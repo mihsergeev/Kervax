@@ -732,7 +732,7 @@ _SETUP_LABEL = {
     "gitlab-setup": "GitLab: версия, бэкап, миграции",
     "sockfix-setup": "Compose внешнего прокси: сокет и образ",
     "relay-setup": "Ретранслятор для агентов",
-    "webfiles-setup": "Файлы сайтов: новые php и правки",
+    "webfiles-setup": "Файлы сайтов: признаки взлома",
 }
 
 
@@ -1681,8 +1681,8 @@ async def changes_ack(server_id: int, user: CurrentUser, session: SessionDep) ->
 
 @router.post("/{server_id}/webfiles-accept", response_model=ServerOut)
 async def webfiles_accept(server_id: int, body: dict, user: CurrentUser, session: SessionDep) -> ServerOut:
-    """Новые php и правки в веб-корне - свои (app/webfiles.py): root - какой корень (пусто - все),
-    key - php или edit (пусто - оба). Строка и признаки уходят, следующий новый файл снова виден."""
+    """Улики в веб-корне - свои (app/webfiles.py): root - какой корень (пусто - все), key - php или
+    пусто (edit - от старых версий панели). Признак уходит, следующая улика снова видна."""
     s = await _get_or_404(server_id, session, user)
     if user.role == "viewer":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Нужны права оператора")
@@ -1693,23 +1693,6 @@ async def webfiles_accept(server_id: int, body: dict, user: CurrentUser, session
     await session.commit()
     await session.refresh(s)
     await audit.record(session, user.username, "webfiles_accept", s.name, f"{root} {key}".strip())
-    return _out(s, datetime.now(timezone.utc))
-
-
-@router.post("/{server_id}/webfiles-mode", response_model=ServerOut)
-async def webfiles_mode(server_id: int, body: dict, user: CurrentUser, session: SessionDep) -> ServerOut:
-    """Здесь правят руками (app/webfiles.py): root - корни строки через запятую, mode - auto (по
-    ветке рабочей копии), dev (правки разработчика не признак) или strict (каждая правка - признак)."""
-    s = await _get_or_404(server_id, session, user)
-    if user.role == "viewer":
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Нужны права оператора")
-    root, mode = str(body.get("root") or ""), str(body.get("mode") or "")
-    if not root or mode not in webfiles_mod.MODES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нет такого режима")
-    s.webfiles = webfiles_mod.set_mode(s.webfiles, root, mode)
-    await session.commit()
-    await session.refresh(s)
-    await audit.record(session, user.username, "webfiles_mode", s.name, f"{root} {mode}")
     return _out(s, datetime.now(timezone.utc))
 
 

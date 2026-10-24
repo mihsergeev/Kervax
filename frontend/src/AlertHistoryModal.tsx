@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError, alertHistory, type AlertEventDto, type AlertHistory, type AlertHistoryQuery, type ReportNoise } from './api'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { NetTile } from './NetLinks'
 import { NoiseTable } from './NoiseTable'
 import { times } from './reportNoise'
@@ -20,7 +21,8 @@ const PERIODS = [1, 7, 30, 180]
 // сводке - что шумело: что именно и где, как в отчете; у самых шумных объектов свой раздел с
 // их сообщениями; "Все сообщения" - лента с поиском и отбором.
 export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOpen }: Props) {
-  const { t } = useI18n()
+  const { t, lang } = useI18n()
+  useEscape(onClose)
   const [days, setDays] = useState(7)
   const [sec, setSec] = useState(initialTarget ? `t:${initialTarget}` : 'over')
   // сводка и меню: весь период без отбора
@@ -91,12 +93,20 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
     }
   }, [key, onUnauthorized])
 
+  // "Показать раньше" - только к ленте того же отбора: сменили отбор, пока шел запрос (или
+  // лента еще старая), - ответ не подмешиваем
+  const keyRef = useRef(key)
+  useEffect(() => {
+    keyRef.current = key
+  }, [key])
   const more = async () => {
     const last = events[events.length - 1]
-    if (!last || !query) return
+    if (!last || !query || partKey !== key) return
+    const k = key
     setBusy(true)
     try {
       const d = await alertHistory({ ...query, before_id: last.id })
+      if (keyRef.current !== k) return
       setEvents((prev) => [...prev, ...d.events])
       setPart((prev) => (prev ? { ...prev, more: d.more } : d))
     } catch (e) {
@@ -168,7 +178,7 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
     if (!all.length) return <p className="muted small">{t('За этот период алертов не было.')}</p>
     // подписи дней верны, только если новое выше старого - не полагаемся на порядок id
     const list = [...all].sort((a, b) => b.ts.localeCompare(a.ts) || b.id - a.id)
-    const day = (ts: string) => new Date(ts).toLocaleDateString([], { weekday: 'short', day: '2-digit', month: '2-digit' })
+    const day = (ts: string) => new Date(ts).toLocaleDateString(lang === 'ru' ? 'ru-RU' : 'en-GB', { weekday: 'short', day: '2-digit', month: '2-digit' })
     return (
       <div className="ah-list">
         {list.map((e, i) => (

@@ -10,6 +10,8 @@ import {
 } from './api'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
+import { safeHref } from './shell'
 import { NetTile } from './NetLinks'
 import { sinceShort } from './serverUtils'
 
@@ -49,6 +51,7 @@ const PERIODS = [1, 7, 30]
 // разобранное. Отметка "разобрано" ставится сразу, без сохранения.
 export function PanelErrorsModal({ onClose, onUnauthorized, onChanged, onOpenServer }: Props) {
   const { t } = useI18n()
+  useEscape(onClose)
   const [sec, setSec] = useState('over')
   const [days, setDays] = useState(7)
   const [q, setQ] = useState('')
@@ -271,9 +274,12 @@ function ErrRow({
         {x.page && (
           <span>
             {t('где')}:{' '}
-            <a className="mono" href={x.page} target="_blank" rel="noreferrer">
-              {x.page}
-            </a>
+            {/* страницу пишет в журнал любой вошедший: ссылкой - только путь этой панели */}
+            {safeHref(x.page, true) ? (
+              <a className="mono" href={safeHref(x.page, true)!} target="_blank" rel="noreferrer">
+                {x.page}
+              </a>
+            ) : <span className="mono">{x.page}</span>}
           </span>
         )}
         {x.count > 1 && <span>{t('впервые')}: {new Date(x.first_at).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>}

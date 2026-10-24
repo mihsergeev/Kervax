@@ -390,6 +390,9 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
   const broken = (x: BackupAudit) => x.kind === 'db' && !!findDump(x.dump_engine, x.instance)
   const left = [...risks].sort((a, b) => Number(broken(b)) - Number(broken(a)))
   const brokenN = allRisks.filter(broken).length
+  // базы под галкой "бэкаплю сам" - не вопрос: плитка считает то же, что колонка "Под вопросом"
+  const selfN = dbSelfManaged ? dbRisks.filter((x) => !broken(x)).length : 0
+  const qN = allRisks.length - brokenN - selfN
   // сколько всего придется бэкапить из "Под вопросом": по строкам, где объем посчитан; есть
   // непосчитанные - "от", чтобы сумма не выдавала себя за полную
   const leftSized = left.filter((x) => (x.size_bytes ?? 0) > 0)
@@ -452,9 +455,10 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
           <NetTile label={t('Баз на ноде')} value={String(live.filter(isDb).length)}
             sub={mutedDb ? t('и приглушено: {n}', { n: mutedDb }) : undefined} />
           <NetTile label={t('Бэкапится')} value={String(okItems.length)} tone={okItems.length ? 'ok' : undefined}
-            sub={waitN ? t('из них ждут первого бэкапа: {n}', { n: waitN }) : t('дамп или свой бэкап')} />
-          <NetTile label={t('Под вопросом')} value={String(allRisks.length - brokenN)}
-            tone={allRisks.length - brokenN ? 'warn' : 'ok'} sub={t('только файловый снапшот')} />
+            sub={waitN ? t('из них ждут первого бэкапа: {n}', { n: waitN })
+              : selfN ? t('и бэкапите сами: {n}', { n: selfN }) : t('дамп или свой бэкап')} />
+          <NetTile label={t('Под вопросом')} value={String(qN)}
+            tone={qN ? 'warn' : 'ok'} sub={t('только файловый снапшот')} />
           <NetTile label={t('Сломано')} value={String(brokenN + gaps.length)} tone={brokenN + gaps.length ? 'bad' : 'ok'}
             sub={t('дамп не снимается, не в бэкапе')} />
         </div>
@@ -543,7 +547,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
                 )}
               </div>
               {okItems.map((x, i) => row(x, 'ok', i))}
-              {!okItems.length && <div className="cov-empty muted">{t('пока ни одной базы')}</div>}
+              {!okItems.length && <div className="cov-empty muted">{selfN ? t('дампы панели не настроены, базы бэкапите сами') : t('пока ни одной базы')}</div>}
             </div>
             {mutedPlace === 'right' && mutedBlock}
           </div>

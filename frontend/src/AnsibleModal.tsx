@@ -10,6 +10,7 @@ import {
 } from './api'
 import { CardNav, type SecDef, type SecInfo } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { NetTile } from './NetLinks'
 import { fmtSetupVersion, sinceShort } from './serverUtils'
 
@@ -83,6 +84,7 @@ const SECS: SecDef[] = [
 // и командами) и токен, по которому плагин инвентаря эти группы спрашивает
 export function AnsibleModal({ onClose, onUnauthorized, onOpenServer }: Props) {
   const { t } = useI18n()
+  useEscape(onClose)
   const [acc, setAcc] = useState<AnsibleAccess | null>(null)
   const [nodes, setNodes] = useState<AnsibleNode[] | null>(null)
   const [token, setToken] = useState<string | null>(null)

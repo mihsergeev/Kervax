@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ApiError, getDepMap, type DepMap, type DepMapCheck, type DepMapServer } from './api'
 import { CardNav, type SecDef, type SecInfo } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { NetTile } from './NetLinks'
 import { sinceShort } from './serverUtils'
 import type { Section } from './App'
@@ -101,6 +102,7 @@ function shownTarget(c: DepMapCheck): string {
 
 export function DepMapModal({ onClose, onUnauthorized, onOpen }: Props) {
   const { t } = useI18n()
+  useEscape(onClose)
   const [data, setData] = useState<DepMap | null>(null)
   const [err, setErr] = useState('')
   const [sec, setSec] = useState('over')

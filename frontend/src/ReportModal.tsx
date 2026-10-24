@@ -4,6 +4,7 @@ import { useAuth } from './auth'
 import { useBranding } from './BrandLogo'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { Inventory } from './Inventory'
 import { NetTile } from './NetLinks'
 import { downloadReportHtml } from './reportHtml'
@@ -106,6 +107,7 @@ function DayBars({ labels, series, fmt, t }: { labels: string[]; series: Series[
 
 export function ReportModal({ onClose, onUnauthorized, onOpen }: Props) {
   const { t } = useI18n()
+  useEscape(onClose)
   const { sections } = useAuth()
   const [branding] = useBranding()
   const [days, setDays] = useState(7)

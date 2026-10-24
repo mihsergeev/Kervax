@@ -486,7 +486,7 @@ def phrase(key: str, s: dict) -> str:
         from app import tg_fmt
         names = list(dict.fromkeys(f["p"].rsplit("/", 1)[-1] for f in s.get("files") or []))
         if key == "php":
-            return f"новые php ({tg_fmt.names(names, 2)})"
+            return f"{_php_head(s)} ({tg_fmt.names(names, 2)})"
         if len(names) == 1:
             return f"правка {names[0]} не через git/деплой"
         return "правки не через git/деплой: " + tg_fmt.names(names, 2)
@@ -548,8 +548,15 @@ def _detail(key: str, s: dict) -> str:
             return f"{it['what']} с дырой, исправлено в {it['fix']}"
     if key == "php":
         from app import tg_fmt
-        return "новые php: " + tg_fmt.names(list(dict.fromkeys(f["p"].rsplit("/", 1)[-1] for f in s.get("files") or [])))
+        return f"{_php_head(s)}: " + tg_fmt.names(list(dict.fromkeys(f["p"].rsplit("/", 1)[-1] for f in s.get("files") or [])))
     return phrase(key, s)
+
+
+def _php_head(s: dict) -> str:
+    """Что за улика в файлах сайта (app/webfiles.py): веб-шелл, php в загрузках, запуск php,
+    файл WordPress не как в выпуске."""
+    from app import webfiles
+    return webfiles.php_head({f.get("p", ""): f for f in s.get("files") or []})
 
 
 def _where(src: str) -> str:
@@ -588,7 +595,7 @@ def view(state: dict | None) -> dict | None:
                          # что о файлах знает git, если у всех одно (dirty, new, ignored), и по файлу:
                          # новый или изменен, владелец, записал ли сам сайт, похож ли на веб-шелл
                          "git": _one({f.get("g", "") for f in files}),
-                         "items": [{x: f[x] for x in ("p", "t", "since", "k", "g", "o", "w", "x") if f.get(x)}
+                         "items": [{x: f[x] for x in ("p", "t", "since", "k", "g", "o", "w", "x", "y", "ver", "ref") if f.get(x)}
                                    for f in {f.get("p", ""): f for f in files}.values()][:10],
                          "branch": next((f["branch"] for f in files if f.get("branch")), ""),
                          "where": ", ".join(dict.fromkeys(f.get("where", "") for f in files if f.get("where")))})

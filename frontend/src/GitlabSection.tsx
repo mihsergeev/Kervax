@@ -2,8 +2,10 @@
 // версия против выпусков и путь обновления, как поставлен, бэкап (архивы, SKIP, расписание, конфиг),
 // фоновые миграции и gitlab-autoupgrade. 🔕 - не алертить об этом GitLab
 import { useState } from 'react'
-import { snoozeServerAlert, updateServer, type GitlabInfo, type GitlabInst, type Server } from './api'
+import { muteServerKeys, snoozeServerAlert, type GitlabInfo, type GitlabInst, type Server } from './api'
 import { useI18n } from './i18n'
+import { safeHref } from './shell'
+import { toastError } from './toast'
 import { useAuth } from './auth'
 import { fmtRel } from './ServersPage'
 import { GITLAB_MUTE } from './mutes'
@@ -65,16 +67,16 @@ function GitlabRow({ server, x, onChanged }: { server: Server; x: GitlabInst; on
     setBusy(true)
     try {
       if (hours < 0) {
-        await updateServer(server.id, { alert_mutes: [...new Set([...(server.alert_mutes ?? []), kind])] })
+        await muteServerKeys(server.id, [kind])
       } else if (hours === 0) {
         if ((server.alert_mutes ?? []).includes(kind))
-          await updateServer(server.id, { alert_mutes: (server.alert_mutes ?? []).filter((m) => m !== kind) })
+          await muteServerKeys(server.id, [], [kind])
         if (server.alert_snoozes?.[kind]) await snoozeServerAlert(server.id, kind, 0)
       } else await snoozeServerAlert(server.id, kind, hours)
       setPicking(false)
       onChanged()
-    } catch {
-      /* кнопка остается, можно повторить */
+    } catch (e) {
+      toastError(e) // кнопка остается, можно повторить
     } finally {
       setBusy(false)
     }
@@ -92,7 +94,7 @@ function GitlabRow({ server, x, onChanged }: { server: Server; x: GitlabInst; on
       <span className={`lk-dot${x.mute ? '' : DOT[tone]}`} />
       <div className="docker-c-main">
         <div className="docker-c-name">
-          {x.url ? <a href={x.url} target="_blank" rel="noreferrer" className="mono">{x.label}</a> : <span className="mono">{x.label}</span>}{' '}
+          {safeHref(x.url) ? <a href={safeHref(x.url)!} target="_blank" rel="noreferrer" className="mono">{x.label}</a> : <span className="mono">{x.label}</span>}{' '}
           {x.edition && <span className="type-chip">{x.edition.toUpperCase()}</span>}{' '}
           <span className="mono">{x.version || t('версия неизвестна')}</span>
           {x.state !== 'running' && <span className="q-stuck small"> · {t('контейнер {s}', { s: x.state })}</span>}

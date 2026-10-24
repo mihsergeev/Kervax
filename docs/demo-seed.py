@@ -176,7 +176,7 @@ def report(node, t_min: float) -> dict:
         rep["web_services"] = [{"kind": "nginx", "version": "1.30.0", "source": "host",
                                 "sites": WEB_SITES[name]}]
     if role in ("web", "app", "ci"):
-        rep["docker"] = {"present": True, "access": True, "version": "28.5.1", "compose": True,
+        rep["docker"] = {"present": True, "access": True, "version": "28.5.1", "compose": "2.40.3",
                          # Поля ровно те, что шлет агент: name/image/state/status/policy/
                          # restarts/binds, cpu (% одного ядра, агент 2.21) и mem (байты, 2.14)
                          "containers": [
@@ -194,7 +194,7 @@ def report(node, t_min: float) -> dict:
                               "policy": "unless-stopped", "restarts": 0, "binds": [],
                               "cpu": round(wave(t_min, 3, 1.5), 1), "mem": 48_000_000}]}
     if role == "gpu":
-        rep["docker"] = {"present": True, "access": True, "version": "28.5.1", "compose": True,
+        rep["docker"] = {"present": True, "access": True, "version": "28.5.1", "compose": "2.40.3",
                          "containers": [
                              {"name": "llm-vllm-1", "image": "vllm/vllm-openai:v0.11.0",
                               "state": "running", "status": "Up 3 days", "policy": "always",

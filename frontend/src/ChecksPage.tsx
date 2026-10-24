@@ -77,6 +77,7 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
   const { isViewer } = useAuth()
   const [ov, setOv] = useState<ChecksOverview | null>(null)
   const [err, setErr] = useState<string | null>(null)
+  const [moveErr, setMoveErr] = useState<string | null>(null)
   const [formOpen, setFormOpen] = useState(false)
   // Домены, которые агенты видят на веб-серверах парка. Полезны ровно одним: показать,
   // что часть сайтов вообще не под мониторингом — сам по себе раздел «Сайты» об этом
@@ -180,9 +181,9 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
 
   // что реально можно предложить добавить: без масок/regexp, без уже покрытых и без
   // помеченных «мониторить не нужно» — иначе плашка висела бы вечно
-  const skipSet = new Set(found?.ignored ?? [])
+  const skipSet = new Set((found?.ignored ?? []).map((x) => x.toLowerCase()))
   const newFound = (found?.domains ?? []).filter(
-    (d) => adoptable(d.domain) && found?.hosts[d.domain] == null && !skipSet.has(d.domain),
+    (d) => adoptable(d.domain) && found?.hosts[d.domain.toLowerCase()] == null && !skipSet.has(d.domain.toLowerCase()),
   )
 
   const openAdd = () => {
@@ -208,15 +209,16 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
     }
   }
 
-  const remove = async (c: Check): Promise<boolean> => {
-    if (!window.confirm(t('Удалить монитор «{name}»?', { name: c.name }))) return false
+  // null - удален, '' - передумали, иначе текст отказа: его показывает окно монитора
+  const remove = async (c: Check): Promise<string | null> => {
+    if (!window.confirm(t('Удалить монитор «{name}»?', { name: c.name }))) return ''
     try {
       await deleteCheck(c.id)
       load()
-      return true
+      return null
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) onUnauthorized()
-      return false
+      return e instanceof Error ? e.message : t('Ошибка')
     }
   }
 
@@ -408,8 +410,12 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
     } catch (e) {
       draggingRef.current = false
       if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+      // порядок не сохранился: вернуть настоящий и сказать почему
+      setMoveErr(e instanceof Error ? e.message : t('Ошибка'))
+      load()
       return
     }
+    setMoveErr(null)
     draggingRef.current = false
     load()
   }
@@ -637,6 +643,7 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
       )}
 
       {err && <p className="form-error">{err}</p>}
+      {moveErr && <p className="form-error">{t('Порядок не сохранен: {err}', { err: moveErr })}</p>}
 
       {/* Когда из одной точки «падает» заметная доля мониторов — сломана почти
           наверняка она сама, а не все эти сайты разом. Живой случай: из Алматы
@@ -723,7 +730,12 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
       )}
 
       {ov && visibleBase.length === 0 && checks.length > 0 && (
-        <div className="card muted">{t('Нет мониторов с этим статусом.')}</div>
+        <div className="card muted">
+          {q ? <>
+            {t('По запросу «{q}» ничего нет.', { q: query.trim() })}
+            <button className="ghost search-clear" onClick={() => setQuery('')}>{t('Сбросить')}</button>
+          </> : t('Нет мониторов с этим статусом.')}
+        </div>
       )}
 
       {grouped.map((g) => {
@@ -837,7 +849,9 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
           onSaved={load}
           onRun={load}
           onDelete={async () => {
-            if (await remove(detail)) setDetailId(null)
+            const r = await remove(detail)
+            if (r === null) setDetailId(null)
+            return r
           }}
           onUnauthorized={onUnauthorized}
         />
@@ -869,8 +883,9 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
 
 function GroupSummary({ items }: { items: Check[] }) {
   // счётчик мониторов вынесен к названию группы (.mon-group-n); тут — только здоровье
-  const down = items.filter((c) => c.last_status === 'down').length
-  const degraded = items.filter((c) => c.last_status === 'degraded').length
+  // выключенный монитор не проверяется: его последний статус в шапке группы не считаем, как и в плитках
+  const down = items.filter((c) => c.enabled && c.last_status === 'down').length
+  const degraded = items.filter((c) => c.enabled && c.last_status === 'degraded').length
   return (
     <span className="mon-group-sum">
       {down > 0 && <span className="uptime-badge t-down">{down} ▼</span>}

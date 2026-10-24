@@ -12,6 +12,7 @@ import {
 } from './api'
 import { CardNav, type SecDef, type SecInfo } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { NetTile } from './NetLinks'
 import { sinceShort } from './serverUtils'
 import { fmtBytes } from './units'
@@ -135,6 +136,7 @@ export function BackupModal({ onClose, onUnauthorized }: Props) {
     if (dirty && !window.confirm(t('Закрыть без сохранения? Изменения пропадут.'))) return
     onClose()
   }
+  useEscape(close)
   const setW = (k: keyof Want, v: number) => {
     setMsg(null)
     const lim = k === 'interval' ? [0, 720] : [1, 365]

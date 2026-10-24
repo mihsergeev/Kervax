@@ -1,5 +1,5 @@
 import { currentLang, tr } from './i18n'
-import { trBody } from './backendText'
+import { trBackend, trBody } from './backendText'
 import { noteApiFailure, uiHeaders } from './errorLog'
 
 // Должна совпадать с MIN_PASSWORD_LEN в backend/app/security.py: интерфейс не
@@ -68,10 +68,16 @@ const LOG_CMD = /^\/api\/servers\/\d+\/(docker|kube|backup)\/command$/
 const LOG_ACTIONS: Record<string, string[]> = { docker: ['logs'], kube: ['logs', 'logs_prev'], backup: ['unit_journal'] }
 let readOnly = false
 let logsReadable = false
-export function setReadOnly(v: boolean, logs = false): void {
-  readOnly = v
-  logsReadable = v && logs
+// вход админа под чужой учеткой: бэкенд (deps.py) запрещает любые изменения, включая свою учетку
+// пользователя и чтение логов командой, поэтому и здесь пропускается только журнал ошибок
+let impUser = ''
+export function setReadOnly(v: boolean, logs = false, imp = ''): void {
+  readOnly = v || !!imp
+  logsReadable = v && logs && !imp
+  impUser = imp
 }
+const IMP_WRITES = ['/api/panel-errors/front', '/api/panel-errors/report']
+export const IMP_READ_ONLY = 'Вы смотрите панель глазами {user}: менять ничего нельзя. Чтобы что-то поменять, вернитесь к себе'
 function readsLogs(method: string, path: string, body: unknown): boolean {
   const m = LOG_CMD.exec(path)
   if (!logsReadable || method !== 'POST' || !m || typeof body !== 'string') return false
@@ -83,6 +89,7 @@ function readsLogs(method: string, path: string, body: unknown): boolean {
   }
 }
 export function writeBlocked(method: string, path: string, body?: unknown): boolean {
+  if (impUser) return method !== 'GET' && method !== 'HEAD' && !IMP_WRITES.some((p) => path.startsWith(p))
   return readOnly && method !== 'GET' && method !== 'HEAD' && !VIEWER_WRITES.some((p) => path.startsWith(p))
     && !readsLogs(method, path, body)
 }
@@ -92,10 +99,14 @@ export class ApiError extends Error {
   // 422: какие поля не прошли проверку бэкенда - форма их подсвечивает
   fields: string[]
 
-  constructor(message: string, status: number, fields: string[] = []) {
+  // метод запроса: изменяющий запрос с отказом бэкенд сам пишет в журнал ошибок панели (errorLog.ts)
+  method: string
+
+  constructor(message: string, status: number, fields: string[] = [], method = '') {
     super(message)
     this.status = status
     this.fields = fields
+    this.method = method
   }
 }
 
@@ -122,6 +133,15 @@ const FIELD_LABEL: Record<string, string> = {
   http_headers: 'Заголовок, по строке',
   dns_server: 'DNS-сервер (IP)',
   password: 'Пароль',
+  alert_after_failures: 'Алерт после N сбоев подряд',
+  offline_after_seconds: 'Считать оффлайн после, сек',
+  cpu_alert_percent: 'Порог CPU, %',
+  mem_alert_percent: 'Порог памяти, %',
+  disk_alert_percent: 'Порог диска, %',
+  after_min: 'Через, минут',
+  flood_threshold: 'Порог потока алертов',
+  chats: 'Чаты',
+  note: 'Заметка',
 }
 
 function invalidWhat(e: Invalid): string {
@@ -174,6 +194,13 @@ export function invalidDetail(detail: unknown): { text: string; fields: string[]
   return { text: [...new Set(lines)].join('; '), fields }
 }
 
+// отказ бэкенд пишет по-русски: английской панели - перевод из словаря или по фразам, если есть
+function errText(s: string): string {
+  if (currentLang() !== 'en') return s
+  const t = tr(s)
+  return t !== s ? t : trBackend(s)
+}
+
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   // страница и раздел: если запрос не удастся, бэкенд запишет в журнал ошибок, где это было
   const headers: Record<string, string> = {
@@ -184,14 +211,17 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const token = getToken()
   if (token) headers['Authorization'] = `Bearer ${token}`
   const method = (options.method || 'GET').toUpperCase()
-  if (writeBlocked(method, path, options.body)) throw new ApiError(tr(VIEWER_READ_ONLY), 403)
+  if (writeBlocked(method, path, options.body)) {
+    throw new ApiError(impUser ? tr(IMP_READ_ONLY, { user: impUser }) : tr(VIEWER_READ_ONLY), 403)
+  }
 
   let res: Response
   try {
     res = await fetch(path, { ...options, headers })
   } catch (e) {
+    // сеть или панель недоступна: вместо "Failed to fetch" (у каждого браузера свой текст) - по-человечески
     noteApiFailure(method, path, 0, e instanceof Error ? e.message : String(e))
-    throw e
+    throw new ApiError(tr('Нет связи с панелью'), 0, [], method)
   }
   if (res.status === 204) return undefined as T
 
@@ -214,14 +244,18 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   }
   if (!res.ok) {
     const invalid = invalidDetail(body?.detail)
+    // 502-504 без detail - ответ прокси (HTML), пока бэкенд перезапускается на деплое
     const detail =
       typeof body?.detail === 'string'
-        ? body.detail
-        : invalid?.text || tr('Ошибка HTTP {code}', { code: res.status })
+        ? errText(body.detail)
+        : invalid?.text ||
+          (res.status >= 502 && res.status <= 504
+            ? tr('Панель перезапускается или недоступна, повторите через минуту')
+            : tr('Ошибка HTTP {code}', { code: res.status }))
     // последние неудачные запросы уходят вместе с "Сообщить о проблеме". У 422 - поля и причины:
     // сырой detail повторяет присланные значения, а там бывают пароли и заголовки
     noteApiFailure(method, path, res.status, typeof body?.detail === 'string' ? body.detail : invalid?.text || JSON.stringify(body?.detail ?? ''))
-    throw new ApiError(detail, res.status, invalid?.fields)
+    throw new ApiError(detail, res.status, invalid?.fields, method)
   }
   // тексты проблем бэкенд пишет по-русски: английской панели переводим то, что умеем
   return (currentLang() === 'en' ? trBody(body) : body) as T
@@ -2388,7 +2422,7 @@ export type Server = {
   web_config?: { server: string; where: string; ok: boolean; err: string }[] | null
   // сертификаты nginx (helper webserver-setup 0.24): сколько дней до конца срока
   web_certs?: { where: string; file: string; label: string; days: number }[] | null
-  // файлы сайтов (backend app/webfiles.py): веб-корни, новые php и правки не через git/деплой
+  // файлы сайтов (backend app/webfiles.py): веб-корни, улики взлома и что менялось
   webfiles?: { roots: WebRoot[]; ts?: number | null } | null
   // внешние прокси со сборкой образа старше года (built - unix-секунды); key - решение "оставить как
   // есть" в alert_mutes (proxyold:<контейнер>), muted - решение принято, fix - как обновить
@@ -3022,10 +3056,26 @@ export function updateServer(
 ): Promise<Server> {
   return api<Server>(`/api/servers/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
 }
+// Мьюты сервера хранятся списком, а PATCH заменяет его целиком. Два быстрых клика "не алертить" у
+// разных пунктов слали каждый свой список из устаревшего s.alert_mutes, и второй затирал первый.
+// Здесь запросы по одному серверу идут по очереди, и каждый правит свежий список с сервера
+const muteChain = new Map<number, Promise<unknown>>()
+export function muteServerKeys(id: number, add: string[], remove: string[] = []): Promise<Server> {
+  const run = (muteChain.get(id) ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(async () => {
+      const cur = (await api<Server>(`/api/servers/${id}`)).alert_mutes ?? []
+      const next = [...new Set([...cur.filter((k) => !remove.includes(k)), ...add])]
+      return updateServer(id, { alert_mutes: next })
+    })
+  muteChain.set(id, run)
+  return run
+}
 export function deleteServer(id: number): Promise<void> {
   return api<void>(`/api/servers/${id}`, { method: 'DELETE' })
 }
-// Веб-корень ноды: признаки - файлы с моментом появления; site - признаки идут и в карточку сайта
+// Веб-корень ноды: php - улики взлома (y - почему); site - признаки идут и в карточку сайта;
+// остальное - серые строки о том, что менялось за неделю
 export interface WebRoot {
   key: string
   where: string
@@ -3036,32 +3086,37 @@ export interface WebRoot {
   // pods - сколько подов ворклоада в строке (0 - хост), layer - список только верхнего слоя контейнера
   pods?: number
   layer?: boolean
-  // git - выкладка через git (pull, checkout...) по reflog репозитория
-  deploy?: { at: string; n: number; git?: string } | null
   php: WebFile[]
-  edit: WebFile[]
   site: boolean
-  // WordPress: версия ядра (helper 0.4 следит за версиями) и что он обновил сам за неделю
+  // выкладка: git - через git (pull, checkout...) по reflog, без git - много файлов за прогон или в
+  // одну секунду; edits - правки вне выкладки (не признак); from - первый файл, o - кто записал
+  deploy?: WebChange & { git?: string } | null
+  edits?: WebChange | null
+  // WordPress: версия ядра и что он обновил сам за неделю; checking - файлов ждут эталона wordpress.org
   wp?: string
   wp_events?: WpEvent[]
+  checking?: number
   // рабочая копия git: ветка и файлы, записанные заново тем же содержимым (git - тем же, что в HEAD; за неделю)
   branch?: string
   same?: { at: string; files: string[]; n: number; git?: boolean } | null
-  // здесь правят руками: dev - да, mode - как выбрано (auto - по ветке); dev_work - правки
-  // разработчика, которые поэтому не признак
-  dev?: boolean
-  mode?: 'auto' | 'dev' | 'strict'
-  dev_work?: WebFile[]
-  // файлы, которые плагин записал сам (helper 0.7, за неделю): by - plugin:<slug>, data (конфиг
-  // без кода), deny (.htaccess только закрывает доступ)
+  // файлы, которые плагин записал сам (за неделю): by - plugin:<slug>, data (конфиг без кода),
+  // deny (.htaccess только закрывает доступ)
   gen?: { at: string; files: string[]; n: number; by: string[] } | null
-  // последний признак, который снялся сам (why: gone, back, head, wplang, plugin со slug, data,
-  // deny), за неделю
+  // последний признак, который снялся сам (why: gone, back, head, wporg - снова как в выпуске), за неделю
   cleared?: { at: string; p: string; why: string; slug?: string } | null
 }
-// файл признака: t - время записи (unix), k - новый (new) или изменен (chg), g - что знает git
-// (dirty - не как в HEAD, new - git его не знает, ignored - в .gitignore), o - владелец,
-// w - записал пользователь веб-сервера, x - похож на веб-шелл (helper webfiles-setup 0.6)
+// серая строка о файлах: когда (from - первый, at - последний), сколько, какие, кто записал
+export interface WebChange {
+  at: string
+  from?: string
+  n: number
+  files?: string[]
+  o?: string[]
+}
+// файл улики: y - почему (shell - похож на веб-шелл, upload - php в загрузках, exec - .htaccess
+// запускает php, wporg - не как в выпуске WordPress ver, wpextra - лишний php в ядре), t - время
+// записи (unix), k - новый (new) или изменен (chg), o - владелец, w - записал пользователь
+// веб-сервера, x - похож на веб-шелл
 export interface WebFile {
   p: string
   since: string
@@ -3071,6 +3126,9 @@ export interface WebFile {
   o?: string
   w?: number
   x?: number
+  y?: 'shell' | 'upload' | 'exec' | 'wporg' | 'wpextra' | ''
+  ver?: string
+  ref?: string
 }
 // обновление, которое WordPress поставил сам: перевод (part - чей) или плагин, тема, ядро с версиями
 export interface WpEvent {
@@ -3082,13 +3140,9 @@ export interface WpEvent {
   to?: string
   at: string
 }
-// новые php и правки в корне - свои: root пусто - все корни, key пусто - оба признака
-export function acceptWebfiles(id: number, root = '', key = ''): Promise<Server> {
-  return api<Server>(`/api/servers/${id}/webfiles-accept`, { method: 'POST', body: JSON.stringify({ root, key }) })
-}
-// здесь правят руками: auto - по ветке рабочей копии, dev - да, strict - каждая правка признак
-export function setWebfilesMode(id: number, root: string, mode: 'auto' | 'dev' | 'strict'): Promise<Server> {
-  return api<Server>(`/api/servers/${id}/webfiles-mode`, { method: 'POST', body: JSON.stringify({ root, mode }) })
+// улики в корне - свои: root пусто - все корни
+export function acceptWebfiles(id: number, root = ''): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/webfiles-accept`, { method: 'POST', body: JSON.stringify({ root, key: 'php' }) })
 }
 // Изменения доступа сделали свои: строка уходит с главной
 export function ackChanges(id: number): Promise<Server> {
@@ -3335,6 +3389,14 @@ export function logsErrorText(result: string): string {
     return result
   }
 }
+// Итог команды агенту после опроса. Успех - только done без ok=false. pending/running по таймауту
+// опроса - агент за ретранслятором или команда долгая: это не "не удалось" и не "готово"
+export function cmdState(c: { status: string; ok: boolean | null }): 'ok' | 'wait' | 'fail' {
+  if (c.status === 'done' && c.ok !== false) return 'ok'
+  return c.status === 'pending' || c.status === 'running' ? 'wait' : 'fail'
+}
+export const cmdWaitText = () => tr('Агент еще выполняет команду, итог появится позже')
+
 export type BackupCommand = {
   id: number
   action: string

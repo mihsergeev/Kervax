@@ -31,6 +31,7 @@ import { ImpersonationBar } from './ImpersonationBar'
 import { ProblemModal } from './ProblemModal'
 import { PanelErrorsModal } from './PanelErrorsModal'
 import { setUiSection } from './errorLog'
+import { Toasts } from './toast'
 
 type Modal =
   | 'account'
@@ -165,10 +166,13 @@ export default function App() {
     }
     setSection(sec)
   }, [])
-  // раздел дашборда сервера из диплинка (?server=id&sec=mem) — открыть сразу на нём
-  const [openServerSec] = useState<string | null>(
-    () => new URLSearchParams(window.location.search).get('sec'),
-  )
+  // раздел дашборда сервера из диплинка (?server=id&sec=mem) — открыть сразу на нём. Только
+  // вместе с ?server и один раз: иначе sec от монитора или прошлого сервера открывал на том же
+  // разделе каждый следующий сервер из поиска
+  const [openServerSec, setOpenServerSec] = useState<string | null>(() => {
+    const p = new URLSearchParams(window.location.search)
+    return p.get('server') ? p.get('sec') : null
+  })
   // секция детали сервера, заданная кликом из «Требует действий» (не из URL)
   const [deepSec, setDeepSec] = useState<string | null>(null)
   const [section, setSection] = useState<Section>(() =>
@@ -189,7 +193,7 @@ export default function App() {
                   : 'home',
   )
   // адрес показывает раздел и открытую карточку, чтобы ссылку можно было отдать другому
-  useUrlSection(section)
+  useUrlSection(section, authed === true)
   // раздел - в журнал ошибок панели вместе с неудачным запросом (errorLog.ts)
   useEffect(() => {
     setUiSection(authed ? section : authed === false ? 'login' : '')
@@ -259,7 +263,8 @@ export default function App() {
     me()
       .then((u) => {
         setRole(u.role)
-        setReadOnly(u.role === 'viewer', !!u.can_read_logs)
+        // под чужой учеткой бэкенд режет любые изменения - кнопки правки не рисуем, как у viewer
+        setReadOnly(u.role === 'viewer', !!u.can_read_logs, u.impersonator ? u.username : '')
         setLogsOpen(!!u.can_read_logs)
         setSections(u.sections ?? [])
         setUsername(u.username)
@@ -323,9 +328,9 @@ export default function App() {
     <AuthProvider
       value={{
         role,
-        isViewer: role === 'viewer',
-        canWrite: role !== 'viewer',
-        canLogs: role !== 'viewer' || logsOpen,
+        isViewer: role === 'viewer' || !!imp,
+        canWrite: role !== 'viewer' && !imp,
+        canLogs: !imp && (role !== 'viewer' || logsOpen),
         isAdmin: role === 'admin',
         sections,
         username,
@@ -686,7 +691,10 @@ export default function App() {
             onUnauthorized={logout}
             openServerId={openServerId}
             openServerSec={deepSec ?? openServerSec}
-            onConsumed={() => setOpenServerId(null)}
+            onConsumed={() => {
+              setOpenServerId(null)
+              setOpenServerSec(null)
+            }}
             onOpen={openTarget}
           />
         )}
@@ -806,6 +814,7 @@ export default function App() {
           }}
         />
       )}
+      <Toasts />
     </div>
     </AuthProvider>
   )

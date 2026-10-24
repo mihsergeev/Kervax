@@ -32,11 +32,13 @@ function flush(): void {
 
 /** Раздел панели в адресе: ?section=servers. Открытая карточка главнее - она и так
     говорит, в каком разделе искать. */
-export function useUrlSection(section: string): void {
+export function useUrlSection(section: string, enabled = true): void {
   useEffect(() => {
+    // до входа адрес не трогаем: ссылка на карточку должна пережить F5 на странице входа
+    if (!enabled) return
     cur.section = section
     flush()
-  }, [section])
+  }, [section, enabled])
 }
 
 /** Открытая карточка в адресе: ?server=12. При закрытии карточки и при уходе из

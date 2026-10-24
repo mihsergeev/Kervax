@@ -99,9 +99,19 @@ export function VaultPanel({ servers }: { servers: Server[] }) {
     }
   }, [key, lock])
 
+  // нет доступа (403) - блока нет. Любая другая ошибка - текстом: иначе админ решил бы, что сейфа нет
+  const [metaErr, setMetaErr] = useState<string | null>(null)
   useEffect(() => {
-    vaultMeta().then(setMeta).catch(() => setMeta(null))
-  }, [])
+    vaultMeta()
+      .then((m) => {
+        setMeta(m)
+        setMetaErr(null)
+      })
+      .catch((e) => {
+        setMeta(null)
+        if (!(e instanceof ApiError && (e.status === 403 || e.status === 401))) setMetaErr(e instanceof Error ? e.message : t('Ошибка'))
+      })
+  }, [t])
 
   async function loadRows(k: CryptoKey) {
     const items = await vaultList()
@@ -252,7 +262,13 @@ export function VaultPanel({ servers }: { servers: Server[] }) {
     )
   }
 
-  if (meta === null) return null
+  if (meta === null)
+    return metaErr ? (
+      <div className="chart-card vault-box">
+        <div className="chart-cap vault-cap">{t('Доступы к бэкапам')}</div>
+        <p className="form-error small">{t('Сейф не загрузился: {err}', { err: metaErr })}</p>
+      </div>
+    ) : null
 
   return (
     <div className="chart-card vault-box">

@@ -14,6 +14,7 @@ import {
 import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { maintFor, maintReload, maintTime, useMaint } from './maintStore'
 import { NetTile } from './NetLinks'
 
@@ -176,10 +177,13 @@ export function MaintModal({ onClose, onUnauthorized, onOpen }: Props) {
     setSec(id)
     mainRef.current?.scrollTo({ top: 0 })
   }
+  // начатое новое окно тоже пропадет при закрытии: название, серверы, мониторы или заметка
+  const newDirty = !!(nForm.title.trim() || nForm.note.trim() || nForm.server_ids.length || nForm.check_ids.length)
   const close = () => {
-    if (dirty && !window.confirm(t('Закрыть без сохранения? Изменения пропадут.'))) return
+    if ((dirty || newDirty) && !window.confirm(t('Закрыть без сохранения? Изменения пропадут.'))) return
     onClose()
   }
+  useEscape(close)
   const setForm = (f: MaintIn) => {
     if (!curW) return
     setMsg(null)
@@ -346,7 +350,7 @@ export function MaintModal({ onClose, onUnauthorized, onOpen }: Props) {
       <div className="card modal alerts-modal" onClick={(e) => e.stopPropagation()}>
         <div className="al-head">
           <h3>{t('Окна обслуживания')}</h3>
-          {items && (
+          {items && sorted.length > 0 && (
             <span className={`small ${live.length ? 't-degraded' : 'muted'}`}>
               {live.length
                 ? t('идет: {n}', { n: live.length })
@@ -537,7 +541,7 @@ export function MaintModal({ onClose, onUnauthorized, onOpen }: Props) {
               <span className="lk-dot lk-dot-warn" />
               {t('Есть несохраненные изменения')} · {form && schedText(form, t)}
             </span>
-          ) : items ? (
+          ) : items && sorted.length > 0 ? (
             <span className="muted small">
               {t('Окон: {n}', { n: sorted.length - past.length })}
               {past.length ? ` · ${t('прошедших: {n}', { n: past.length })}` : ''}

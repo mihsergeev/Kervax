@@ -2001,7 +2001,7 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return ("белые списки больше не обходятся подменой заголовка: порт закрыт для всех, кроме "
                 "Cloudflare, или веб-сервер верит заголовку только от него")
     if key == "webfiles":
-        return "новых php в файлах сайтов больше нет"
+        return "признаков взлома в файлах сайтов больше нет"
     if key == "db_health":
         return "базы снова в порядке: реплики догнали, долгих транзакций и блокировок нет"
     if key == "ssh_risk":
@@ -4258,8 +4258,8 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # Конфиг веб-сервера не проходит проверку: ведет в "Сервисы" ноды
     for lv, txt, _key in web_config.problems(rep, now):
         add("web_config", lv, txt, "web", "web_config", section="services")
-    # Новые php и правки кода вне выкладки в веб-корне без своего монитора (app/webfiles.py):
-    # ведет в "Сервисы" ноды, раздел "Файлы сайтов"
+    # Улики взлома в веб-корне без своего монитора (app/webfiles.py): ведет в "Сервисы" ноды,
+    # раздел "Файлы сайтов"
     for lv, txt, _key in webfiles_mod.problems(getattr(s, "webfiles", None)):
         add("webfiles", lv, txt, "files", "webfiles", section="services")
     # Здоровье баз: ведет в "Сервисы" ноды, где инвентарь СУБД
@@ -6440,9 +6440,9 @@ def _server_conditions(s: Server, now: datetime,
         out["web_config"] = (max((lv for lv, _t, _k in wc), default=0),
                              {"detail": "; ".join(t for _l, t, _k in wc[:3]), "sig": [k for _l, _t, k in wc], "items": wc,
                               "parts": [(k, t) for _l, t, k in wc]})
-    # Новые php в веб-корне без своего монитора (helper webfiles-setup): похоже на взлом. Одна
-    # правка вне выкладки - только строка в "Что сломано", в Telegram тихо. sig - какие файлы,
-    # чтобы новый php дал свой алерт
+    # Улики взлома в веб-корне без своего монитора (helper webfiles-setup): веб-шелл, php в
+    # загрузках, запуск php в .htaccess, файл WordPress не как в выпуске. sig - какие файлы, чтобы
+    # новая улика дала свой алерт
     if getattr(s, "webfiles", None):
         wf = webfiles_mod.problems(s.webfiles)
         bad = [p for p in wf if p[0] >= 2]

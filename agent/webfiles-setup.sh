@@ -67,13 +67,27 @@
 # carries the versions that changed since the last one: the core from wp-includes/version.php,
 # plugins and themes from the Version: line of their headers.
 #
-# Only paths, sizes, modification times, owners, these versions and the verdicts above leave the
-# node, never file contents or their hashes.
+# What is evidence of a break-in and nothing else (the panel alerts only on that):
+# - php that looks like a web shell (eval of base64, a call with $_POST and the like, names of
+#   known shells) and php in uploads (wp-content/uploads, upload(s) or tmp at the top of the site or
+#   under public/web, sites/*/files);
+# - .htaccess or .user.ini that runs php for pictures or text, runs php in uploads or prepends a
+#   file to every request from uploads, tmp or not a .php;
+# - a file of the WordPress core or of a plugin that is not as in the official release of its
+#   version: for these files the md5 goes to the panel with the plugin and its version, the panel
+#   takes the official checksums from wordpress.org. It is public code, the md5 tells nothing else.
+# Any other change - a deploy, an edit, an update - the panel only shows.
+#
+# The owner of a file is named as the host knows the user for a directory mounted into a
+# container (a deploy from the host writes it), as the container knows it for its own layer.
+#
+# Only paths, sizes, modification times, owners, these versions, the verdicts above and md5 of
+# WordPress core and plugin files leave the node, never file contents or other hashes.
 # The helper changes nothing in the roots and keeps its own lists in /var/lib/kervax/webfiles
 # (root only).
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.7 # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.8 # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x nginx || pgrep -x apache2 || pgrep -x httpd || pgrep php-fpm || pgrep -x php || pgrep lsphp || pgrep frankenphp"
 
 HELPER_DIR=/lib65/kervax
@@ -440,28 +454,30 @@ web_uids() {
 }
 
 # NUL-separated paths of the list (from the root) whose php looks like a web shell: code run from
-# the request, eval of an encoded string, the names of known shells
+# the request, eval of an encoded string, the names of known shells. A method ($db->exec($_POST))
+# or a function of another name (curl_exec) is not one
 shells() {
   (cd "$1" 2>/dev/null && awk '/\.(php[3-8]?|phtml|pht|phar)$/' "$2" \
     | while IFS= read -r f; do [ -f "$f" ] && [ "$(stat -c %s "$f" 2>/dev/null || echo 0)" -le "$HASH_MAX" ] && printf '%s\0' "$f"; done \
     | timeout 60 xargs -0 -r grep -l -Z -a -s -E \
-        -e '(eval|assert)[[:space:]]*\([[:space:]]*@?[[:space:]]*(base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|strrev|rawurldecode|hex2bin)[[:space:]]*\(' \
-        -e '(eval|assert|system|passthru|shell_exec|exec|popen|proc_open|pcntl_exec)[[:space:]]*\([[:space:]]*@?[[:space:]]*\$_(GET|POST|REQUEST|COOKIE|SERVER|FILES)' \
+        -e '(^|[^A-Za-z0-9_>:$\])(eval|assert)[[:space:]]*\([[:space:]]*@?[[:space:]]*(base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|strrev|rawurldecode|hex2bin)[[:space:]]*\(' \
+        -e '(^|[^A-Za-z0-9_>:$\])(eval|assert|system|passthru|shell_exec|exec|popen|proc_open|pcntl_exec)[[:space:]]*\([[:space:]]*@?[[:space:]]*\$_(GET|POST|REQUEST|COOKIE|FILES)' \
         -e '\$_(GET|POST|REQUEST|COOKIE)[[:space:]]*\[[^]]{1,40}\][[:space:]]*\([[:space:]]*@?[[:space:]]*\$_(GET|POST|REQUEST|COOKIE)' \
         -e '(FilesMan|b374k|c99shell|r57shell|IndoXploit|AnonymousFox|Yanz Webshell)' -- 2>/dev/null)
 }
 
 # OWN[path from the root]: "owner TAB 1 when the owner is the web user TAB 1 when the php looks
-# like a web shell". Arguments: root, passwd to read names from, web uids, file with paths
+# like a web shell". Arguments: root, passwd to read names from, web uids, file with paths, passwd
+# for the uids the first one does not know
 declare -A OWN=()
 owners_of() {
-  local root=$1 pw=$2 web=$3 list=$4 f u n w
+  local root=$1 pw=$2 web=$3 list=$4 pw2=${5:-} f u n w
   local -A name=() sus=()
   OWN=()
   [ -s "$list" ] || return 0
   while IFS=: read -r n _x u _rest; do
     [ -n "$u" ] && [ -z "${name[$u]+x}" ] && name[$u]=$(printf '%s' "$n" | tr -cd 'A-Za-z0-9._-' | head -c 32)
-  done < <(head -c 262144 "$pw" 2>/dev/null)
+  done < <(head -c 262144 "$pw" 2>/dev/null; [ -n "$pw2" ] && head -c 262144 "$pw2" 2>/dev/null)
   while IFS= read -r -d '' f; do sus[$f]=1; done < <(shells "$root" "$list")
   while IFS= read -r f; do
     u=$(stat -c %u "$root/$f" 2>/dev/null) || continue
@@ -516,6 +532,87 @@ gen_check() {
     esac
     [ -n "$v" ] && GEN[$f]=$v
   done < "$work/gencand"
+}
+
+# A directory of uploads, as in_uploads of the panel: wp-content/uploads, upload(s), userfiles or
+# tmp at the top of the site or right under public/web (backend/web/uploads of Yii),
+# sites/*/files. files, images or media in code (src/Files, .../Upload/) are classes, not uploads.
+# Reads paths from the root, prints those in one
+UP_AWK='{ n = split($0, s, "/"); u = 0
+  for (i = 1; i < n; i++) if (s[i] == "wp-content") for (j = i + 1; j < n; j++) if (s[j] == "uploads") u = 1
+  if (n > 3 && s[1] == "sites" && s[3] == "files") u = 1
+  for (i = 1; i < n; i++)
+    if (s[i] ~ /^(upload|uploads|userfiles|tmp|temp)$/ && (i == 1 || s[i - 1] ~ /^(public|web|htdocs|pub|public_html|www)$/)) u = 1
+  if (u) print }'
+
+# Exit 0 when .htaccess or .user.ini runs php where it must not: a php handler or type for other
+# extensions (pictures, text), a php handler for a whole directory of uploads or for pictures in
+# <Files>, php switched on in uploads, a file prepended to every request from uploads, tmp, with
+# .. or not a .php. up=1 - the file lies in a directory of uploads
+IFS= read -r -d '' EXEC_AWK <<'EXEC_AWK_EOF' || true
+function phpext(e) { sub(/^\./, "", e); return e ~ /^(php[3-8]?|phtml|pht|phar)$/ }
+function bad_path(v) {
+  gsub(/["']/, "", v)
+  return v != "" && v != "none" && (v !~ /\.php$/ || index(v, "..") || v ~ /\/(uploads?|tmp|temp|shm)\//)
+}
+{ l = tolower($0); sub(/\r$/, "", l); sub(/^[ \t]+/, "", l); sub(/[ \t]+$/, "", l) }
+l == "" || l ~ /^[#;]/ { next }
+l ~ /^<files(match)?[ \t]/ { pic = l ~ /(jpe?g|png|gif|ico|bmp|webp|svg|txt)/; next }
+l ~ /^<\/files/ { pic = 0; next }
+{ n = split(l, w, /[ \t=]+/) }
+(w[1] == "addhandler" || w[1] == "addtype") && w[2] ~ /php/ {
+  for (i = 3; i <= n; i++) if (!phpext(w[i])) { hit = 1; exit }
+}
+(w[1] == "sethandler" || w[1] == "forcetype") && w[2] ~ /php|fcgi/ && (up || pic) { hit = 1; exit }
+(w[1] == "php_flag" || w[1] == "php_admin_flag") && w[2] == "engine" && w[3] ~ /^(on|1)$/ && up { hit = 1; exit }
+(w[1] == "php_value" || w[1] == "php_admin_value") && w[2] ~ /^auto_(prepend|append)_file$/ && bad_path(w[3]) { hit = 1; exit }
+w[1] ~ /^auto_(prepend|append)_file$/ && bad_path(w[2]) { hit = 1; exit }
+END { exit !hit }
+EXEC_AWK_EOF
+
+# EXEC[path from the root]=1: .htaccess or .user.ini of the list that runs php where it must not.
+# Arguments: root, file with paths
+declare -A EXEC=()
+exec_check() {
+  local root=$1 list=$2 f up
+  local -A ups=()
+  EXEC=()
+  [ -s "$list" ] || return 0
+  while IFS= read -r f; do ups[$f]=1; done < <(awk "$UP_AWK" "$list")
+  while IFS= read -r f; do
+    case "$f" in .htaccess|*/.htaccess|.user.ini|*/.user.ini) ;; *) continue ;; esac
+    [ -f "$root/$f" ] && [ ! -L "$root/$f" ] && [ "$(stat -c %s "$root/$f" 2>/dev/null || echo 0)" -le "$GEN_DATA" ] || continue
+    up=0
+    [ -n "${ups[$f]:-}" ] && up=1
+    awk -v up="$up" "$EXEC_AWK" "$root/$f" 2>/dev/null && EXEC[$f]=1
+  done < "$list"
+}
+
+# SUMS[path from the root]: "md5 TAB core or plugin:<slug> TAB path in the release TAB version" for
+# the files of the list that come in a release on wordpress.org: wp-admin, wp-includes and wp-*.php
+# of the core, the files of a plugin in its directory. Arguments: root, versions (wp_versions), file
+# with paths
+declare -A SUMS=()
+wp_sums() {
+  local root=$1 wp=$2 list=$3 f ref rel ver m
+  SUMS=()
+  [ -s "$list" ] && [ -s "$wp" ] || return 0
+  while IFS="$TAB" read -r f ref rel ver; do
+    [ -f "$root/$f" ] && [ ! -L "$root/$f" ] && [ "$(stat -c %s "$root/$f" 2>/dev/null || echo 0)" -le "$HASH_MAX" ] || continue
+    m=$(md5sum < "$root/$f" 2>/dev/null | cut -c1-32)
+    [ "${#m}" = 32 ] && SUMS[$f]="$m$TAB$ref$TAB$rel$TAB$ver"
+  done < <(awk -F '\t' -v OFS='\t' '
+    FILENAME == ARGV[1] {
+      if ($1 == "core") { core = $4; cv = $3; has = 1 }
+      else if ($1 == "plugin" && $4 ~ /\/$/) { pp[$4] = $2 FS $3 }
+      next
+    }
+    has && substr($0, 1, length(core)) == core {
+      r = substr($0, length(core) + 1)
+      if (r ~ /^wp-(admin|includes)\// || r ~ /^(index|xmlrpc|wp-[^\/]+)\.php$/ && r != "wp-config.php") { print $0, "core", r, cv; next }
+    }
+    { for (p in pp) if (substr($0, 1, length(p)) == p) { split(pp[p], a, FS); print $0, "plugin:" a[1], substr($0, length(p) + 1), a[2]; next } }
+  ' "$wp" "$list" | head -n 40)
 }
 
 # sha1 of the files on a list (paths from the root) -> "path TAB sha1"
@@ -641,14 +738,16 @@ jlist() {
 # WordPress in the root: "kind TAB slug TAB version TAB path prefix", kind is core, plugin or
 # theme. Only the first lines of plugin and theme headers are looked at, for the Version: line
 wp_versions() {
-  local p=$1 v w="" c rel
+  local p=$1 v w="" c rel loc
   for v in "$p/wp-includes/version.php" "$p"/*/wp-includes/version.php "$p/web/wp/wp-includes/version.php"; do
     if [ -f "$v" ]; then w=${v%/wp-includes/version.php}; break; fi
   done
   [ -n "$w" ] || return 0
   rel=${w#"$p"}; rel=${rel#/}; rel=${rel:+$rel/}
   v=$(awk -F "'" '/^\$wp_version *=/ { print $2; exit }' "$w/wp-includes/version.php" 2>/dev/null | tr -cd 'A-Za-z0-9._+-' | head -c 30)
-  printf 'core\t\t%s\t%s\n' "$v" "$rel"
+  # a localized build has its own version.php: the checksums of the release go by the locale
+  loc=$(awk -F "'" '/^\$wp_local_package *=/ { print $2; exit }' "$w/wp-includes/version.php" 2>/dev/null | tr -cd 'A-Za-z0-9_' | head -c 20)
+  printf 'core\t\t%s\t%s\t%s\n' "$v" "$rel" "$loc"
   c=$w/wp-content
   [ -d "$c" ] || c=${w%/*}/app  # Bedrock: web/wp and web/app
   [ -d "$c" ] || return 0
@@ -744,6 +843,7 @@ while IFS="$TAB" read -r pid dir names; do
   # WordPress: versions now, the core one goes to the panel with the root
   wp_versions "$p" > "$work/wp"
   wpv=$(awk -F '\t' '$1 == "core" { print $3; exit }' "$work/wp")
+  wploc=$(awk -F '\t' '$1 == "core" { print $5; exit }' "$work/wp")
   # wp-content from the root: where the plugins are, else next to the core
   wpc=$(awk -F '\t' '$1 == "plugin" && (i = index($4, "plugins/")) { print substr($4, 1, i - 1); exit }' "$work/wp")
   if [ -z "$wpc" ] && [ -n "$wpv" ]; then
@@ -876,22 +976,33 @@ while IFS="$TAB" read -r pid dir names; do
       $4 != "" && n < 40 { printf "%s[\"%s\",\"%s\"]", (n++ ? "," : ""), e($1), $4 }' "$wf")
   fi
   if [ "$((nn + nc + ng + ns))" -gt 0 ] || [ -n "$wpup" ]; then
-    # owner of each file sent, whether the site wrote it, whether it looks like a web shell
-    pw=/etc/passwd
-    [ "$p" != "$inner" ] && pw=/proc/$pid/root/etc/passwd
-    owners_of "$lroot" "$pw" "$WEBALL" "$work/listed"
-    finfo=""
+    # owner of each file sent, whether the site wrote it, whether it looks like a web shell. A
+    # directory mounted into a container is written from the host (a deploy) or by the container:
+    # the host names the user first, the container the uids the host does not know
+    pw=/etc/passwd pw2=""
+    if [ "$p" != "$inner" ]; then
+      if [ "$layer" = true ]; then pw=/proc/$pid/root/etc/passwd; else pw2=/proc/$pid/root/etc/passwd; fi
+    fi
+    owners_of "$lroot" "$pw" "$WEBALL" "$work/listed" "$pw2"
+    exec_check "$p" "$work/listed"
+    wp_sums "$p" "$work/wp" "$work/listed"
+    finfo="" fsums=""
     while IFS= read -r f; do
-      o=${OWN[$f]:-} g=${GST[$f]:-} d=${GEN[$f]:-}
-      [ -n "$o$g$d" ] || continue
+      o=${OWN[$f]:-} g=${GST[$f]:-} d=${GEN[$f]:-} e=${EXEC[$f]:-0}
+      if [ -n "${SUMS[$f]:-}" ]; then
+        IFS="$TAB" read -r sm sref srel sver <<< "${SUMS[$f]}"
+        fsums="$fsums${fsums:+,}\"$(esc "$f")\":[\"$sm\",\"$(esc "$sref")\",\"$(esc "$srel")\",\"$(esc "$sver")\"]"
+      fi
+      [ -n "$o$g$d" ] || [ "$e" = 1 ] || continue
       on="" ow=0 ox=0
       [ -n "$o" ] && IFS="$TAB" read -r on ow ox <<< "$o"
-      finfo="$finfo${finfo:+,}\"$(esc "$f")\":[\"$g\",\"$(esc "$on")\",${ow:-0},${ox:-0}${d:+,\"$d\"}]"
+      finfo="$finfo${finfo:+,}\"$(esc "$f")\":[\"$g\",\"$(esc "$on")\",${ow:-0},${ox:-0},\"$d\",$e]"
     done < "$work/listed"
     [ -n "$finfo" ] && finfo=",\"f\":{$finfo}"
+    [ -n "$fsums" ] && finfo="$finfo,\"sums\":{$fsums}"
     deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"n_new\":$nn,\"n_changed\":$nc,\"n_gone\":$ng,\"n_same\":$ns,\"new\":[$(jlist N "$work/diff")],\"changed\":[$(jlist C "$work/diff")],\"gone\":[$(jlist G "$work/diff")],\"same\":[$(jlist S "$work/diff")]${wpup:+,\"wp\":[$wpup]}$finfo}"
   fi
-  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}${branch:+,\"branch\":\"$branch\"}${wpv:+,\"wp\":\"$wpv\"}${clean:+,\"clean\":[$clean]}}"
+  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}${branch:+,\"branch\":\"$branch\"}${wpv:+,\"wp\":\"$wpv\"}${wploc:+,\"wploc\":\"$wploc\"}${clean:+,\"clean\":[$clean]}}"
   cp -f "$work/cur" "$snap.tmp" && mv -f "$snap.tmp" "$snap"
   [ -e "$wf" ] || : > "$wf"
   cp -f "$work/wp" "$SNAP/$key.wp.tmp" && mv -f "$SNAP/$key.wp.tmp" "$SNAP/$key.wp"

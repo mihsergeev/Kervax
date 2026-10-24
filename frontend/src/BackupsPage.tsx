@@ -28,6 +28,10 @@ import {
   type CustomBackup,
   type RepoStat,
   type Server,
+  muteServerKeys,
+  cmdState,
+  cmdWaitText,
+  type BackupAudit,
 } from './api'
 import { BACKUP_HTTP_MUTE, backupServerToHttps, backupToHttps, updateServer } from './api'
 import { trBackend } from './backendText'
@@ -41,6 +45,7 @@ import { bulkCleanupScript, safeRepoName } from './bulkCleanupScript'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { useI18n, currentLang, tr } from './i18n'
+import { toastError } from './toast'
 import { MuteChip, collectMutes, muteRows, mutesTileSub } from './mutes'
 import { MutesPanel } from './MutesPanel'
 import { VaultPanel } from './VaultPanel'
@@ -49,6 +54,15 @@ import { FixSteps } from './FixSteps'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits, fmtDur } from './units'
 import { NetTile, TileFilterChip, useTileFilter, type Tone } from './NetLinks'
+
+// Сводка покрытия, когда замечаний нет: базы на ноде могут быть и без дампа панели - их бэкапит
+// владелец (галка "бэкаплю сам"). Раньше тут было "баз не найдено" рядом с плиткой "Баз на ноде 1"
+function coverageLine(audit: BackupAudit[], selfDb: boolean, t: (k: string, p?: Record<string, string | number>) => string): string {
+  const okDb = audit.filter((x) => x.kind === 'db_ok').length
+  const ownDb = selfDb ? audit.filter((x) => x.kind === 'db').length : 0
+  if (!okDb && !ownDb) return audit.some((x) => x.kind === 'db') ? t('баз без дампа: {n}', { n: audit.filter((x) => x.kind === 'db').length }) : t('баз не найдено')
+  return [okDb && t('бэкапится баз: {n}', { n: okDb }), ownDb && t('бэкапите сами: {n}', { n: ownDb })].filter(Boolean).join(', ')
+}
 
 async function runAndWait(
   serverId: number,
@@ -264,10 +278,11 @@ function ManageSection({ server: s, backup: b, onChanged }: { server: Server; ba
     setMsg(null)
     try {
       const res = await runAndWait(s.id, body)
-      setMsg({ ok: res.status === 'done', text: helperText(res.result, t) || (res.status === 'done' ? t('готово') : t('ошибка')) })
+      const st = cmdState(res)
+      setMsg({ ok: st === 'ok', text: st === 'wait' ? cmdWaitText() : helperText(res.result, t) || (st === 'ok' ? t('готово') : t('ошибка')) })
       onChanged()
-    } catch {
-      setMsg({ ok: false, text: t('ошибка') })
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : t('ошибка') })
     } finally {
       setBusy(null)
     }
@@ -307,11 +322,11 @@ function ManageSection({ server: s, backup: b, onChanged }: { server: Server; ba
       if (winDirty) await updateServer(s.id, { backup_deadline_hour: deadline, backup_anytime: anytime })
       if (schedDirty) {
         const r = await runAndWait(s.id, { action: 'set_schedule', schedule })
-        if (r.status !== 'done') throw new Error(helperText(r.result, t) || t('ошибка'))
+        if (cmdState(r) !== 'ok') throw new Error(cmdState(r) === 'wait' ? cmdWaitText() : helperText(r.result, t) || t('ошибка'))
       }
       if (pathsDirty) {
         const r = await runAndWait(s.id, { action: 'set_paths', mode, paths: curList })
-        if (r.status !== 'done') throw new Error(helperText(r.result, t) || t('ошибка'))
+        if (cmdState(r) !== 'ok') throw new Error(cmdState(r) === 'wait' ? cmdWaitText() : helperText(r.result, t) || t('ошибка'))
       }
       setMsg({ ok: true, text: t('Сохранено') })
       onChanged()
@@ -674,11 +689,10 @@ function BackupHttp({ server: s, canManage, onChanged }: {
   const blockers = s.backup_https?.blockers ?? []
   const running = job?.status === 'running'
   const toggle = () => {
-    const cur = s.alert_mutes ?? []
     setBusy(true)
-    updateServer(s.id, { alert_mutes: tg.muted ? cur.filter((m) => m !== BACKUP_HTTP_MUTE) : [...new Set([...cur, BACKUP_HTTP_MUTE])] })
+    muteServerKeys(s.id, tg.muted ? [] : [BACKUP_HTTP_MUTE], tg.muted ? [BACKUP_HTTP_MUTE] : [])
       .then(onChanged)
-      .catch(() => {})
+      .catch(toastError)
       .finally(() => setBusy(false))
   }
   const move = async () => {
@@ -877,8 +891,8 @@ function BackupModal({
     setRbusy(true); setRmsg(null)
     try {
       const res = await runAndWait(s.id, { action: 'restic_update' })
-      const ok = res.status !== 'error'
-      setRmsg(ok ? (helperText(res.result, t) || t('готово')) : (helperText(res.result, t) || t('не удалось')))
+      const ok = cmdState(res) === 'ok'
+      setRmsg(cmdState(res) === 'wait' ? cmdWaitText() : ok ? (helperText(res.result, t) || t('готово')) : (helperText(res.result, t) || t('не удалось')))
       if (ok) setRdone(true)   // прячем кнопку до подтверждения отчётом
       onChanged()
     } catch (e) {
@@ -965,14 +979,13 @@ function BackupModal({
         text: t('{db} - нужен отдельный дамп', { db: shortList(dbAuditNames(dbs), t, 3) }),
       })
   }
-  const okDb = audit.filter((x) => x.kind === 'db_ok').length
   const ok: Record<string, string> = {
     runs: b.last_backup_ts
       ? last
         ? t('последний {ago}, добавил {s}', { ago: fmtAgo(b.last_backup_ts), s: fmtBytes(last.st) })
         : t('последний {ago}', { ago: fmtAgo(b.last_backup_ts) })
       : t('бэкапа еще не было'),
-    coverage: okDb ? t('бэкапится баз: {n}', { n: okDb }) : t('баз не найдено'),
+    coverage: coverageLine(audit, !!s.db_dumps_ok, t),
     own: t('заданий: {n}, все отрабатывают', { n: own.filter((j) => !j.ignored).length }),
     restore: v
       ? t('проверено {d}: файлов совпало {n}{dumps}', {
@@ -985,7 +998,7 @@ function BackupModal({
       ? subOf(
           b.schedule && t('каждый день {time}', { time: b.schedule }),
           b.mode === 'include'
-            ? t('только {n} путей', { n: (b.includes ?? []).length })
+            ? t('бэкапятся только пути: {n}', { n: (b.includes ?? []).length })
             : t('исключено путей: {n}', { n: (b.excludes ?? []).length }),
         )
       : t('управление недоступно без helper'),
@@ -2215,8 +2228,8 @@ function RestServerUpdate({ server: s, info, onChanged }: {
     setBusy(true); setMsg(null)
     try {
       const res = await runAndWait(s.id, { action: 'update_image' })
-      const ok = res.status !== 'error'
-      setMsg(ok ? (helperText(res.result, t) || t('готово')) : (helperText(res.result, t) || t('не удалось')))
+      const ok = cmdState(res) === 'ok'
+      setMsg(cmdState(res) === 'wait' ? cmdWaitText() : ok ? (helperText(res.result, t) || t('готово')) : (helperText(res.result, t) || t('не удалось')))
       if (ok) setDone(true)
       onChanged()
     } catch (e) {
@@ -2434,7 +2447,6 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
         text: t('{db} - нужен отдельный дамп', { db: shortList(dbAuditNames(dbs), t, 3) }),
       })
   }
-  const okDb = audit.filter((x) => x.kind === 'db_ok').length
   const ok: Record<string, string> = {
     repos: all.length ? t('репозиториев: {n}, все в порядке', { n: all.length }) : '',
     archive: t('репозиториев: {n}, {sz}', { n: archivedRepos.length, sz: fmtBytes(archivedBytes) }),
@@ -2444,7 +2456,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
       info.tls_front ? 'HTTPS' : 'HTTP',
       info.running ? t('запущен') : t('остановлен'),
     ),
-    coverage: okDb ? t('бэкапится баз: {n}', { n: okDb }) : t('баз не найдено'),
+    coverage: coverageLine(audit, !!s.db_dumps_ok, t),
     https: t('все клиенты по https'),
   }
   const infoSec: Record<string, SecInfo> = {}
@@ -3032,8 +3044,9 @@ function NoBackupRow({ server: s, canAct, onSetup, onDeploy, onCoverage, onChang
   )
 }
 
+// адрес ноды под именем: IP, иначе hostname - но не тот же, что имя (было "ci-runner-1 ... ci-runner-1")
 function serverAddr(s: Server): string {
-  return s.agent_ip || s.hostname || ''
+  return s.agent_ip || (s.hostname && s.hostname !== s.name ? s.hostname : '')
 }
 
 // строка, на которую ведет ссылка с главной (?backup=id у ноды без бэкапа): прокрутить к ней
@@ -3074,7 +3087,7 @@ function SetupProblemRow({ server: s, canAct, onRedo, onChanged, focus }: {
         await new Promise((r) => setTimeout(r, 1500))
         last = await backupCommandStatus(s.id, c.id)
       }
-      if (last.status !== 'done') setErr(last.result || t('не удалось'))
+      if (cmdState(last) !== 'ok') setErr(cmdState(last) === 'wait' ? cmdWaitText() : last.result || t('не удалось'))
       onChanged()
     } catch (e) {
       setErr(e instanceof Error ? e.message : t('ошибка'))
@@ -3575,12 +3588,14 @@ export function BackupsPage({
   const srvStat = srvHosts.map(({ s, d }) => {
     const ctx = repoCtx(s)
     const repos = (d.repos ?? []).filter((r) => !ctx.archived.has(r.name))
-    return { repos: repos.length, bad: repos.filter((r) => repoBad(r, ctx)).length, pct: diskPct(d) ?? -1, down: !d.running }
+    return { name: s.name, repos: repos.length, bad: repos.filter((r) => repoBad(r, ctx)).length, pct: diskPct(d) ?? -1, down: !d.running }
   })
   const repoN = srvStat.reduce((a, x) => a + x.repos, 0)
   const repoBadN = srvStat.reduce((a, x) => a + x.bad, 0)
   const srvDownN = srvStat.filter((x) => x.down).length
   const pctMax = Math.max(-1, ...srvStat.map((x) => x.pct))
+  // "диск до 88%" ничего не говорит: какой сервер и насколько занят
+  const fullest = srvStat.find((x) => x.pct === pctMax)
   const verified = allHosts.filter(({ s }) => s.backup_verify)
   const verBadN = verified.filter(({ s }) => (s.backup_verify?.level ?? 0) >= 2).length
   const verWarnN = verified.filter(({ s }) => (s.backup_verify?.level ?? 0) === 1).length
@@ -3641,7 +3656,7 @@ export function BackupsPage({
     const row = setupBad.some((x) => x.id === srv.id) || noBackupAll.some((x) => x.id === srv.id)
     if (srv.last_report?.backup_server?.present) setOpenSrvId(openId)
     else if (row && linkSec.sec !== 'coverage') setFocusId(srv.id)
-    else if ((srv.backup_audit?.length ?? 0) > 0) setCovId(srv.id)
+    else if ((srv.backup_audit?.length ?? 0) > 0 || (srv.custom_backups?.length ?? 0) > 0) setCovId(srv.id)
     setOpenId(null)
   }, [openId, open, servers, setupBad, noBackupAll, linkSec.sec])
 
@@ -3701,7 +3716,9 @@ export function BackupsPage({
                 t('репозиториев: {n}', { n: repoN }),
                 repoBadN > 0 && t('проблемных: {b}', { b: repoBadN }),
                 srvDownN > 0 && t('остановлено: {n}', { n: srvDownN }),
-                pctMax >= 0 && t('диск до {p}%', { p: pctMax }),
+                pctMax >= 0 && fullest && (srvStat.length > 1
+                  ? t('диск больше всех занят у {name}: {p}%', { name: fullest.name, p: pctMax })
+                  : t('диск занят на {p}%', { p: pctMax })),
               )}
               tone={repoBadN || srvDownN || pctMax >= 90 ? 'bad' : pctMax >= 80 ? 'warn' : 'ok'}
               {...tileProps('servers')}

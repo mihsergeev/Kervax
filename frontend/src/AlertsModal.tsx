@@ -18,6 +18,7 @@ import {
 import { CardNav, type SecDef, type SecInfo } from './cardLayout'
 import { AlertRulesList, ScopedNote, scopedKinds, unscopeRules } from './ServerAlertRules'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 
 type Props = {
   onClose: () => void
@@ -112,7 +113,8 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
         // ничего не настроено - начинаем с бота
         if (!c.telegram_token && !c.webhook) setSec('bot')
       })
-      .catch(() => onUnauthorized())
+      // 502 на деплое или сеть - не выход из панели: выходом лечится только 401 (fail)
+      .catch(fail)
     getServerAlertRules()
       .then((r) => {
         setSrv(r)
@@ -225,6 +227,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
     if (dirty && !window.confirm(t('Закрыть без сохранения? Изменения пропадут.'))) return
     onClose()
   }
+  useEscape(close)
 
   // числа в меню: сломанные чаты, бот без токена, бот не читается, старые ограничения правил
   const info: Record<string, SecInfo> = {}
@@ -273,7 +276,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
             </div>
             <p className="muted small al-lead">{t(LEAD[cur.id])}</p>
             {!f || !cfg ? (
-              <p className="muted small">{t('загрузка…')}</p>
+              err ? <p className="form-error small">{err}</p> : <p className="muted small">{t('загрузка…')}</p>
             ) : (
               <div className="srv-sec">
                 {cur.id === 'where' && (
@@ -379,7 +382,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
                         min={0}
                         max={1000}
                         value={f.flood_threshold}
-                        onChange={(e) => set({ flood_threshold: Math.max(0, Number(e.target.value) || 0) })}
+                        onChange={(e) => set({ flood_threshold: Math.min(1000, Math.max(0, Number(e.target.value) || 0)) })}
                       />
                     </label>
                     <p className="muted small">
@@ -591,7 +594,7 @@ function EscalationForm({
                 min={5}
                 max={720}
                 value={esc.after_min}
-                onChange={(e) => set({ after_min: Math.max(5, Number(e.target.value) || 15) })}
+                onChange={(e) => set({ after_min: Math.min(720, Math.max(5, Number(e.target.value) || 15)) })}
               />
             </label>
             <label className="field">
@@ -743,12 +746,15 @@ function RoutesForm({
           {tested[i] === 'ok' && <p className="form-ok small">{t('Проверочное сообщение отправлено.')}</p>}
         </div>
       ))}
-      <button
-        className="ghost al-add"
-        onClick={() => onChange({ ...routes, chats: [...routes.chats, { ...NEW_ROUTE }] })}
-      >
-        {t('+ Чат для групп')}
-      </button>
+      {/* больше 20 чатов бэкенд не принимает */}
+      {routes.chats.length < 20 && (
+        <button
+          className="ghost al-add"
+          onClick={() => onChange({ ...routes, chats: [...routes.chats, { ...NEW_ROUTE }] })}
+        >
+          {t('+ Чат для групп')}
+        </button>
+      )}
       <p className="muted small">
         {t('Алерты серверов и сайтов из выбранных групп уходят в отдельный чат: например, разработчикам - только про их проект. Бота нужно добавить в этот чат. Id группы видно в Telegram, а если включены команды боту, бот подскажет его в ответ на /id.')}
       </p>

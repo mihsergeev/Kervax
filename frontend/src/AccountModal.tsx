@@ -23,7 +23,8 @@ import {
 } from './api'
 import { ROLE_LABEL, ROLE_WHAT, SECTION_LABEL } from './access'
 import { CardNav, type SecDef } from './cardLayout'
-import { useI18n } from './i18n'
+import { tr, useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import { NetTile } from './NetLinks'
 
 // "Моя учетка" из меню: своя роль и доступ, последние входы, пароль, вход по коду из
@@ -46,6 +47,7 @@ const fmt = (iso: string) => new Date(iso).toLocaleString([], { day: '2-digit', 
 
 export function AccountModal({ onClose, onUnauthorized }: Props) {
   const { t } = useI18n()
+  useEscape(onClose)
   const [sec, setSec] = useState('over')
   const [user, setUser] = useState<UserOut | null>(null)
   const [tfa, setTfa] = useState<boolean | null>(null)
@@ -53,9 +55,12 @@ export function AccountModal({ onClose, onUnauthorized }: Props) {
   const [act, setAct] = useState<MyActivity | null>(null)
   const mainRef = useRef<HTMLDivElement>(null)
 
+  // ошибка загрузки - текстом вместо вечной "загрузка…"
+  const [loadErr, setLoadErr] = useState<string | null>(null)
   const fail = useCallback(
     (e: unknown) => {
-      if (e instanceof ApiError && e.status === 401) onUnauthorized()
+      if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+      setLoadErr(e instanceof Error ? e.message : tr('Ошибка'))
     },
     [onUnauthorized],
   )
@@ -187,10 +192,11 @@ export function AccountModal({ onClose, onUnauthorized }: Props) {
               <h4>{t(cur.label)}</h4>
             </div>
             <div className="srv-sec">
+              {loadErr && <p className="form-error small">{loadErr}</p>}
               {cur.id === 'over' && overview()}
               {cur.id === 'password' && <PasswordSec changed={act?.password_changed ?? null} onDone={loadAct} onUnauthorized={onUnauthorized} />}
-              {cur.id === '2fa' && <TwoFASec enabled={tfa} onChange={setTfa} />}
-              {cur.id === 'telegram' && <TelegramSec st={tg} onChange={setTg} />}
+              {cur.id === '2fa' && <TwoFASec enabled={tfa} failed={!!loadErr} onChange={setTfa} />}
+              {cur.id === 'telegram' && <TelegramSec st={tg} failed={!!loadErr} onChange={setTg} />}
             </div>
           </div>
         </div>
@@ -266,7 +272,7 @@ function PasswordSec({ changed, onDone, onUnauthorized }: { changed: string | nu
 }
 
 // Вход по коду из приложения (TOTP): включить - QR и подтверждение кодом, выключить - текущим кодом
-function TwoFASec({ enabled, onChange }: { enabled: boolean | null; onChange: (on: boolean) => void }) {
+function TwoFASec({ enabled, failed, onChange }: { enabled: boolean | null; failed?: boolean; onChange: (on: boolean) => void }) {
   const { t } = useI18n()
   const [setup, setSetup] = useState<TwoFASetup | null>(null)
   const [qr, setQr] = useState<{ uri: string; url: string } | null>(null)
@@ -323,7 +329,7 @@ function TwoFASec({ enabled, onChange }: { enabled: boolean | null; onChange: (o
     </label>
   )
 
-  if (enabled == null) return <p className="muted small">{t('загрузка…')}</p>
+  if (enabled == null) return failed ? null : <p className="muted small">{t('загрузка…')}</p>
   if (enabled)
     return (
       <>
@@ -384,7 +390,7 @@ function TwoFASec({ enabled, onChange }: { enabled: boolean | null; onChange: (o
 // кодом: панель выдает код, человек шлет его боту, панель находит код среди сообщений бота и
 // запоминает чат отправителя. Ручной ввод оставлен для групповых чатов и каналов (там своего
 // "Start" нет).
-function TelegramSec({ st, onChange }: { st: TelegramState | null; onChange: (s: TelegramState) => void }) {
+function TelegramSec({ st, failed, onChange }: { st: TelegramState | null; failed?: boolean; onChange: (s: TelegramState) => void }) {
   const { t } = useI18n()
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
@@ -425,7 +431,7 @@ function TelegramSec({ st, onChange }: { st: TelegramState | null; onChange: (s:
     }
   }
 
-  if (!st) return <p className="muted small">{t('загрузка…')}</p>
+  if (!st) return failed ? null : <p className="muted small">{t('загрузка…')}</p>
   return (
     <>
       <p className="muted small al-lead">
@@ -510,9 +516,18 @@ function TelegramSec({ st, onChange }: { st: TelegramState | null; onChange: (s:
               placeholder={st.own_token ? t('задан — введите новый, чтобы заменить') : ''}
             />
           </label>
-          <button className="primary" disabled={busy} onClick={() => run(() => updateTelegram({ chat_id: chat.trim(), token: token.trim() }), t('Сохранено'))}>
+          {/* пустое поле при заданном своем боте значит не менять, иначе смена одного чата молча
+              стирала токен. Вернуться на общий бот - отдельной кнопкой */}
+          <button className="primary" disabled={busy} onClick={() => run(() => updateTelegram({
+            chat_id: chat.trim(), ...(token.trim() || !st.own_token ? { token: token.trim() } : {}),
+          }), t('Сохранено'))}>
             {t('Сохранить')}
           </button>
+          {st.own_token && (
+            <button className="ghost" disabled={busy} onClick={() => run(() => updateTelegram({ token: '' }), t('Сохранено'))}>
+              {t('Вернуться на общий бот')}
+            </button>
+          )}
           <p className="muted small">
             {t('Свой бот нужен, только если хотите отдельного бота или свой прокси к Telegram. Для группы добавьте бота в неё и укажите её ID.')}
           </p>

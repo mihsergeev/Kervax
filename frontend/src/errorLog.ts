@@ -112,8 +112,11 @@ export function installErrorHandlers(): void {
     reportFront('error', message, stack || (ev.filename ? `at ${ev.filename}:${ev.lineno}:${ev.colno}` : ''))
   })
   window.addEventListener('unhandledrejection', (ev) => {
-    const r = ev.reason as { status?: number } | undefined
+    const r = ev.reason as { status?: number; method?: string } | undefined
     if (r && typeof r === 'object' && r.status === 401) return
+    // отказ на изменяющий запрос и 5xx бэкенд уже записал сам (panel_errors.py) - второй строкой не дублируем
+    if (r && typeof r === 'object' && typeof r.status === 'number'
+      && (r.status >= 500 || (r.status >= 400 && !!r.method && r.method !== 'GET' && r.method !== 'HEAD'))) return
     const { message, stack } = errText(ev.reason)
     reportFront('rejection', message, stack)
   })

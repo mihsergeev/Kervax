@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { ApiError, getHealth, sendProblemReport } from './api'
 import { recentClientLog, uiPage, uiSection } from './errorLog'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 
 // подписи разделов, как в шапке
 const SECTION: Record<string, string> = {
@@ -19,6 +20,7 @@ const SECTION: Record<string, string> = {
 // сами. Скриншот не нужен. Админ видит сообщение в окне "Ошибки панели".
 export function ProblemModal({ onClose, onUnauthorized }: { onClose: () => void; onUnauthorized: () => void }) {
   const { t } = useI18n()
+  useEscape(onClose)
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)

@@ -88,8 +88,10 @@ export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
   }
 
   const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') onClose()
-    else if (e.key === 'ArrowDown') {
+    if (e.key === 'Escape') {
+      e.preventDefault() // окно под поиском (карточка сервера) по этому Esc не закрывается
+      onClose()
+    } else if (e.key === 'ArrowDown') {
       e.preventDefault()
       setCur((c) => Math.min(c + 1, Math.max(flat.length - 1, 0)))
     } else if (e.key === 'ArrowUp') {
