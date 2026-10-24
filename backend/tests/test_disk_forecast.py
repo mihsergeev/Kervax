@@ -168,6 +168,8 @@ def _capture(monkeypatch) -> list[str]:
 
 async def test_forecast_alert_levels_and_recovery(tmp_path, monkeypatch):
     from app import collector
+    # прогноз шлется только днем по поясу панели: тест не должен зависеть от часа запуска
+    monkeypatch.setattr(collector, "_daytime", lambda now, tz: True)
     from app.config import Settings
     from app.models import Server
 
@@ -213,6 +215,8 @@ async def test_forecast_alert_levels_and_recovery(tmp_path, monkeypatch):
 async def test_forecast_alert_comes_five_days_ahead(tmp_path, monkeypatch):
     """Предупреждение за пять суток - с того же срока, что пункт в "Что сломано"."""
     from app import collector
+    # прогноз шлется только днем по поясу панели: тест не должен зависеть от часа запуска
+    monkeypatch.setattr(collector, "_daytime", lambda now, tz: True)
     from app.config import Settings
     from app.models import Server
 

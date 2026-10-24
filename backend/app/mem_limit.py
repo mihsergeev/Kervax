@@ -16,6 +16,14 @@ major faults и refault в секунду. Поля нет - агент стар
 пода было PSI full 2.6-5, major faults 87-1340/с, refault файлов десятки тысяч в секунду; у всех
 остальных подов и контейнеров на тех же нодах - ноль.
 
+Сами по себе faults без давления - не торможение. Вечер 24.10: под ClickHouse с лимитом 40Gi
+четыре раза за вечер "уперся" и через полчаса "больше не упирается" по refault 4-11 тыс/с. При
+этом PSI ровно 0, major faults 0, анонимной памяти 23% лимита: ClickHouse читает куски больше
+своего кэша, и страницы файлов по кругу вытесняются и читаются снова. Так живет любая база у
+лимита (bitcoind с refault 5 тыс/с - тоже). Страницы рабочего набора, которые пришлось читать
+обратно, ядро само записывает в PSI (memstall при refault workingset), поэтому решает давление:
+PSI full от FULL_MIN или PSI some от SOME_MIN вместе с major faults / refault.
+
 Дебаунс на каждый контейнер или под отдельно - alert_state["memlim"]: {ключ: {"s": начало эпизода,
 "l": последний замер у лимита, "v": он сам}}. Эпизод держится HOLD_S - признак и алерт; замеры с
 просветом до GAP_S - один эпизод (минутная пауза в нагрузке его не рвет); отбой - после COOL_S без
@@ -33,6 +41,7 @@ from app.models import Server
 
 HOT_RATIO = 0.95  # занято от лимита (memory.current, с кэшем)
 FULL_MIN = 1.0  # PSI memory full avg60, %
+SOME_MIN = 5.0  # PSI memory some avg60, % - вместе с major faults или refault
 MF_MIN = 50.0  # major faults в секунду
 RF_MIN = 2000.0  # refault в секунду (~8мб/с прочитанного заново)
 CRIT_FULL = 10.0  # PSI full от 10% - процессы стоят каждую десятую секунду: авария
@@ -94,10 +103,10 @@ def key_of(x: dict, name: str, ctrls: dict[str, str] | None = None) -> str:
 
 
 def hot(x: dict) -> bool:
-    """У лимита и тормозит: давление памяти или вытесненное читается обратно."""
+    """У лимита и тормозит: давление памяти, а не просто кэш по кругу (refault без PSI)."""
     ratio = _f(x.get("cur")) / _f(x.get("lim")) if _f(x.get("lim")) else 0.0
-    return ratio >= HOT_RATIO and (_f(x.get("full")) >= FULL_MIN or _f(x.get("mf")) >= MF_MIN
-                                   or _f(x.get("rf")) >= RF_MIN)
+    faults = _f(x.get("mf")) >= MF_MIN or _f(x.get("rf")) >= RF_MIN
+    return ratio >= HOT_RATIO and (_f(x.get("full")) >= FULL_MIN or (_f(x.get("some")) >= SOME_MIN and faults))
 
 
 def _snap(x: dict, name: str) -> dict:
@@ -165,6 +174,8 @@ def facts_text(v: dict) -> str:
     parts = [f"используется {min(int(_f(v.get('cur')) / lim * 100), 100)}%" if lim else ""]
     if _f(v.get("full")) >= 0.1:
         parts.append(f"PSI full {_num(_f(v.get('full')))}")
+    elif _f(v.get("some")) >= 0.1:
+        parts.append(f"PSI some {_num(_f(v.get('some')))}")
     if _f(v.get("mf")) >= 1:
         parts.append(f"major faults {tg_fmt.count(_f(v.get('mf')))}/с")
     elif _f(v.get("rf")) >= 1:

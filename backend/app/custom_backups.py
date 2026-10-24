@@ -330,6 +330,11 @@ def _parse(item: str) -> tuple[str, str]:
     return (m.group(1), m.group(2)) if m else (str(item), "")
 
 
+def names(own: list[str]) -> list[str]:
+    """Имена заданий из problems(): о ком алерт (повтор с другим заданием - новость)"""
+    return sorted({_parse(x)[0] for x in own})
+
+
 def _short_one(item: str) -> tuple[str, list[str]]:
     """Строка problems() -> (что случилось, конкретика)"""
     name, problem = _parse(item)
