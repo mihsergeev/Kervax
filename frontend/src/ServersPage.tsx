@@ -1,4 +1,4 @@
-import { withProxy } from './installProxy'
+import { localizeInstallCmd, withProxy } from './installProxy'
 import { InstallPath, type InstallMode } from './InstallPath'
 import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -20,6 +20,9 @@ import {
   kubeCommand,
   kubeCommandStatus,
   listServers,
+  installStatus,
+  installVia,
+  type InstallStatus,
   rotateServerToken,
   setRelay,
   type RelayView,
@@ -5881,7 +5884,8 @@ export function EnrollModal({
 }
 
 // Команда установки по аргументам: переносится между ними, а не посреди токена. Токен
-// приглушен до наведения (или тапа на телефоне), копируется команда целиком
+// приглушен до наведения (или тапа на телефоне), копируется команда целиком. Повторы ожидания
+// (sh -c '...') тоже приглушены и текут как текст: глазу нужны адрес панели и токен в конце
 function InstallCmd({ cmd, token, add }: { cmd: string; token: string; add?: string }) {
   const parts = cmd.match(/'[^']*'|\S+/g) ?? []
   return (
@@ -5889,7 +5893,9 @@ function InstallCmd({ cmd, token, add }: { cmd: string; token: string; add?: str
       {parts.map((p, i) => (
         <span key={i}>
           {i > 0 && ' '}
-          <span className={`ic-arg${p === token ? ' ic-tok' : ''}`}>{p}</span>
+          <span className={p === token ? 'ic-arg ic-tok' : p.length > 80 && p.startsWith("'") ? 'ic-script' : 'ic-arg'}>
+            {p}
+          </span>
         </span>
       ))}
       {add && <span className="install-cmd-add"> {add}</span>}
@@ -5913,22 +5919,28 @@ export function InstallModal({
   // путь до панели (InstallPath): прокси ретранслятора, локации или свой - в команду
   const [path, setPath] = useState<InstallMode>(mode ?? 'direct')
   const [proxy, setProxy] = useState('')
-  const cmd = withProxy(enroll.install_cmd, proxy)
+  const base = localizeInstallCmd(enroll.install_cmd, t)
+  const cmd = withProxy(base, proxy)
   // путь через прокси выбран, а прокси в команде еще нет: копировать рано
-  const pending = path !== 'direct' && cmd === enroll.install_cmd
+  const pending = path !== 'direct' && cmd === base
   // живая проверка: поллим сервер, пока агент не пришлёт первый отчёт
   const [connected, setConnected] = useState<Server | null>(null)
+  // а пока его нет - что панель знает о ноде: открыт ли ей адрес, что она уже скачала
+  const [st, setSt] = useState<InstallStatus | null>(null)
   useEffect(() => {
     if (connected) return
-    const id = window.setInterval(async () => {
+    const poll = async () => {
       try {
-        const list = await listServers()
+        const [list, now] = await Promise.all([listServers(), installStatus(enroll.server.id)])
+        setSt(now)
         const s = list.find((x) => x.id === enroll.server.id)
         if (s?.last_seen) setConnected(s)
       } catch {
         /* транзиентные сбои поллинга не мешают ожиданию */
       }
-    }, 4000)
+    }
+    void poll()
+    const id = window.setInterval(poll, 4000)
     return () => window.clearInterval(id)
   }, [enroll.server.id, connected])
   const copy = (text: string, what: string) => {
@@ -5974,12 +5986,8 @@ export function InstallModal({
               {copied === 'cmd' ? t('Скопировано ✓') : t('Копировать')}
             </button>
           </div>
-          {pending ? (
+          {pending && (
             <p className="ic-hint t-degraded small">{t('Сначала заполните поля выше: прокси попадет в команду')}</p>
-          ) : (
-            <p className="ic-hint muted small">
-              {t('Если curl упал по таймауту, подождите минуту и повторите: панель открывает адрес новой ноды не сразу')}
-            </p>
           )}
           <details className="ic-more">
             <summary className="muted small">{t('Агент сам настроит Docker, Kubernetes и доступ к бэкапам')}</summary>
@@ -6025,13 +6033,68 @@ export function InstallModal({
               <span className="ic-pulse" />
               <span>
                 <b>{t('Ждем первый отчет агента')}</b>
-                <span className="muted small"> {t('статус сменится здесь сам')}</span>
+                <InstallProgress st={st} path={path} serverId={enroll.server.id} />
               </span>
             </>
           )}
         </section>
       </div>
     </div>
+  )
+}
+
+// Что панель знает о новой ноде, пока агент молчит. Самое продвинутое: скачал агента >
+// скачал установщик > адрес открыт или открывается. Адрес в фаерволе панели важен только для пути
+// напрямую: через прокси и ретранслятор нода приходит с их адреса
+function InstallProgress({ st, path, serverId }: { st: InstallStatus | null; path: InstallMode; serverId: number }) {
+  const { t } = useI18n()
+  const [ip, setIp] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const at = (iso: string) => new Date(iso).toLocaleTimeString(currentLang() === 'en' ? 'en-GB' : 'ru-RU', { hour: '2-digit', minute: '2-digit' })
+  const line = (text: string, cls = 'muted') => <span className={`ic-sub small ${cls}`}>{text}</span>
+  if (!st) return line(t('статус сменится здесь сам'))
+  if (st.agent_at) return line(t('сервер скачал агента в {t}, ждем запуска', { t: at(st.agent_at) }))
+  if (st.script_at) return line(t('сервер скачал установщик в {t}', { t: at(st.script_at) }))
+  if (st.relay === 'opening') return line(t('ретранслятор пустит этот сервер в течение минуты'))
+  if (st.relay === 'open') return line(t('ретранслятор уже пускает этот сервер'))
+  if (path !== 'direct' || !st.firewall) return line(t('статус сменится здесь сам'))
+  if (st.firewall === 'open') return line(t('адрес {ip} открыт в фаерволе панели', { ip: st.ip }))
+  if (st.firewall === 'opening') return line(t('открываем адрес {ip} в фаерволе панели, обычно до 2 минут, команда подождет', { ip: st.ip }))
+  if (st.firewall === 'stale')
+    return line(
+      t('адреса в фаерволе панели не обновлялись {n} мин: на хосте панели не запускается ops/agent-firewall-sync.sh', {
+        n: Math.round((st.fw_age ?? 0) / 60),
+      }),
+      't-degraded',
+    )
+  // фаервол есть, а IP сервера не указан: открыть нечего, агент не пройдет
+  const save = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      await installVia(serverId, { mode: 'direct', ip: ip.trim() })
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <span className="ic-sub ic-noip small">
+      <span className="t-degraded">{t('IP сервера не указан, фаервол панели его не пустит:')}</span>
+      <input
+        className="mono"
+        value={ip}
+        placeholder={t('IP сервера')}
+        onChange={(e) => setIp(e.target.value)}
+        onKeyDown={(e) => e.key === 'Enter' && ip.trim() && void save()}
+      />
+      <button className="ghost" disabled={!ip.trim() || busy} onClick={() => void save()}>
+        {t('Открыть')}
+      </button>
+      {err && <span className="form-error">{err}</span>}
+    </span>
   )
 }
 

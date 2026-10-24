@@ -3467,6 +3467,20 @@ export type InstallVia = { mode: 'direct' | 'relay' | 'location' | 'custom'; rel
 export function installVia(id: number, body: InstallVia): Promise<{ proxy: string; ip: string }> {
   return api<{ proxy: string; ip: string }>(`/api/servers/${id}/install-via`, { method: 'POST', body: JSON.stringify(body) })
 }
+// шаг 3 окна установки, пока агент молчит (app/install_watch.py): firewall '' | open | opening |
+// no_ip | stale, relay '' | opening | open, *_at - когда нода скачала установщик и агента
+export type InstallStatus = {
+  ip: string
+  firewall: '' | 'open' | 'opening' | 'no_ip' | 'stale'
+  fw_age: number | null
+  relay: '' | 'opening' | 'open'
+  script_at: string | null
+  agent_at: string | null
+  connected: boolean
+}
+export function installStatus(id: number): Promise<InstallStatus> {
+  return api<InstallStatus>(`/api/servers/${id}/install-status`)
+}
 export function rotateServerToken(id: number): Promise<ServerEnroll> {
   return api<ServerEnroll>(`/api/servers/${id}/rotate`, { method: 'POST' })
 }

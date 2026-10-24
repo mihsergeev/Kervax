@@ -2516,6 +2516,7 @@ select:focus {
 .install-cmd.ic-cmd { word-break: normal; line-height: 1.55; outline: none; }
 .ic-arg { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .ic-tok { filter: blur(4px); opacity: 0.7; transition: filter 0.15s, opacity 0.15s; }
+.ic-script { color: var(--text-muted); overflow-wrap: anywhere; }
 .ic-cmd:hover .ic-tok,
 .ic-cmd:focus .ic-tok { filter: none; opacity: 1; }
 .ic-hint { margin: -0.15rem 0 0; }
@@ -2532,6 +2533,10 @@ select:focus {
 .ic-status-ok .ic-num { background: color-mix(in srgb, var(--up) 20%, transparent); color: var(--up); }
 .ic-ok-dot { color: var(--up); font-weight: 700; }
 .ic-done { margin-left: auto; }
+.ic-sub { display: block; margin-top: 0.15rem; }
+.ic-noip { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+.ic-noip input { width: 11rem; max-width: 100%; padding: 0.2rem 0.45rem; }
+.ic-noip button { padding: 0.2rem 0.7rem; }
 /* путь агента в панель (InstallPath): карточки 2x2, под ними поля выбранного пути */
 .install-path { display: flex; flex-direction: column; gap: 0.5rem; }
 .ip-modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }

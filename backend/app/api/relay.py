@@ -7,11 +7,12 @@ from fastapi import APIRouter, Body, Header, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 
-from app import audit, relay as relay_mod
+from app import audit, install_watch, relay as relay_mod
 from app.api.servers import _get_or_404, _is_online, _out, _write_agent_allowlist
+from app.config import get_settings
 from app.deps import CurrentUser, SessionDep
 from app.models import Location, Server
-from app.schemas import InstallViaIn, InstallViaOut, RelayUpdate, ServerOut
+from app.schemas import InstallStatusOut, InstallViaIn, InstallViaOut, RelayUpdate, ServerOut
 from app.security import hash_agent_token
 
 router = APIRouter(prefix="/servers", tags=["relay"])
@@ -75,11 +76,39 @@ async def install_via(server_id: int, body: InstallViaIn, user: CurrentUser, ses
     changed = via != server.relay_via_id
     server.relay_via_id = via
     await session.commit()
+    if via is not None and (changed or ip):
+        install_watch.via_relay(server.id)
     if ip:
         await _write_agent_allowlist(session)
     if changed or ip:
         await audit.record(session, user.username, "server_install_via", server.name, body.mode)
     return InstallViaOut(proxy=proxy, ip=relay_mod.address_of(server))
+
+
+def _ts(dt: datetime | None) -> float | None:
+    if dt is None:
+        return None
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+
+
+@router.get("/{server_id}/install-status", response_model=InstallStatusOut)
+async def install_status(server_id: int, user: CurrentUser, session: SessionDep) -> InstallStatusOut:
+    """Шаг 3 окна установки, пока агент молчит: открыт ли адрес ноды в фаерволе панели (или на
+    ретрансляторе) и что нода уже скачала. Окно спрашивает раз в несколько секунд."""
+    server = await _get_or_404(server_id, session, user)
+    ip = (server.agent_ip or "").strip()
+    fw, age = install_watch.firewall_state(ip, get_settings().data_dir)
+    out = InstallStatusOut(ip=ip, firewall=fw, fw_age=age, connected=server.last_seen is not None)
+    if server.relay_via_id is not None:
+        relay = await session.get(Server, server.relay_via_id)
+        out.relay = install_watch.relay_state(server.id, _ts(relay.relay_seen_at) if relay is not None else None)
+        # адрес ретранслятора в фаерволе панели и так открыт, а запросы ноды идут с него:
+        # ни фаервол, ни скачанное ей не приписать
+        out.firewall, out.fw_age = "", None
+        return out
+    for what, ts in install_watch.seen(relay_mod.address_of(server), _ts(server.created_at) or 0).items():
+        setattr(out, f"{what}_at", datetime.fromtimestamp(ts, timezone.utc))
+    return out
 
 
 async def _by_token(session, token: str) -> Server:
