@@ -737,7 +737,7 @@ async def test_prune_alert_waits_for_a_second_failure_but_not_for_a_broken_env(t
     assert len(hits) == 1 and "env-broken" in hits[0] and "wrong password" in full_text(hits[0]), sent
     assert "lock-once" not in full_text(hits[0])
     # в чате: что случилось и какой репозиторий, текст ошибки restic - в панели
-    assert hits[0] == "⚠️🧹 backup-04\n<b>Не работает чистка репозитория</b>\nenv-broken", hits[0]
+    assert hits[0] == "🔴🧹 backup-04\n<b>Не работает чистка репозитория</b>\nenv-broken", hits[0]
     later = now + timedelta(hours=27)
     async with factory() as s:
         srv = (await s.scalars(collector.select(Server).where(Server.name == "backup-04"))).first()

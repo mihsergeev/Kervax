@@ -8,7 +8,6 @@ import {
   applyLocalProbe,
   listServers,
   localProbeSuggestions,
-  podFinished,
   snoozeServerAlert,
   updateServer,
   type Check,
@@ -22,9 +21,9 @@ import {
   type KnownIssue,
 } from './api'
 import type { Section } from './App'
-import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta } from './serverUtils'
+import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, srvMutesNow, knownMeta, tallyIssues } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
-import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, isDecision, oomCulpritLabel } from './mutes'
+import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, isDecision, kindLabel, liftMute, oomCulpritLabel, type MuteItem } from './mutes'
 import { offLines, rotationLines } from './BsrvCleanup'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
@@ -91,8 +90,6 @@ const WEAR_PLAN_MS = 183 * 86400 * 1000
 // Снуз на время понимают не все ключи: рост памяти, перезапуски и пропавший порт бэкенд берет только
 // из alert_mutes, решения "так и должно быть" - не мьют вовсе
 const snoozable = (k: string) => !isDecision(k) && ![LEAK_MUTE, RESTARTS_MUTE, LISTEN_MUTE].some((p) => k.startsWith(p))
-
-const K_BAD_POD = ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull', 'Error', 'OOMKilled', 'CreateContainerError']
 
 // ВЕРХНИЙ блок: только то, что требует РУЧНОГО действия на ноде — обновить агент или
 // выполнить setup-скрипт (docker proxy / kube-setup / backupserver-setup). Клик ведёт
@@ -463,8 +460,10 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
       items.push({ key: `access-w-${s.id}`, icon: '🗝', section: 'servers', id: s.id, name: s.name, cc: s.country,
         sec: 'access', ...hm(s, 'access-w'), detail: shortList(ac.weak, t), text: t('{name}: слабые SSH-ключи у {list} - замените на ed25519',
           { name: s.name, list: shortList(ac.weak, t) }) })
-    // SSH пускает по паролю, а порт открыт в интернет; "вход по паролю нужен" - решение, сюда не идет
-    for (const a of (s.ssh_advice ?? []).filter((a) => !a.muted)) {
+    // SSH пускает по паролю, а порт открыт в интернет; "вход по паролю нужен" - решение, сюда не идет.
+    // Есть проблема ssh_risk - она уже красной строкой в "Что сломано", совет не повторяем (как в карточке)
+    const sshRisk = srvIssues(s, t).some((i) => i.kind === 'ssh_risk')
+    for (const a of (s.ssh_advice ?? []).filter((a) => !a.muted && !sshRisk)) {
       items.push({ key: `ssh-${s.id}`, icon: a.level >= 2 ? '⛔' : '🔐', section: 'servers', id: s.id,
         name: s.name, cc: s.country, sec: 'ssh', ...hm(s, `ssh-${a.kind}`), detail: a.text, text: `${s.name}: ${a.text}` })
     }
@@ -483,8 +482,12 @@ function dockerProblems(servers: Server[], t: T): ProbItem[] {
     // растет прямо сейчас. Сам счетчик копится за всю жизнь контейнера: семь перезапусков могли
     // быть месяц назад или руками, а главная по нему поднимала ложную тревогу.
     const al = s.docker_alerts ?? {}
-    const down = d.containers.filter((c) => al[c.name] === 'down').map((c) => c.name)
-    const loop = d.containers.filter((c) => al[c.name] === 'loop').map((c) => c.name)
+    // бэкенд ведет "лежит" и "в цикле" и без отправленного алерта; заглушенное (вид целиком или
+    // контейнер кнопкой под алертом) на главную не идет, как и остальные заглушенные строки
+    const mn = srvMutesNow(s)
+    const off = (kind: string, name: string) => mn.has(kind) || mn.has(`${kind}:${name}`)
+    const down = d.containers.filter((c) => al[c.name] === 'down' && !off('docker_down', c.name)).map((c) => c.name)
+    const loop = d.containers.filter((c) => al[c.name] === 'loop' && !off('docker_loop', c.name)).map((c) => c.name)
     if (down.length > 0)
       out.push({
         key: `d-down-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'containers',
@@ -511,20 +514,6 @@ function dockerProblems(servers: Server[], t: T): ProbItem[] {
   return out
 }
 
-// проблемы Kube: NotReady ноды + проблемные поды (по кластерам)
-function kubeProblems(servers: Server[], t: T): ProbItem[] {
-  const out: ProbItem[] = []
-  for (const s of servers) {
-    const k = s.online ? s.last_report?.kube : undefined
-    if (!k?.access) continue
-    const nr = (k.nodes || []).filter((n) => !n.ready).length
-    const bad = (k.pods || []).filter((p) => !podFinished(p) && (p.phase === 'Failed' || (p.reason ? K_BAD_POD.includes(p.reason) : false))).length
-    if (nr > 0) out.push({ key: `k-node-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'nodes', text: t('{name}: нод NotReady — {n}', { name: s.name, n: nr }) })
-    if (bad > 0) out.push({ key: `k-pod-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'pods', since: s.alert_since?.kube_pod, text: t('{name}: проблемных подов — {n}', { name: s.name, n: bad }) })
-  }
-  return out
-}
-
 // проблемы бэкапов: клиенты (ошибка/несвежесть) + серверы (стоп/битые репо)
 function backupProblems(servers: Server[], t: T): ProbItem[] {
   const out: ProbItem[] = []
@@ -535,15 +524,25 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
     // оставшаяся от снесенного бэкапа, не "бэкап упал", а "бэкап не настроен"
     const alive = backupAlive(b)
     const st = s.backup_state
-    if (alive && b?.metric_present) {
-      if (b.success === 0) out.push({ key: `b-fail-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'runs', since: s.alert_since?.backup_failed,
+    // заглушенный вид (насовсем или снузом) строку не дает: алерта по нему тоже не будет
+    const mnow = srvMutesNow(s)
+    const off = (k: string) => mnow.has(k)
+    // Старая раскладка (ансибл без prom-метрики): время прогона агент берет из systemd, успех - из
+    // Result юнита, как раздел "Бэкапы" (backupStatus) и алерт. Упал и не свежий - отдельно, как
+    // два алерта; не свежий в Telegram красный, здесь тоже
+    const sysd = b?.ts_source === 'systemd'
+    if (alive && b && (b.metric_present || sysd)) {
+      const res = (b.service_result || '').trim()
+      const failed = sysd ? !!res && res !== 'success' : b.success === 0
+      if (failed && !off('backup_failed')) out.push({ key: `b-fail-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'runs', since: s.alert_since?.backup_failed,
         text: st?.reason ? t('{name}: бэкап завершился с ошибкой - {why}', { name: s.name, why: st.reason }) : t('{name}: бэкап завершился с ошибкой', { name: s.name }) })
-      else if (b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > 2 * 86400) out.push({ key: `b-stale-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, sec: 'runs', since: s.alert_since?.backup_stale, text: t('{name}: бэкап не свежий', { name: s.name }) })
+      if (b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > 2 * 86400 && !off('backup_stale'))
+        out.push({ key: `b-stale-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, sec: 'runs', since: s.alert_since?.backup_stale, text: t('{name}: бэкап не свежий', { name: s.name }) })
     }
     const bs = s.last_report?.backup_server
     // свои бэкапы ноды (настроены без панели): упал прогон, давно не отрабатывал, выключен
     const own = (s.custom_backups ?? []).filter((j) => ['failed', 'stale', 'disabled'].includes(j.status))
-    if (own.length > 0) {
+    if (own.length > 0 && !off('backup_custom')) {
       out.push({ key: `b-own-${s.id}`, id: s.id, name: s.name, cc: s.country, sec: 'own', down: own.some((j) => j.status === 'failed'), since: s.alert_since?.backup_custom,
         text: t('{name}: свой бэкап не отрабатывает — {jobs}', {
           name: s.name, jobs: own.map((j) => `${j.name} (${j.problem})`).join(', '),
@@ -551,12 +550,14 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
     }
     // прогон добавил в разы больше обычного (helper backup-setup 0.32, считает бэкенд)
     const g = s.backup_growth
-    if (g && !(s.alert_mutes ?? []).includes('backup_growth'))
+    if (g && !off('backup_growth'))
       out.push({ key: `b-growth-${s.id}`, id: s.id, name: s.name, cc: s.country, down: false, sec: 'runs',
         since: new Date(g.ts * 1000).toISOString(), text: `${s.name}: ${g.text}` })
     const ownFiles = (s.custom_backups ?? []).some((j) => j.files && !j.ignored)
     // настройка из панели упала на полпути: в "Бэкапах" нода в "Проблемах" с кнопками
-    if (!bs?.present && !alive && st?.state === 'partial') {
+    if (off('backup_missing')) {
+      // бэкап не настроен - заглушено (настройка, не прошедшая из панели, идет тем же алертом)
+    } else if (!bs?.present && !alive && st?.state === 'partial') {
       out.push({ key: `b-part-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, since: st.since,
         text: t('{name}: настройка бэкапа не прошла - {why}', { name: s.name, why: st.reason || t('без причины') }) })
     } else if (!bs?.present && !alive && !s.backup_not_required && !ownFiles) {
@@ -567,7 +568,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
     if (bs?.present) {
       if (!bs.running) out.push({ key: `bs-stop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'server', text: t('{name}: rest-server остановлен', { name: s.name }) })
       const rmuted = new Set(s.backup_repo_mutes ?? [])
-      const smuted = new Set(s.alert_mutes ?? [])
+      const smuted = mnow
       const now = Date.now() / 1000
       const live = (bs.repos || []).filter((r) => !rmuted.has(r.name))
       // Висячий лок дольше суток - своей строкой, как и свой алерт backup_lock: в общем
@@ -586,7 +587,7 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
       // те же репозитории, что в алерте backup_repo: бэкенд считает их с ритмом бэкапов (клиент
       // без агента опаздывает через сутки с небольшим), без приглушенных и архива
       const badNames = Object.keys(s.bsrv_repo_reasons ?? {}).sort()
-      if (badNames.length > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'repos', since: s.alert_since?.backup_repo,
+      if (badNames.length > 0 && !off('backup_repo')) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'repos', since: s.alert_since?.backup_repo,
         text: t('{name}: репозиториев с проблемой - {n} ({list})', { name: s.name, n: badNames.length,
           list: badNames.slice(0, 3).join(', ') + (badNames.length > 3 ? ', ...' : '') }) })
       // чистка не работает (не открывает репозиторий, падает, не запускается): те же
@@ -617,6 +618,30 @@ function backupProblems(servers: Server[], t: T): ProbItem[] {
         })
     }
   }
+  return out
+}
+
+// Заглушено целиком: ключи, которые глушат вид у сервера разом, - голый вид (units, kube_pod, disk@1)
+// насовсем и снузом, и снуз всего сервера. Поштучные (unit:nginx.service, kube_pod:ns/web), решения
+// "так и должно быть" и заглушки "Требует действий" (home:) сюда не идут: они про одну вещь.
+// Такие мьюты остались с прежних кнопок Telegram: по ним молчат алерты о любой вещи этого вида,
+// в том числе о новых, и без этого блока это видно только в карточке сервера
+type WideMute = MuteItem
+function wideMutes(s: Server, t: T, now = Date.now()): WideMute[] {
+  const wide = (k: string) => !!k && !k.includes(':') && !isDecision(k)
+  // вид с уровнем (disk@1): подпись вида, если своей у ключа нет, и до какого уровня
+  const label = (k: string) => {
+    const own = kindLabel(k, t)
+    const m = /^(.+)@(\d)$/.exec(k)
+    if (own !== k || !m) return own
+    return `${kindLabel(m[1], t)} - ${m[2] === '1' ? t('только предупреждения') : t('предупр. и проблемы')}`
+  }
+  const out: WideMute[] = []
+  if (s.snooze_until && Date.parse(s.snooze_until) > now)
+    out.push({ label: t('весь сервер'), until: s.snooze_until, group: 'alert', key: '' })
+  for (const [k, u] of Object.entries(s.alert_snoozes ?? {}))
+    if (wide(k) && Date.parse(u) > now) out.push({ label: label(k), until: u, group: 'alert', key: k })
+  for (const k of s.alert_mutes ?? []) if (wide(k)) out.push({ label: label(k), until: null, group: 'alert', key: k })
   return out
 }
 
@@ -768,6 +793,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // сроки сайтов: у какой строки открыт выбор "напомнить за", раскрыта ли строка отложенных
   const [warnPick, setWarnPick] = useState<string | null>(null)
   const [warnOffOpen, setWarnOffOpen] = useState(false)
+  // блок "заглушено целиком": раскрыт ли и какой ключ сейчас снимается
+  const [wideOpen, setWideOpen] = useState(false)
+  const [wideBusy, setWideBusy] = useState('')
   const oomMuteText = (k: string) =>
     k.startsWith(OOM_MUTE) ? t('не алертить об OOM из-за {n}', { n: oomCulpritLabel(k.slice(OOM_MUTE.length), t, true) }) : null
   const muteFor = (id: number, key: string, hours: number) => {
@@ -807,28 +835,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   ).length
   const srvTotal = servers?.length ?? 0
   const srvOnline = servers?.filter((s) => s.online).length ?? 0
-  // проблемные серверы (оффлайн + перегрузка ресурсов) — что именно не так
-  // проблема = есть t-down (оффлайн / ≥порога alert/crit); предупреждение = только
-  // t-degraded (warn, напр. диск 85%). Раньше всё валилось в «Проблемы» скопом.
-  // Проблемы других разделов (сроки и Flux, дампы, очереди) сюда не идут: их считают карточки
-  // своих разделов (sectionProbs), иначе одна беда попадала бы в два счетчика.
-  const srvProblems = (servers ?? [])
-    .map((s) => {
-      const iss = srvIssues(s, t).filter((i) => !i.section)
-      if (!iss.length) return null
-      const down = iss.some((i) => i.tone === 't-down')
-      // ключи мута для приглушения (у предупреждений — свои, напр. disk@1)
-      const mutes = [...new Set(iss.map((i) => i.mute).filter(Boolean) as string[])]
-      return {
-        id: s.id, name: s.name, down, cc: s.country,
-        text: iss.map((i) => i.text).join(', '),
-        mutes,
-      }
-    })
-    .filter((x): x is NonNullable<typeof x> => x != null)
-  const srvDown = srvProblems.filter((p) => p.down)
-  const srvWarn = srvProblems.filter((p) => !p.down)
-
   const srvList = servers ?? []
   const fleetRun = useFleetRollout(srvList, avail, setServers, onUnauthorized, !isViewer)
   const allActions = actionItems(srvList, relProblem, t).filter((x) => canSee(x.section))
@@ -846,16 +852,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const dockerProbs = dockerProblems(srvList, t)
   const kubeHosts = srvList.filter((s) => s.last_report?.kube?.present && s.last_report.kube.access)
   const kubePods = kubeHosts.reduce((n, s) => n + (s.last_report?.kube?.pods?.filter((p) => p.phase === 'Running').length ?? 0), 0)
-  const kubeProbs = kubeProblems(srvList, t)
   const backupClients = srvList.filter((s) => backupAlive(s.last_report?.backup))
   const backupServers = srvList.filter((s) => s.last_report?.backup_server?.present)
   const backupProbs = backupProblems(srvList, t)
-  // проблемы с бэкенда, которые относятся к разделу (сроки и Flux - к "Куберу", дампы и проверки
-  // репозиториев - к "Бэкапам"): только для счетчика карточки, в "Что сломано" они идут общим списком
-  const sectionProbs = (sec: Section): ProbItem[] =>
-    srvList.flatMap((s) => srvIssues(s, t).filter((i) => i.section === sec).map((i, n) => ({
-      key: `${sec}-${s.id}-${n}`, id: s.id, name: s.name, down: i.tone === 't-down', text: i.text, srv: i.srv,
-    })))
 
   // "Что сломано": все проблемы одним списком, по строке на каждую - серверы (включая
   // поломки дисков, прогноз, inode, упавшие юниты), Docker, Kubernetes и бэкапы. Клик ведет
@@ -899,7 +898,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         .filter((i) => canSee(i.section)),
     ),
     ...fromProbs(dockerProbs, 'docker'),
-    ...fromProbs(kubeProbs, 'kuber'),
+    // кубер (поды, NotReady-ноды, сроки, Flux) приходит с бэкенда строками problems (section kuber)
+    // по тем же правилам, что алерт: здесь его второй раз не считаем
     ...fromProbs(backupProbs, 'backups'),
     // признаки взлома сайта (backend app/tamper.py): похоже на взлом - красным, один слабый
     // признак - желтым; клик ведет в раздел "Признаки взлома" карточки монитора
@@ -1076,9 +1076,15 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         canMute={!isViewer} onToggle={() => toggleGrp(r.grp)} onMute={muteActs}
         onOpen={(it) => onOpen(it.section, it.id, it.srv, it.sec)} />
     )
-  // Сводка сверху: плитка на раздел, клик ведет в него. Тон плитки - по худшему в разделе:
-  // красная - есть настоящая беда, желтая - только предупреждения
-  const probTone = (list: ProbItem[]): Tone => (list.some((p) => p.down) ? 'bad' : list.length ? 'warn' : 'ok')
+  // Сводка сверху: плитка на раздел, клик ведет в него. Считает те же строки, что "Что сломано"
+  // (serverUtils.tallyIssues): серверы и службы - "Серверы", дальше Docker, Кубер, бэкапы. Проблема -
+  // красная строка, предупреждение - желтая; тон плитки - по худшему
+  const tally = tallyIssues(broken)
+  const probTone = (x: { down: number; warn: number }): Tone => (x.down ? 'bad' : x.warn ? 'warn' : 'ok')
+  const probSub = (x: { down: number; warn: number }) => [
+    x.down > 0 && t('проблем: {n}', { n: x.down }),
+    x.warn > 0 && t('предупреждений: {n}', { n: x.warn }),
+  ]
   const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
   const tile = (sec: Section, icon: ReactNode, label: string, value: string, sub: string, tone: Tone, unit?: string) => (
     <button key={sec} className="srv-tile-btn" onClick={() => onNavigate(sec)} title={t('Открыть')}>
@@ -1086,8 +1092,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     </button>
   )
   const siteDown = downChecks.filter((c) => c.last_status === 'down').length
-  const kubeAll = [...kubeProbs, ...sectionProbs('kuber')]
-  const backupAll = [...backupProbs, ...sectionProbs('backups')]
   const tiles: ReactNode[] = []
   if (canSee('sites'))
     tiles.push(
@@ -1095,12 +1099,15 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         ? tile('sites', <IconSites />, t('Сайты работают'), '—', ov == null ? t('загрузка…') : t('Мониторов пока нет.'), 'muted')
         : tile(
             'sites', <IconSites />, t('Сайты работают'), String(ov.up),
+            // частично (не отвечает из части локаций) входит в "работают", как плитка "Работает" в
+            // разделе Сайты, и так же отдельно подписан: иначе 10 из 12 читалось как "все десять в порядке"
             subOf(
-              downChecks.length ? t('проблем: {n}', { n: downChecks.length }) : !knownDown && t('все в норме'),
+              downChecks.length ? t('проблем: {n}', { n: downChecks.length }) : !knownDown && !ov.partial && t('все в норме'),
+              ov.partial > 0 && t('частично: {n}', { n: ov.partial }),
               knownDown && t('известных: {n}', { n: knownDown }),
-              ov.open_incidents > 0 && t('{n} откр. инцидентов', { n: ov.open_incidents }),
+              ov.open_incidents > 0 && t('открытых инцидентов: {n}', { n: ov.open_incidents }),
             ),
-            siteDown ? 'bad' : downChecks.length ? 'warn' : 'ok',
+            siteDown ? 'bad' : downChecks.length || ov.partial ? 'warn' : 'ok',
             t('из {n}', { n: ov.total }),
           ),
     )
@@ -1110,13 +1117,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         ? tile('servers', <IconServers />, t('Серверы онлайн'), '—', servers == null ? t('загрузка…') : t('Серверов пока нет.'), 'muted')
         : tile(
             'servers', <IconServers />, t('Серверы онлайн'), String(srvOnline),
-            // оффлайн-нода уже сидит в srvDown (srvIssues отдает ей "оффлайн"), отдельно не плюсуем
-            subOf(
-              srvDown.length > 0 && t('проблем: {n}', { n: srvDown.length }),
-              srvWarn.length > 0 && t('предупреждений: {n}', { n: srvWarn.length }),
-              !srvProblems.length && t('все в норме'),
-            ),
-            srvDown.length ? 'bad' : srvWarn.length ? 'warn' : 'ok',
+            // оффлайн-нода уже среди строк (srvIssues отдает ей "оффлайн"), отдельно не плюсуем
+            subOf(...probSub(tally.servers), !tally.servers.down && !tally.servers.warn && t('все в норме')),
+            probTone(tally.servers),
             t('из {n}', { n: srvTotal }),
           ),
     )
@@ -1124,24 +1127,39 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   if (canSee('docker') && dockerHosts.length)
     tiles.push(tile(
       'docker', <IconDocker />, t('Контейнеры Docker'), String(dockerRunning),
-      subOf(t('хостов: {n}', { n: dockerHosts.length }), dockerProbs.length > 0 && t('проблем: {n}', { n: dockerProbs.length })),
-      probTone(dockerProbs),
+      subOf(t('хостов: {n}', { n: dockerHosts.length }), ...probSub(tally.docker)),
+      probTone(tally.docker),
     ))
   if (canSee('kuber') && kubeHosts.length)
     tiles.push(tile(
       'kuber', <IconKube />, t('Поды Kubernetes'), String(kubePods),
-      subOf(t('кластеров: {n}', { n: kubeHosts.length }), kubeAll.length > 0 && t('проблем: {n}', { n: kubeAll.length })),
-      probTone(kubeAll),
+      subOf(t('кластеров: {n}', { n: kubeHosts.length }), ...probSub(tally.kuber)),
+      probTone(tally.kuber),
     ))
   if (canSee('backups') && backupClients.length + backupServers.length)
     tiles.push(tile(
       'backups', <IconBackups />, t('Серверов под бэкапом'), String(backupClients.length),
       subOf(
         backupServers.length > 0 && t('серверов бэкапа: {n}', { n: backupServers.length }),
-        backupAll.length > 0 ? t('проблем: {n}', { n: backupAll.length }) : t('все свежие'),
+        ...probSub(tally.backups),
+        !tally.backups.down && !tally.backups.warn && t('все свежие'),
       ),
-      probTone(backupAll),
+      probTone(tally.backups),
     ))
+  // заглушено целиком (wideMutes): строка на сервер, ведет в его карточку
+  const wideRows = canSee('servers')
+    ? srvList.map((s) => ({ s, items: wideMutes(s, t) })).filter((x) => x.items.length > 0)
+        .sort((a, b) => a.s.name.localeCompare(b.s.name))
+    : []
+  // вернуть: снять ключ теми же ручками, что в "Заглушено" (mutes.tsx liftMute) - из alert_mutes
+  // целиком, снуз - на 0 часов. Сервер берем свежий: alert_mutes сохраняется целиком
+  const liftWide = (s: Server, i: WideMute) => {
+    const id = `${s.id}|${i.key}|${i.until ?? ''}`
+    setWideBusy(id)
+    liftMute(s, i).then(load).catch(() => {}).finally(() => setWideBusy(''))
+  }
+  const whenText = (u: string) =>
+    new Date(u).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
   // бэкап вышел за ночное окно: мягкое уведомление (НЕ алерт, не в Telegram)
   const late = canSee('backups')
     ? srvList.map((s) => ({ s, note: backupWindowNote(s) })).filter((x) => x.note)
@@ -1338,7 +1356,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           {fleetRun.err && <div className="upd-err">{fleetRun.err}</div>}
         </div>
       )}
-      {actions.length > 0 && (
+      {actRowsN > 0 && (
         <div className="chart-card net-card net-card-wide home-block">
           {cap(t('Требует действий'), actRowsN, 'warn')}
           <div className="home-attention-list">
@@ -1380,6 +1398,58 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
               </button>
             ))}
           </div>
+        </div>
+      )}
+      {/* Заглушено целиком: свернуто счетчиком, внизу - это к сведению, не беда */}
+      {wideRows.length > 0 && (
+        <div className="chart-card net-card net-card-wide home-block home-attention-soft">
+          <div className="home-sel-foot">
+            <button className="linklike muted small" onClick={() => setWideOpen(!wideOpen)}>
+              {t('заглушено целиком, серверов: {n}', { n: wideRows.length })}, {wideOpen ? t('скрыть') : t('показать')}
+            </button>
+          </div>
+          {wideOpen && (
+            <>
+              <div className="muted small home-attention-note">
+                {t('Алерты этого вида не приходят ни по одной вещи на сервере, в том числе по новым')}
+              </div>
+              <div className="home-attention-list">
+                {wideRows.map(({ s, items }) => (
+                  <div key={s.id} role="button" tabIndex={0} className="home-attention-row home-attention-muted"
+                    onClick={() => onOpen('servers', s.id)}
+                    onKeyDown={(ev) => ev.key === 'Enter' && ev.target === ev.currentTarget && onOpen('servers', s.id)}>
+                    <span className="lk-dot" />
+                    <span className="home-attention-ico">🔕</span>
+                    <span className="home-attention-txt">
+                      <CountryFlag code={s.country} /> <b>{s.name}</b>
+                      {' - '}
+                      {items.map((i, n) => {
+                        const id = `${s.id}|${i.key}|${i.until ?? ''}`
+                        return (
+                          <span key={id}>
+                            {n > 0 && ', '}
+                            {i.label}
+                            <span className="muted"> ({i.until ? t('до {d}', { d: whenText(i.until) }) : t('насовсем')})</span>
+                            {!isViewer && (
+                              <>
+                                {' '}
+                                <button className="linklike small" disabled={!!wideBusy}
+                                  title={t('Вернуть алерты этого вида на сервере')}
+                                  onClick={(e) => { e.stopPropagation(); liftWide(s, i) }}>
+                                  {wideBusy === id ? '...' : t('вернуть')}
+                                </button>
+                              </>
+                            )}
+                          </span>
+                        )
+                      })}
+                    </span>
+                    <span className="home-open">→</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
       </div>

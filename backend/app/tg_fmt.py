@@ -28,6 +28,10 @@ LEVEL = {1: "⚠️", 2: "🔴", 3: "🚨"}
 OK = "✅"
 FACTS_MAX = 2
 NAMES_MAX = 3
+# значение от агента (имя контейнера, юнита, mount) длиннее - обрезается: агент шлет что угодно
+VALUE_MAX = 200
+# строка конкретики целиком (подпись и до NAMES_MAX имен)
+FACT_LEN = 400
 
 # что в чате заменяем: тире и кавычки на клавиатурные, стрелки словами
 _SUBST = (
@@ -47,6 +51,28 @@ def clean(text: str) -> str:
     return out.replace("↳", "").strip()
 
 
+# управляющие символы (Cc), разделители строк и абзацев Unicode, переключатели направления текста
+_CTRL = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+def flat(s) -> str:
+    """Значение от агента в одну строку: переносы, табы и прочие управляющие символы -> пробел.
+    Имя контейнера "web\n✅ db-a: снова на связи" иначе дописывало в алерт поддельную строку.
+    Для целых текстов, где переносы нужны, - clean, он их оставляет."""
+    return _CTRL.sub(" ", str(s if s is not None else ""))
+
+
+def clip(s, n: int = VALUE_MAX) -> str:
+    """Обрезать до n символов с "..." в конце."""
+    s = str(s if s is not None else "")
+    return s if len(s) <= n else s[:max(n - 3, 1)].rstrip() + "..."
+
+
+def field(s, n: int = VALUE_MAX) -> str:
+    """Значение от агента для алерта: одной строкой и не длиннее n (flat + clip)."""
+    return clip(flat(s).strip(), n)
+
+
 def cap(s: str) -> str:
     """Заглавная - только у русского слова: "web перезапускается" остается с именем как есть."""
     s = str(s or "").strip()
@@ -63,7 +89,7 @@ def low(s: str) -> str:
 
 def names(items, limit: int = NAMES_MAX) -> str:
     """Перечень имен: больше limit - "и еще N". Повторы убираются, порядок сохраняется."""
-    seen = list(dict.fromkeys(str(x) for x in items if str(x or "").strip()))
+    seen = list(dict.fromkeys(v for v in (field(x) for x in items if str(x or "").strip()) if v))
     if len(seen) <= limit:
         return ", ".join(seen)
     return ", ".join(seen[:limit]) + f" и еще {len(seen) - limit}"
@@ -134,7 +160,7 @@ def pct(v: float | int | None) -> str:
 
 def fact(label: str, value: str) -> str:
     """Строка конкретики: "Убит: mariadbd". Без подписи - просто значение."""
-    value = str(value or "").strip()
+    value = field(value, FACT_LEN)
     return f"{cap(label)}: {value}" if label else value
 
 
@@ -158,10 +184,11 @@ def split_detail(detail: str) -> tuple[str, list[str]]:
 def render(icon: str, name_html: str, what: str, facts: list[str] | None = None) -> str:
     """Формат A в HTML Telegram. name_html - уже готовая ссылка или экранированное имя;
     what и facts - обычный текст, экранируются здесь."""
-    lines = [f"{icon} {name_html}".strip(), f"<b>{html.escape(clean(cap(what)))}</b>"]
-    # строки конкретики как есть: заглавная портила бы имена (caddy-proxy, ms-dev, tech1/...)
+    lines = [f"{icon} {name_html}".strip(), f"<b>{html.escape(field(clean(cap(what)), FACT_LEN))}</b>"]
+    # строки конкретики как есть: заглавная портила бы имена (caddy-proxy, ms-dev, tech1/...);
+    # каждая - одной строкой: перенос в значении от агента подделал бы строку алерта
     for f in (facts or [])[:FACTS_MAX]:
-        f = clean(f)
+        f = field(clean(f), FACT_LEN)
         if f:
             lines.append(html.escape(f))
     return "\n".join(lines)
@@ -169,8 +196,8 @@ def render(icon: str, name_html: str, what: str, facts: list[str] | None = None)
 
 def one_line(icon: str, name_html: str, what: str, facts: list[str] | None = None) -> str:
     """Тот же алерт одной строкой - для пачки: "⚠️💽 web-a: диск заполнен на 86%"."""
-    out = f"{icon} {name_html}: {html.escape(clean(low(what)))}"
-    f = next((clean(x) for x in facts or [] if clean(x)), "")
+    out = f"{icon} {name_html}: {html.escape(field(clean(low(what)), FACT_LEN))}"
+    f = next((field(clean(x), FACT_LEN) for x in facts or [] if field(clean(x), FACT_LEN)), "")
     if f:
         out += ", " + html.escape(low(f))
     return out
@@ -178,11 +205,11 @@ def one_line(icon: str, name_html: str, what: str, facts: list[str] | None = Non
 
 def recovery(name_html: str, what: str) -> str:
     """Отбой одной строкой: "✅ stats-a: снова на связи"."""
-    return f"{OK} {name_html}: {html.escape(clean(low(what)))}"
+    return f"{OK} {name_html}: {html.escape(field(clean(low(what)), FACT_LEN))}"
 
 
 def link(name: str, url: str = "") -> str:
-    nm = html.escape(name)
+    nm = html.escape(field(name))
     return f'<a href="{html.escape(url, quote=True)}">{nm}</a>' if url else nm
 
 

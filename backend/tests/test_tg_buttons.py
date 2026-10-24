@@ -85,7 +85,18 @@ async def _row(factory, ref, kind, chat="-100") -> int:
         return row.id
 
 
+async def _linked(factory, uid="555", name="@petya", role="operator") -> None:
+    """Глушить кнопкой может только привязанная учетка с правом правки: нажимающий по умолчанию -
+    оператор "@petya" с привязанным Telegram (если чат 555 уже чей-то, оставляем как есть)."""
+    async with factory() as s:
+        if await s.scalar(select(User).where(User.tg_chat_id == uid)) is None:
+            s.add(User(username=name, password_hash="x", role=role, tg_chat_id=uid))
+            await s.commit()
+
+
 async def _press(factory, aid, op, frm=None, chat="-100"):
+    if frm is None:
+        await _linked(factory)
     cq = {"id": "q1", "data": f"kx:{aid}:{op}", "from": frm or {"id": 555, "username": "petya"},
           "message": {"chat": {"id": int(chat)}, "message_id": 7}}
     await tg_bot.handle_callback(factory, CFG, cq, NOW)
@@ -342,9 +353,10 @@ async def test_command_only_in_known_chats(client, tg):
 async def test_link_code_handled_by_bot(client, tg):
     f = _factory(client)
     async with f() as s:
-        s.add(User(username="ivan", password_hash="x", role="operator", tg_link_code="ABC123"))
+        s.add(User(username="ivan", password_hash="x", role="operator",
+                   tg_link_code=tg_bot.link_code_store("ABC123", NOW - timedelta(minutes=2))))
         await s.commit()
-    await tg_bot.handle_message(f, CFG, {"text": "/link abc123", "chat": {"id": 31337}}, NOW)
+    await tg_bot.handle_message(f, CFG, {"text": "/link abc123", "chat": {"id": 31337, "type": "private"}}, NOW)
     async with f() as s:
         u = await s.scalar(select(User).where(User.username == "ivan"))
     assert u.tg_chat_id == "31337" and u.tg_link_code == ""

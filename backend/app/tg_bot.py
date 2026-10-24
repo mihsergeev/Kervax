@@ -5,9 +5,9 @@ Telegram до них не достучится. Читать апдейты бо
 бота уже читает другая программа или вторая панель, Telegram отвечает 409 - тогда показываем
 это в настройках и ждем, а не воюем за апдейты.
 
-Кто вправе жать кнопки: всякий в чате, куда ушел алерт. Общий чат алертов и так видят только
-свои, а в личный чат алерт уходит владельцу учетки. Если человек привязан к учетке панели и это
-"только просмотр" - он может только "взял".
+Кто вправе жать кнопки: "взял" - всякий в чате, куда ушел алерт. Глушить, "это мы" и "вернуть" -
+только тот, чей Telegram привязан к учетке панели с правом правки (оператор, админ): в групповом
+чате бывают гости, и любой из них навсегда глушил алерты, а "это мы" гасило алерт о смене доступа.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ import httpx
 from sqlalchemy import delete, select
 
 from app import alerts, audit, known, maint, settings_store, tg_buttons
+from app import kube_expiry as kube_expiry_mod
 from app.config import Settings, get_settings
 from app.models import Check, MaintenanceWindow, Server, TgAlert, User
 
@@ -41,9 +42,26 @@ HELP = (
     "/status - что сейчас горит\n"
     "/mutes - что заглушено\n"
     "/id - id этого чата для настроек панели\n\n"
-    "Кнопки под алертом: заглушить этот вид алерта на час, до 9 утра или насовсем, "
-    "\"взял\" - отметить, что занимаешься. Заглушенное возвращает кнопка \"Вернуть алерты\"."
+    "Кнопки под алертом: заглушить то, о чем алерт (юнит, крон, под, контейнер), на час, до 9 утра "
+    "или насовсем, \"взял\" - отметить, что занимаешься. Заглушенное возвращает кнопка \"Вернуть "
+    "алерты\". Глушить могут только те, кто привязал Telegram к учетке панели (/link)."
 )
+# Код /link: живет 10 минут и принимается только в личном чате с ботом. Хранится как
+# "<код>.<unix-время выдачи>"; старый код без времени не принимается
+LINK_TTL_S = 600
+LINK_LEN = 8
+
+
+def link_code_store(code: str, now: datetime) -> str:
+    return f"{code}.{int(now.timestamp())}"
+
+
+def link_code_parse(stored: str, now: datetime) -> str:
+    """Действующий код из записи учетки или пусто (просрочен, старый формат)."""
+    code, _, ts = (stored or "").partition(".")
+    if not code or not ts.isdigit() or now.timestamp() - int(ts) > LINK_TTL_S:
+        return ""
+    return code
 
 
 def _tok_hash(token: str) -> str:
@@ -107,15 +125,63 @@ def _aware(t: datetime | None) -> datetime | None:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
-async def _mute(session, row: TgAlert, until: datetime | None) -> dict | None:
-    """Глушит вид алерта row.kind у объекта; возвращает, как вернуть. None - объекта нет."""
+def _item_keys(row: TgAlert) -> list[str]:
+    """Поштучные ключи вещей, о которых алерт (tg_buttons.ITEM_MUTE); пусто - глушится вид."""
+    keys = [str(k) for k in (row.undo or {}).get("keys") or [] if k]
+    spec = tg_buttons.ITEM_MUTE.get(row.kind)
+    return [k for k in keys if spec and k.startswith(spec[0])]
+
+
+def _kexp_items(s: Server, keys: list[str]) -> dict[str, dict]:
+    """Пункты сроков кластера из отчета по ключам "kube_expiry:<вид>|<где>"."""
+    want = {k[len("kube_expiry:"):] for k in keys}
+    return {kube_expiry_mod.key(it): it for it in (s.last_report or {}).get("kube_expiry") or []
+            if isinstance(it, dict) and kube_expiry_mod.key(it) in want}
+
+
+async def _mute(session, row: TgAlert, until: datetime | None, who: str = "") -> dict | None:
+    """Глушит то, о чем алерт: вещи алерта поштучно, где это есть, иначе вид row.kind у объекта;
+    возвращает, как вернуть. None - объекта нет."""
     obj, ids = _ref(row)
     now = datetime.now(timezone.utc)
+    keys = _item_keys(row)
+    spec = tg_buttons.ITEM_MUTE.get(row.kind)
     if obj == "srv" and ids:
         # несколько серверов - одно сообщение про один сбой на всех (alerts.merge_storm)
         servers = [s for s in [await session.get(Server, i) for i in ids] if s is not None]
         if not servers:
             return None
+        if keys and until is not None and spec and spec[1]:
+            # на время - поштучный снуз
+            kprev: dict[str, dict] = {}
+            for s in servers:
+                snoozes = {k: v for k, v in (s.alert_snoozes or {}).items() if (_parse(v) or now) > now}
+                kprev[str(s.id)] = {k: (s.alert_snoozes or {}).get(k) for k in keys}
+                for k in keys:
+                    snoozes[k] = until.isoformat()
+                s.alert_snoozes = snoozes
+            return {"t": "snooze_keys", "keys": keys, "prev": kprev}
+        if keys and until is None and row.kind == "kube_expiry":
+            # сроки кластера: отметка "не следить" у пункта, снимется сама, когда секрет обновят
+            done: dict[str, list[str]] = {}
+            for s in servers:
+                cur = dict(s.kube_expiry_ignored or {}) if isinstance(s.kube_expiry_ignored, dict) else {}
+                for ik, it in _kexp_items(s, keys).items():
+                    if ik not in cur:
+                        cur[ik] = kube_expiry_mod.entry(it, who or "telegram", now)
+                        done.setdefault(str(s.id), []).append(ik)
+                s.kube_expiry_ignored = cur or None
+            if done:
+                return {"t": "kexp", "added": done}
+        elif keys and until is None:
+            added_k: dict[str, list[str]] = {}
+            for s in servers:
+                mutes = list(s.alert_mutes or [])
+                new = [k for k in keys if k not in mutes]
+                if new:
+                    s.alert_mutes = mutes + new
+                    added_k[str(s.id)] = new
+            return {"t": "mute_keys", "added": added_k}
         if until is not None:
             prev = {}
             for s in servers:
@@ -160,7 +226,24 @@ async def _unmute(session, row: TgAlert, how: dict) -> None:
             s = await session.get(Server, i)
             if s is None:
                 continue
-            if t == "snooze":
+            if t == "snooze_keys":
+                p = (how.get("prev") or {}).get(str(i)) or {}
+                snoozes = dict(s.alert_snoozes or {})
+                for k in how.get("keys") or []:
+                    snoozes.pop(k, None)
+                    prev = _parse(p.get(k))
+                    if prev is not None and prev > datetime.now(timezone.utc):
+                        snoozes[k] = prev.isoformat()
+                s.alert_snoozes = snoozes
+            elif t == "mute_keys":
+                gone = set((how.get("added") or {}).get(str(i)) or [])
+                if gone:
+                    s.alert_mutes = [m for m in (s.alert_mutes or []) if m not in gone]
+            elif t == "kexp":
+                gone = set((how.get("added") or {}).get(str(i)) or [])
+                if gone and isinstance(s.kube_expiry_ignored, dict):
+                    s.kube_expiry_ignored = {k: v for k, v in s.kube_expiry_ignored.items() if k not in gone} or None
+            elif t == "snooze":
                 # до 1.4.246 prev и added - про один сервер, без словаря и списка
                 p = how.get("prev")
                 snoozes = dict(s.alert_snoozes or {})
@@ -187,6 +270,8 @@ async def _unmute(session, row: TgAlert, how: dict) -> None:
 async def apply(session, row: TgAlert, op: str, who: str, user: User | None,
                 now: datetime, tz: str) -> tuple[str, str]:
     """Нажатие кнопки: (текст всплывашки, запись для журнала действий; пусто - не писать)."""
+    if op != tg_buttons.OP_ACK and user is None:
+        return "Привяжите Telegram к учетке панели (/link), тогда кнопки заработают", ""
     if user is not None and user.role == "viewer" and op != tg_buttons.OP_ACK:
         return "Нужны права оператора", ""
     undo = dict(row.undo or {})
@@ -226,7 +311,7 @@ async def apply(session, row: TgAlert, op: str, who: str, user: User | None,
         until, label = tg_buttons.next_morning(now, tz), "до утра"
     else:
         until, label = None, "насовсем"
-    how = await _mute(session, row, until)
+    how = await _mute(session, row, until, who)
     if how is None:
         return "Объект удален из панели", ""
     undo["mute"] = how
@@ -252,6 +337,14 @@ async def _srv_wanted(session, row: TgAlert, sid: int, now: datetime) -> bool | 
         return False
     if (s.snooze_until is not None and _aware(s.snooze_until) > now) or row.kind in _server_mutes(s, now):
         return False
+    keys = _item_keys(row)
+    if keys:
+        # глушили поштучно (кнопкой или в панели): все вещи алерта заглушены - не повторять
+        cur = set(s.alert_mutes or []) | {k for k, v in (s.alert_snoozes or {}).items()
+                                          if (_parse(v) or now) > now}
+        ign = s.kube_expiry_ignored if isinstance(s.kube_expiry_ignored, dict) else {}
+        if all(k in cur or k[len("kube_expiry:"):] in ign for k in keys):
+            return False
     lvl = (s.alert_state or {}).get(row.kind)
     if isinstance(lvl, int) and not isinstance(lvl, bool) and lvl <= 0:
         return None
@@ -496,11 +589,20 @@ async def _chat_user(session, cfg: dict, chat: str) -> tuple[bool, User | None]:
     return False, None
 
 
-async def _link(session, cfg: dict, msg: dict, code: str) -> str | None:
+async def _link(session, cfg: dict, msg: dict, code: str, now: datetime | None = None) -> str | None:
     """"/link CODE" из окна "Мои алерты в Telegram": пока панель читает бота сама, ответ ищет
-    она, а не кнопка "Проверить привязку" (той апдейты уже не достанутся)."""
-    user = await session.scalar(select(User).where(User.tg_link_code == code))
-    if user is None or (user.tg_token and user.tg_token != cfg.get("telegram_token")):
+    она, а не кнопка "Проверить привязку" (той апдейты уже не достанутся). Код живет LINK_TTL_S
+    и только в личном чате: в групповом его видят все, и привязать чужой чат к учетке - значит
+    отдать ему кнопки под алертами."""
+    now = now or datetime.now(timezone.utc)
+    if not code or "." in code:
+        return None
+    if ((msg.get("chat") or {}).get("type") or "private") != "private":
+        return "Код привязки принимается только в личном чате с ботом"
+    user = await session.scalar(select(User).where(User.tg_link_code.like(f"{code}.%")))
+    if user is None or link_code_parse(user.tg_link_code, now) != code:
+        return None
+    if user.tg_token and user.tg_token != cfg.get("telegram_token"):
         return None
     chat = str((msg.get("chat") or {}).get("id") or "")
     user.tg_chat_id, user.tg_link_code = chat, ""
@@ -520,7 +622,7 @@ async def handle_message(session_factory, cfg: dict, msg: dict, now: datetime) -
     reply = None
     async with session_factory() as session:
         if cmd == "/link" and len(parts) > 1:
-            reply = await _link(session, cfg, msg, parts[1].strip().upper())
+            reply = await _link(session, cfg, msg, parts[1].strip().upper(), now)
         elif cmd == "/id":
             # id чата для настроек панели (основной чат, чаты по группам, эскалация)
             reply = f"id этого чата: <code>{html.escape(chat)}</code>"

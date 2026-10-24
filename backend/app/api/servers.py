@@ -350,19 +350,20 @@ def _out(
 
 
 def _docker_alerts(server: Server) -> dict[str, str]:
-    """Контейнеры, по которым алерт УЖЕ отправлен: {имя: 'down'|'loop'}.
+    """Контейнеры, которые лежат или крутятся в цикле по правилам алерта: {имя: 'down'|'loop'}.
 
-    Панель подсвечивает ровно то, про что написала в телеграм. Считать проблему на
-    фронте по RestartCount нельзя: этот счётчик копится за всё время жизни контейнера
-    и сам по себе ничего не значит, а crash-loop определяется по ПРИРОСТУ счётчика в
-    окне — история для этого есть только на бэкенде (alert_state)."""
+    Считать проблему на фронте по RestartCount нельзя: этот счётчик копится за всё время
+    жизни контейнера и сам по себе ничего не значит, а crash-loop определяется по ПРИРОСТУ
+    счётчика в окне — история для этого есть только на бэкенде (alert_state). Состояние
+    ("down"/"loop") ведется и без отправленного алерта: под мьютом, при выключенном правиле
+    упавший контейнер раньше не был виден нигде; alerted_* - у состояний, записанных раньше."""
     out: dict[str, str] = {}
     for name, cs in ((server.alert_state or {}).get("docker") or {}).items():
         if not isinstance(cs, dict):
             continue
-        if cs.get("alerted_down"):
+        if cs.get("down") or cs.get("alerted_down"):
             out[name] = "down"
-        elif cs.get("alerted_loop"):
+        elif cs.get("loop") or cs.get("alerted_loop"):
             out[name] = "loop"
     return out
 

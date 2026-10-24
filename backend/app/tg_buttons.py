@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -17,6 +18,26 @@ log = logging.getLogger("kervax.tg_buttons")
 OP_HOUR, OP_MORNING, OP_FOREVER, OP_ACK, OP_US, OP_UNDO = "h1", "mo", "pm", "ak", "us", "un"
 OPS = (OP_HOUR, OP_MORNING, OP_FOREVER, OP_ACK, OP_US, OP_UNDO)
 MORNING_HOUR = 9
+
+# Что глушит кнопка под алертом. Раньше - вид целиком: "заглушить" под алертом про один CronJob
+# выключало алерты всех подов и кронов кластера, под алертом про nginx.service - всех юнитов
+# сервера, и главная этого не видела. Для видов, где у алерта есть конкретные вещи, кнопка пишет
+# их поштучные ключи (<префикс><ключ вещи>), те же, что ставит панель. Второе - понимает ли вид
+# поштучный снуз на время; если нет, "1 ч" и "до утра" глушат вид целиком (ненадолго), а
+# "насовсем" - все равно только эти вещи.
+ITEM_MUTE: dict[str, tuple[str, bool]] = {
+    "units": ("unit:", True), "workers": ("worker:", True), "queue_stuck": ("qstuck:", True),
+    "queue_failed": ("qfail:", True), "cron_stuck": ("cron:", True), "log_errors": ("logerr:", True),
+    "fpm": ("fpm:", True), "gitlab": ("gitlab:", True),
+    "kube_cron": ("kube_cron:", True), "kube_job": ("kube_job:", True), "kube_pod": ("kube_pod:", True),
+    "docker_down": ("docker_down:", True), "docker_loop": ("docker_loop:", True),
+    "kube_restarts": ("restarts:", False), "docker_restarts": ("restarts:", False),
+    "mem_limit": ("memlim:", False), "mem_leak": ("leak:", False), "listen_gone": ("listen:", False),
+    "cf_realip": ("cfip:", False), "docker_risk": ("dockrisk:", False),
+    # сроки кластера "насовсем" - отметка "не следить" у пункта (app/kube_expiry.py): снимется сама,
+    # когда секрет обновят
+    "kube_expiry": ("kube_expiry:", False),
+}
 
 
 def zone(tz: str):
@@ -81,6 +102,33 @@ def row_keyboard(row: TgAlert) -> dict:
                     us_done=bool(undo.get("us")))
 
 
+def _cut_html(text: str, limit: int) -> str:
+    """Обрезать HTML алерта, не разрезав тег или сущность: Telegram на оборванный "<a hr" отвечает
+    400, и правка сообщения ("взял", "заглушено") и эскалация не уходили."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    # по последнему переводу строки: строки алерта собраны целыми тегами
+    nl = cut.rfind("\n")
+    if nl > limit // 2:
+        cut = cut[:nl]
+    # недописанный тег или сущность в хвосте
+    lt, amp = cut.rfind("<"), cut.rfind("&")
+    if lt > cut.rfind(">"):
+        cut = cut[:lt]
+    if amp > cut.rfind(";"):
+        cut = cut[:amp]
+    # открытые и не закрытые теги закрываем: <a>, <b>, <i>, <code>, <pre>
+    opened: list[str] = []
+    for m in re.finditer(r"<(/?)([a-z]+)[^>]*>", cut):
+        if m.group(1):
+            if opened and opened[-1] == m.group(2):
+                opened.pop()
+        else:
+            opened.append(m.group(2))
+    return cut + "..." + "".join(f"</{t}>" for t in reversed(opened))
+
+
 def row_text(row: TgAlert, tz: str, now: datetime | None = None) -> str:
     """Исходный текст алерта и под ним кто что сделал. Telegram режет сообщение на 4096."""
     lines = []
@@ -95,8 +143,8 @@ def row_text(row: TgAlert, tz: str, now: datetime | None = None) -> str:
         lines.append(f"✅ снова в норме в {hhmm(row.resolved_at, tz, now)}")
     text = row.text or ""
     if lines:
-        text = text[: 4000 - sum(len(x) + 1 for x in lines)] + "\n\n" + "\n".join(lines)
-    return text
+        text = _cut_html(text, 4000 - sum(len(x) + 1 for x in lines) - 20) + "\n\n" + "\n".join(lines)
+    return _cut_html(text, 4000)
 
 
 def _esc(s: str) -> str:
@@ -114,6 +162,8 @@ async def prepare(session_factory, messages: list) -> dict[int, int]:
             rows = []
             for i in idx:
                 m = messages[i]
+                # что именно глушить (ITEM_MUTE): ключи вещей из алерта
+                keys = [str(k) for k in getattr(m, "mutes", None) or [] if k][:50]
                 row = TgAlert(
                     ref=str(getattr(m, "ref", ""))[:255],
                     kind=str(getattr(m, "kind", "") or "")[:40],
@@ -122,6 +172,7 @@ async def prepare(session_factory, messages: list) -> dict[int, int]:
                     grp=str(getattr(m, "group", "") or "")[:255],
                     text=str(m),
                     messages=[],
+                    undo={"keys": keys} if keys else None,
                 )
                 session.add(row)
                 rows.append((i, row))

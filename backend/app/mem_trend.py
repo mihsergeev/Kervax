@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from app import podnames, tg_fmt
 from app.models import Server
@@ -71,9 +72,20 @@ def targets(rep: dict) -> dict[str, int]:
     return out
 
 
-def step(prev: dict | None, v: int, now: datetime) -> dict:
+def _local_day(now: datetime, tz: str | None) -> date:
+    """Сутки по поясу панели: по UTC они начинались в 03:00 МСК, и ночной бэкап делился на двое
+    суток, а дно одних из них было не дном."""
+    if not tz:
+        return now.date()
+    try:
+        return now.astimezone(ZoneInfo(tz)).date()
+    except Exception:  # noqa: BLE001 - кривой пояс в настройках: как раньше, по UTC
+        return now.date()
+
+
+def step(prev: dict | None, v: int, now: datetime, tz: str | None = None) -> dict:
     """Дно за текущие сутки; сутки кончились - их минимум уходит в историю"""
-    day = now.date().isoformat()
+    day = _local_day(now, tz).isoformat()
     p = prev if isinstance(prev, dict) else {}
     h = [x for x in p.get("h") or [] if isinstance(x, list) and len(x) == 2]
     if p.get("d") == day:
@@ -83,12 +95,12 @@ def step(prev: dict | None, v: int, now: datetime) -> dict:
     return {"d": day, "m": v, "h": h}
 
 
-def update(state: dict | None, rep: dict, now: datetime) -> dict:
+def update(state: dict | None, rep: dict, now: datetime, tz: str | None = None) -> dict:
     """Новое alert_state["mem_trend"]. Пропавшее из отчета держим сутки (контейнер пересоздали,
-    процесс выпал из топа на минуту), дальше забываем."""
+    процесс выпал из топа на минуту), дальше забываем. tz - пояс панели: сутки по нему."""
     old = state if isinstance(state, dict) else {}
-    new = {k: step(old.get(k), v, now) for k, v in targets(rep).items()}
-    keep_from = (now.date() - timedelta(days=1)).isoformat()
+    new = {k: step(old.get(k), v, now, tz) for k, v in targets(rep).items()}
+    keep_from = (_local_day(now, tz) - timedelta(days=1)).isoformat()
     for k, v in old.items():
         if k not in new and isinstance(v, dict) and str(v.get("d") or "") >= keep_from:
             new[k] = v

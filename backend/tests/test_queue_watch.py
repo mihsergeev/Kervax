@@ -198,6 +198,7 @@ def test_mute_a_queue_for_a_while():
     kinds = {p["kind"] for p in collector.server_problems(s, NOW)}
     assert "queue" not in kinds and "queue_stuck" not in kinds
     s.alert_mutes = []
+    s.alert_state = {**s.alert_state, "queues": {key: 1}}  # алерт по порогу объявлен
     rows = {p["kind"]: p for p in collector.server_problems(s, NOW)}
     assert rows["queue"]["text"] == "переполнены очереди: document_indexing (200)"
 

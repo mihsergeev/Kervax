@@ -4,10 +4,12 @@
 транспорт (send_alert) и security-события (брутфорс, смена пароля и т.п.).
 """
 
+import contextvars
 import html
 import logging
 import re
 
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 
 import httpx
@@ -43,10 +45,13 @@ class Msg(str):
     # формат, где текст и есть полный
     full: str
     line: str
+    # точные ключи мьюта, которые пишет кнопка "заглушить" под алертом вместо вида целиком;
+    # пусто - глушится вид
+    mutes: list[str]
 
     def __new__(cls, text: str, section: str = "", group: str = "", kind: str = "",
                 target: str = "", recovery: bool = False, ref: str = "", full: str = "",
-                line: str = "") -> "Msg":
+                line: str = "", mutes: list[str] | None = None) -> "Msg":
         obj = super().__new__(cls, text)
         obj.section = section
         obj.group = group
@@ -56,6 +61,7 @@ class Msg(str):
         obj.ref = ref
         obj.full = full
         obj.line = line
+        obj.mutes = list(mutes or [])
         return obj
 
     def tail(self, extra: str, short: str = "") -> "Msg":
@@ -64,10 +70,10 @@ class Msg(str):
         if self.full:
             text = str(self) + (short if short else "")
             out = Msg(text, self.section, self.group, self.kind, self.target, self.recovery, self.ref,
-                      self.full + extra, self.line)
+                      self.full + extra, self.line, mutes=self.mutes)
         else:
             out = Msg(str(self) + extra, self.section, self.group, self.kind, self.target, self.recovery,
-                      self.ref)
+                      self.ref, mutes=self.mutes)
         if getattr(self, "parts", None):
             out.parts = self.parts
         return out
@@ -159,7 +165,9 @@ def _storm_msg(parts: list) -> Msg:
         body = head + "\n" + ", ".join(shown) + more + (f"\n{tail}" if tail else "")
     ids = [x for p in parts for x in str(p.ref or "").partition(":")[2].split(",") if x.strip().isdigit()]
     ref = "srv:" + ",".join(dict.fromkeys(ids)) if ids else ""
-    out = Msg(body, first.section, first.group, first.kind, ", ".join(names), first.recovery, ref, full, line)
+    mutes = list(dict.fromkeys(k for p in parts for k in getattr(p, "mutes", None) or []))
+    out = Msg(body, first.section, first.group, first.kind, ", ".join(names), first.recovery, ref, full, line,
+              mutes=mutes)
     out.parts = list(parts)  # история пишется по каждому серверу
     return out
 
@@ -235,25 +243,229 @@ def alerts_enabled(cfg: dict) -> bool:
     )
 
 
+# Telegram не принимает сообщение длиннее 4096 символов (400 Bad Request), а 400 на одном
+# алерте раньше означал повтор всей пачки каждый тик. Запас - под "..." и закрывающие теги
+TG_MAX = 4000
+# connect короткий: недоступный api.telegram.org должен давать отказ за секунды, а не держать
+# тик минутами; read длиннее - Telegram бывает медленным, но отвечает
+TG_TIMEOUT = httpx.Timeout(10, connect=4)
+
+_TAG = re.compile(r"<[^>]+>")
+_OPEN_CLOSE = re.compile(r"<(/?)([a-zA-Z][\w-]*)[^>]*>")
+
+
+class TgRejected(Exception):
+    """Telegram отказал навсегда (4xx кроме 429: битая разметка после повтора обычным текстом,
+    чат не найден, бот удален из чата): тот же запрос на следующем тике получит тот же отказ."""
+
+
+class TgDown(Exception):
+    """Telegram или вебхук уже не ответил в этой отправке пачки: остальное туда не шлем,
+    повтор на следующем тике."""
+
+
+def _u16(s: str) -> int:
+    """Длина так, как ее считает Telegram: в UTF-16 (эмодзи - два)."""
+    return len(s.encode("utf-16-le")) // 2
+
+
+def _plain(text: str) -> str:
+    """HTML Telegram -> обычный текст: теги сняты, сущности раскодированы."""
+    return html.unescape(_TAG.sub("", str(text)))
+
+
+def _clip(text: str, html_mode: bool, limit: int = TG_MAX) -> str:
+    """Обрезать до limit: по последнему переносу строки, если он не слишком рано, и не посреди
+    тега или сущности (&amp;). В HTML незакрытые теги закрываются, иначе Telegram не разберет
+    разметку."""
+    text = str(text)
+    if _u16(text) <= limit:
+        return text
+    room = limit - 3  # "..."
+    n = room
+    while n > 0 and _u16(text[:n]) > room:
+        n -= _u16(text[:n]) - room
+    nl = text.rfind("\n", 0, n)
+    if nl > n // 2:
+        n = nl
+    if html_mode:
+        lt = text.rfind("<", 0, n)
+        if lt > text.rfind(">", 0, n):
+            n = lt  # посреди тега
+        amp = text.rfind("&", 0, n)
+        if amp > text.rfind(";", 0, n):
+            n = amp  # посреди &amp; (в HTML-тексте любой & экранирован, значит это обрезок)
+    head = text[:n].rstrip() + "..."
+    if not html_mode:
+        return head
+    stack: list[str] = []
+    for close, tag in _OPEN_CLOSE.findall(head):
+        tag = tag.lower()
+        if not close:
+            stack.append(tag)
+        elif tag in stack:
+            while stack and stack.pop() != tag:
+                pass
+    return head + "".join(f"</{t}>" for t in reversed(stack))
+
+
+def _status(r) -> int:
+    code = getattr(r, "status_code", 200)
+    return code if isinstance(code, int) else 200
+
+
+def _tg_why(r) -> str:
+    """Описание отказа от Telegram ("Bad Request: can't parse entities ...")."""
+    try:
+        return str(r.json().get("description") or "без описания")[:200]
+    except Exception:  # noqa: BLE001
+        return "без описания"
+
+
+async def _post(http, url: str, payload: dict):
+    if http is not None:
+        return await http.post(url, json=payload)
+    async with httpx.AsyncClient(timeout=TG_TIMEOUT) as own:
+        return await own.post(url, json=payload)
+
+
 async def tg_send(
     api: str, token: str, chat: str, text: str, parse_mode: str | None = None,
-    reply_markup: dict | None = None,
+    reply_markup: dict | None = None, http=None,
 ) -> int | None:
-    """Одно сообщение в Telegram. Бросает исключение — обработка на вызывающем.
-    Возвращает message_id (нужен, чтобы потом дописать в сообщение "взял" или "заглушено")."""
+    """Одно сообщение в Telegram. Бросает исключение - обработка на вызывающем.
+    Возвращает message_id (нужен, чтобы потом дописать в сообщение "взял" или "заглушено").
+
+    Длинный текст режется до TG_MAX. Telegram не принял сообщение с разметкой (400) - еще раз
+    обычным текстом, кнопки те же. Снова 4xx (кроме 429) - TgRejected: повтор не поможет.
+    Сеть, таймаут, 5xx и 429 - обычное исключение, повтор на следующем тике.
+    В тексте ошибки нет адреса запроса: в нем токен бота, а ошибка видна в настройках и логах.
+    http - общий клиент на всю пачку (dispatch); без него - свой клиент на одно сообщение."""
     base = (api or "https://api.telegram.org").rstrip("/")
-    payload = {"chat_id": chat, "text": text, "disable_web_page_preview": True}
+    url = f"{base}/bot{token}/sendMessage"
+    html_mode = (parse_mode or "").upper() == "HTML"
+    payload = {"chat_id": chat, "text": _clip(text, html_mode), "disable_web_page_preview": True}
     if parse_mode:
         payload["parse_mode"] = parse_mode
     if reply_markup:
         payload["reply_markup"] = reply_markup
-    async with httpx.AsyncClient(timeout=10) as http:
-        r = await http.post(f"{base}/bot{token}/sendMessage", json=payload)
-        r.raise_for_status()
+    r = await _post(http, url, payload)
+    code = _status(r)
+    if code == 400 and parse_mode:
+        log.warning("Telegram не принял сообщение в %s (%s), шлем обычным текстом", chat, _tg_why(r))
+        payload.pop("parse_mode")
+        payload["text"] = _clip(_plain(text) if html_mode else str(text), False)
+        r = await _post(http, url, payload)
+        code = _status(r)
+    if 400 <= code < 500 and code != 429:
+        raise TgRejected(f"HTTP {code}: {_tg_why(r)}")
+    if code >= 400:
+        raise RuntimeError(f"HTTP {code}: {_tg_why(r)}")
+    r.raise_for_status()
     try:
         return int(r.json()["result"]["message_id"])
     except Exception:  # noqa: BLE001 - без id сообщение просто не поправить потом
         return None
+
+
+# Вебхук (Mattermost, Discord, Slack) читает разметку markdown: "[текст](url)" из имени
+# контейнера становился ссылкой, "@everyone" и "<@id>" - упоминанием всех. Скобки экранируются
+# обратным слэшем (его понимают Mattermost и Discord), сам слэш - тоже, иначе "\[" в имени снимал
+# бы экранирование. "@" - с пробелом нулевой ширины после (U+200B): обратный слэш перед "@"
+# понимают не все получатели, а "@" + U+200B не разбирается как упоминание, и текст выглядит так же
+_HOOK_MD = re.compile(r"([\\\[\]()<>])")
+
+
+def webhook_text(text: str, parse_mode: str | None = None) -> str:
+    """Текст для вебхука: без HTML Telegram и без разметки, которую понял бы получатель."""
+    s = _plain(text) if (parse_mode or "").upper() == "HTML" else str(text)
+    return _HOOK_MD.sub(r"\\\1", s).replace("@", "@\u200b")
+
+
+class _Link:
+    """Связь на одну отправку пачки (dispatch): один http-клиент на все сообщения и память о
+    том, что Telegram или вебхук не отвечают. Без нее при недоступном api.telegram.org каждое
+    сообщение ждало свой таймаут, и тик растягивался на минуты."""
+
+    def __init__(self) -> None:
+        self._stack: AsyncExitStack | None = None
+        self.http = None
+        self.tg_down = ""
+        self.hook_down = ""
+        self.hook_err: str | None = None  # None - вебхук не звали, "" - принял, иначе ошибка
+
+    async def client(self):
+        if self.http is None:
+            self._stack = AsyncExitStack()
+            self.http = await self._stack.enter_async_context(httpx.AsyncClient(timeout=TG_TIMEOUT))
+        return self.http
+
+    async def close(self) -> None:
+        if self._stack is not None:
+            try:
+                await self._stack.aclose()
+            except Exception:  # noqa: BLE001
+                log.warning("http-клиент алертов не закрыт", exc_info=True)
+        self._stack, self.http = None, None
+
+    async def tg(self, api: str, token: str, chat: str, text: str, parse_mode: str | None = None,
+                 reply_markup: dict | None = None) -> int | None:
+        if self.tg_down:
+            raise TgDown(self.tg_down)
+        try:
+            return await tg_send(api, token, chat, text, parse_mode, reply_markup, http=await self.client())
+        except httpx.TransportError as exc:  # таймаут, коннект: остальным сообщениям то же самое
+            self.tg_down = f"Telegram не отвечает ({type(exc).__name__}), остальное в этот раз не слали"
+            raise
+
+    async def hook(self, url: str, text: str, parse_mode: str | None) -> str:
+        """Одно сообщение в вебхук. Возвращает текст ошибки, пусто - принял."""
+        if self.hook_down:
+            err = self.hook_down
+        else:
+            try:
+                r = await (await self.client()).post(url, json={"text": webhook_text(text, parse_mode)})
+                code = _status(r)
+                # без адреса: в адресе вебхука бывает секрет (у Discord токен прямо в пути)
+                if code >= 400:
+                    raise RuntimeError(f"HTTP {code}")
+                r.raise_for_status()
+                if self.hook_err is None:
+                    self.hook_err = ""
+                return ""
+            except httpx.TransportError as exc:
+                self.hook_down = err = f"не отвечает ({type(exc).__name__})"
+            except Exception as exc:  # noqa: BLE001
+                err = str(exc)[:300]
+        self.hook_err = err
+        return err
+
+
+_LINK: contextvars.ContextVar[_Link | None] = contextvars.ContextVar("kervax_alert_link", default=None)
+
+
+@asynccontextmanager
+async def _link():
+    """Связь текущей отправки пачки, а вне dispatch - своя на один вызов. Через contextvar, а
+    не параметром: send_alert подменяют в десятках тестов с сигнатурой (cfg, text, parse_mode)."""
+    cur = _LINK.get()
+    if cur is not None:
+        yield cur
+        return
+    own = _Link()
+    token = _LINK.set(own)
+    try:
+        yield own
+    finally:
+        _LINK.reset(token)
+        await own.close()
+
+
+class SendErrors(list):
+    """Ошибки send_alert - список строк, как раньше. rejected - сколько из них отказ навсегда
+    (TgRejected): такое сообщение повторять незачем."""
+
+    rejected: int = 0
 
 
 async def send_alert(cfg: dict, text: str, parse_mode: str | None = None,
@@ -261,27 +473,30 @@ async def send_alert(cfg: dict, text: str, parse_mode: str | None = None,
     """Шлёт текст во все настроенные каналы. Возвращает список ошибок (пустой = ок).
     parse_mode="HTML" — для сайтовых алертов со ссылкой <a href> в тексте (тогда
     весь динамический контент обязан быть html-экранирован вызывающим).
-    reply_markup - кнопки под сообщением в Telegram; sent - сюда дописывается, куда ушло."""
-    errors: list[str] = []
+    reply_markup - кнопки под сообщением в Telegram; sent - сюда дописывается, куда ушло.
+    Список - SendErrors: в rejected видно, сколько ошибок не исправит повтор."""
+    errors = SendErrors()
     token, chat = cfg.get("telegram_token"), cfg.get("telegram_chat")
-    if token and chat:
-        try:
-            mid = await tg_send(cfg.get("telegram_api", ""), token, chat, text, parse_mode,
-                                reply_markup)
-            if sent is not None and mid is not None:
-                sent.append({"chat": str(chat), "id": mid})
-        except Exception as exc:  # noqa: BLE001 — алерт не должен ронять цикл
-            errors.append(f"Telegram: {exc}")
-            log.warning("Telegram-алерт не отправлен: %s", exc)
+    async with _link() as link:
+        if token and chat:
+            try:
+                mid = await link.tg(cfg.get("telegram_api", ""), token, chat, text, parse_mode,
+                                    reply_markup)
+                if sent is not None and mid is not None:
+                    sent.append({"chat": str(chat), "id": mid})
+            except TgRejected as exc:
+                errors.append(f"Telegram: {exc}")
+                errors.rejected += 1
+                log.warning("Telegram отказал в алерте: %s", exc)
+            except Exception as exc:  # noqa: BLE001 — алерт не должен ронять цикл
+                errors.append(f"Telegram: {exc}")
+                log.warning("Telegram-алерт не отправлен: %s", exc)
 
-    if cfg.get("webhook"):
-        try:
-            async with httpx.AsyncClient(timeout=10) as http:
-                r = await http.post(cfg["webhook"], json={"text": text})
-                r.raise_for_status()
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"Webhook: {exc}")
-            log.warning("Вебхук-алерт не отправлен: %s", exc)
+        if cfg.get("webhook"):
+            err = await link.hook(cfg["webhook"], text, parse_mode)
+            if err:
+                errors.append(f"Webhook: {err}")
+                log.warning("Вебхук-алерт не отправлен: %s", err)
     return errors
 
 
@@ -314,11 +529,17 @@ async def tg_edit(cfg: dict, chat: str, message_id: int, text: str, reply_markup
     """Поправить отправленное сообщение: дописать статус и сменить кнопки. Сбой не страшен."""
     base = (cfg.get("telegram_api") or "https://api.telegram.org").rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=10) as http:
-            await http.post(f"{base}/bot{cfg['telegram_token']}/editMessageText", json={
-                "chat_id": chat, "message_id": message_id, "text": text, "parse_mode": "HTML",
-                "disable_web_page_preview": True, "reply_markup": reply_markup,
-            })
+        async with _link() as link:
+            if link.tg_down:
+                return  # Telegram в этой пачке уже не ответил: правка подождет до следующего раза
+            try:
+                await (await link.client()).post(f"{base}/bot{cfg['telegram_token']}/editMessageText", json={
+                    "chat_id": chat, "message_id": message_id, "text": _clip(text, True), "parse_mode": "HTML",
+                    "disable_web_page_preview": True, "reply_markup": reply_markup,
+                })
+            except httpx.TransportError as exc:
+                link.tg_down = f"Telegram не отвечает ({type(exc).__name__}), остальное в этот раз не слали"
+                raise
     except Exception:  # noqa: BLE001
         log.warning("сообщение %s/%s не поправлено", chat, message_id, exc_info=True)
 
@@ -394,6 +615,13 @@ async def send_personal(
         return
     api = cfg.get("telegram_api", "")
     common = cfg.get("telegram_token") or ""
+    async with _link() as link:
+        await _send_personal(link, api, common, users, messages, threshold, parse_mode, rows, sent)
+
+
+async def _send_personal(link: "_Link", api: str, common: str, users: list, messages: list[str],
+                         threshold: int, parse_mode: str | None, rows: dict[int, int] | None,
+                         sent: dict[int, list] | None) -> None:
     for user in users:
         token = user.tg_token or common
         if not token:
@@ -409,7 +637,7 @@ async def send_personal(
             aid = (rows or {}).get(i) if i is not None and not own_bot else None
             markup = tg_buttons.keyboard(aid, getattr(text, "kind", "")) if aid else None
             try:
-                mid = await tg_send(api, token, user.tg_chat_id, text, parse_mode, markup)
+                mid = await link.tg(api, token, user.tg_chat_id, text, parse_mode, markup)
                 if aid and mid is not None and sent is not None:
                     sent.setdefault(aid, []).append({"chat": str(user.tg_chat_id), "id": mid})
             except Exception as exc:  # noqa: BLE001
@@ -427,9 +655,14 @@ async def dispatch(
 ) -> bool:
     """Отправка пачки алертов ОДНОГО цикла с антифлудом. Если сообщений
     ≥ threshold (>0) — шлём один дайджест вместо потока; иначе — поштучно.
-    Возвращает True, если ВСЁ доставлено (можно фиксировать состояние).
+    Возвращает True, если повторять нечего (можно фиксировать состояние): каждое сообщение
+    ушло хоть в один общий канал (Telegram или вебхук) или отклонено навсегда (TgRejected,
+    в журнале ошибок). Умерший вебхук при живом Telegram повтора не вызывает, ошибка вебхука
+    запоминается рядом с ошибками чатов по группам (ключ "_webhook").
     can_send=False (каналы не настроены / пауза) → не шлём и не фиксируем.
-    parse_mode прокидывается в send_alert (дайджест-обёртка html-безопасна)."""
+    parse_mode прокидывается в send_alert (дайджест-обёртка html-безопасна).
+    Вся пачка идет через один http-клиент; после первого таймаута Telegram остальное в
+    Telegram в этот раз не шлется (повтор на следующем тике)."""
     if not messages:
         return True
     if not can_send:
@@ -442,32 +675,43 @@ async def dispatch(
     if session_factory is not None and buttons_on(cfg):
         rows = await tg_buttons.prepare(session_factory, messages)
     sent: dict[int, list] = {}
-    # тихие часы/выключенные каналы уже отсеяны выше (can_send) — персональные
-    # получатели подчиняются тем же правилам, отдельного «ночью можно» у них нет
-    if session_factory is not None:
-        await send_personal(session_factory, cfg, messages, threshold, parse_mode, rows, sent)
-    main = str(cfg.get("telegram_chat") or "") if cfg.get("telegram_token") else ""
-    on_main = [bool(main) and main in chats_for(cfg, m) for m in messages]
-    everything = list(range(len(messages)))
-    if not main or all(on_main):
-        ok, got = await _send_common(cfg, everything, messages, threshold, parse_mode, rows, sent)
-    else:
-        # основной чат получает только остальное, а вебхук - все, как и раньше
-        ok, got = await _send_common({**cfg, "webhook": ""}, [i for i in everything if on_main[i]],
-                                     messages, threshold, parse_mode, rows, sent)
-        if cfg.get("webhook"):
-            ok2, got2 = await _send_common({**cfg, "telegram_chat": ""}, everything, messages,
-                                           threshold, parse_mode, {}, sent)
-            ok, got = ok and ok2, got | got2
-    if cfg.get("telegram_token"):
-        rok, rgot = await _send_routes(cfg, messages, threshold, parse_mode, rows, sent,
-                                       session_factory)
-        ok, got = ok and rok, got | rgot
-    delivered = [m for i, m in enumerate(messages) if i in got]
-    if rows:
-        await tg_buttons.store_sent(session_factory, sent)
-    if session_factory is not None and buttons_on(cfg):
-        await tg_resolve(session_factory, cfg, messages)
+    async with _link() as link:
+        # тихие часы/выключенные каналы уже отсеяны выше (can_send) — персональные
+        # получатели подчиняются тем же правилам, отдельного «ночью можно» у них нет
+        if session_factory is not None:
+            await send_personal(session_factory, cfg, messages, threshold, parse_mode, rows, sent)
+        main = str(cfg.get("telegram_chat") or "") if cfg.get("telegram_token") else ""
+        on_main = [bool(main) and main in chats_for(cfg, m) for m in messages]
+        everything = list(range(len(messages)))
+        if not main or all(on_main):
+            got, again = await _send_common(cfg, everything, messages, threshold, parse_mode, rows, sent)
+        else:
+            # основной чат получает только остальное, а вебхук - все, как и раньше
+            got, again = await _send_common({**cfg, "webhook": ""}, [i for i in everything if on_main[i]],
+                                            messages, threshold, parse_mode, rows, sent)
+            if cfg.get("webhook"):
+                got2, again2 = await _send_common({**cfg, "telegram_chat": ""}, everything, messages,
+                                                  threshold, parse_mode, {}, sent)
+                got, again = got | got2, again | again2
+        # ушло хоть в один общий канал - доставлено, сбой второго канала повтора не вызывает
+        again -= got
+        ok = True
+        if cfg.get("telegram_token"):
+            rok, rgot = await _send_routes(cfg, messages, threshold, parse_mode, rows, sent,
+                                           session_factory)
+            ok, got = rok, got | rgot
+            # то, что основной чат не получает (main=rest), в Telegram идет чатом по группам: если
+            # тот принял, а вебхук нет - сообщение доставлено, как с основным чатом. Сбой самого
+            # основного чата чат по группам не покрывает: там повтор, как и раньше
+            again -= {i for i in rgot if not on_main[i]}
+        ok = ok and not again
+        delivered = [m for i, m in enumerate(messages) if i in got]
+        if rows:
+            await tg_buttons.store_sent(session_factory, sent)
+        if session_factory is not None and buttons_on(cfg):
+            await tg_resolve(session_factory, cfg, messages)
+        if session_factory is not None:
+            await _note_webhook(session_factory, link.hook_err if cfg.get("webhook") else "")
     if session_factory is not None and delivered:
         await record_history(session_factory, delivered)
     return ok
@@ -534,18 +778,33 @@ def _channel_count(cfg: dict) -> int:
     return int(bool(cfg.get("telegram_token") and cfg.get("telegram_chat"))) + int(bool(cfg.get("webhook")))
 
 
+def _outcome(errors: list[str], channels: int, text: str) -> tuple[bool, bool]:
+    """Итог send_alert для одного сообщения: дошло ли хоть куда и нужен ли повтор. Повтор - только
+    если не дошло никуда и хоть один канал сбоил не навсегда (сеть, 5xx, 429). Отказ навсегда
+    (TgRejected) - в журнал ошибок панели и без повтора: иначе одно битое сообщение каждый тик
+    тянуло бы за собой повтор всей пачки."""
+    rejected = getattr(errors, "rejected", 0)
+    got = len(errors) < channels
+    if rejected:
+        log.error("алерт не принят Telegram, повтора не будет: %s; текст: %s", "; ".join(errors),
+                  _plain(str(text)).split("\n")[0][:200])
+    return got, not got and len(errors) > rejected
+
+
 async def _send_common(cfg: dict, idx: list[int], messages: list[str], threshold: int,
                        parse_mode: str | None, rows: dict[int, int], sent: dict[int, list]
-                       ) -> tuple[bool, set[int]]:
-    """Основной чат и вебхук: дайджестом, если сообщений много, иначе по одному. Хотя бы один
-    канал не принял - повтор на следующем цикле. Возвращает, все ли ушло, и что дошло хоть куда."""
+                       ) -> tuple[set[int], set[int]]:
+    """Основной чат и вебхук: дайджестом, если сообщений много, иначе по одному. Возвращает,
+    что дошло хоть в один канал, и что повторить на следующем цикле (см. _outcome)."""
     channels = _channel_count(cfg)
     if not idx or not channels:
-        return True, set()
+        return set(), set()
     if threshold and len(idx) >= threshold:
-        errors = await send_alert(cfg, _digest([messages[i] for i in idx]), parse_mode)
-        return not errors, (set(idx) if len(errors) < channels else set())
-    ok, got = True, set()
+        text = _digest([messages[i] for i in idx])
+        errors = await send_alert(cfg, text, parse_mode)
+        got, again = _outcome(errors, channels, text)
+        return (set(idx) if got else set()), (set(idx) if again else set())
+    got, again = set(), set()
     for i in idx:
         m = messages[i]
         aid = rows.get(i)
@@ -557,11 +816,12 @@ async def _send_common(cfg: dict, idx: list[int], messages: list[str], threshold
             errors = await send_alert(cfg, m, parse_mode)
         if aid and out:
             sent.setdefault(aid, []).extend(out)
-        if errors:
-            ok = False  # хотя бы один канал не принял - повторим на следующем цикле
-        if len(errors) < channels:
+        g, a = _outcome(errors, channels, m)
+        if g:
             got.add(i)
-    return ok, got
+        if a:
+            again.add(i)
+    return got, again
 
 
 async def _send_batch(cfg: dict, chat: str, items: list[tuple[int, str]], threshold: int,
@@ -569,10 +829,17 @@ async def _send_batch(cfg: dict, chat: str, items: list[tuple[int, str]], thresh
                       ) -> tuple[list[int], str]:
     """Пачка сообщений в чат по группам: дайджестом, если их много, иначе по одному с кнопками.
     Возвращает, какие не ушли, и текст последней ошибки."""
+    async with _link() as link:
+        return await _send_batch_via(link, cfg, chat, items, threshold, parse_mode, rows, sent)
+
+
+async def _send_batch_via(link: "_Link", cfg: dict, chat: str, items: list[tuple[int, str]], threshold: int,
+                          parse_mode: str | None, rows: dict[int, int], sent: dict[int, list]
+                          ) -> tuple[list[int], str]:
     api, token = cfg.get("telegram_api", ""), cfg["telegram_token"]
     if threshold and len(items) >= threshold:
         try:
-            await tg_send(api, token, chat, _digest([t for _, t in items]), parse_mode)
+            await link.tg(api, token, chat, _digest([t for _, t in items]), parse_mode)
             return [], ""
         except Exception as exc:  # noqa: BLE001
             log.warning("Telegram-алерт в чат %s не отправлен: %s", chat, exc)
@@ -583,7 +850,7 @@ async def _send_batch(cfg: dict, chat: str, items: list[tuple[int, str]], thresh
         aid = rows.get(i)
         markup = tg_buttons.keyboard(aid, getattr(text, "kind", "")) if aid else None
         try:
-            mid = await tg_send(api, token, chat, text, parse_mode, markup)
+            mid = await link.tg(api, token, chat, text, parse_mode, markup)
             if aid and mid is not None:
                 sent.setdefault(aid, []).append({"chat": chat, "id": mid})
         except Exception as exc:  # noqa: BLE001 — алерт не должен ронять цикл
@@ -630,9 +897,9 @@ async def _send_routes(cfg: dict, messages: list[str], threshold: int, parse_mod
                 fallback.append(_fallback_text(messages[i], names.get(chat, chat), err, parse_mode))
     ok = True
     if fallback:
-        fok, fgot = await _send_common({**cfg, "webhook": ""}, list(range(len(fallback))), fallback,
-                                       threshold, parse_mode, {}, sent)
-        ok = fok
+        fgot, fagain = await _send_common({**cfg, "webhook": ""}, list(range(len(fallback))), fallback,
+                                          threshold, parse_mode, {}, sent)
+        ok = not fagain
         got.update(back[j] for j in fgot)
     if session_factory is not None:
         await _note_routes(session_factory, set(plan), errors)
@@ -655,7 +922,29 @@ async def _note_routes(session_factory, used: set[str], errors: dict[str, str]) 
         log.warning("состояние чатов по группам не записано", exc_info=True)
 
 
-_TAG = re.compile(r"<[^>]+>")
+# ошибка вебхука лежит рядом с ошибками чатов по группам: id чата с "_" не начинается
+WEBHOOK_STATE_KEY = "_webhook"
+
+
+async def _note_webhook(session_factory, err: str | None) -> None:
+    """Запомнить, что вебхук не принял алерт (повтора из-за него больше нет, и без этой записи
+    сбой никто бы не увидел), и забыть, когда снова принял. err: None - вебхук в этой пачке не
+    звали (состояние не трогаем), "" - принял или вебхук выключен, иначе текст ошибки."""
+    if err is None:
+        return
+    try:
+        async with session_factory() as session:
+            state = await settings_store.get_routes_state(session)
+            new = dict(state)
+            if err:
+                new[WEBHOOK_STATE_KEY] = {"err": err[:300], "at": datetime.now(timezone.utc).isoformat()}
+            else:
+                new.pop(WEBHOOK_STATE_KEY, None)
+            if new != state:
+                await settings_store.set_routes_state(session, new)
+                await session.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("состояние вебхука не записано", exc_info=True)
 
 
 async def record_history(session_factory, messages: list[str]) -> None:

@@ -6,6 +6,7 @@
 сломан — т.е. ловит ровно те случаи, когда сама панель сообщить о себе не может.
 """
 import asyncio
+import contextvars
 import logging
 import os
 import time
@@ -13,10 +14,40 @@ import time
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app import alerts, settings_store
+from app import alerts, panel_errors, settings_store
 from app.config import Settings
 
 log = logging.getLogger("kervax.heartbeat")
+
+# Код идет из цикла планировщика (и его фоновых задач: они наследуют контекст). В одиночном
+# режиме планировщик крутится в веб-процессе, а ошибки HTTP-запросов журнал получает от
+# middleware - их второй раз не пишем.
+IN_SCHEDULER: contextvars.ContextVar[bool] = contextvars.ContextVar("kervax_in_scheduler", default=False)
+
+
+class SchedulerErrors(logging.Handler):
+    """Ошибки планировщика (log.exception и log.error логгеров kervax.*) - в журнал ошибок панели.
+    Стадия, упавшая на NameError, раньше оставляла строку только в docker-логе scheduler, а он
+    пропадает с каждой выкладкой. Одинаковые складываются по тексту и типу исключения."""
+
+    def __init__(self, session_factory) -> None:
+        super().__init__(level=logging.ERROR)
+        self.session_factory = session_factory
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if not IN_SCHEDULER.get() or record.name == panel_errors.log.name:
+            return
+        try:
+            msg = record.getMessage()
+            exc = record.exc_info[1] if record.exc_info else None
+            detail = panel_errors.short_tb(exc) if exc is not None else ""
+            what = f"{type(exc).__name__}: {exc}" if exc is not None else ""
+            panel_errors.record_soon(
+                self.session_factory, kind="server", action="планировщик",
+                message=msg + (f" - {what}" if what else ""), detail=detail,
+                fp_key=f"{record.name}|{msg}|{type(exc).__name__ if exc is not None else ''}")
+        except Exception:  # noqa: BLE001 - журнал не должен ронять планировщик
+            self.handleError(record)
 
 # как часто писать пульс (независимо от длительности тика планировщика)
 _HEARTBEAT_EVERY_S = 60.0
@@ -26,6 +57,53 @@ _HEARTBEAT_EVERY_S = 60.0
 # хостовый watchdog ложно кричит «канал алертов сломан». Реальный отказ (протух
 # токен, TG заблокирован) держится и валит все проверки → после N подряд алертим.
 _CHANNEL_FAIL_STRIKES = 3
+# Пульс пишет своя задача, и повисший цикл планировщика (await без таймаута, ждет блокировку в
+# базе) он не замечал: процесс жив, пульс свежий, а мониторы не проверяются. Поэтому в пульсе
+# еще время начала последнего тика (tick) и порог, после которого тик считается повисшим
+# (tick_max, щедрый: длинный тик не должен шуметь), и стадия, которая падает тиков подряд
+# (stage_fail). Сторож (ops/panel-watchdog.sh) тревожит по ним сам.
+_TICK_MAX_MIN = 600
+_TICK_MAX_TICKS = 10
+_tick_at = 0.0
+_stage_fails: dict[str, tuple[int, str]] = {}  # стадия -> (сколько тиков подряд, что упало)
+_partial: dict[str, str] = {}
+
+
+def tick_started(now: float | None = None) -> None:
+    """Начался тик планировщика."""
+    global _tick_at
+    _tick_at = time.time() if now is None else now
+
+
+def stage_partial(name: str, what: str) -> None:
+    """Стадия отработала, но не целиком (серверные алерты пропустили сервер с ошибкой)."""
+    _partial[name] = what
+
+
+def stage_done(name: str, ok: bool, what: str = "") -> None:
+    """Итог стадии за тик: упала или отработала не целиком - счетчик подряд растет."""
+    part = _partial.pop(name, "")
+    if ok and not part:
+        _stage_fails.pop(name, None)
+        return
+    n = _stage_fails.get(name, (0, ""))[0] + 1
+    _stage_fails[name] = (n, what or part)
+
+
+def stage_fail_line() -> str:
+    """Худшая стадия для пульса: "5 серверные алерты (node-a)"; пусто - все стадии в порядке."""
+    if not _stage_fails:
+        return ""
+    name, (n, what) = max(_stage_fails.items(), key=lambda x: x[1][0])
+    return f"{n} {name}" + (f" ({what})" if what else "")
+
+
+def reset() -> None:
+    """Для тестов."""
+    global _tick_at
+    _tick_at = 0.0
+    _stage_fails.clear()
+    _partial.clear()
 
 
 async def probe_alert_channel(cfg: dict) -> bool:
@@ -71,6 +149,11 @@ async def write_heartbeat(
             f"webhook={cfg.get('webhook', '')}",
             f"version={settings.version}",
             f"panel={settings.panel_url}",  # чтобы watchdog назвал КОНКРЕТНУЮ панель
+            # начало последнего тика (0 - планировщик выключен или еще не начал) и когда он повис
+            f"tick={int(_tick_at)}",
+            f"tick_max={max(_TICK_MAX_MIN, _TICK_MAX_TICKS * int(settings.scheduler_tick or 0))}",
+            # одной строкой: перевод строки в имени сломал бы разбор файла сторожем
+            f"stage_fail={' '.join(stage_fail_line().split())}",
         ]
         os.makedirs(settings.data_dir, exist_ok=True)
         path = os.path.join(settings.data_dir, "heartbeat")

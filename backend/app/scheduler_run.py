@@ -10,6 +10,7 @@
 """
 import asyncio
 import logging
+import signal
 
 from app.bootstrap import ensure_admin, ensure_default_location
 from app.collector import collector_loop
@@ -33,8 +34,18 @@ async def main() -> None:
     await ensure_admin(factory, settings)
     await ensure_default_location(factory, settings)
     log.info("планировщик запущен (tick=%ss)", settings.scheduler_tick)
+    # docker stop шлет SIGTERM: доделываем тик и выходим (collector_loop смотрит stop после
+    # тика). По умолчанию Python умирал сразу, и убитый между отправкой алерта и записью
+    # состояния планировщик после старта слал тот же алерт второй раз
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, RuntimeError):  # Windows: сигналов в цикле событий нет
+            pass
     try:
-        await collector_loop(factory, settings)
+        await collector_loop(factory, settings, stop)
     finally:
         await engine.dispose()
 

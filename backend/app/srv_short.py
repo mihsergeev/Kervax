@@ -45,18 +45,27 @@ BASE = {
     "backup_dump": 2, "backup_dump_space": 2, "backup_cron": 2, "backup_custom": 2,
     "backup_restore": 2, "backup_check": 2, "port_new": 2, "cf_realip": 2, "ssh_risk": 2, "access_risk": 2,
     "listen_gone": 2, "link": 2, "unit_loop": 2, "db_conn": 2, "dns": 2,
+    # смена доступа - событие безопасности; висячий лок, сломанная чистка и проблемные репозитории
+    # бэкап-сервера - поломка, а не напоминание. Главная красит их так же (level ниже)
+    "access_change": 2, "backup_lock": 2, "backup_prune": 2, "backup_repo": 2,
 }
 # эти виды знаками уровня не помечаются: событие, а не поломка
 NO_LEVEL = frozenset({"known", "uncovered"})
 
 
-def icon(key: str, level: int = 1) -> str:
+def level(key: str, lvl: int = 1) -> int:
+    """Уровень, с которым вид показывается: сильнейший из своего и базового для вида. Один
+    источник для Telegram (icon) и "Что сломано" (collector.server_problems): раньше главная
+    красила CPU красным, а алерт про него приходил желтым, и наоборот."""
+    return min(max(int(lvl or 0), BASE.get(key, 1), 1), 3)
+
+
+def icon(key: str, lvl: int = 1) -> str:
     """Эмодзи уровня и темы: "🔴🧠". Уровень - сильнейший из своего и базового для вида."""
     topic = TOPIC.get(key, "🖥")
     if key in NO_LEVEL:
         return topic
-    lvl = max(int(level or 0), BASE.get(key, 1), 1)
-    return tg_fmt.LEVEL.get(min(lvl, 3), "⚠️") + topic
+    return tg_fmt.LEVEL.get(level(key, lvl), "⚠️") + topic
 
 
 # Отбой одной строкой: "✅ сервер: <это>"
@@ -388,7 +397,7 @@ def _short(key: str, ctx: dict, s, level: int):
         top = top_proc(rep, "mem")
         return f"Память занята на {v}%{_avg_tail(ctx)}", [tg_fmt.fact("Ест", top)] if top else []
     if key in ("disk", "inode"):
-        mount = ctx.get("mount") or ""
+        mount = tg_fmt.field(ctx.get("mount") or "")  # от агента: в одну строку и не длиннее 200
         where = f" {mount}" if mount else ""
         what = (f"Диск{where} заполнен на {v}%" if key == "disk" else f"Кончаются inode на{where or ' диске'}")
         if ctx.get("fast"):

@@ -646,6 +646,12 @@ async def test_server_alert_flood_digest(tmp_path, monkeypatch):
                 last_seen=now - timedelta(seconds=600), offline_after_seconds=120,
                 cpu_alert_percent=0, mem_alert_percent=0, disk_alert_percent=0,
             ))
+        for i in range(7):  # остальной парк на связи: это не сбой приема у самой панели
+            s.add(Server(
+                name=f"live{i}", token_hash=f"y{i}", enabled=True, backup_not_required=True,
+                last_seen=now, offline_after_seconds=120,
+                cpu_alert_percent=0, mem_alert_percent=0, disk_alert_percent=0,
+            ))
         await s.commit()
 
     sent: list[str] = []
@@ -1330,12 +1336,16 @@ async def test_backup_repo_alert_and_mute(tmp_path, monkeypatch):
     sent.clear()
     await collector.evaluate_servers(factory, settings, now)
     assert sent == []
-    # заглушаем old-oneoff → проблем нет → recovery
+    # заглушаем old-oneoff → проблем нет, но ничего не починилось: закрываем молча, без
+    # "снова в норме", запись - в истории алертов
     async with factory() as s:
         (await s.scalar(select(Server))).backup_repo_mutes = ["old-oneoff"]
         await s.commit()
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "норм" in sent[0].lower()
+    assert sent == []
+    async with factory() as s:
+        srv = await s.scalar(select(Server))
+        assert not int((srv.alert_state or {}).get("backup_repo") or 0)
     await engine.dispose()
 
 

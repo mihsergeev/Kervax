@@ -93,9 +93,10 @@ export function srvRamPct(s: Server): number | null {
 // диска, крит останется). Панель шлёт его в alert_mutes.
 // since - с какого момента проблема видна (ISO): для "Что сломано" - "2 дн"
 // section и srv - куда вести с главной, если проблема не про карточку сервера (см. ServerProblem)
+// level - уровень с бэкенда (тот же, что у алерта): по нему мьют вида с уровнем (units@1)
 export type SrvIssue = {
   tone: 't-down' | 't-degraded'; text: string; sec?: string; mute?: string; kind?: string; since?: string | null
-  section?: 'kuber' | 'services' | 'backups' | 'docker'; srv?: boolean
+  section?: 'kuber' | 'services' | 'backups' | 'docker'; srv?: boolean; level?: number
 }
 
 // Сколько длится проблема, коротко: "40 мин", "5 ч", "3 дн". Меньше минуты - пусто: только что
@@ -111,21 +112,29 @@ export function sinceShort(iso: string | null | undefined, t: (k: string, p?: Re
 
 // Проблемы сервера: оффлайн / CPU / RAM / диск (warn=degraded, ≥alert/crit=down).
 // Заглушён ли сигнал (повторяет бэкендовый _muted): базовый ключ `disk` глушит все
-// уровни; `disk@N` — уровни ≤ N. Без mute-ключа сигнал не приглушается. Нужно, чтобы
-// приглушённое колокольчиком РЕАЛЬНО уходило с главной (иначе «жму — ничего не происходит»).
-function srvIssueMuted(i: SrvIssue, mutes: Set<string>): boolean {
-  if (!i.mute) return false
-  if (mutes.has(i.mute)) return true
-  // уровень только у вида без хвоста (disk@1): в unit:openvpn@srv.service "@" - часть имени
-  const lv = /^([a-z_]+)@(\d)$/.exec(i.mute)
-  const base = lv ? lv[1] : i.mute
-  const level = lv ? parseInt(lv[2], 10) : 3
+// уровни; `disk@N` — уровни ≤ N. Нужно, чтобы приглушённое колокольчиком РЕАЛЬНО уходило
+// с главной (иначе «жму — ничего не происходит»).
+// Кроме ключа строки (unit:nginx.service) смотрим и вид целиком (units, units@1): широкий мьют
+// с прежних кнопок Telegram глушит все вещи этого вида, и строка не должна оставаться красной
+function levelMuted(base: string, level: number, mutes: Set<string>): boolean {
   if (mutes.has(base)) return true
   for (const m of mutes) {
     if (!m.startsWith(base + '@')) continue
     const n = parseInt(m.slice(base.length + 1), 10)
     if (!Number.isNaN(n) && level <= n) return true
   }
+  return false
+}
+
+function srvIssueMuted(i: SrvIssue, mutes: Set<string>): boolean {
+  if (i.mute && mutes.has(i.mute)) return true
+  // уровень только у вида без хвоста (disk@1): в unit:openvpn@srv.service "@" - часть имени
+  const lv = i.mute ? /^([a-z_]+)@(\d)$/.exec(i.mute) : null
+  const base = lv ? lv[1] : i.mute
+  if (base && levelMuted(base, lv ? parseInt(lv[2], 10) : 3, mutes)) return true
+  // вид целиком: уровень строки - с бэкенда, без него считаем худшим (глушит только мьют без уровня
+  // или с уровнем 3)
+  if (i.kind && i.kind !== base && levelMuted(i.kind, lv ? parseInt(lv[2], 10) : i.level ?? 3, mutes)) return true
   return false
 }
 
@@ -163,7 +172,7 @@ export function srvIssuesRaw(
   // же, что у алертов, считать их здесь второй раз незачем
   for (const p of s.problems ?? [])
     out.push({ tone: p.level >= 2 ? 't-down' : 't-degraded', text: p.text, sec: p.sec, mute: p.mute, kind: p.kind,
-      since: p.since, section: p.section, srv: p.srv })
+      since: p.since, section: p.section, srv: p.srv, level: p.level })
   // с какого момента: панель запоминает начало проблемы каждого вида (alert_since)
   for (const i of out) if (i.since === undefined && i.kind) i.since = s.alert_since?.[i.kind] ?? null
   return out
@@ -183,7 +192,7 @@ export function srvKnownOf(s: Server, i: SrvIssue): KnownIssue | null {
 
 // Проблемы сервера без приглушенных и без известных: известные показываются отдельно (srvKnown)
 // Заглушенное у сервера сейчас: насовсем и на время (снуз 🔕 с главной на час, день, неделю)
-function srvMutesNow(s: Server): Set<string> {
+export function srvMutesNow(s: Server): Set<string> {
   const out = new Set(s.alert_mutes ?? [])
   const now = Date.now()
   for (const [k, u] of Object.entries(s.alert_snoozes ?? {})) if (Date.parse(u) > now) out.add(k)
@@ -218,6 +227,39 @@ export function srvKnown(
     const k = srvKnownOf(s, i)
     return k && !srvIssueMuted(i, mutes) ? [{ ...i, known: k }] : []
   })
+}
+
+// Плитки главной и счетчик "Серверов": проблемы ("Что сломано") по разделу, куда ведет строка.
+// Строки без раздела и с "services" (очереди, воркеры, кроны) - плитка "Серверы", остальные - свои.
+// Проблема - красная строка (t-down), предупреждение - желтая: те же цвета, что в списке
+export type Tally = { down: number; warn: number }
+export type TallyTile = 'servers' | 'docker' | 'kuber' | 'backups' | 'sites'
+export function tallyTile(section?: string | null): TallyTile {
+  if (!section || section === 'services') return 'servers'
+  return section as TallyTile
+}
+export function tallyIssues(items: { tone: 't-down' | 't-degraded'; section?: string | null }[]): Record<TallyTile, Tally> {
+  const out: Record<TallyTile, Tally> = {
+    servers: { down: 0, warn: 0 }, docker: { down: 0, warn: 0 }, kuber: { down: 0, warn: 0 },
+    backups: { down: 0, warn: 0 }, sites: { down: 0, warn: 0 },
+  }
+  for (const i of items) {
+    const x = out[tallyTile(i.section)]
+    if (!x) continue
+    if (i.tone === 't-down') x.down++
+    else x.warn++
+  }
+  return out
+}
+// Серверы с бедой по тем же строкам: с проблемой (есть красная) и только с предупреждениями
+export function tallyServers(servers: Server[], t: (k: string, p?: Record<string, string | number>) => string): Tally {
+  const out: Tally = { down: 0, warn: 0 }
+  for (const s of servers) {
+    const all = Object.values(tallyIssues(srvIssues(s, t)))
+    if (all.some((x) => x.down > 0)) out.down++
+    else if (all.some((x) => x.warn > 0)) out.warn++
+  }
+  return out
 }
 
 // Версия setup-скрипта — строка «мажор.минор» (0.12). Показываем как есть; про

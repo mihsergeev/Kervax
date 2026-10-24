@@ -271,10 +271,15 @@ async def _gather_capped(coros, limit: int, jitter_s: float):
     return await asyncio.gather(*[run(c) for c in coros], return_exceptions=True)
 
 
+# Допуск "пора": тик просыпается к сроку ближайшего монитора (_next_tick_in), а время проверки -
+# начало прошлой пачки; без допуска доли секунды отправляли монитор на целый тик позже
+_DUE_SLACK_S = 1.0
+
+
 def _is_due(check: Check, now: datetime) -> bool:
     if check.last_checked_at is None:
         return True
-    return (now - check.last_checked_at).total_seconds() >= max(check.interval_seconds, 5)
+    return (now - _aware(check.last_checked_at)).total_seconds() >= max(check.interval_seconds, 5) - _DUE_SLACK_S
 
 
 def _needs_expiry(check: Check, now: datetime, settings: Settings) -> bool:
@@ -754,6 +759,10 @@ async def record_outcome(
         except Exception:
             log.warning("не попросил проверку изнутри для %s", row.name, exc_info=True)
 
+    # Планировщик и "Проверить сейчас" (другие процессы) пишут один монитор: строка монитора под
+    # блокировкой до конца транзакции, иначе оба видели "открытого инцидента нет" и открывали по
+    # своему (два инцидента, два алерта). В SQLite FOR UPDATE нет, там один писатель и так
+    await session.execute(select(Check.id).where(Check.id == row.id).with_for_update())
     open_inc = await session.scalar(
         select(CheckIncident).where(
             CheckIncident.check_id == row.id,
@@ -1119,9 +1128,41 @@ async def _with_before(session_factory, msg: "alerts.Msg", s, end: datetime,
     return msg.tail("\n" + html.escape(tail))
 
 
+# Отбой объявленного падения, который не ушел (канал не принял): инцидент к этому моменту уже
+# закрыт, и раньше отбой терялся навсегда - в чате последним оставалось "лежит". Повторяем при
+# следующих отправках, пока монитор на ногах, не дольше суток. В памяти процесса планировщика
+_REC_RETRY: dict[int, tuple["Pending", datetime]] = {}
+_REC_RETRY_MAX = timedelta(days=1)
+_RECOVERY_KINDS = ("recovery", "recstable")
+
+
+async def _with_retries(session_factory, pending: list, now: datetime) -> list:
+    """Подмешать в пачку недоставленные отбои мониторов, которые все еще на ногах."""
+    if not _REC_RETRY:
+        return pending
+    have = {p.check_id for p in map(_as_pending, pending) if p.kind in _RECOVERY_KINDS}
+    want = {cid: p for cid, (p, at) in list(_REC_RETRY.items())
+            if now - at < _REC_RETRY_MAX and cid not in have}
+    for cid in [c for c, (_p, at) in _REC_RETRY.items() if now - at >= _REC_RETRY_MAX]:
+        _REC_RETRY.pop(cid, None)
+    if not want:
+        return pending
+    try:
+        async with session_factory() as session:
+            up = {i for i, st in (await session.execute(select(Check.id, Check.last_status)
+                                                         .where(Check.id.in_(list(want))))).all() if st == "up"}
+    except Exception:  # noqa: BLE001 - не прочиталось: попробуем в следующий раз
+        log.warning("не проверил мониторы для повтора отбоев", exc_info=True)
+        return pending
+    for cid in set(want) - up:
+        _REC_RETRY.pop(cid, None)  # снова лежит: отбой больше не правда
+    return list(pending) + [want[c] for c in sorted(up)]
+
+
 async def _send_alerts(
     session_factory, settings: Settings, pending, now: datetime
 ) -> None:
+    pending = await _with_retries(session_factory, list(pending), now)
     async with session_factory() as session:
         cfg = await settings_store.get_alert_config(session, settings)
         muted = await settings_store.get_muted(session)
@@ -1232,14 +1273,20 @@ async def _send_alerts(
     same_hosts: dict[tuple, list[str]] = {}
     # мониторы, свернутые в чужое сообщение: кнопки под ним глушат их все
     more_ids: dict[int, list[int]] = {}
+    # их имена - в историю алертов строкой на каждый: иначе у свернутого в истории была тревога
+    # без отбоя или отбой без тревоги
+    more_names: dict[int, list[str]] = {}
     # Pending(*p): на вход может прийти и голый кортеж (в т.ч. из тестов) —
     # приводим к именованному, недостающий icon подставит дефолт
     for kind, name, status, msg, inc_id, check_id, flag, icon in map(_as_pending, pending):
         rk = _SITE_RULE_KIND.get(kind)
         rule = rules.get(rk) if rk else None
         grp = groups.get(check_id, "") if check_id is not None else ""
-        if check_id is not None and check_id in snoozed:
-            continue  # монитор временно приглушён (снуз) — не шлём, но и не помечаем
+        if check_id is not None and check_id in snoozed and kind not in _RECOVERY_KINDS:
+            # монитор временно приглушён (снуз) — не шлём, но и не помечаем. Кроме отбоя
+            # объявленного падения: снуз ставят, чтобы не слышать повторов, а не чтобы не узнать,
+            # что поднялось (на одной ноде: "лежит", снуз, через час поднялся - отбоя не было вовсе)
+            continue
         if rk and check_id is not None and rk in mutes.get(check_id, set()):
             continue  # тип заглушён именно для этого монитора
         if kind == "known":
@@ -1269,6 +1316,7 @@ async def _send_alerts(
                 dom_n[zone] = dom_n.get(zone, 1) + 1
                 if check_id is not None:
                     more_ids.setdefault(dom_at[zone], []).append(check_id)
+                more_names.setdefault(dom_at[zone], []).append(name)
                 commits.append((kind, inc_id, check_id, flag))
                 continue
         same = None
@@ -1279,6 +1327,7 @@ async def _send_alerts(
                 same_hosts[same].append(host or name)
                 if check_id is not None:
                     more_ids.setdefault(same_at[same], []).append(check_id)
+                more_names.setdefault(same_at[same], []).append(name)
                 commits.append((kind, inc_id, check_id, flag))
                 continue
         if rule is not None:
@@ -1358,11 +1407,25 @@ async def _send_alerts(
                 recovery=old.recovery, ref=old.ref + "".join(f",{i}" for i in ids),
                 full=old.full, line=old.line,
             )
+    for idx, names in more_names.items():
+        old = texts[idx]
+        # история (record_history) и снятие кнопок по отбою (tg_resolve) идут по частям
+        texts[idx].parts = [old] + [alerts.Msg(str(old), old.section, old.group, kind=old.kind, target=n,
+                                               recovery=old.recovery, full=old.full, line=old.line)
+                                    for n in names if n != old.target]
 
     # parse_mode=HTML: имя монитора идёт ссылкой <a href>. Весь контент экранирован.
+    recs = {p.check_id: p for p in map(_as_pending, pending)
+            if p.kind in _RECOVERY_KINDS and p.check_id is not None}
     if not await alerts.dispatch(cfg, True, texts, threshold, parse_mode="HTML",
                                  session_factory=session_factory):
-        return  # не доставлено — не помечаем, повторим на следующем тике
+        # не доставлено — не помечаем, повторим на следующем тике. Отбой - тоже: его инцидент
+        # уже закрыт, и сам он не повторится
+        for cid, p in recs.items():
+            _REC_RETRY.setdefault(cid, (p, now))
+        return
+    for cid in recs:
+        _REC_RETRY.pop(cid, None)
     async with session_factory() as session:
         for kind, inc_id, check_id, flag in commits:
             if kind == "bad" and inc_id is not None:
@@ -1925,10 +1988,12 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "SSH больше не пускает root по паролю, перебора без защиты нет"
     if key == "access_risk":
         return "второго root и учеток с пустым паролем больше нет"
-    if key == "kube_restarts":
-        return "поды восстановлены, частых перезапусков нет"
-    if key == "docker_restarts":
-        return "контейнеры восстановлены, частых перезапусков нет"
+    if key in ("kube_restarts", "docker_restarts"):
+        # "частых перезапусков нет" при 45 за сутки противоречило счетчику: перезапуски
+        # прекратились, а сутки еще помнят. Число - по объявленному
+        n = _restarts_day(st, key)
+        what = "поды" if key == "kube_restarts" else "контейнеры"
+        return f"{what} больше не перезапускаются" + (f" (за сутки было {n})" if n else "")
     if key == "backup_restore":
         return "проверка восстановления снова проходит: файлы и дампы из снапшота читаются"
     label = _SRV_LABEL[key]
@@ -1941,6 +2006,15 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
     )
 
 
+def _restarts_day(st: dict, key: str) -> int:
+    """Сколько перезапусков за сутки у объявленного в алерте (по sig: ворклоад или контейнер)."""
+    told = {podnames.pod_key(str(k)) for k in (st.get(f"{key}_told") or st.get(f"{key}_sig") or [])}
+    now = datetime.now(timezone.utc)
+    rst = st.get("restarts") if isinstance(st.get("restarts"), dict) else {}
+    return sum(srv_restarts.count(cs, now)[0] for k, cs in rst.items()
+               if isinstance(cs, dict) and podnames.pod_key(str(k)) in told)
+
+
 def _recovery_short(key: str, st: dict, ctx: dict, s=None) -> str:
     """Отбой одной строкой для чата: "диск снова в норме, 82%". Полный (_recovery_detail) - про
     то же подробно, он остается для старых шаблонов."""
@@ -1948,6 +2022,12 @@ def _recovery_short(key: str, st: dict, ctx: dict, s=None) -> str:
         return "больше не алертим: проверка шла с адреса панели, нужна локация в другой сети"
     if key == "backup_missing" and getattr(s, "backup_not_required", False):
         return "бэкап больше не требуется"
+    if key in ("kube_restarts", "docker_restarts"):
+        # "частых перезапусков нет" при 45 за сутки противоречило счетчику: перезапуски
+        # прекратились, а сутки их еще помнят. Число - по объявленному
+        n = _restarts_day(st, key)
+        what = "поды" if key == "kube_restarts" else "контейнеры"
+        return f"{what} больше не перезапускаются" + (f" (за сутки было {n})" if n else "")
     rec = srv_short.RECOVERY.get(key) or f"{_SRV_LABEL.get(key, key)} снова в норме"
     unit, val = _SRV_UNIT.get(key), ctx.get("value")
     return f"{rec}, {val}{unit}" if unit and val is not None else rec
@@ -2099,6 +2179,43 @@ def _flux_detail(msg: str, limit: int = 150) -> str:
 # сразу, а в Telegram уйдёт только устойчивый обрыв). 3 минуты = 12 пропущенных
 # отчётов подряд: разовая перегрузка канала столько не держится.
 _OFFLINE_ALERT_EXTRA = 180
+# Нода ходит к панели через ретранслятор (relay_via_id): путь длиннее и за DPI рвется чаще, отчет
+# опаздывает на минуту-другую. Две такие ноды "недоступны" одним тиком и через полминуты обе
+# снова на связи - это опоздание, а не беда
+_OFFLINE_RELAY_EXTRA = 180
+
+
+def offline_extra(s) -> int:
+    """Выдержка алерта "недоступен" сверх offline_after."""
+    return _OFFLINE_ALERT_EXTRA + (_OFFLINE_RELAY_EXTRA if getattr(s, "relay_via_id", None) else 0)
+
+
+# Замолчали разом больше _GAP_SHARE нод (не меньше _GAP_MIN): это не беда на нодах, а сбой приема
+# отчетов на стороне панели (backend лежит, висит на миграции, рестартится, сеть панели). Вместо
+# "недоступен" по всему парку и потом отбоев - одно сообщение. Отметка - в памяти планировщика
+_GAP_MIN = 5
+_GAP_SHARE = 0.6
+_gap_said: dict[str, object] = {}
+
+
+def ingest_gap(servers, now: datetime) -> tuple[int, int]:
+    """(сколько нод замолчали дольше выдержки и еще не объявлены, сколько всего было на связи);
+    первое 0 - массового молчания нет."""
+    fresh_off, talking = 0, 0
+    for s in servers:
+        if s.last_seen is None:
+            continue
+        if seen_online(s, now):
+            talking += 1
+            continue
+        silent = (now - _aware(s.last_seen)).total_seconds()
+        if not int((s.alert_state or {}).get("offline", 0) or 0) and \
+                silent > max(s.offline_after_seconds, 30) + offline_extra(s):
+            fresh_off += 1
+    total = fresh_off + talking
+    if fresh_off >= _GAP_MIN and fresh_off > total * _GAP_SHARE:
+        return fresh_off, total
+    return 0, total
 
 # Отбой "снова на связи" ждет, пока лежавшие из-за сервера мониторы проверят после его
 # возврата (интервал обычно минута), чтобы назвать поднявшиеся одним сообщением
@@ -3908,8 +4025,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     early = alert_since(s) if alerted else {}
 
     def metric(kind: str, level: int, text: str) -> None:
+        # уровень - тот, с которым ушел алерт (в Telegram CPU был желтым, а на главной красным)
         if kind in alerted:
-            add(kind, level, text, kind, kind, early.get(kind))
+            add(kind, int(state.get(kind, 0) or 0) or level, text, kind, kind, early.get(kind))
 
     cpu = rep.get("cpu_percent")
     if getattr(s, "cpu_alert_percent", 0) and cpu is not None:
@@ -3979,7 +4097,11 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
                 continue
             key = queue_key(b["source"], q)
             thr = queue_threshold(s, key)
-            if thr > 0 and queue_depth(q) >= thr and key not in qmuted:
+            # как у алерта: выше порога дольше выдержки или уже объявлена
+            q_from = _parse_iso(str((state.get("queues_since") or {}).get(key) or ""))
+            q_held = bool((state.get("queues") or {}).get(key)) or (
+                q_from is not None and (now - q_from).total_seconds() >= _QUEUE_HOLD_S)
+            if thr > 0 and queue_depth(q) >= thr and key not in qmuted and q_held:
                 hot.append(f"{q.get('name') or '?'} ({queue_depth(q)})")
     if hot:
         add("queue", 2, "переполнены очереди: " + ", ".join(hot[:3])
@@ -4038,7 +4160,8 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             add("backup_cron", 2, "дамп-CronJob не отрабатывает: " + "; ".join(cron[:3])
                 + (f" и еще {len(cron) - 3}" if len(cron) > 3 else ""), "coverage", "backup_cron",
                 section="backups", srv=False)
-        kc = sorted(f"{n} ({why})" for n, why in cron_job_issues(rep, now, False, state).items())
+        cm = item_mutes(s, now, "kube_cron:")
+        kc = sorted(f"{n} ({why})" for n, why in cron_job_issues(rep, now, False, state).items() if n not in cm)
         if kc:
             add("kube_cron", 1, ("CronJob не отрабатывает: " if len(kc) == 1 else "CronJob не отрабатывают: ")
                 + "; ".join(kc[:3]) + (f" и еще {len(kc) - 3}" if len(kc) > 3 else ""), "cron", "kube_cron",
@@ -4047,7 +4170,16 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         if kn and _held_long(s, state, "kube_node", now):
             add("kube_node", 2, "; ".join(kn[:3]) + (f" и еще {len(kn) - 3}" if len(kn) > 3 else ""),
                 "nodes", "kube_node", state.get("kube_node_since"), section="kuber")
-        fj = kube_failed_jobs(rep, now, 24)
+        # Поды, которые должны работать и не работают: то же правило и та же выдержка, что у алерта
+        # kube_pod (главная считала их своими правилами: Pending и NotReady уходили в Telegram, а
+        # на главной было пусто). С именами: "проблемных подов 1" не говорил, какой
+        pm = item_mutes(s, now, "kube_pod:")
+        bp = [p for p in kube_bad_pods(rep) if pod_item(p) not in pm]
+        if bp and _held_long(s, state, "kube_pod", now):
+            add("kube_pod", 2, ("под не работает: " if len(bp) == 1 else "поды не работают: ") + bad_pods_text(bp, 3),
+                "pods", "kube_pod", state.get("kube_pod_since"), section="kuber")
+        jm = item_mutes(s, now, "kube_job:")
+        fj = [j for j in kube_failed_jobs(rep, now, 24) if job_item(j) not in jm]
         if fj:
             add("kube_job", 1, ("упал Job: " if len(fj) == 1 else "упали Job: ") + failed_jobs_text(fj),
                 "cron", "kube_job", section="kuber")
@@ -4135,10 +4267,13 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         add("mem_limit", x["level"], x["text"], "memlimit", mem_limit.MUTE_PREFIX + x["key"], x["since"])
     # Часто перезапускается (медленный цикл): контейнер ведет в "Докер", под - в "Кубер"
     for x in srv_restarts.problems(s, now):
+        # ежедневный эпизод в одно и то же время (распорядок, алерта нет) - с пометкой "обычно в ..."
         if x["kind"] == "docker":
-            add("docker_restarts", 1, x["text"], "containers", srv_restarts.MUTE_PREFIX + x["key"], section="docker")
+            add("docker_restarts", 1, x["text"] + _routine_tail(state, "docker_restarts", now), "containers",
+                srv_restarts.MUTE_PREFIX + x["key"], section="docker")
         else:
-            add("kube_restarts", 1, x["text"], "restarts", srv_restarts.MUTE_PREFIX + x["key"], section="kuber")
+            add("kube_restarts", 1, x["text"] + _routine_tail(state, "kube_restarts", now), "restarts",
+                srv_restarts.MUTE_PREFIX + x["key"], section="kuber")
     # Изменился доступ: держится сутки, пока не отметили "это мы"
     acc = srv_changes.unacked_alerts(s, now)
     if acc:
@@ -4158,6 +4293,14 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # Cloudflare: белые списки обходятся поддельным заголовком (app/cf_realip.py)
     for lv, txt, _key in cf_realip.problems(s, now):
         add("cf_realip", lv, txt, "exposure", "cf_realip")
+    # Объявленная проблема - с уровнем алерта в Telegram (srv_short.level): один источник. Раньше
+    # web_config, перебор SSH, Job и пропавший порт на главной были желтыми, а в Telegram красными.
+    # Еще не объявленное (идет выдержка, справка за сутки) остается желтым: красное на главной без
+    # алерта - шум
+    st_lv = s.alert_state or {}
+    for p in out:
+        if int(st_lv.get(p["kind"], 0) or 0):
+            p["level"] = srv_short.level(p["kind"], p["level"])
     out.sort(key=lambda p: -p["level"])
     return out
 
@@ -4246,10 +4389,22 @@ _SIG_STORY_S = 3600
 # каждый из _ROUTINE_DAYS прошлых дней и каждый раз прошел сам не дольше чем за _ROUTINE_MAX, не
 # алертит, и отбоя у него нет. Держится на _ROUTINE_OVER дольше обычного конца - алерт с пометкой.
 # История эпизодов - alert_state "<вид>_hist" ([начало, конец] в unix, за _ROUTINE_KEEP)
-_ROUTINE_KINDS = frozenset({"pressure", "disk_slow", "cpu"})
+# Перезапуски подов и контейнеров - тоже: ежедневная выкладка, после которой ворклоад час крутится
+# в crashloop, давала каждый день тревогу и отбой; со второго дня это строка в "Что сломано"
+_ROUTINE_KINDS = frozenset({"pressure", "disk_slow", "cpu", "kube_restarts", "docker_restarts"})
 # Алерты без отбоя в телеграм: событие уже прошло, делать по "снова обычно" нечего. Прирост бэкапа -
 # один прогон добавил в разы больше обычного; следующий обычный прогон закрывает алерт молча
 _SILENT_RECOVERY = frozenset({"backup_growth"})
+# Медленные признаки - только днем по поясу панели (_DAY_FROM.._DAY_TO): утечка памяти и прогноз
+# заполнения диска (кроме "заполнится за сутки")
+_DAYTIME_KINDS = frozenset({"mem_leak", "disk_forecast"})
+_DAY_FROM, _DAY_TO = 9, 21
+
+
+def _daytime(now: datetime, tz: str) -> bool:
+    return _DAY_FROM <= now.astimezone(tg_buttons.zone(tz)).hour < _DAY_TO
+
+
 _ROUTINE_DAYS = 2
 _ROUTINE_SLACK = 45 * 60
 _ROUTINE_MAX = 6 * 3600
@@ -4347,6 +4502,31 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
     if key == "mem_limit":
         return all(podnames.muted(mem_limit.decided(s), k) for k in sig)
     return False
+
+
+def _sig_rule_why(s: Server, key: str, sig: set[str], now: datetime) -> str:
+    """Почему объявленное больше не алертит, если это правило панели, а не мьют человека: свой
+    helper, служебный юнит, рост памяти, которого хватит надолго. Пусто - заглушил человек."""
+    if key == "units":
+        muted = units_muted(s, now)
+        if any((own_helper_unit(u) or benign_unit(u)) and u not in muted for u in sig):
+            return "служебный юнит, его сбой виден в карточке сервера"
+    if key == "mem_leak":
+        muted = {m[len(mem_trend.MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(mem_trend.MUTE_PREFIX)}
+        if any(not podnames.muted(muted, k) for k in sig):
+            return "растет, но памяти сервера хватит надолго"
+    return ""
+
+
+def _closed_tail(key: str, st: dict) -> list[tuple[str, object]]:
+    """Что сбросить в состоянии вместе с отбоем вида: уровень и хвосты (sig, объявленное, офлайн)."""
+    out: list[tuple[str, object]] = [(key, 0)]
+    for suf, empty in (("_sig", []), ("_told", []), ("_told_lvl", None)):
+        if st.get(key + suf):
+            out.append((key + suf, empty))
+    if key == "offline":
+        out += [("offline_said", 0), ("offline_probe", None), ("offline_kids", None), ("offline_back", None)]
+    return out
 
 
 def units_hold(s: Server, bad: list[dict], now: datetime, muted: set[str]) -> dict[str, list]:
@@ -4461,6 +4641,55 @@ def units_muted(s: Server, now: datetime) -> set[str]:
         if k.startswith(_UNIT_MUTE_PREFIX) and u is not None and u > now:
             keys.add(k[len(_UNIT_MUTE_PREFIX):])
     return keys
+
+
+def item_mutes(s: Server, now: datetime, prefix: str) -> set[str]:
+    """Вещи вида, заглушенные поштучно насовсем или на время: ключи "<prefix><вещь>" в alert_mutes
+    и в действующих alert_snoozes (их ставят кнопки под алертом, tg_buttons.ITEM_MUTE)."""
+    keys = {m[len(prefix):] for m in (s.alert_mutes or []) if m.startswith(prefix)}
+    for k, until in (s.alert_snoozes or {}).items():
+        u = _parse_iso(until)
+        if k.startswith(prefix) and u is not None and u > now:
+            keys.add(k[len(prefix):])
+    return keys
+
+
+def pod_item(p: dict) -> str:
+    """Под как вещь для мьюта: ns/ворклоад (копии и пересозданные поды - одно и то же)."""
+    return f"{p.get('ns') or '?'}/{podnames.workload(str(p.get('name') or ''), str(p.get('ctrl') or ''))}"
+
+
+_JOB_RUN = re.compile(r"-\d{8,}$")
+
+
+def job_item(j: dict) -> str:
+    """Упавший Job как вещь для мьюта: ns/имя без хвоста прогона CronJob (<cronjob>-<минуты>)."""
+    return f"{j.get('ns') or '?'}/{_JOB_RUN.sub('', str(j.get('name') or ''))}"
+
+
+def tg_mute_keys(key: str, ctx: dict) -> list[str]:
+    """Что глушить кнопкой под алертом: поштучные ключи вещей этого сообщения (новое - если алерт
+    про новое при открытом). Пусто - вещей у вида нет, кнопка глушит вид (cpu, диск, офлайн)."""
+    spec = tg_buttons.ITEM_MUTE.get(key)
+    if spec is None:
+        return []
+    if key == "kube_cron":
+        items = [str(x.get("name") or "") for x in ctx.get("items") or [] if isinstance(x, dict)]
+    elif key == "kube_pod":
+        items = [pod_item(p) for p in ctx.get("items") or [] if isinstance(p, dict)]
+    elif key == "kube_job":
+        items = [job_item(j) for j in ctx.get("items") or [] if isinstance(j, dict)]
+    elif key in ("docker_down", "docker_loop"):
+        items = [str(ctx.get("container") or "")]
+    elif key == "kube_expiry":
+        items = [str(ctx.get("ikey") or "")]
+    else:
+        items = [str(x) for x in (ctx.get("fresh") or ctx.get("sig") or [])]
+        if key == "listen_gone":
+            items = [x.split(":", 1)[-1] for x in items]  # "tcp:8080" -> "listen:8080"
+        elif key == "docker_risk":
+            items = [x.rsplit(":", 1)[0] for x in items]  # "<имя>:<флаги>" -> "dockrisk:<имя>"
+    return list(dict.fromkeys(spec[0] + x for x in sorted(items) if x))
 
 
 def unit_level(u: dict) -> int:
@@ -5348,6 +5577,12 @@ def _flap_metric(s: Server, st: dict, now: datetime, apply, note: list, url: str
     return True
 
 
+# Очередь по порогу (вид queue): тревога, когда держится выше порога _QUEUE_HOLD_S, отбой - когда
+# опустилась ниже _QUEUE_CLEAR от порога
+_QUEUE_HOLD_S = 10 * 60
+_QUEUE_CLEAR = 0.8
+
+
 def queue_key(source: str, q: dict) -> str:
     """Ключ очереди: источник обязателен — на ноде бывает несколько инстансов
     RabbitMQ (dev/stage), и имена очередей в них совпадают."""
@@ -5473,6 +5708,8 @@ def kube_expiry_ctx(exp: float, days: float, it: dict, near: int) -> dict:
         "date": datetime.fromtimestamp(exp, tz=timezone.utc).strftime("%d.%m.%Y"),
         "more": f" (и ещё {near - 1} на этом сервере)" if near > 1 else "",
         "unused": unused,
+        # пункт для кнопки "заглушить насовсем": отметка "не следить" именно у него
+        "ikey": kube_expiry_mod.key(it),
     }
 
 
@@ -5584,7 +5821,7 @@ def _server_conditions(s: Server, now: datetime,
         # 8 сообщений за 30 минут по одной ноде. Для АЛЕРТА молчание должно продержаться
         # ещё _OFFLINE_ALERT_EXTRA сверх порога.
         silent = (now - _aware(s.last_seen)).total_seconds()
-        alert_off = silent > max(s.offline_after_seconds, 30) + _OFFLINE_ALERT_EXTRA
+        alert_off = silent > max(s.offline_after_seconds, 30) + offline_extra(s)
         # агент предупредил о штатной перезагрузке (app/going_down.py): сервер грузится, ждем его
         # до going_down.WAIT, а не обычную выдержку. Не вернулся - алерт, что не вернулся
         if alert_off and going_down.holds(s.last_report, now):
@@ -5814,7 +6051,9 @@ def _server_conditions(s: Server, now: datetime,
     # панель об этом не сказала ни разу: в «Кубере» их видно, только если открыть.
     # Шума не будет: по парку в 26 нод таких подов было ровно четыре, все на этой ноде.
     if online and (rep.get("kube") or {}).get("access"):
-        bad_pods = kube_bad_pods(rep)
+        # заглушенные поштучно (кнопкой под алертом): kube_pod:<ns>/<ворклоад>
+        pm = item_mutes(s, now, "kube_pod:")
+        bad_pods = [p for p in kube_bad_pods(rep) if pod_item(p) not in pm]
         sustain("kube_pod", bool(bad_pods),
                 {"pods": bad_pods_text(bad_pods), "n": len(bad_pods), "items": bad_pods},
                 below=not bad_pods, cool_s=_POD_CALM_S)
@@ -6070,7 +6309,8 @@ def _server_conditions(s: Server, now: datetime,
         # Предупреждение, как у упавшего oneshot-юнита: сервис живой, не сделана работа.
         # items - разбор для короткого алерта (упал/не запускается, причина, строка лога),
         # у одного CronJob ссылка ведет прямо на его строку и открывает лог или причину
-        ki = cron_job_items(rep, now, False, state)
+        cm = item_mutes(s, now, "kube_cron:")
+        ki = {n: v for n, v in cron_job_items(rep, now, False, state).items() if n not in cm}
         kc = sorted(f"{n} ({v['why']})" for n, v in ki.items())
         kctx = {"jobs": "; ".join(kc[:6]) + (f" и еще {len(kc) - 6}" if len(kc) > 6 else ""), "n": len(kc),
                 "items": [{"name": n, **v} for n, v in sorted(ki.items())]}
@@ -6343,6 +6583,7 @@ async def evaluate_servers(
                       if any(str(m).startswith(home_mute.PREFIX + "k-noagent") for x in servers for m in x.alert_mutes or [])
                       else None)
     can_send = alerts.alerts_enabled(cfg) and not muted
+    gap_n, gap_total = (0, 0) if panel_just_started(now) else ingest_gap(servers, now)
     # окна обслуживания: сервер в идущем окне молчит, как под снузом (app/maint.py)
     maint_srv, _mc = maint.active(windows, now, cfg.get("tz") or "Europe/Moscow")
     # Зависимости (app/parents.py): кто сейчас молчит, что из-за этого лежит и кто стоит за ним.
@@ -6458,17 +6699,21 @@ async def evaluate_servers(
             if key == "kube_expiry" and ctx.get("expired"):
                 level = max(level, 2)
             detail = _fmt_rule(default, s, ctx)
-            return _server_alert_text(
+            out = _server_alert_text(
                 key, s.name, detail, url, icon=srv_short.icon(key, level),
                 group=s.group_name or "", ref=f"srv:{s.id}",
                 short=srv_short.short(key, ctx, s, detail, level),
             )
-        txt = html.escape(_fmt_rule(rule["text"], s, ctx))
-        return alerts.Msg(
-            txt + (f"\n🔗 {html.escape(url)}" if url else ""),
-            _ALERT_SECTION.get(key, "servers"),
-            s.group_name or "", kind=key, target=s.name, ref=f"srv:{s.id}",
-        )
+        else:
+            txt = html.escape(_fmt_rule(rule["text"], s, ctx))
+            out = alerts.Msg(
+                txt + (f"\n🔗 {html.escape(url)}" if url else ""),
+                _ALERT_SECTION.get(key, "servers"),
+                s.group_name or "", kind=key, target=s.name, ref=f"srv:{s.id}",
+            )
+        # кнопка "заглушить" глушит вещи этого алерта, а не вид целиком (tg_buttons.ITEM_MUTE)
+        out.mutes = tg_mute_keys(key, ctx)
+        return out
 
     # Сначала СОБИРАЕМ все переходы за тик (не шлём внутри цикла), чтобы при
     # массовых событиях схлопнуть их в один дайджест. Состояние фиксируем после
@@ -6480,14 +6725,20 @@ async def evaluate_servers(
     recoveries: list[alerts.Msg] = []
     fire_apply: list[tuple[int, str, object]] = []  # (sid, key, value)
     rec_apply: list[tuple[int, str, object]] = []
+    # объявленное закрыто молча, потому что все заглушено: в историю алертов - строкой закрытия
+    quiet_closed: list[tuple[Server, str, str]] = []
     # известные проблемы, которые сборщик обновил или закрыл: (sid, вид, at записи, новая|None)
     known_upd: list[tuple[int, str, str | None, dict | None, str]] = []
+    # отметки напоминаний известных проблем: пишутся вместе с fire_apply, после доставки
+    known_remind: list[tuple[int, str, str | None, dict | None, str]] = []
     # новые известные проблемы: что было при подключении сервера (sid, вид, запись)
     known_add: list[tuple[int, str, dict]] = []
     # сервер закрыл подключение сам (вышел ONBOARD_MAX): sid -> что стало известным
     onboard_closed: dict[int, list[str]] = {}
     # мьют поломки диска снят сам, диск заменили и массив собрался: (sid, текст)
     mute_lift: list[tuple[int, str, str]] = []
+    # заглушка "до нового" переходит на сузившийся набор: (sid, старый ключ, новый)
+    mute_swap: list[tuple[int, str, str]] = []
     # отметки "не следить" у сроков кластера: секрет обновили или удалили (sid, ключ, at, новая|None)
     kexp_upd: list[tuple[int, str, str, dict | None]] = []
     # где в очередях начинается каждый сервер: у серверов на подключении после цикла
@@ -6501,25 +6752,29 @@ async def evaluate_servers(
         cur_by_id[sid][key] = value
         changed_ids.add(sid)
 
-    for s in servers:
+    async def one_server(s: Server) -> None:
+        """Все признаки одного сервера за тик. Своей функцией, чтобы исключение на одной ноде
+        (неожиданное поле в отчете, новый агент) не роняло серверные алерты всего парка: раньше
+        цикл шел без единого try, и стадия падала каждый тик, включая "недоступен"."""
+        nonlocal probes_left
         st = cur_by_id[s.id]
         marks.append((s.id, len(fires), len(fire_apply), len(recoveries), len(rec_apply)))
-        # снуз: сервер временно приглушён — алерты не шлём (но состояние не трогаем,
-        # чтобы после снуза оставшаяся проблема снова сработала)
-        if s.snooze_until is not None and _aware(s.snooze_until) > now:
-            continue
-        if s.id in maint_srv:
+        # снуз: сервер временно приглушён — новых алертов не шлём и не записываем (после снуза
+        # оставшаяся проблема сработает). Но начало проблем (<вид>_since, _from) ведем и ушедшее
+        # снимаем: иначе на главной до конца снуза висела ушедшая беда, а новая не появлялась
+        quiet_srv = s.snooze_until is not None and _aware(s.snooze_until) > now
+        if not quiet_srv and s.id in maint_srv:
             # идет окно обслуживания: то же, что снуз, после окна оставшееся сработает. Кроме
             # перезагрузки: в окне она плановая, после окна "перезагружен" было бы ложной тревогой
             if s.rebooted_at is not None and st.get("reboot_at") != _aware(s.rebooted_at).isoformat():
                 apply(s.id, "reboot_at", _aware(s.rebooted_at).isoformat())
-            continue
+            quiet_srv = True
         # Только что добавленный сервер: первые минуты ставятся helper'ы, и первые отчеты
         # неполные (у сервера бэкапов "чистка не работает" ушла через минуту после добавления и
         # через минуту отбилась). Состояние не трогаем: что останется, придет после тишины.
         created = getattr(s, "created_at", None)
         if created is not None and 0 <= (now - _aware(created)).total_seconds() < _NEW_SERVER_QUIET:
-            continue
+            return
         # Идет подключение (app/onboard.py): пороги придерживаются, события молча двигают отметку
         onb = onboard_mod.active(s, now)
         if onb:
@@ -6535,7 +6790,7 @@ async def evaluate_servers(
                 mutes.add(k)
         # Отбой «мигания» проверяем каждый тик, а не на переключении: успокоившаяся
         # нода переключений и не делает — иначе флаг висел бы вечно.
-        if st.get("flap_muted"):
+        if st.get("flap_muted") and not quiet_srv:
             fs = _parse_iso(st.get("flap_since") or "")
             if fs is None or (now - fs).total_seconds() > _FLAP_WINDOW:
                 apply(s.id, "flap_muted", 0)
@@ -6549,8 +6804,9 @@ async def evaluate_servers(
         # То же для пороговых метрик: за окно ни одного нового захода - снова
         # разрешаем алерты. Отбой шлём, только если метрика реально вернулась в
         # норму, иначе «снова в норме» было бы неправдой.
+        flap_back: list[str] = []
         for fk in _FLAP_METRIC_KINDS:
-            if not st.get(f"flap_{fk}_muted"):
+            if quiet_srv or not st.get(f"flap_{fk}_muted"):
                 continue
             fs = _parse_iso(st.get(f"flap_{fk}_last") or st.get(f"flap_{fk}_since") or "")
             if fs is not None and (now - fs).total_seconds() <= _FLAP_METRIC_WINDOW:
@@ -6559,13 +6815,15 @@ async def evaluate_servers(
             apply(s.id, f"flap_{fk}_count", 0)
             apply(s.id, f"flap_{fk}_last", None)
             if int(st.get(fk, 0)) == 0:
-                recoveries.append(_server_alert_text(
-                    fk, s.name,
-                    f"{settings_store.SERVER_ALERT_KINDS[fk][0]} снова в норме",
-                    srv_url(s, fk), recovery=True, group=s.group_name or "",
-                ))
+                flap_back.append(fk)
         conds = _server_conditions(s, now, web_err.get(s.id), pod_names, fill_hist.get(s.id),
                                    metric_hist.get(s.id, []))
+        for fk in flap_back:
+            # тот же текст, что у обычного отбоя: "CPU снова в норме, 79%", а не без цифры
+            recoveries.append(_server_alert_text(
+                fk, s.name, _recovery_short(fk, st, conds.get(fk, (0, {}))[1], s),
+                srv_url(s, fk), recovery=True, group=s.group_name or "",
+            ))
         # Нода молчит: про ее CPU, память и диски ничего не известно. Все, кроме самого
         # "недоступен", замирает как было: ни срабатываний, ни отбоев, ни сброса выдержек.
         # Иначе пороговые условия на молчащей ноде падали в ноль, и объявленный CPU получал
@@ -6578,7 +6836,12 @@ async def evaluate_servers(
         for k, (_lvl, cx) in conds.items():
             if not talking and k != "offline":
                 continue
-            if "since" in cx and st.get(f"{k}_since") != cx["since"]:
+            if quiet_srv:
+                # снуз и окно обслуживания: выдержка пойдет с их конца (в окне чистят тот самый
+                # диск, алерт сразу после окна был бы про то, что еще доделывают)
+                if st.get(f"{k}_since"):
+                    apply(s.id, f"{k}_since", None)
+            elif "since" in cx and st.get(f"{k}_since") != cx["since"]:
                 apply(s.id, f"{k}_since", cx["since"])
             if "streak" in cx and int(st.get(f"{k}_streak", 0)) != cx["streak"]:
                 apply(s.id, f"{k}_streak", cx["streak"])
@@ -6601,6 +6864,20 @@ async def evaluate_servers(
                 apply(s.id, f"{k}_from", now.isoformat())
             elif _lvl <= 0 and frm:
                 apply(s.id, f"{k}_from", None)
+        if quiet_srv:
+            # Сервер в снузе или в окне обслуживания. Стало легче - уровень молча вниз; объявленное
+            # ушло совсем - отбой (снуз ставят, чтобы не слышать повторов, а не чтобы не узнать, что
+            # починилось). Новое не пишем: после снуза оно придет алертом
+            for key, (level, ctx) in conds.items():
+                if (not talking and key != "offline") or level >= int(st.get(key, 0)):
+                    continue
+                if level or key in _SILENT_RECOVERY or (key in _FLAP_METRIC_KINDS and st.get(f"flap_{key}_muted")):
+                    apply(s.id, key, level)
+                    continue
+                recoveries.append(_server_alert_text(key, s.name, _recovery_short(key, st, ctx, s), srv_url(s, key),
+                                                     recovery=True, group=s.group_name or ""))
+                rec_apply.extend((s.id, k, v) for k, v in _closed_tail(key, st))
+            return
         # Бессрочный мьют поломки диска держится, пока диск не заменят (app/disk_mute.py). Снят -
         # в этом же тике алерт идет как без мьюта: состояние с нуля, все, что осталось сломанным
         # кроме замененного диска, придет новым алертом, а отбоя про давнее не будет
@@ -6634,8 +6911,13 @@ async def evaluate_servers(
         if talking:
             for mk, why in os_support.stale_mutes(s.last_report or {}, s.alert_mutes, now):
                 mute_lift.append((s.id, mk, why if mk.split("@")[0] != "osupd:reboot" else f"заглушка перезагрузки снята: {why}"))
-            for mk, why in home_mute.stale(s, now, kube_index):
+            hm_lift, hm_swap, hm_items = home_mute.review(s, now, kube_index, st.get(home_mute.STATE))
+            for mk, why in hm_lift:
                 mute_lift.append((s.id, mk, why))
+            # набор сузился (часть поправили): заглушка молча переходит на остаток
+            mute_swap.extend((s.id, old, new) for old, new in hm_swap)
+            if hm_items != (st.get(home_mute.STATE) or {}):
+                apply(s.id, home_mute.STATE, hm_items or None)
         # Известные проблемы (app/known.py): снимок того, что отметили, закрытие, когда ушла
         # сама или вышел срок, и напоминание раз в неделю, что она все еще висит
         known_now: dict[str, dict] = {}
@@ -6650,7 +6932,9 @@ async def evaluate_servers(
             k_lvl, k_ctx = conds.get(kk, (0, {}))
             new_k, what = known_mod.step(ent, int(k_ctx["raw"]) if "raw" in k_ctx else k_lvl, k_ctx.get("sig"), now)
             if new_k != ent:
-                known_upd.append((s.id, kk, ent.get("at"), new_k, what))
+                # отметку напоминания - только когда напоминание дошло (как fire_apply): иначе сбой
+                # отправки откладывал следующее на неделю
+                (known_remind if what == "remind" else known_upd).append((s.id, kk, ent.get("at"), new_k, what))
             if new_k is None:
                 continue
             known_now[kk] = new_k
@@ -6691,6 +6975,9 @@ async def evaluate_servers(
             rule = rules.get(key) or _fallback_rule(key)
             if not rule["enabled"] or not _rule_scope_ok(rule, s):
                 continue  # правило выключено или сервер вне области применения
+            if key == "offline" and level > int(st.get(key, 0)) and gap_n:
+                # замолчало большинство разом: сбой приема у панели, сообщение одно (ниже)
+                continue
             if key == "offline" and level > int(st.get(key, 0)) and s.parent_id \
                     and (s.parent_id in silent or s.parent_id in maint_srv):
                 # стоит за молчащим (или обслуживаемым) сервером: молчит из-за него, это строка в
@@ -6703,7 +6990,14 @@ async def evaluate_servers(
                 # состояния, не поднялось - алерт придет после (app/boot_warmup.py)
                 continue
             if _muted(key, level, mutes):
-                continue  # тип (или его нижние уровни) заглушён для этого сервера
+                # Тип (или его нижние уровни) заглушен для этого сервера. Новое не пишем: снимут мьют -
+                # оставшееся придет алертом. Стало легче - уровень молча вниз: иначе "Диск 40%" навсегда
+                # висел проблемой уровня 2. Объявленное ушло совсем - отбой дальше обычной дорогой
+                prev_m = int(st.get(key, 0))
+                if level or not prev_m:
+                    if level < prev_m:
+                        apply(s.id, key, level)
+                    continue
             if known_mod.covers(known_now.get(key), level, ctx.get("sig")):
                 continue  # известная проблема: про нее знают, молчим, пока не стало хуже
             if onb and not onboard_mod.cond_ok(key, level) and level > int(st.get(key, 0)):
@@ -6711,6 +7005,10 @@ async def evaluate_servers(
                 # сломано"; что останется к закрытию, станет известной проблемой
                 continue
             prev = int(st.get(key, 0))
+            if key in _DAYTIME_KINDS and level > 0 and (key != "disk_forecast" or level < 2)                     and not _daytime(now, cfg.get("tz") or "Europe/Moscow"):
+                # Медленный признак (память растет день за днем, диск заполнится через дни): ждать
+                # он может до утра, в 3 ночи его не шлем. Состояние не трогаем - утром придет как есть
+                continue
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "mem_limit", "db_health",
                        "web_config", "web_cert", "webfiles", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
                        "cf_realip",
@@ -6744,7 +7042,13 @@ async def evaluate_servers(
                 told_lvl = int(st.get(lvk) or prev) if prev else 0
                 if prev and not level and old_sig and _sig_all_quiet(s, key, old_sig, now):
                     # объявленное теперь заглушено (или это свой helper, по которому алерта
-                    # больше нет): ничего не стихло, отбой был бы неправдой
+                    # больше нет): ничего не стихло, отбой "снова в норме" был бы неправдой. Сняли
+                    # правилом панели (служебный юнит, рост памяти без угрозы) или заглушил человек -
+                    # в чат не пишем (служебные таймеры гасятся молча с 1.4.280), но закрытие с
+                    # причиной ложится в историю алерта: раньше алерт пропадал без следа
+                    why = _sig_rule_why(s, key, old_sig, now)
+                    quiet_closed.append((s, key, f"больше не считаем проблемой: {why}" if why
+                                         else "все, о чем был алерт, заглушено"))
                     rec_apply.append((s.id, sk, []))
                     rec_apply.append((s.id, tk, []))
                     rec_apply.append((s.id, lvk, None))
@@ -7016,11 +7320,13 @@ async def evaluate_servers(
             if seen is None:
                 apply(s.id, "kube_jobs_seen", keys)
             elif set(keys) - set(seen):
-                fresh = [j for j in jobs if job_logs.job_key(j) not in set(seen)]
+                # заглушенные поштучно (kube_job:<ns>/<имя>) учитываются молча
+                jm = item_mutes(s, now, "kube_job:")
+                fresh = [j for j in jobs if job_logs.job_key(j) not in set(seen) and job_item(j) not in jm]
                 kj = rules.get("kube_job")
                 # Job, упавший на прогреве после включения (база еще не встала), - загрузка: кроны
                 # запустятся снова, а падающий и дальше даст свой алерт
-                if not warm and "kube_job" not in mutes and kj and kj["enabled"] and _rule_scope_ok(kj, s):
+                if fresh and not warm and "kube_job" not in mutes and kj and kj["enabled"] and _rule_scope_ok(kj, s):
                     # хвост лога пода просит стадия "логи упавших Job"; пока агент не ответил
                     # (до job_logs._WAIT), алерт ждет следующего тика, kube_jobs_seen не трогаем
                     logs = job_logs.collect(s.id, k_rep, fresh, now.timestamp())
@@ -7063,6 +7369,8 @@ async def evaluate_servers(
             sustain_s = _SUSTAIN_DEFAULT if _ss is None else max(int(_ss), 0)
             dstate = dict(st.get("docker") or {})
             seen_names: set[str] = set()
+            # заглушенные поштучно (кнопкой под алертом): docker_down:<имя>, docker_loop:<имя>
+            dm_down, dm_loop = item_mutes(s, now, "docker_down:"), item_mutes(s, now, "docker_loop:")
             for c in dk.get("containers") or []:
                 name = (c.get("name") or "").strip()
                 if not name:
@@ -7084,8 +7392,12 @@ async def evaluate_servers(
                     loops.append(now.isoformat())
                 cs["rc"], cs["loops"] = rc, loops
                 looping = len(loops) >= _DOCKER_LOOP_MIN
+                # состояние "в цикле" - без оглядки на правило и мьют: главная (docker_alerts) показывает
+                # беду и тогда, когда сообщение о ней не ушло
+                cs["loop"] = looping
                 was_loop = bool(cs.get("alerted_loop"))
-                loop_ok = r_loop and r_loop["enabled"] and "docker_loop" not in mutes and _rule_scope_ok(r_loop, s)
+                loop_ok = (r_loop and r_loop["enabled"] and "docker_loop" not in mutes and _rule_scope_ok(r_loop, s)
+                           and name not in dm_loop)
                 if looping and not was_loop and loop_ok:
                     ctx = {"container": name, "restarts": len(loops),
                            "window": round(_DOCKER_LOOP_WINDOW / 60), "policy": policy or "no", "state": state}
@@ -7104,12 +7416,14 @@ async def evaluate_servers(
                 why = docker_down_why(c)
                 is_down = why is not None
                 was_down = bool(cs.get("alerted_down"))
-                down_ok = r_down and r_down["enabled"] and "docker_down" not in mutes and _rule_scope_ok(r_down, s)
+                down_ok = (r_down and r_down["enabled"] and "docker_down" not in mutes and _rule_scope_ok(r_down, s)
+                           and name not in dm_down)
                 if is_down:
                     since = cs.get("down_since") or now.isoformat()
                     cs["down_since"] = since
                     started = _parse_iso(since)
                     held = (now - started).total_seconds() if started else 0.0
+                    cs["down"] = held >= sustain_s  # лежит дольше выдержки, ушло сообщение или нет
                     if held >= sustain_s and not was_down and down_ok:
                         # перед этим - без событий самого контейнера: что он упал, и так понятно
                         fires.append(await _with_before(session_factory, srv_fire(
@@ -7119,6 +7433,7 @@ async def evaluate_servers(
                         cs["alerted_down"] = True
                 else:
                     cs["down_since"] = None
+                    cs["down"] = False
                     if was_down:  # снова поднялся; отметку снимаем и у заглушенного
                         if down_ok:
                             # не поднялся, но это уже не авария: остановили руками, сняли policy
@@ -7191,7 +7506,7 @@ async def evaluate_servers(
             if lstate is not None and lstate != (st.get("listen_hist") or {}):
                 apply(s.id, "listen_hist", lstate)
             # суточные минимумы памяти контейнеров, подов и процессов (mem_trend)
-            mstate = mem_trend.update(st.get("mem_trend"), s.last_report or {}, now)
+            mstate = mem_trend.update(st.get("mem_trend"), s.last_report or {}, now, cfg.get("tz") or "Europe/Moscow")
             if mstate != (st.get("mem_trend") or {}):
                 apply(s.id, "mem_trend", mstate)
             # эпизоды у лимита памяти по каждому контейнеру и поду (mem_limit)
@@ -7225,6 +7540,9 @@ async def evaluate_servers(
         qr = rules.get("queue")
         if online_now and qr and qr["enabled"] and "queue" not in mutes and _rule_scope_ok(qr, s):
             qstate = dict(st.get("queues") or {})
+            # с какого момента очередь подряд выше порога: глубина у порога давала тревогу и отбой на
+            # соседних тиках (у queue_stuck это лечили выдержкой в 1.8.9)
+            qsince = dict(st.get("queues_since") or {})
             seen_q: set[str] = set()
             qmuted = queue_watch.muted_keys(s, now)
             for b in queue_watch.brokers(s.last_report or {}):
@@ -7241,23 +7559,34 @@ async def evaluate_servers(
                         continue
                     depth = queue_depth(q)
                     was = bool(qstate.get(key))
-                    if depth >= thr and not was and not warm:
+                    if depth >= thr:
+                        qsince.setdefault(key, now.isoformat())
+                    elif not was or depth < thr * _QUEUE_CLEAR:
+                        qsince.pop(key, None)
+                    over = _parse_iso(str(qsince.get(key) or ""))
+                    held = over is not None and (now - over).total_seconds() >= _QUEUE_HOLD_S
+                    if depth >= thr and held and not was and not warm:
                         # на прогреве потребители еще встают: переросла и не разобралась - после
                         ctx = {"queue": q.get("name") or "?", "source": src or "rabbitmq",
                                "value": depth, "threshold": thr}
                         fires.append(srv_fire(s, "queue", qr, ctx))
                         qstate[key] = True
-                    elif depth < thr and was:
+                    elif depth < thr * _QUEUE_CLEAR and was:
+                        # отбой - ниже линии снятия, а не просто ниже порога
                         recoveries.append(_server_alert_text(
                             "queue", s.name,
-                            f"очередь {q.get('name') or '?'} снова в норме",
+                            f"очередь {q.get('name') or '?'} снова в норме, {depth}",
                             srv_url(s, "queue"), recovery=True, group=s.group_name or ""))
                         qstate[key] = False
             # очередь удалили/переименовали — состояние по ней больше не нужно
             for gone in [k for k in qstate if k not in seen_q]:
                 qstate.pop(gone, None)
+            for gone in [k for k in qsince if k not in seen_q]:
+                qsince.pop(gone, None)
             if qstate != (st.get("queues") or {}):
                 apply(s.id, "queues", qstate)
+            if qsince != (st.get("queues_since") or {}):
+                apply(s.id, "queues_since", qsince or None)
 
         # Ротация: старейший снапшот пережил политику хранения. Отдельно от backup_repo —
         # там про свежесть и целостность, тут про то, что старое НЕ убирается.
@@ -7280,9 +7609,15 @@ async def evaluate_servers(
                 fires.append(srv_fire(s, "backup_rotation", rot_r, {"repos": shown, "names": [x.split(" (")[0] for x in stale]}))
                 fire_apply.append((s.id, "rotation_stale", 1))
             elif not stale and was_stale:
-                recoveries.append(_server_alert_text(
-                    "backup_rotation", s.name, "ротация снова вычищает старые снапшоты",
-                    srv_url(s, "backup_rotation"), recovery=True, group=s.group_name or ""))
+                # Набор опустел, потому что человек убрал репозитории из учета (архив, мьют), а не
+                # потому что ротация заработала: отбой "снова вычищает" был бы неправдой
+                raw_over, _seen = rotation_overflow(bsrv_rot, dict(st.get("rotation_over") or {}), now, rot_ext, {})
+                if rotation_stale_repos(bsrv_rot, now, rot_ext, {}) + raw_over:
+                    quiet_closed.append((s, "backup_rotation", "оставшиеся репозитории в архиве или заглушены"))
+                else:
+                    recoveries.append(_server_alert_text(
+                        "backup_rotation", s.name, "ротация снова вычищает старые снапшоты",
+                        srv_url(s, "backup_rotation"), recovery=True, group=s.group_name or ""))
                 rec_apply.append((s.id, "rotation_stale", 0))
 
         # Висячий лок дольше суток: чистка и проверка репозитория не идут. Раньше он был
@@ -7418,10 +7753,53 @@ async def evaluate_servers(
                     "whys": [repo_reason(byname.get(p) or {}, now, repo_ext, panel_names) for p in order]}))
                 fire_apply.append((s.id, "backup_repos", {"repos": probs, "ts": now.timestamp()}))
             elif not probs and prev_active:
-                recoveries.append(_server_alert_text(
-                    "backup_repo", s.name, "все репозитории снова в норме",
-                    srv_url(s, "backup_repo"), recovery=True, group=s.group_name or ""))
+                # объявленные репозитории не починились, а ушли в архив или заглушены: молча
+                hidden = set(prev.get("repos") or []) & set(_backup_problem_repos(bsrv, set(), now, repo_ext,
+                                                                                  panel_names, {}))
+                if hidden:
+                    quiet_closed.append((s, "backup_repo", "оставшиеся репозитории в архиве или заглушены"))
+                else:
+                    recoveries.append(_server_alert_text(
+                        "backup_repo", s.name, "все репозитории снова в норме",
+                        srv_url(s, "backup_repo"), recovery=True, group=s.group_name or ""))
                 rec_apply.append((s.id, "backup_repos", []))
+
+    # Сервер, на котором оценка упала, пропускаем целиком: его переходы этого тика откатываются,
+    # остальные серверы оцениваются как обычно. Ошибка - в журнал ошибок панели (log.exception
+    # туда пишет обработчик планировщика) и в пульс: стадия падает на сервере N тиков подряд -
+    # сторож скажет об этом снаружи
+    failed: list[str] = []
+    for s in servers:
+        lens = (len(fires), len(fire_apply), len(recoveries), len(rec_apply), len(known_upd), len(known_add),
+                len(mute_lift), len(kexp_upd), len(marks), len(quiet_closed), len(mute_swap), len(known_remind))
+        st0, was_changed = dict(cur_by_id[s.id]), s.id in changed_ids
+        try:
+            await one_server(s)
+        except Exception:  # noqa: BLE001 - остальные серверы должны оцениться
+            log.exception("серверные алерты: оценка сервера %s упала, сервер пропущен", s.name)
+            failed.append(s.name)
+            for lst, n in zip((fires, fire_apply, recoveries, rec_apply, known_upd, known_add, mute_lift,
+                               kexp_upd, marks, quiet_closed, mute_swap, known_remind), lens):
+                del lst[n:]
+            marks.append((s.id, *lens[:4]))
+            cur_by_id[s.id] = st0
+            onboard_closed.pop(s.id, None)
+            if not was_changed:
+                changed_ids.discard(s.id)
+    if failed:
+        heartbeat.stage_partial("серверные алерты", ", ".join(failed[:5]) + (f" и еще {len(failed) - 5}"
+                                                                            if len(failed) > 5 else ""))
+
+    if gap_n and not _gap_said.get("at"):
+        fires.append(alerts.Msg(
+            f"🔴📡 <b>Панель не получает отчеты</b>\nЗамолчали разом {gap_n} из {gap_total} серверов. "
+            "Похоже на сбой приема на стороне панели (backend, прокси, сеть панели), а не на серверах: "
+            "\"недоступен\" по каждому не шлем", "servers", "", kind="ingest_gap", target="панель"))
+        _gap_said["at"] = now
+    elif not gap_n and _gap_said.get("at"):
+        recoveries.append(alerts.Msg("✅📡 Панель снова получает отчеты серверов", "servers", "",
+                                     kind="ingest_gap", target="панель", recovery=True))
+        _gap_said.pop("at", None)
 
     if onboarding:
         # У серверов на подключении уходит только офлайн и критичный диск. Отметки придержанных
@@ -7448,13 +7826,22 @@ async def evaluate_servers(
                              session_factory=session_factory):
         for sid, key, value in fire_apply:
             apply(sid, key, value)
+        known_upd.extend(known_remind)
     if await alerts.dispatch(cfg, can_send, recoveries, threshold, parse_mode="HTML",
                              session_factory=session_factory):
         for sid, key, value in rec_apply:
             apply(sid, key, value)
 
-    if changed_ids or known_upd or known_add or onboard_closed or mute_lift or kexp_upd:
+    if changed_ids or known_upd or known_add or onboard_closed or mute_lift or kexp_upd or quiet_closed or mute_swap:
         async with session_factory() as session:
+            for qs, qk, why in quiet_closed:
+                if any(sid == qs.id and k == qk for sid, k, _v in rec_apply if k == qk) and int(
+                        cur_by_id[qs.id].get(qk) or 0):
+                    continue  # отбой не записался (пачка не ушла): закроется на следующем тике
+                session.add(AlertEvent(kind=qk[:40], target=qs.name[:255], section=_ALERT_SECTION.get(qk, "servers")[:20],
+                                       grp=(qs.group_name or "")[:255], recovery=True,
+                                       text=f"{qs.name}: {settings_store.SERVER_ALERT_KINDS.get(qk, (qk,))[0]} - "
+                                            f"закрыто без отбоя, {why}"[:4000]))
             for sid in changed_ids:
                 row = await session.get(Server, sid)
                 if row is not None:
@@ -7490,6 +7877,10 @@ async def evaluate_servers(
                     # сняли руками раньше нас - в журнал писать нечего
                     row.alert_mutes = [m for m in row.alert_mutes if m != mk]
                     session.add(AuditLog(username="авто", action="mute_lifted", target=row.name[:255], detail=txt))
+            for sid, old, new in mute_swap:
+                row = await session.get(Server, sid)
+                if row is not None and old in (row.alert_mutes or []):
+                    row.alert_mutes = list(dict.fromkeys(new if m == old else m for m in row.alert_mutes))
             for sid, kk, at, new_e in kexp_upd:
                 row = await session.get(Server, sid)
                 cur = dict((row.kube_expiry_ignored if row is not None else None) or {})
@@ -8009,8 +8400,27 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
             await session.commit()
 
 
+async def _next_tick_in(session_factory: async_sessionmaker[AsyncSession], settings: Settings) -> float:
+    """Сколько спать до следующего тика: до ближайшего монитора, которому пора, но не меньше
+    полутика и не больше тика. С фиксированным sleep(tick) после работы монитор становился "пора"
+    чуть после тика и ждал следующего: при интервале 60 с проверка шла раз в 66-70 с."""
+    tick = float(settings.scheduler_tick)
+    try:
+        now = datetime.now(timezone.utc)
+        async with session_factory() as session:
+            rows = (await session.execute(select(Check.interval_seconds, Check.last_checked_at)
+                                          .where(Check.enabled.is_(True)))).all()
+    except Exception:  # noqa: BLE001 - не прочиталось: спим как раньше
+        log.warning("не посчитал, когда следующий монитор", exc_info=True)
+        return tick
+    left = [max(iv or 0, 5) - (now - _aware(lc)).total_seconds() for iv, lc in rows if lc is not None]
+    nearest = min(left, default=tick)
+    return min(max(nearest, tick / 2), tick)
+
+
 async def collector_loop(
-    session_factory: async_sessionmaker[AsyncSession], settings: Settings
+    session_factory: async_sessionmaker[AsyncSession], settings: Settings,
+    stop: asyncio.Event | None = None,
 ) -> None:
     if settings.scheduler_tick <= 0:
         log.info("планировщик мониторов выключен (scheduler_tick=0)")
@@ -8028,14 +8438,25 @@ async def collector_loop(
     # Стадии изолированы друг от друга. Была одна try на весь тик, и NameError в
     # серверных алертах уносил с собой прунинг и автобэкап панели — при этом наружу
     # шла одна строка в лог, а мониторинг молча стоял (нашли только вручную).
+    # Падения стадий (log.exception) пишутся еще и в журнал ошибок панели: docker-лог scheduler
+    # пропадает с каждой выкладкой, и упавшую стадию раньше видно было только в нем. И в пульс:
+    # стадия падает тиков подряд - сторож скажет об этом снаружи.
+    err_handler = heartbeat.SchedulerErrors(session_factory)
+    logging.getLogger("kervax").addHandler(err_handler)
+    in_scheduler = heartbeat.IN_SCHEDULER.set(True)
+
     async def stage(name: str, coro) -> None:
         try:
             await coro
         except Exception:  # noqa: BLE001 — соседние стадии должны отработать
             log.exception("стадия планировщика «%s» упала", name)
+            heartbeat.stage_done(name, False)
+            return
+        heartbeat.stage_done(name, True)
 
     try:
         while True:
+            heartbeat.tick_started()
             # Привязка локальных мониторов к нодам — ДО проверок, а не после: иначе
             # свежая галочка «проверять локально» встречает первый же цикл без ноды,
             # и монитор минуту горит «проверять некому» с открытым инцидентом.
@@ -8047,8 +8468,10 @@ async def collector_loop(
                 m = await run_location_probes(session_factory, settings)
                 if m:
                     log.info("проверок через локации: %d", m)
+                heartbeat.stage_done("мониторы", True)
             except Exception:  # noqa: BLE001 — цикл не должен падать
                 log.exception("ошибка планировщика мониторов")
+                heartbeat.stage_done("мониторы", False)
             await stage("алерты локаций", evaluate_location_alerts(
                 session_factory, settings, datetime.now(timezone.utc)))
             # прогноз - до алертов: они читают его из servers.disk_forecast
@@ -8109,8 +8532,25 @@ async def collector_loop(
                 session_factory, datetime.now(timezone.utc)))
             await stage("сводка непокрытого", _daily_uncovered(session_factory, settings))
             await stage("автобэкап", _maybe_auto_backup(session_factory, settings))
-            await asyncio.sleep(settings.scheduler_tick)
+            if stop is not None and stop.is_set():
+                # SIGTERM (выкладка): тик доделан и состояние записано, выходим. Убитый между
+                # отправкой алерта и записью состояния процесс слал после старта тот же алерт
+                log.info("планировщик остановлен по сигналу после тика")
+                return
+            pause = await _next_tick_in(session_factory, settings)
+            if stop is None:
+                await asyncio.sleep(pause)
+            else:
+                try:
+                    await asyncio.wait_for(stop.wait(), pause)
+                except asyncio.TimeoutError:
+                    pass
+                if stop.is_set():
+                    log.info("планировщик остановлен по сигналу")
+                    return
     finally:
         hb_task.cancel()
         tg_task.cancel()
         pause_task.cancel()
+        logging.getLogger("kervax").removeHandler(err_handler)
+        heartbeat.IN_SCHEDULER.reset(in_scheduler)

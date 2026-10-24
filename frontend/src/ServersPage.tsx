@@ -69,7 +69,7 @@ import {
 } from './api'
 import { StackedAreaChart, type ChartMark, type Series } from './charts/StackedAreaChart'
 import { OnboardBlock } from './OnboardBlock'
-import { diskHealth, diskUsage, fmtSetupVersion, limText, memLimFacts, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskHealth, diskUsage, fmtSetupVersion, limText, memLimFacts, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, tallyServers, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -5198,9 +5198,13 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
   const [mutesOpen, setMutesOpen] = useState(false)
   const online = servers?.filter((s) => s.online).length ?? 0
   const total = servers?.length ?? 0
-  // «проблемные» = оффлайн ИЛИ превышен порог (CPU/RAM/диск/темп/троттлинг/conntrack)
-  const problems =
-    servers?.filter((s) => srvIssues(s, t).length > 0).length ?? 0
+  // серверы с бедой - по тем же строкам и цветам, что "Что сломано" на главной (serverUtils.tallyServers):
+  // с проблемой (есть красная) и только с предупреждениями. Плитка фильтрует список по обоим, поэтому
+  // число - сумма, а подпись говорит, что в нем
+  const srvTally = tallyServers(servers ?? [], t)
+  const problems = srvTally.down + srvTally.warn
+  const problemsLabel = !srvTally.warn ? t('С проблемами') : !srvTally.down ? t('С предупреждениями')
+    : t('С проблемами и предупреждениями')
   const detail = detailId != null ? servers?.find((s) => s.id === detailId) : undefined
   const q = query.trim().toLowerCase()
   const visible = (servers ?? []).filter((s) => {
@@ -5332,8 +5336,9 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
           {/* «Проблемы» — первой: жмут чаще всего */}
           <SrvTile
             num={problems}
-            tone="degraded"
-            label={t('Проблемы')}
+            tone={srvTally.down ? 'down' : 'degraded'}
+            label={problemsLabel}
+            title={t('серверов с проблемами: {d}, только с предупреждениями: {w}', { d: srvTally.down, w: srvTally.warn })}
             active={filter === 'problem'}
             onClick={() => setFilter((f) => (f === 'problem' ? 'all' : 'problem'))}
           />
