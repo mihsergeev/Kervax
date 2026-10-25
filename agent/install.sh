@@ -487,7 +487,19 @@ run_remote_setup() {
   f=$(mktemp) || return 0
   if pcurl -fsSL --compressed --connect-timeout 15 --speed-limit 512 --speed-time 60 --retry 3 \
        --retry-delay 5 $RETRY_ALL "${URL%/}/api/agent/setup/$1.sh" -o "$f"; then
-    bash "$f" </dev/null || echo "· $1: could not run it (skipping)." >&2
+    # at most 3 minutes for one helper: the rest wait behind it in a row, and the panel already
+    # shows them as "not installed". One that did not make it is finished by the playbook later.
+    rc=0
+    if timeout -k 10 1 true 2>/dev/null; then
+      timeout -k 10 180 bash "$f" </dev/null || rc=$?
+    else
+      bash "$f" </dev/null || rc=$?
+    fi
+    case $rc in
+      0) ;;
+      124|137) echo "· $1: did not finish in 3 minutes (skipping, the playbook will finish it)." >&2 ;;
+      *) echo "· $1: could not run it (skipping)." >&2 ;;
+    esac
   else
     echo "· $1: could not download it (skipping)." >&2
   fi

@@ -99,7 +99,7 @@ fi
 #       * restic is installed only as RESTIC_TARGET_VER with the baked sha256;
 #       * a rest-server port published by docker past ufw is reported (docker opens it to the
 #         whole internet when ufw-docker is not set up), and ufw opens the actual port
-KERVAX_SETUP_VERSION=0.36  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+KERVAX_SETUP_VERSION=0.37  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -1132,6 +1132,15 @@ cmd_adopt_legacy() {  # [--apply] [name...]   no names = every repository of the
 }
 
 # ------- deploying a rest-server from scratch (clean node -> backup server) -------
+# apt without questions and without needrestart: from a terminal its apt hook (debconf window
+# "Pending kernel upgrade") waited for Enter until the timeout, and it would also restart services
+# left over from earlier upgrades - not our business
+apt_q() {
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l timeout -k 10 "${APT_TIMEOUT:-120}" \
+    apt-get -q -y -o DPkg::Lock::Timeout=60 -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold "$@" </dev/null >/dev/null 2>&1
+}
+
 # Installed only from the distribution's own repositories (no curl|sh from foreign domains).
 ensure_pkgs() {
   local need=() p
@@ -1141,9 +1150,9 @@ ensure_pkgs() {
   command -v bunzip2   >/dev/null 2>&1 || need+=(bzip2)
   [ ${#need[@]} -eq 0 ] && return 0
   command -v apt-get >/dev/null 2>&1 || { echo "packages are required (${need[*]}) but apt-get is missing - install them manually" >&2; return 2; }
-  DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || true
+  apt_q update || true
   for p in "${need[@]}"; do
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$p" >/dev/null 2>&1 \
+    APT_TIMEOUT=600 apt_q install "$p" \
       || { echo "could not install $p" >&2; return 2; }
   done
   systemctl enable --now docker >/dev/null 2>&1 || true
@@ -1171,7 +1180,7 @@ restic_fetch() {
     aarch64|arm64) arch=arm64; want="$RESTIC_SHA_arm64" ;;
     *) echo "unknown architecture: $(uname -m)" >&2; return 2 ;;
   esac
-  command -v bunzip2 >/dev/null 2>&1 || { apt-get update -qq >/dev/null 2>&1 || true; apt-get install -y -qq bzip2 >/dev/null 2>&1 || true; }
+  command -v bunzip2 >/dev/null 2>&1 || { apt_q update || true; apt_q install bzip2 || true; }
   f="restic_${RESTIC_TARGET_VER}_linux_${arch}.bz2"
   tmp="$(mktemp -d /tmp/kv-restic.XXXXXX)" || return 2
   if ! curl -fsSL --connect-timeout 20 --max-time 600 "https://github.com/restic/restic/releases/download/v$RESTIC_TARGET_VER/$f" -o "$tmp/$f"; then
