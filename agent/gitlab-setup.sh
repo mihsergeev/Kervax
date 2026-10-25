@@ -26,7 +26,9 @@
 set -euo pipefail
 
 KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
-KERVAX_SETUP_WHEN="command -v docker >/dev/null 2>&1 && docker ps -a 2>/dev/null | grep -qi -e gitlab-ce -e gitlab-ee"
+# the panel wants this helper for a compose service named gitlab on an image of its own too
+# (setup_needed); with only the grep the playbook skipped such a node, and it stayed in kervax_outdated
+KERVAX_SETUP_WHEN="command -v docker >/dev/null 2>&1 && (docker ps -a 2>/dev/null | grep -qi -e gitlab-ce -e gitlab-ee || docker ps -aq --filter label=com.docker.compose.service=gitlab 2>/dev/null | grep -q .)"
 
 HELPER_DIR=/lib65/kervax
 HELPER="$HELPER_DIR/kervax-gitlab"

@@ -313,7 +313,7 @@ def _out(
     # оказаться внутренним. local_ip не смотрим — он приватный и страны не имеет.
     o.country = geoip.country_of(server.external_ip) or geoip.country_of(server.agent_ip)
     o.docker_alerts = _docker_alerts(server)
-    o.docker_exposed = docker_exposure.view(server.last_report or {})
+    o.docker_exposed = docker_exposure.view(server.last_report or {}, _fresh_node(server, now))
     o.docker_risk = docker_risk.view(server, fix=True)
     o.exposure = open_ports.view(server)
     if o.exposure is not None:

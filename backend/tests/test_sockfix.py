@@ -362,3 +362,59 @@ def test_helper_script():
     assert '"config", "--format", "json"' in SRC and '"unknown flag"' in SRC
     # python 3.6: без capture_output и text=
     assert "capture_output" not in SRC and "text=True" not in SRC
+
+
+def _bare(**kw):
+    """Отчет без блока helper'а: прокси с сокетом, версии helper'ов - как пришлет агент"""
+    return {"clock_unix": time.time(), "agent_version": "2.53", **kw,
+            "docker": {"present": True, "access": True, "containers": [
+                {"name": "edge-caddy-1", "image": "lucaslorentz/caddy-docker-proxy:2.12.0", "state": "running",
+                 "binds": ["/var/run/docker.sock", "/srv/caddy/data"]}]}}
+
+
+def test_card_says_whether_the_helper_is_there():
+    """Готового файла нет: карточка различает "helper'а нет" (команда установки), "установщик еще
+    идет" и "helper стоит, но еще не собрал". Раньше на всех трех было одно "соберет helper"."""
+    rep = _bare(setup_versions={"timesync-setup": "0.3"})
+    [x] = docker_exposure.view(rep)
+    assert x["helper"] == "missing" and "fix" not in x
+    assert docker_exposure.view(rep, fresh=True)[0]["helper"] == "installing"
+    rep["setup_versions"]["sockfix-setup"] = "0.3"
+    assert "helper" not in docker_exposure.view(rep)[0]
+    # агент не шлет версий helper'ов (до 1.46): стоит ли helper, неизвестно - без пометки
+    assert "helper" not in docker_exposure.view(_bare())[0]
+    # отчет helper'а есть - значит стоит, даже если версии не пришли
+    assert "helper" not in docker_exposure.view(_rep([READY]))[0]
+    # алерт и "Что сломано" пометки не видят
+    assert "helper" not in docker_exposure.exposed(rep)[0]
+
+
+def test_node_with_the_socket_and_no_helper_goes_to_kervax_outdated():
+    """Прокси держит сокет, sockfix-setup на ноде нет: после окна свежей ноды она в kervax_outdated,
+    плейбук -l kervax_outdated ставит helper по его условию. В окне (установщик еще ставит helper'ы
+    по списку) не зовем, но проблема в kervax_docker_sock видна сразу."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.api.ansible import node_of
+    from app.models import Server
+
+    now = datetime.now(timezone.utc)
+    s = Server(id=5, name="node-a", token_hash="x", enabled=True, last_seen=now, offline_after_seconds=180,
+               last_report=_bare(setup_versions={"timesync-setup": "0.3"}), first_report_at=now - timedelta(minutes=4))
+    cur = {"timesync-setup": "0.3", "sockfix-setup": "0.3"}
+    n = node_of(s, cur, now)
+    assert n is not None and n.issues == ["docker_sock"] and n.outdated == []
+    s.first_report_at = now - timedelta(minutes=40)
+    n = node_of(s, cur, now)
+    assert [a.name for a in n.outdated] == ["sockfix-setup"] and n.outdated[0].installed is None and n.rollout
+
+
+def test_when_covers_every_proxy_the_panel_wants_the_helper_for():
+    """Панель зовет sockfix-setup по образу прокси (docker_exposure), плейбук и установщик ставят его по
+    KERVAX_SETUP_WHEN на ноде. Прокси, которого условие не узнает, держал бы ноду в kervax_outdated
+    вечно: панель просит, плейбук пропускает. В выводе docker ps образ виден целиком - ищем его имя."""
+    when = re.search(r'^KERVAX_SETUP_WHEN="([^"]+)"', SRC, re.MULTILINE).group(1)
+    pats = re.findall(r"-e (\S+)", when)
+    for base in [*docker_exposure._EDGE, "caddy"]:
+        assert docker_exposure.proxy_kind(f"example/{base}:1"), base
+        assert any(p in base for p in pats), base

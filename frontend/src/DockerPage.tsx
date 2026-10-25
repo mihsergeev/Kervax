@@ -26,6 +26,7 @@ import { CountryFlag } from './CountryFlag'
 import { FixSteps, useFixDone } from './FixSteps'
 import { dockRiskText, memLimChip, proxyBuilt, shortList, srvIpHit, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
+import { helperCmd, hostOf } from './FleetUpdate'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 import { fmtBytes } from './units'
@@ -174,7 +175,7 @@ function SockDiff({ diff }: { diff: string }) {
 
 type Exposed = NonNullable<Server['docker_exposed']>[number]
 
-function SockWarning({ items }: { items: Exposed[] }) {
+function SockWarning({ items, server }: { items: Exposed[]; server: Server }) {
   const { t } = useI18n()
   const ready = items.filter((i) => i.fix?.ok)
   const manual = items.filter((i) => !i.fix?.ok)
@@ -224,13 +225,21 @@ function SockWarning({ items }: { items: Exposed[] }) {
                   name: i.name, why: t(SOCK_WHY[i.fix.why ?? ''] ?? 'не вышло'),
                   detail: i.fix.why_detail ? ` (${i.fix.why_detail})` : '',
                 })
-              : t('Готовый файл соберет helper sockfix-setup, пока руками.')}
+              : i.helper === 'missing'
+                ? t('Helper sockfix-setup на ноде не стоит, без него готового файла не будет. Поставить его или поправить руками:')
+                : i.helper === 'installing'
+                  ? t('Установщик еще ставит helper-скрипты, готовый файл соберет sockfix-setup через несколько минут. Пока руками.')
+                  : t('Готовый файл соберет helper sockfix-setup, пока руками.')}
           </div>
           <FixSteps steps={[
-            { id: 'rm' },
+            // без helper'а: плейбук по имени ноды ставит его по условию из самого скрипта
+            ...(i.helper === 'missing' ? [{ id: 'helper', cmd: helperCmd([hostOf(server)]) }] : []),
+            { id: 'rm', alt: i.helper === 'missing' },
             { id: 'add', cmd: SOCK_FIX[i.kind] ? snippet(i) : undefined },
             { id: 'up' },
-          ]} text={(st) => st.id === 'rm'
+          ]} text={(st) => st.id === 'helper'
+            ? t('Поставить helper sockfix-setup, через пару минут здесь будет готовый файл')
+            : st.id === 'rm'
             ? (i.fix?.file
               ? t('В {file} у сервиса {svc} убрать из volumes строку с docker.sock', { file: i.fix.file, svc: i.fix.service ?? i.kind })
               : t('В compose прокси убрать из volumes строку с docker.sock'))
@@ -1212,7 +1221,7 @@ function DockerHostModal({
                 <div className="srv-sec">
                   {sockDone.bars}
                   {riskDone.bars}
-                  {exposed.length > 0 && <SockWarning items={exposed} />}
+                  {exposed.length > 0 && <SockWarning items={exposed} server={s} />}
                   {(s.docker_risk?.length ?? 0) > 0 && <RiskWarning server={s} canAct={canAct} onChanged={onChanged} />}
                   {!exposed.length && !(s.docker_risk?.length ?? 0) && !sockDone.done.length && !riskDone.done.length && (
                     <div className="srv-empty">
