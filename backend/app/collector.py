@@ -3922,7 +3922,8 @@ def _metric_row(s: Server, state: dict, now: datetime, kind: str, value: float) 
     ss = getattr(s, "alert_sustain_seconds", None)
     hold = _SUSTAIN_DEFAULT if ss is None else max(int(ss), 0)
     cool = _parse_iso(str(state.get(f"{kind}_cool") or "")) if value < line else None
-    left = hold - ((now - cool).total_seconds() if cool else 0)
+    # после выдержки - еще общая выдержка отбоя цикла алертов (_SETTLE_S)
+    left = hold + _SETTLE_S - ((now - cool).total_seconds() if cool else 0)
     mins = max(1, -(-int(left) // 60))
     return text + f" - снимется, если продержится ниже {line}{unit} {'еще ' if cool else ''}{mins} мин"
 
@@ -4448,6 +4449,15 @@ def _who(ctx: dict) -> list[str]:
     return [str(ctx["mount"])] if ctx.get("mount") else []
 
 
+def _held_only(ctx: dict) -> bool:
+    """Уровень держит только выдержка отбоя: в свежем отчете беды уже нет (sustain и sustain_lvl
+    ведут "cool", restarts_hold и units_hold держат объявленное при пустом перечне). Такой уровень -
+    не новость: "держится дольше обычного" и "вернулось и держится" о нем были бы сообщением без
+    самой беды, одной припиской"""
+    items = ctx.get("items")
+    return bool(ctx.get("cool")) or (isinstance(items, list) and not items)
+
+
 def _again_of(st: dict, key: str, level: int, sig, now: datetime) -> dict | None:
     """Прошлый отбой, продолжением которого будет эта тревога, или None (тревога новая)."""
     was = st.get(f"{key}_was")
@@ -4512,6 +4522,16 @@ def routine_end(hist: object, now_ts: float) -> list:
     h = [[a, b] for a, b in _hist_pairs(hist)]
     if h and h[-1][1] is None:
         h[-1][1] = now_ts
+    return h
+
+
+def routine_open(hist: object, begun: datetime | None) -> list:
+    """История, где последний эпизод снова идет: беда вернулась, пока уровень держала выдержка
+    отбоя. begun - с какого момента без перерыва держится уровень ("<вид>_from"): эпизод, который
+    кончился раньше, - прошлый, его не трогаем"""
+    h = [[a, b] for a, b in _hist_pairs(hist)]
+    if begun is not None and h and h[-1][1] is not None and h[-1][1] >= begun.timestamp():
+        h[-1][1] = None
     return h
 
 
@@ -5937,7 +5957,10 @@ def _server_conditions(s: Server, now: datetime,
             if (now - started).total_seconds() < (sustain_s if cool_s is None else cool_s):
                 since, lvl, cool = state.get(f"{key}_since"), 1, started.isoformat()
             else:
-                since, lvl = None, 0
+                # выдержка вышла, а уровень в состоянии держит общая выдержка отбоя (_SETTLE_S):
+                # "_cool" не сбрасываем, иначе следующий тик начал бы выдержку заново и отбой не
+                # пришел бы никогда
+                since, lvl, cool = None, 0, started.isoformat()
         else:
             since, lvl = None, 0
         ctx["since"] = since
@@ -5966,7 +5989,7 @@ def _server_conditions(s: Server, now: datetime,
             if (now - started).total_seconds() < cool_s:
                 since, lvl, cool = state.get(f"{key}_since"), alerted, started.isoformat()
             else:
-                since, lvl = None, 0
+                since, lvl, cool = None, 0, started.isoformat()  # как в sustain: "_cool" до отбоя
         else:
             since, lvl = None, 0
         ctx["since"] = since
@@ -6042,7 +6065,7 @@ def _server_conditions(s: Server, now: datetime,
             # объявленный троттлинг снимаем после _THROTTLE_CALM_S спокойствия ("_cool" - с какого момента)
             started = _parse_iso(str(state.get("throttle_cool") or "")) or now
             calm = (now - started).total_seconds() >= _THROTTLE_CALM_S
-            lvl, cool = (0, None) if calm else (1, started.isoformat())
+            lvl, cool = (0 if calm else 1), started.isoformat()  # "_cool" до отбоя, как в sustain
         else:
             lvl = 0
         out["throttle"] = (lvl, {"value": round(thr), "streak": streak, "cool": cool})
@@ -7121,7 +7144,7 @@ async def evaluate_servers(
                             apply(s.id, f"{key}_told", sorted(set(was.get("sig") or []) | set(ctx.get("sig") or [])))
                             apply(s.id, f"{key}_told_lvl", max(int(was.get("lvl") or 0), level))
                         continue
-                elif level and hush is not None and (now - hush).total_seconds() >= _AGAIN_TELL:
+                elif level and hush is not None and (now - hush).total_seconds() >= _AGAIN_TELL                         and not _held_only(ctx):
                     # повтор держится часами: это уже не волна, говорим как о новой тревоге
                     prev = 0
                     ctx["_note"] = f"после отбоя вернулось и держится уже {tg_fmt.dur((now - hush).total_seconds())}"
@@ -7226,7 +7249,17 @@ async def evaluate_servers(
                 now_ts = now.timestamp()
                 quiet = st.get(f"{key}_quiet")
                 hist = st.get(f"{key}_hist") or []
-                if level and not prev:
+                if level and prev and _held_only(ctx):
+                    # беда ушла, уровень держит выдержка отбоя: эпизод кончился, когда ушла беда.
+                    # Конец по отбою добавлял к эпизоду час выдержки, а выдержка, затянувшаяся за
+                    # обычный конец, уходила алертом "держится дольше" без самой беды в тексте
+                    gone = _parse_iso(str(ctx.get("cool") or ""))
+                    closed = routine_end(hist, gone.timestamp() if gone else now_ts)
+                    if closed != hist:
+                        apply(s.id, f"{key}_hist", closed)
+                    if quiet:
+                        continue
+                elif level and not prev:
                     hist = routine_start(hist, now_ts)
                     apply(s.id, f"{key}_hist", hist)
                     r = routine_of(hist[:-1], now_ts)
@@ -7237,7 +7270,10 @@ async def evaluate_servers(
                         apply(s.id, f"{key}_quiet", r[1] + _ROUTINE_OVER)
                         apply(s.id, f"{key}_usual", usual)
                         continue
-                elif level and quiet:
+                elif level and (back := routine_open(hist, _parse_iso(str(st.get(f"{key}_from") or "")))) != hist:
+                    # вернулось, пока держала выдержка: тот же эпизод, а не уже кончившийся
+                    apply(s.id, f"{key}_hist", back)
+                if level and prev and quiet and not _held_only(ctx):
                     if now_ts < float(quiet):
                         if level != prev:
                             apply(s.id, key, level)

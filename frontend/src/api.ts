@@ -3323,6 +3323,8 @@ export type OomEpisode = {
   text: string
   culprit?: string // кто занимал память: svc:<служба> | ct:<контейнер> | pod:<под без хеша или uid> | cg:<cgroup> | proc:<процесс>
   muted?: boolean // не алертит: заглушен весь OOM или виновник
+  // OOM по лимиту cgroup (kind memcg): чей лимит, как owner у убитых; иначе null
+  limit_owner?: { kind: string; name: string; unknown: boolean } | null
 }
 export function serverOom(id: number): Promise<{ episodes: OomEpisode[]; helper: boolean }> {
   return api(`/api/servers/${id}/oom`)

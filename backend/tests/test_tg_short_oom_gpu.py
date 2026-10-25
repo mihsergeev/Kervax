@@ -65,15 +65,15 @@ def test_oom_in_pod_limit_names_the_pod():
     e = oom.episodes(oom.records(POD_BLOCK))[-1]
     names = {"e551fc7f": "default/wordpress-mariadb-7d9f8b6c5d-x2k4q"}
     assert _clean(*oom.episode_short(e, timezone.utc, set(), {}, names)) == (
-        "Кончилась память (OOM)", ["Убит: mariadbd", "Под: wordpress-mariadb (лимит 1гб)"])
+        "Убит по лимиту памяти (OOM)", ["mariadbd - под wordpress-mariadb уперся в свой лимит 1гб"])
     # имени нет (воркер без kube-api) - начало uid с пометкой, чтобы uid не читался как имя
-    assert oom.episode_short(e, timezone.utc, set())[1][1] == "Под: e551fc7f (имя неизвестно, лимит 1гб)"
+    assert oom.episode_short(e, timezone.utc, set())[1] == ["mariadbd - под e551fc7f (имя неизвестно) уперся в свой лимит 1гб"]
     # через alert_step: короткий текст в "oom_short", сам алерт не изменился
     rep = _oom_rep(POD_BLOCK)
     s = SimpleNamespace(oom_total=2, oom_victim="", last_report=rep, alert_mutes=[])
     fire, done, _ = oom.alert_step(s, {"oom_end": 0.0}, rep, NOW, timezone.utc, set(), pod_names=names)
-    assert len(fire) == 2 and fire[1].startswith("кончилась память в лимите пода wordpress-mariadb")
-    assert done["oom_short"] == ("Кончилась память (OOM)", ["Убит: mariadbd", "Под: wordpress-mariadb (лимит 1гб)"])
+    assert len(fire) == 2 and fire[1].startswith("OOM по лимиту памяти пода wordpress-mariadb")
+    assert done["oom_short"] == ("Убит по лимиту памяти (OOM)", ["mariadbd - под wordpress-mariadb уперся в свой лимит 1гб"])
     assert oom.tg_short(done["oom_short"]) == done["oom_short"] and oom.tg_short(None) is None
 
 
@@ -81,7 +81,7 @@ def test_oom_on_host_pool_and_restarted_units():
     e = oom.episodes(oom.records(HOST_BLOCK))[-1]
     # без "больше всего памяти", RAM/swap и счетчика за неделю; сессия пользователя - мелочь
     assert _clean(*oom.episode_short(e, timezone.utc, set())) == (
-        "Кончилась память (OOM)", ["Убит: php-fpm7.4 (пул idv)", "Перезапустились: mysql, php7.4-fpm"])
+        "Кончилась память на сервере (OOM)", ["Убит: php-fpm7.4 (пул idv)", "Перезапустились: mysql, php7.4-fpm"])
     # служба не поднялась - это важнее
     assert oom.episode_short(e, timezone.utc, {"mysql.service"})[1][1] == "Не поднялась: mysql"
     # процесс службы: имя службы, только если оно что-то добавляет
@@ -99,7 +99,7 @@ def test_oom_late_and_counter_only():
     late = NOW + timedelta(hours=2)
     rep_late = dict(rep, clock_unix=late.timestamp(), extras={"oom": dict(HOST_BLOCK, ts=late.timestamp() - 20)})
     _fire, done, _ = oom.alert_step(s, {"oom_end": 0.0}, rep_late, late, timezone.utc, set())
-    assert done["oom_short"][0] == "Кончилась память (OOM) в " + datetime.fromtimestamp(TS - 300, timezone.utc).strftime("%H:%M")
+    assert done["oom_short"][0] == "Кончилась память на сервере (OOM) в " + datetime.fromtimestamp(TS - 300, timezone.utc).strftime("%H:%M")
     # helper'а нет: по счетчику ядра, жертва без pid
     bare = {"clock_unix": TS}
     s = SimpleNamespace(oom_total=2, oom_victim="java (pid 7)", last_report=bare, alert_mutes=[])

@@ -92,6 +92,10 @@ def step(state: dict, key: str, value: float, raw: int, low: float | None, now: 
             started = _iso(state.get(f"{key}_cool")) or now
             if (now - started).total_seconds() < CALM_S:
                 lvl, since, cool = prev, state.get(f"{key}_since"), started.isoformat()
+            else:
+                # уровень 0, но "_cool" держим до отбоя: его придерживает общая выдержка отбоя
+                # цикла алертов, а новый отсчет с нуля не дал бы отбою прийти никогда
+                cool = started.isoformat()
     elif raw:
         since = state.get(f"{key}_since") or now.isoformat()
         begun = _iso(since) or now
