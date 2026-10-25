@@ -28,6 +28,7 @@ from app import request_watch
 from app import panel_errors
 from app import inside_probe
 from app import site_flap
+from app import site_group
 from app import job_logs, kube_cron
 from app import retention as retention_mod
 from app import db_health
@@ -107,6 +108,7 @@ from app.models import (
     ServerMetric,
     ServerTraffic,
     ServerUsage,
+    TgAlert,
     WebErrorSample,
 )
 
@@ -1084,7 +1086,8 @@ async def run_due_checks(
                 _apply_expiry(row, exp_map[check.id], now, pending, doms)
         await session.commit()
 
-    if pending:
+    # группа мониторов одного места ждет отбоя (app/site_group.py): смотрим и без новых событий
+    if pending or await site_group.any_open(session_factory):
         try:
             await _send_alerts(session_factory, settings, pending, now)
         except Exception:  # noqa: BLE001 — алерты не должны ронять цикл
@@ -1212,6 +1215,8 @@ async def _send_alerts(
         before_by: dict[int, str] = {}
         # сайт лег снаружи - открывается ли он изнутри своего сервера (app/inside_probe.py)
         inside_by: dict[int, str] = {}
+        # где монитор: сервер панели или адрес (app/site_group.py) - сбои одного места одним сообщением
+        places: dict[int, tuple] = {}
         if ids:
             rows = await session.execute(
                 select(
@@ -1256,6 +1261,9 @@ async def _send_alerts(
                         held.add(c.id)
                     elif c.id in down_ids and pids:
                         pids_by[c.id] = pids
+                for c in lite:
+                    if c.id not in held and c.id not in snoozed and (pl := site_group.place(c, pidx)):
+                        places[c.id] = pl
                 if pids_by:
                     try:
                         all_p = set().union(*pids_by.values())
@@ -1296,6 +1304,10 @@ async def _send_alerts(
     # их имена - в историю алертов строкой на каждый: иначе у свернутого в истории была тревога
     # без отбоя или отбой без тревоги
     more_names: dict[int, list[str]] = {}
+    # сбои, которые можно свернуть с соседями по серверу или адресу: индекс в texts -> (группа,
+    # монитор, строка для списка); grp_fold - мониторы, уже свернутые в это сообщение по домену
+    grp_src: dict[int, tuple[str, int, dict]] = {}
+    grp_fold: dict[int, list[tuple[int, dict]]] = {}
     # Pending(*p): на вход может прийти и голый кортеж (в т.ч. из тестов) —
     # приводим к именованному, недостающий icon подставит дефолт
     for kind, name, status, msg, inc_id, check_id, flag, icon in map(_as_pending, pending):
@@ -1347,6 +1359,8 @@ async def _send_alerts(
                 same_hosts[same].append(host or name)
                 if check_id is not None:
                     more_ids.setdefault(same_at[same], []).append(check_id)
+                    grp_fold.setdefault(same_at[same], []).append(
+                        (check_id, _grp_member(name, host, link_url, "")))
                 more_names.setdefault(same_at[same], []).append(name)
                 commits.append((kind, inc_id, check_id, flag))
                 continue
@@ -1405,6 +1419,9 @@ async def _send_alerts(
                                 ref=f"chk:{check_id}" if check_id is not None and rk else "",
                                 full=full, line=line))
         commits.append((kind, inc_id, check_id, flag))
+        if is_default and check_id in places and (g_lvl := site_group.lvl_of(kind, status)):
+            why = sh[2][0] if isinstance(sh, tuple) and sh[2] else ""
+            grp_src[len(texts) - 1] = (g_lvl, check_id, _grp_member(name, host, link_url, why))
 
     # дописываем счётчик только там, где мониторов реально больше одного (в полный текст)
     for zone, idx in dom_at.items():
@@ -1434,6 +1451,14 @@ async def _send_alerts(
                                                recovery=old.recovery, full=old.full, line=old.line)
                                     for n in names if n != old.target]
 
+    # мониторы одного сервера или адреса - одним сообщением, отбой - когда в норме все
+    grp_after = None
+    try:
+        texts, grp_after = await _site_groups(session_factory, cfg, texts, grp_src, grp_fold, places, pending,
+                                              now, base)
+    except Exception:  # noqa: BLE001 - без свертки, но алерты уходят
+        log.warning("не свернул мониторы по серверу и адресу", exc_info=True)
+
     # parse_mode=HTML: имя монитора идёт ссылкой <a href>. Весь контент экранирован.
     recs = {p.check_id: p for p in map(_as_pending, pending)
             if p.kind in _RECOVERY_KINDS and p.check_id is not None}
@@ -1446,6 +1471,11 @@ async def _send_alerts(
         return
     for cid in recs:
         _REC_RETRY.pop(cid, None)
+    if grp_after is not None:
+        try:
+            await grp_after()
+        except Exception:  # noqa: BLE001 - сообщения уже ушли, группы поправятся на следующем тике
+            log.warning("группы мониторов не записаны", exc_info=True)
     async with session_factory() as session:
         for kind, inc_id, check_id, flag in commits:
             if kind == "bad" and inc_id is not None:
@@ -1459,6 +1489,198 @@ async def _send_alerts(
                     for attr, value in flag if isinstance(flag, list) else [flag]:
                         setattr(row, attr, value)
         await session.commit()
+
+
+def _grp_member(name: str, host: str, url: str, why: str) -> dict:
+    """Монитор в группе места: строка списка в сообщении и имя для истории."""
+    return {"name": name, "host": host or name, "url": url, "why": site_group.short_why(why) if why else "",
+            "ments": _MENTION_RE.findall(name or "")}
+
+
+# отбои, которые придерживает группа места
+_GROUP_REC = ("recovery", "recstable", "flakyrec")
+
+
+async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold: dict, places: dict,
+                       pending: list, now: datetime, base: str):
+    """Мониторы одного сервера или адреса (app/site_group.py).
+
+    Сбои одного места в этом тике - одно сообщение. Сбой места, о котором уже написали (группа
+    открыта, прошлый сбой не раньше JOIN), - не сообщение, а строка в отправленном: его правим
+    после доставки, а в историю - своя строка. Отбои членов группы молчат, пока в норму не придут
+    все, тогда одно сообщение. Возвращает (что слать, что сделать после доставки)."""
+    async with session_factory() as session:
+        state = await site_group.load(session)
+    if not src and not state:
+        return texts, None
+    groups = json.loads(json.dumps(state))
+    p_all = list(map(_as_pending, pending))
+    fails = {p.check_id for p in p_all if p.check_id is not None and p.kind in ("bad", "flaky")}
+    recs = {p.check_id for p in p_all if p.check_id is not None and p.kind in _GROUP_REC}
+    drop: set[int] = set()
+    swap: dict[int, alerts.Msg] = {}
+    quiet: list = []         # дописанные в отправленное: только в историю
+    edits: set[str] = set()  # группы, чье сообщение поправить
+    fresh: dict[str, alerts.Msg] = {}  # группы, чье сообщение уходит сейчас: запомнить, куда ушло
+    # править отправленное умеет только Telegram: без него id сообщений не нужны
+    track = bool(cfg.get("telegram_token"))
+
+    by_place: dict[tuple, list[int]] = {}
+    for i, (lvl, cid, _m) in src.items():
+        by_place.setdefault((places[cid][0], lvl), []).append(i)
+    srv_ids = {places[src[i][1]][2] for idxs in by_place.values() for i in idxs} - {None}
+    srv_ids |= {g.get("srv") for g in groups.values() if g.get("srv")}
+    cause: dict[int, list[str]] = {}
+    if srv_ids:
+        try:
+            async with session_factory() as session:
+                for sid, st in (await session.execute(
+                        select(Server.id, Server.alert_state).where(Server.id.in_(srv_ids)))).all():
+                    got = [site_group.SERVER_CAUSE[k] for k, v in (st or {}).items()
+                           if k in site_group.SERVER_CAUSE and isinstance(v, int) and not isinstance(v, bool) and v > 0]
+                    if got:
+                        cause[sid] = list(dict.fromkeys(got))
+        except Exception:  # noqa: BLE001 - без строки про сервер
+            log.warning("не прочитал тревоги серверов для группы мониторов", exc_info=True)
+
+    for (key, lvl), idxs in by_place.items():
+        g = site_group.open_for(groups, key, lvl, now)
+        new = g is None
+        if new:
+            _k, label, srv = places[src[idxs[0]][1]]
+            g = site_group.new_group(key, lvl, await site_group.label_for(key, label), srv, now)
+            first = texts[idxs[0]]
+            g.update(first=first.target, kind=first.kind, grp=first.group)
+            groups[g["id"]] = g
+        for i in idxs:
+            _lvl, cid, mem = src[i]
+            for c, mm in [(cid, mem)] + fold.get(i, []):
+                g["members"].setdefault(str(c), mm)
+        g["last"] = now.isoformat()
+        if not new:
+            # о месте уже написали: этот сбой - строкой в том сообщении
+            drop.update(idxs)
+            quiet.extend(texts[i] for i in idxs)
+            g["solo"] = False
+            edits.add(g["id"])
+        elif len(idxs) > 1:
+            g["solo"] = False
+            text, full, line = site_group.alert_text(g, base, cause.get(g.get("srv")))
+            m = alerts.Msg(text, "sites", g["grp"], kind=g["kind"], target=g["first"],
+                           ref="chk:" + ",".join(g["members"]), full=full, line=line)
+            m.parts = [p for i in idxs for p in getattr(texts[i], "parts", None) or [texts[i]]]
+            if track:
+                m.sent_to = []
+            swap[idxs[0]] = m
+            drop.update(idxs[1:])
+            fresh[g["id"]] = m
+        else:
+            if track:
+                texts[idxs[0]].sent_to = []
+            fresh[g["id"]] = texts[idxs[0]]
+
+    # отбои членов объявленной группы молчат: придет один на всех
+    for i, m in enumerate(texts):
+        if i in drop or not getattr(m, "recovery", False):
+            continue
+        obj, ids = alerts._ref_ids(getattr(m, "ref", ""))  # noqa: SLF001
+        if obj == "chk" and ids and all(
+                any(g.get("kind") == m.kind for g in site_group.member_of(groups, c)) for c in ids):
+            drop.add(i)
+
+    want = {int(c) for g in groups.values() for c in g.get("members") or {}}
+    db: dict[int, tuple] = {}
+    if want:
+        async with session_factory() as session:
+            db = {i: (en, fs, fn) for i, en, fs, fn in (await session.execute(
+                select(Check.id, Check.enabled, Check.flap_state, Check.flaky_notified)
+                .where(Check.id.in_(want)))).all()}
+
+    def is_ok(c: int) -> bool:
+        if c in fails:
+            return False
+        if c in recs:
+            return True
+        row = db.get(c)
+        # монитор удален или выключен - ждать от него нечего
+        return row is None or not row[0] or (site_flap.level(row[1]) is None and not row[2])
+
+    backs: list[alerts.Msg] = []
+    for gid, g in list(groups.items()):
+        oks = {c: site_group.ok_since(g, c, is_ok(int(c)), now) for c in g.get("members") or {}}
+        if g.get("solo"):
+            # одиночное сообщение: отбой у него свой, обычный
+            if all(v is not None for v in oks.values()):
+                groups.pop(gid)
+            continue
+        good = [c for c, v in oks.items() if v is not None]
+        ready = good if len(good) == len(oks) else [c for c in good if now - oks[c] >= site_group.PARTIAL]
+        if not ready:
+            continue
+        mem = g["members"]
+        left = [mem[c]["host"] for c in mem if c not in ready]
+        text = site_group.back_text(g, base, [mem[c]["host"] for c in ready], left)
+        m = alerts.Msg(text, "sites", g.get("grp", ""), kind=g.get("kind", ""), target=g.get("first", ""),
+                       recovery=True, full=text)
+        back = site_group.verb(1, site_group.LVL_BACK.get(g.get("lvl"), "снова отвечают"))
+        m.parts = [alerts.Msg(tg_fmt.recovery(html.escape(mem[c]["host"]), back), "sites", g.get("grp", ""),
+                              kind=g.get("kind", ""), target=mem[c]["name"], recovery=True) for c in ready]
+        if left:
+            m.resolves = []  # сообщение группы еще не решено: часть лежит
+            for c in ready:
+                mem.pop(c, None)
+                g["ok"].pop(c, None)
+        else:
+            m.resolves = [(g.get("kind", ""), g.get("first", ""))] + [(p.kind, p.target) for p in m.parts]
+            groups.pop(gid)
+        backs.append(m)
+
+    for gid in [k for k, g in groups.items() if site_group.stale(g, now)]:
+        groups.pop(gid)
+
+    out = [swap.get(i, m) for i, m in enumerate(texts) if i not in drop] + backs
+
+    async def after() -> None:
+        for gid, m in fresh.items():
+            if gid in groups:
+                groups[gid]["msgs"] = list(getattr(m, "sent_to", None) or [])
+        if groups != state:
+            async with session_factory() as session:
+                await site_group.save(session, groups)
+        if quiet:
+            await alerts.record_history(session_factory, quiet)
+        for gid in edits:
+            if gid in groups:
+                await _site_group_edit(session_factory, cfg, groups[gid], base, cause.get(groups[gid].get("srv")))
+
+    return out, after
+
+
+async def _site_group_edit(session_factory, cfg: dict, g: dict, base: str, cause: list[str] | None) -> None:
+    """Дописать в отправленное сообщение группы новый монитор: правка в Telegram. Если под
+    сообщением кнопки - текст правится и в их записи, чтобы "взял" и мьют его не откатили."""
+    msgs = g.get("msgs") or []
+    if not msgs or not cfg.get("telegram_token"):
+        return
+    text = site_group.alert_text(g, base, cause)[0]
+    markup = None
+    if alerts.buttons_on(cfg):
+        where = {(str(x.get("chat")), x.get("id")) for x in msgs}
+        since = (site_group.ts(g.get("at")) or datetime.now(timezone.utc)) - timedelta(minutes=5)
+        async with session_factory() as session:
+            row = None
+            for r in (await session.scalars(select(TgAlert).where(
+                    TgAlert.kind == g.get("kind", ""), TgAlert.ts >= since))).all():
+                if any((str(x.get("chat")), x.get("id")) in where for x in r.messages or []):
+                    row = r
+            if row is not None:
+                row.text = text
+                row.ref = ("chk:" + ",".join(g.get("members") or {}))[:255]
+                await session.commit()
+                tz = cfg.get("tz") or "UTC"
+                text, markup = tg_buttons.row_text(row, tz), tg_buttons.row_keyboard(row)
+    for x in msgs:
+        await alerts.tg_edit(cfg, x.get("chat"), x.get("id"), text, markup)
 
 
 async def tamper_alerts(session_factory, settings: Settings, now: datetime) -> None:

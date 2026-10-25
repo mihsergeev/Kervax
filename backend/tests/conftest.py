@@ -105,6 +105,15 @@ def _no_dns_lookups(monkeypatch):
     monkeypatch.setattr(parents, "_lookup", no_addrs)
     monkeypatch.setattr(parents, "_dns", {})
 
+    # обратное имя адреса для подписи группы мониторов (app/site_group.py)
+    from app import site_group
+
+    async def no_ptr(ip):
+        raise OSError("в тестах без DNS")
+
+    monkeypatch.setattr(site_group, "_ptr", no_ptr)
+    monkeypatch.setattr(site_group, "_ptr_cache", {})
+
     # куда панели можно ходить (app/net_guard.py): имена не резолвим, судим по самому адресу
     from app import net_guard
 
