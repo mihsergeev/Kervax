@@ -76,6 +76,9 @@ class Msg(str):
                       self.ref, mutes=self.mutes)
         if getattr(self, "parts", None):
             out.parts = self.parts
+        # куда ушло сообщение (app/site_group.py его потом правит): список общий с исходным
+        if getattr(self, "sent_to", None) is not None:
+            out.sent_to = self.sent_to
         return out
 
 
@@ -525,18 +528,19 @@ def _digest(messages: list[str]) -> str:
     return body
 
 
-async def tg_edit(cfg: dict, chat: str, message_id: int, text: str, reply_markup: dict) -> None:
+async def tg_edit(cfg: dict, chat: str, message_id: int, text: str, reply_markup: dict | None) -> None:
     """Поправить отправленное сообщение: дописать статус и сменить кнопки. Сбой не страшен."""
     base = (cfg.get("telegram_api") or "https://api.telegram.org").rstrip("/")
     try:
         async with _link() as link:
             if link.tg_down:
                 return  # Telegram в этой пачке уже не ответил: правка подождет до следующего раза
+            body = {"chat_id": chat, "message_id": message_id, "text": _clip(text, True), "parse_mode": "HTML",
+                    "disable_web_page_preview": True}
+            if reply_markup is not None:
+                body["reply_markup"] = reply_markup
             try:
-                await (await link.client()).post(f"{base}/bot{cfg['telegram_token']}/editMessageText", json={
-                    "chat_id": chat, "message_id": message_id, "text": _clip(text, True), "parse_mode": "HTML",
-                    "disable_web_page_preview": True, "reply_markup": reply_markup,
-                })
+                await (await link.client()).post(f"{base}/bot{cfg['telegram_token']}/editMessageText", json=body)
             except httpx.TransportError as exc:
                 link.tg_down = f"Telegram не отвечает ({type(exc).__name__}), остальное в этот раз не слали"
                 raise
@@ -547,9 +551,13 @@ async def tg_edit(cfg: dict, chat: str, message_id: int, text: str, reply_markup
 async def tg_resolve(session_factory, cfg: dict, messages: list) -> None:
     """Пришел отбой: алерты с кнопками про то же (вид + объект) помечаем решенными и
     дописываем в них "снова в норме" - эскалировать и глушить больше нечего."""
-    pairs = {(getattr(p, "kind", ""), getattr(p, "target", "")) for m in messages
-             if getattr(m, "recovery", False) and getattr(m, "kind", "")
-             for p in getattr(m, "parts", None) or [m]}
+    pairs = set()
+    for m in messages:
+        if not getattr(m, "recovery", False) or not getattr(m, "kind", ""):
+            continue
+        own = getattr(m, "resolves", None)  # свой список (отбой группы мониторов), [] - ничего
+        pairs |= set(own) if own is not None else {
+            (getattr(p, "kind", ""), getattr(p, "target", "")) for p in getattr(m, "parts", None) or [m]}
     if not pairs:
         return
     now = datetime.now(timezone.utc)
@@ -640,6 +648,8 @@ async def _send_personal(link: "_Link", api: str, common: str, users: list, mess
                 mid = await link.tg(api, token, user.tg_chat_id, text, parse_mode, markup)
                 if aid and mid is not None and sent is not None:
                     sent.setdefault(aid, []).append({"chat": str(user.tg_chat_id), "id": mid})
+                if mid is not None and not own_bot:
+                    _note_sent(text, [{"chat": str(user.tg_chat_id), "id": mid}])
             except Exception as exc:  # noqa: BLE001
                 log.warning("персональный алерт для %s не отправлен: %s", user.username, exc)
                 break  # чат недоступен — остальные сообщения этому же адресату тоже
@@ -773,6 +783,14 @@ async def with_notes(session_factory, messages: list[str]) -> list[str]:
     return out
 
 
+def _note_sent(m, where: list) -> None:
+    """Сообщение, которое потом поправят (sent_to), запоминает, куда ушло: чат и id в Telegram.
+    Только через общий бот - править будет он."""
+    lst = getattr(m, "sent_to", None)
+    if lst is not None and where:
+        lst.extend(x for x in where if x not in lst)
+
+
 def _channel_count(cfg: dict) -> int:
     """Сколько общих каналов настроено: алерт считается полученным, если принял хоть один."""
     return int(bool(cfg.get("telegram_token") and cfg.get("telegram_chat"))) + int(bool(cfg.get("webhook")))
@@ -809,13 +827,14 @@ async def _send_common(cfg: dict, idx: list[int], messages: list[str], threshold
         m = messages[i]
         aid = rows.get(i)
         out: list = []
-        if aid:
-            markup = tg_buttons.keyboard(aid, getattr(m, "kind", ""))
+        if aid or getattr(m, "sent_to", None) is not None:
+            markup = tg_buttons.keyboard(aid, getattr(m, "kind", "")) if aid else None
             errors = await send_alert(cfg, m, parse_mode, markup, out)
         else:
             errors = await send_alert(cfg, m, parse_mode)
         if aid and out:
             sent.setdefault(aid, []).extend(out)
+        _note_sent(m, out)
         g, a = _outcome(errors, channels, m)
         if g:
             got.add(i)
@@ -853,6 +872,8 @@ async def _send_batch_via(link: "_Link", cfg: dict, chat: str, items: list[tuple
             mid = await link.tg(api, token, chat, text, parse_mode, markup)
             if aid and mid is not None:
                 sent.setdefault(aid, []).append({"chat": chat, "id": mid})
+            if mid is not None:
+                _note_sent(text, [{"chat": chat, "id": mid}])
         except Exception as exc:  # noqa: BLE001 — алерт не должен ронять цикл
             log.warning("Telegram-алерт в чат %s не отправлен: %s", chat, exc)
             failed.append(i)
