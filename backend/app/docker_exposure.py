@@ -87,10 +87,25 @@ def commands(fx: dict) -> dict[str, str]:
     }
 
 
-def view(rep: dict) -> list[dict]:
-    """Для карточки: прокси с сокетом и готовое исправление ("fix"), если helper его прислал"""
+def view(rep: dict, fresh: bool = False) -> list[dict]:
+    """Для карточки: прокси с сокетом и готовое исправление ("fix"), если helper его прислал.
+    Исправления нет - "helper" говорит почему: "missing" - helper'а sockfix-setup на ноде нет,
+    "installing" - нет, но нода только что поставлена (fresh) и установщик еще идет по списку.
+    На одной ноде установщик пять минут ставил smartmontools для diskhealth-setup, до sockfix-setup
+    не дошел, а карточка обещала, что файл соберет helper, которого там не было."""
     fx = fixes(rep)
-    return [{**x, "fix": fx[x["name"]]} if x["name"] in fx else x for x in exposed(rep)]
+    state = helper_state(rep, fresh)
+    return [{**x, "fix": fx[x["name"]]} if x["name"] in fx else ({**x, "helper": state} if state else x)
+            for x in exposed(rep)]
+
+
+def helper_state(rep: dict, fresh: bool = False) -> str:
+    """Стоит ли на ноде helper sockfix-setup: "" - стоит или неизвестно (агент до 1.46 версий
+    helper'ов не шлет), "missing" - не стоит, "installing" - не стоит, но установщик еще работает."""
+    sv = (rep or {}).get("setup_versions")
+    if not isinstance(sv, dict) or "sockfix-setup" in sv or "sockfix" in ((rep or {}).get("extras") or {}):
+        return ""
+    return "installing" if fresh else "missing"
 
 
 def exposed(rep: dict) -> list[dict]:

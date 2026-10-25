@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.34] - 2026-10-25
+
+### Fixed
+- Карточка "Прокси держит docker-сокет": если helper sockfix-setup на ноде не стоит, она так и пишет и дает команду
+  установки (плейбук на эту ноду), ручные шаги - через "или"; пока установщик свежей ноды еще ставит helper'ы, так
+  и сказано. Раньше карточка обещала, что "файл соберет helper", которого не было.
+- gitlab-setup ставится и на GitLab из compose-сервиса на своем образе: панель просила helper, а плейбук его
+  пропускал.
+
 ## [1.8.33] - 2026-10-25
 
 ### Fixed

@@ -219,6 +219,19 @@ def test_setup_needed():
     assert setup_scripts.setup_needed("gitlab-setup", _rep())
 
 
+
+def test_when_finds_a_gitlab_service_on_an_image_of_its_own():
+    """Панель зовет gitlab-setup и для compose-сервиса gitlab на своем образе. Условие из скрипта
+    раньше искало в docker ps только gitlab-ce/ee: плейбук такую ноду пропускал, а панель держала
+    ее в kervax_outdated. Теперь условие спрашивает и метку сервиса compose."""
+    import re
+    ct = {"name": "gl", "image": "registry.example/ops/omnibus:17", "compose": {"service": "gitlab"}}
+    assert setup_scripts.setup_needed("gitlab-setup", {"docker": {"containers": [ct]}})
+    src = (Path(__file__).resolve().parents[2] / "agent" / "gitlab-setup.sh").read_text(encoding="utf-8")
+    when = re.search(r'^KERVAX_SETUP_WHEN="([^"]+)"', src, re.MULTILINE).group(1)
+    assert "--filter label=com.docker.compose.service=gitlab " in when and "'" not in when
+
+
 def test_helper_version_line_and_lf():
     p = Path(__file__).resolve().parents[2] / "agent" / "gitlab-setup.sh"
     raw = p.read_bytes()

@@ -2470,6 +2470,12 @@ const EN: Record<string, string> = {
     'A ready compose file for {name} is built from {file}, the changes:',
   'Готовый файл соберет helper sockfix-setup, пока руками.':
     'The sockfix-setup helper will build a ready file, by hand for now.',
+  'Helper sockfix-setup на ноде не стоит, без него готового файла не будет. Поставить его или поправить руками:':
+    'The sockfix-setup helper is not on the node, no ready file without it. Install it or fix by hand:',
+  'Установщик еще ставит helper-скрипты, готовый файл соберет sockfix-setup через несколько минут. Пока руками.':
+    'The installer is still adding helpers, sockfix-setup will build the ready file in a few minutes. By hand for now.',
+  'Поставить helper sockfix-setup, через пару минут здесь будет готовый файл':
+    'Install the sockfix-setup helper, the ready file shows up here in a couple of minutes',
   'Для {name} готового файла нет: {why}{detail}.':
     'No ready file for {name}: {why}{detail}.',
   'Добавить сервису environment и networks, рядом сервис и сеть docker-api, как в примере':

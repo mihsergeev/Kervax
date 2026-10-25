@@ -2338,7 +2338,9 @@ export type Server = {
   // а история есть только на бэкенде
   docker_alerts?: Record<string, string>
   // внешние прокси (caddy-docker-proxy, traefik) с docker-сокетом: взлом прокси - root на хосте
-  docker_exposed?: { name: string; image: string; kind: string; fix?: SockFix }[]
+  // helper - почему готового файла нет (fix пуст): missing - helper'а sockfix-setup на ноде нет,
+  // installing - нет, но нода свежая и установщик еще ставит helper'ы
+  docker_exposed?: { name: string; image: string; kind: string; fix?: SockFix; helper?: 'missing' | 'installing' }[]
   // контейнеры с ключами от хоста сверх положенного по назначению: privileged, опасные
   // capabilities, docker-сокет, корень хоста на запись; muted - заглушен точечно
   docker_risk?: DockerRisk[]
