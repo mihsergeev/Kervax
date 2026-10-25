@@ -164,7 +164,7 @@ def test_episodes_and_texts():
     assert oom.level(last, {"php7.4-fpm.service"}) == 2
     text = oom.episode_text(last, timezone.utc, set(), 2)
     lines = text.split("\n")
-    assert lines[0].startswith("нехватка памяти (OOM), ") and lines[1].startswith("убиты: python 554мб")
+    assert lines[0].startswith("нехватка памяти на сервере (OOM), ") and lines[1].startswith("убиты: python 554мб")
     assert "упали: php7.4-fpm.service (поднялась)" in text and "user@" not in text
     assert lines[-1] == "за 7 дней OOM 2 раз"
 
@@ -200,7 +200,7 @@ def test_alert_step_lifecycle():
     st = dict(now_apply)
     rep = {"clock_unix": now.timestamp(), "extras": {"oom": b}}
     fire, done, _ = oom.alert_step(_server(rep, total=3), st, rep, now, timezone.utc)
-    assert fire is not None and fire[0] == 1 and fire[1].startswith("нехватка памяти (OOM)")
+    assert fire is not None and fire[0] == 1 and fire[1].startswith("нехватка памяти на сервере (OOM)")
     assert done["oom_seen"] == 3 and done["oom_sent"] == now.timestamp()
     st.update(done)
     # тот же эпизод второй раз не шлется, а счетчик агента, пришедший позже, - не новость
@@ -297,10 +297,10 @@ async def test_units_alert_skips_oom_and_alert_text(tmp_path, monkeypatch):
     assert len(sent) == 1, sent
     # последний эпизод: php7.4-fpm лежит - критично
     full = full_text(sent[0])
-    assert sent[0].startswith("🔴🧠 ") and "нехватка памяти (OOM)" in full and "упал" not in full.split("\n")[0]
+    assert sent[0].startswith("🔴🧠 ") and "нехватка памяти на сервере (OOM)" in full and "упал" not in full.split("\n")[0]
     assert "php7.4-fpm.service (не поднялась)" in full and "за 7 дней OOM 2 раз" in full
     # в чате: кого убило и что не поднялось, без "больше всего памяти" и счетчика за неделю
-    assert sent[0] == "🔴🧠 node\n<b>Кончилась память (OOM)</b>\nУбит: python (пул web)\nНе поднялась: php7.4-fpm"
+    assert sent[0] == "🔴🧠 node\n<b>Кончилась память на сервере (OOM)</b>\nУбит: python (пул web)\nНе поднялась: php7.4-fpm"
     async with factory() as s:
         srv = (await s.execute(select(Server))).scalars().one()
         probs = collector.server_problems(srv, now)
@@ -309,7 +309,7 @@ async def test_units_alert_skips_oom_and_alert_text(tmp_path, monkeypatch):
     assert "php7.4-fpm.service: убит OOM killer" in texts
     # за сутки один эпизод (второй неделю назад)
     assert any(p["kind"] == "oom" and p["level"] == 2 and p["text"].startswith(
-        "нехватка памяти (OOM) из-за php7.4-fpm.service: была 5 мин назад, убиты python 554мб (php7.4-fpm.service, uid web)")
+        "нехватка памяти на сервере (OOM) из-за php7.4-fpm.service: была 5 мин назад, убиты python 554мб (php7.4-fpm.service, uid web)")
         for p in probs)
     view = oom.view(srv, now)
     assert view["n7"] == 2 and view["units"]["user@1001.service"]["quiet"] is True
@@ -411,9 +411,9 @@ async def test_units_alert_user_manager_by_cgroup(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
     full = full_text(sent[0])
-    assert len(sent) == 1 and "нехватка памяти (OOM)" in full, sent
+    assert len(sent) == 1 and "нехватка памяти на сервере (OOM)" in full, sent
     assert "user@1001" not in full and "launchpadlib" not in full
-    assert sent[0].split("\n")[1] == "<b>Кончилась память (OOM)</b>" and "user@1001" not in sent[0]
+    assert sent[0].split("\n")[1] == "<b>Кончилась память на сервере (OOM)</b>" and "user@1001" not in sent[0]
     async with factory() as s:
         srv = (await s.execute(select(Server))).scalars().one()
         texts = [p["text"] for p in collector.server_problems(srv, now)]
@@ -593,10 +593,10 @@ def test_problem_home_lifetime_and_culprit_text():
 
     # php-fpm убит три дня назад: его служба известна, хотя в эпизоде за сутки его не убивали
     p = prob(_fpm_block(ts, [ts - 1800], tail=ts - 3 * 86400))
-    assert p == (2, "нехватка памяти (OOM) из-за php7.4-fpm.service: была 30 мин назад, убиты mysqld 527мб "
+    assert p == (2, "нехватка памяти на сервере (OOM) из-за php7.4-fpm.service: была 30 мин назад, убиты mysqld 527мб "
                     "(mysql.service, uid db), systemd + sd-pam (сессия web)", "oom:svc:php7.4-fpm.service")
     p = prob(_fpm_block(ts, [ts - 1800]))
-    assert p[1] == ("нехватка памяти (OOM) из-за процесса php-fpm7.4: была 30 мин назад, убиты mysqld 527мб "
+    assert p[1] == ("нехватка памяти на сервере (OOM) из-за процесса php-fpm7.4: была 30 мин назад, убиты mysqld 527мб "
                     "(mysql.service, uid db), systemd + sd-pam (сессия web)") and p[2] == "oom:proc:php-fpm7.4"
     # 17 часов назад, один раз - событие прошло, на главной его нет
     assert prob(_fpm_block(ts, [ts - 17 * 3600])) is None

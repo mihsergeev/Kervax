@@ -1197,7 +1197,25 @@ function oomKillsLine(e: OomEpisode, t: TFn): string {
     .join(', ')
 }
 
-const OOM_KIND: Record<string, string> = { global: 'весь сервер', memcg: 'лимит cgroup', oomd: 'systemd-oomd' }
+// global - кончилась память всего сервера, memcg - процесс уперся в лимит своей cgroup (на сервере
+// память могла быть свободна)
+const OOM_KIND: Record<string, string> = { global: 'память сервера', memcg: 'по лимиту', oomd: 'systemd-oomd' }
+
+// Что делать с OOM по лимиту: поднять лимит там, где его задают, или ужать само приложение
+function oomLimitHint(e: OomEpisode, t: TFn): string {
+  const o = e.limit_owner
+  const lim = e.mem.limit != null ? fmtBytes(e.mem.limit * 1024) : ''
+  const who = o ? oomOwner({ owner: o.name, owner_kind: o.kind, owner_unknown: o.unknown }, t) : ''
+  const head = who
+    ? lim ? t('Уперлись в свой лимит {v} ({w}), память сервера тут ни при чем.', { w: who, v: lim })
+      : t('Уперлись в свой лимит памяти ({w}), память сервера тут ни при чем.', { w: who })
+    : t('Процесс уперся в лимит памяти своей cgroup, память сервера тут ни при чем.')
+  const where =
+    o?.kind === 'container' ? t('Поднять лимит (mem_limit или deploy.resources.limits.memory в compose)')
+      : o?.kind === 'pod' ? t('Поднять лимит (resources.limits.memory у пода)')
+        : o?.kind === 'service' ? t('Поднять лимит (MemoryMax= в юните)') : t('Поднять лимит')
+  return `${head} ${where} ${t('или ограничить память в самом приложении: меньше воркеров и кэшей, -Xmx у java.')}`
+}
 
 // Не алертить об OOM, пока не починят: по виновнику (кто занимал память, OOM из-за других служб
 // приходят) или любой OOM сервера, на час, день, неделю или постоянно. Заглушенное - чипами со сроком
@@ -1332,7 +1350,7 @@ function OomBlock({
   return (
     <div className="chart-card net-card net-card-wide" id="mcard-oom">
       <div className="net-head">
-        <div className="chart-cap">{t('Нехватка памяти (OOM)')}</div>
+        <div className="chart-cap">{t('Убиты OOM killer')}</div>
         {eps.length > 0 && <span className="muted small">{t('за 30 дней: {n}', { n: eps.length })}</span>}
       </div>
       {eps.length > 0 && <OomMute server={s} culprit={s.oom?.culprit || eps[0].culprit || ''} onChanged={onChanged} />}
@@ -1419,6 +1437,7 @@ function OomBlock({
                     </table>
                   </div>
                 )}
+                {e.kind === 'memcg' && <div className="small">{oomLimitHint(e, t)}</div>}
                 <div className="oom-mem">
                   {e.kind === 'memcg' && e.mem.limit != null && <span>{t('лимит cgroup {v}', { v: kb(e.mem.limit) })}</span>}
                   {e.mem.ram != null && <span>{t('RAM {v}', { v: kb(e.mem.ram) })}</span>}

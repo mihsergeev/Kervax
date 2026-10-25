@@ -389,7 +389,7 @@ def mem_text(e: dict) -> str:
     m = e.get("mem") or {}
     if e["kind"] == "memcg":
         lim = m.get("limit")
-        return f"лимит cgroup {size_kb(lim)}" if lim else ""
+        return f"лимит {size_kb(lim)}, память сервера тут ни при чем" if lim else ""
     parts = []
     if m.get("ram"):
         parts.append(f"RAM {size_kb(m['ram'])}")
@@ -450,22 +450,24 @@ def late_text(e: dict, now_ts: float | None, held: bool = False) -> str:
 def episode_text(e: dict, tz, failed_now: set[str], n7: int, containers: dict[str, str] | None = None,
                  more: int = 0, late: str = "") -> str:
     """Текст алерта по эпизоду, строки:
-    нехватка памяти (OOM), 12:22
+    нехватка памяти на сервере (OOM), 12:22
     убиты: python 554мб (php7.4-fpm.service, uid web), systemd + sd-pam (сессия web)
     больше всего памяти: python x12 5.8гб (php7.4-fpm), postgres x41 2.3гб
     RAM 8гб, swap нет
-    за 7 дней OOM 13 раз"""
+    за 7 дней OOM 13 раз
+    У OOM по лимиту cgroup вместо RAM и swap - лимит и что сделать (limit_hint)."""
     at = hhmm(e["start"], tz)
     skip = ""
+    hint = ""
     if e["kind"] == "memcg":
-        k = next((k for k in e["kills"] if k["kind"] == "memcg"), e["kills"][0])
-        o = owner(k.get("oom_memcg") or k.get("memcg") or "", k.get("user") or "", k.get("uid"))
-        head = f"кончилась память в лимите {owner_text(o, containers, gen=True) or 'cgroup'} (OOM), {at}"
+        o = limit_owner(e)
+        head = f"OOM по лимиту памяти {owner_text(o, containers, gen=True) or 'cgroup'}, {at}"
         skip = _owner_key(o, containers)
+        hint = limit_hint(o)
     elif e["kind"] == "oomd":
         head = f"systemd-oomd убил процессы из-за нехватки памяти, {at}"
     else:
-        head = f"нехватка памяти (OOM), {at}"
+        head = f"нехватка памяти на сервере (OOM), {at}"
     if more:
         head += f", с прошлого сообщения еще {more} раз"
     if late:
@@ -480,18 +482,50 @@ def episode_text(e: dict, tz, failed_now: set[str], n7: int, containers: dict[st
     mt = mem_text(e)
     if mt:
         lines.append(mt)
+    if hint:
+        lines.append(hint)
     if n7 > 1:
         lines.append(f"за 7 дней OOM {n7} раз")
     return "\n".join(lines)
 
 
-# -- короткий текст для Telegram (формат A, app/tg_fmt.py) --
-# Кончилась память (OOM)
-# Убит: mariadbd
-# Под: wordpress-mariadb (лимит 1гб)
-# Кто занимал память, RAM и swap, сколько раз за неделю - в полном тексте и в карточке.
+def limit_owner(e: dict) -> dict:
+    """Чей лимит кончился в OOM по лимиту cgroup: контейнер, под, служба (oom_memcg - cgroup, где
+    сработал лимит; она бывает выше cgroup убитого процесса)."""
+    k = next((k for k in e["kills"] if k["kind"] == "memcg"), e["kills"][0])
+    return owner(k.get("oom_memcg") or k.get("memcg") or "", k.get("user") or "", k.get("uid"))
 
+
+# Где поднимают лимит памяти, по владельцу cgroup
+_LIMIT_WHERE = {
+    "container": "mem_limit или deploy.resources.limits.memory в compose",
+    "pod": "resources.limits.memory у пода",
+    "service": "MemoryMax= в юните",
+}
+
+
+def limit_hint(o: dict) -> str:
+    """Что делать с OOM по лимиту: память сервера ни при чем, уперлись в свой лимит."""
+    where = _LIMIT_WHERE.get(o.get("kind") or "")
+    up = f"поднять лимит ({where})" if where else "поднять лимит"
+    return f"что сделать: {up} или ограничить память в самом приложении (меньше воркеров и кэшей, -Xmx у java)"
+
+
+# -- короткий текст для Telegram (формат A, app/tg_fmt.py) --
+# Кончилась память на сервере (OOM)
+# Убит: mysqld
+# Перезапустилась: mysql
+# или по лимиту cgroup (на сервере память может быть свободна):
+# Убит по лимиту памяти (OOM)
+# mariadbd - под wordpress-mariadb уперся в свой лимит 1гб
+# Кто занимал память, RAM и swap, сколько раз за неделю, что сделать - в полном тексте и в карточке.
+
+# по счетчику ядра без журнала: какой это OOM, не знаем (oom_kill считает и лимиты cgroup)
 WHAT = "Кончилась память (OOM)"
+WHAT_HOST = "Кончилась память на сервере (OOM)"
+WHAT_LIMIT = ("Убит по лимиту памяти (OOM)", "Убиты по лимиту памяти (OOM)")
+# род владельца лимита: контейнер уперся, служба уперлась
+_SHE = frozenset({"Служба", "Сессия", "Cgroup"})
 _PID = re.compile(r"\s*\(pid \d+\)")
 
 
@@ -554,27 +588,22 @@ def episode_short(e: dict, tz, failed_now: set[str], containers: dict[str, str] 
                   pod_names: dict[str, str] | None = None, late: bool = False) -> tuple[str, list[str]]:
     """(что случилось, конкретика) по эпизоду. late - сообщение опоздало: время эпизода в первой
     строке, без объяснений почему."""
-    what = "Не хватает памяти (systemd-oomd)" if e["kind"] == "oomd" else WHAT
-    if late:
-        what += f" в {hhmm(e['start'], tz)}"
-    facts: list[str] = []
+    at = f" в {hhmm(e['start'], tz)}" if late else ""
     if e["kind"] == "memcg":
+        # уперлись в лимит своей cgroup: убитые и чей лимит одной строкой, "Убит" - в заголовке
         own = [k for k in e["kills"] if k["kind"] == "memcg"] or e["kills"]
         ks = _main_kills(own)
-        facts.append(tg_fmt.fact("Убит" if len(ks) == 1 else "Убиты",
-                                 tg_fmt.names(_kill_label(k, containers, pod_names, False) for k in ks)))
-        k0 = own[0]
-        label, name = _owner_fact(owner(k0.get("oom_memcg") or k0.get("memcg") or "", k0.get("user") or "",
-                                        k0.get("uid")), containers, pod_names)
+        who = tg_fmt.names(_kill_label(k, containers, pod_names, False) for k in ks)
+        label, name = _owner_fact(limit_owner(e), containers, pod_names)
         lim = (e.get("mem") or {}).get("limit")
+        cap = f"в свой лимит {tg_fmt.size(lim * 1024)}" if lim else "в свой лимит памяти"
         if label:
-            if lim:
-                lt = f"лимит {tg_fmt.size(lim * 1024)}"
-                name = name[:-1] + f", {lt})" if name.endswith(f"({UNKNOWN})") else f"{name} ({lt})"
-            facts.append(tg_fmt.fact(label, name))
-        elif lim:
-            facts.append(f"лимит {tg_fmt.size(lim * 1024)}")
-        return what, facts
+            whose = f"{label if label == 'Cgroup' else label.lower()} {name} {'уперлась' if label in _SHE else 'уперся'}"
+        else:
+            whose = "процесс уперся"
+        return WHAT_LIMIT[len(ks) > 1] + at, [tg_fmt.fact("", f"{who} - {whose} {cap}")]
+    what = ("Не хватает памяти (systemd-oomd)" if e["kind"] == "oomd" else WHAT_HOST) + at
+    facts: list[str] = []
     ks = _main_kills(e["kills"])
     facts.append(tg_fmt.fact("Убит" if len(ks) == 1 else "Убиты",
                              tg_fmt.names(_kill_label(k, containers, pod_names) for k in ks)))
@@ -806,6 +835,11 @@ def _owner_unknown(o: dict, names: dict[str, str] | None) -> bool:
     return bool(n) and ((k == "container" and not ct_name(n, names)) or (k == "pod" and not pod_name(n, names)))
 
 
+def _limit_view(e: dict, names: dict[str, str] | None) -> dict:
+    o = limit_owner(e)
+    return {"kind": o["kind"], "name": _owner_name(o, names), "unknown": _owner_unknown(o, names)}
+
+
 def episode_view(e: dict, containers: dict[str, str] | None = None, failed_now: set[str] | None = None,
                  mutes: set[str] | None = None) -> dict:
     kills = []
@@ -826,6 +860,8 @@ def episode_view(e: dict, containers: dict[str, str] | None = None, failed_now: 
         "level": level(e, failed_now or set()), "kills": kills, "top": e.get("top") or [],
         "mem": e.get("mem") or {}, "by": e.get("by") or [], "units": e.get("units") or {},
         "text": kills_text(e, containers),
+        # OOM по лимиту cgroup: чей лимит (вид и имя, как owner у убитых), карточка пишет, где его поднять
+        "limit_owner": _limit_view(e, containers) if e["kind"] == "memcg" else None,
         # кто занимал память (ключ мьюта без "oom:"): по нему глушат повторы
         "culprit": culprit(e, containers),
         "muted": episode_muted(e, mutes or set(), failed_now or set(), containers),
@@ -969,10 +1005,18 @@ def problem(s: Server, now: datetime, pod_names: dict[str, str] | None = None) -
             and not any(down for _u, down in failed_units(day[0], failed))):
         return None
     lvl = max(level(e, failed) for e in day)
-    ago = max(0.0, now.timestamp() - day[-1]["start"])
+    last = day[-1]
+    ago = max(0.0, now.timestamp() - last["start"])
     when = f"{int(ago // 3600)} ч назад" if ago >= 3600 else f"{max(1, int(ago // 60))} мин назад"
     n = f"{len(day)} раз за сутки, последний" if len(day) > 1 else "была"
-    key = culprit(day[-1], conts)
-    who = f" из-за {culprit_text(key, gen=True)}" if key else ""
-    return (lvl, f"нехватка памяти (OOM){who}: {n} {when}, убиты {kills_text(day[-1], conts, key)}",
+    key = culprit(last, conts)
+    if last["kind"] == "memcg":
+        # уперлись в лимит своей cgroup: виновник - она сама, память сервера ни при чем
+        lim = (last.get("mem") or {}).get("limit")
+        head = f"OOM по лимиту памяти {culprit_text(key, gen=True) or 'cgroup'}" + (f" ({size_kb(lim)})" if lim else "")
+        n = "был" if len(day) == 1 else n
+    else:
+        who = f" из-за {culprit_text(key, gen=True)}" if key else ""
+        head = ("нехватка памяти на сервере (OOM)" if last["kind"] == "global" else "нехватка памяти (OOM)") + who
+    return (lvl, f"{head}: {n} {when}, убиты {kills_text(last, conts, key)}",
             MUTE_PREFIX + key if key else "oom")

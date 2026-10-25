@@ -240,3 +240,129 @@ async def test_unit_timeout_twice_an_hour(tmp_path, monkeypatch):
     assert len(_alerts(sent)) == 1 and "exposure-probe.service" in full_text(sent[0]), sent
     assert len(_oks(sent)) == 1, sent
     await engine.dispose()
+
+
+# Выдержка отбоя вида ("<вид>_cool": давление и сеть - час, CPU и RAM - выдержка сервера, диск -
+# fill_alert.CALM_S) и общая выдержка отбоя (_SETTLE_S) сцепились: выдержка вида вышла - уровень 0,
+# цикл ставит "_calm" и ждет, а следующий тик начинал выдержку вида заново, и уровень снова тот же.
+# Отбой не приходил никогда, а распорядок давления в обычный час конца принимал висящую выдержку за
+# "держится дольше обычного" и слал алерт одной припиской, без самой беды (25.10, сервер выгрузки
+# бэкапов: диск занят каждую ночь до 8:30, алерт в 10:20)
+def _psi(io_full: float = 2.0) -> dict:
+    return {"psi": {"cpu_some_10": 3.0, "cpu_some_60": 2.5, "mem_some_60": 0.4, "mem_full_60": 0.1,
+                    "io_some_60": io_full + 5, "io_full_60": io_full},
+            "dstate": {"n": 0, "top": []}, "fds": {"used": 9000, "max": 1000000}}
+
+
+async def _set(factory, **kw):
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        for k, v in kw.items():
+            setattr(srv, k, v)
+        await s.commit()
+
+
+async def test_pressure_recovers_after_calm(tmp_path, monkeypatch):
+    """Диск не успевал полчаса и отпустил: одна тревога, отбой через час выдержки и 15 минут нормы"""
+    engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
+    t0 = datetime(2026, 10, 25, 9, 0, tzinfo=timezone.utc)
+    await _replay(factory, cfg, t0, [(0, lambda t: _psi(60)), (45, lambda t: _psi()), (45 + 70, lambda t: _psi())],
+                  step_min=5)
+    assert len(_alerts(sent)) == 1 and not _oks(sent), sent
+    await _replay(factory, cfg, t0 + timedelta(minutes=120), [(0, lambda t: _psi()), (240, lambda t: _psi())],
+                  step_min=5)
+    assert len(_alerts(sent)) == 1 and len(_oks(sent)) == 1, sent
+    assert "сервер больше не задыхается" in sent[1]
+    st = await _state(factory)
+    assert st["pressure"] == 0 and not st.get("pressure_cool") and not st.get("pressure_calm")
+    await engine.dispose()
+
+
+async def test_mem_recovers_after_calm(tmp_path, monkeypatch):
+    """RAM выше порога и опустилась: отбой после выдержки сервера и общей выдержки, а не никогда"""
+    engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
+    await _set(factory, mem_alert_percent=90)
+    t0 = datetime(2026, 10, 25, 9, 0, tzinfo=timezone.utc)
+    mem = lambda pct: (lambda t: {"mem_total": 100 << 30, "mem_used": pct << 30})  # noqa: E731
+    await _replay(factory, cfg, t0, [(0, mem(95)), (30, mem(20)), (30 + 25, mem(20))], step_min=5)
+    assert len(_alerts(sent)) == 1 and not _oks(sent), sent
+    await _replay(factory, cfg, t0 + timedelta(minutes=60), [(0, mem(20)), (120, mem(20))], step_min=5)
+    assert len(_alerts(sent)) == 1 and len(_oks(sent)) == 1, sent
+    st = await _state(factory)
+    assert st["mem"] == 0 and not st.get("mem_cool")
+    await engine.dispose()
+
+
+def test_own_cool_kept_until_recovery():
+    """Выдержка вида вышла: уровень 0, а "_cool" прежний, пока цикл не отбил алерт"""
+    from app import fill_alert
+
+    now = datetime(2026, 10, 25, 9, 0, tzinfo=timezone.utc)
+    cool = (now - timedelta(hours=2)).isoformat()
+    lvl, extra = fill_alert.step({"disk": 2, "disk_cool": cool}, "disk", 40.0, 0, 80.0, now)
+    assert lvl == 0 and extra["cool"] == cool
+    lvl, extra = fill_alert.step({"disk": 0, "disk_cool": cool}, "disk", 40.0, 0, 80.0, now)
+    assert lvl == 0 and extra["cool"] is None
+
+
+def _usual_days(t0: datetime, start_min: int, end_min: int) -> list:
+    """Тот же эпизод в каждый из двух прошлых дней"""
+    return [[(t0 + timedelta(days=-d, minutes=start_min)).timestamp(), (t0 + timedelta(days=-d, minutes=end_min)).timestamp()]
+            for d in (2, 1)]
+
+
+async def test_routine_pressure_ended_before_usual_end_no_alert(tmp_path, monkeypatch):
+    """Ночная выгрузка бэкапов: диск занят 02:15-04:15 каждый день. Сегодня отпустило в 04:40,
+    до конца распорядка с запасом (05:15), но выдержка отбоя держала уровень до 05:40 - и в 05:15
+    уходил алерт "держится дольше" без беды. Теперь ни одного сообщения, эпизод кончился в 04:40"""
+    engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
+    t0 = datetime(2026, 10, 25, 2, 0, tzinfo=timezone.utc)
+    await _set(factory, alert_state={"pressure_hist": _usual_days(t0, 15, 135)})
+    await _replay(factory, cfg, t0, [(0, lambda t: _psi(60)), (160, lambda t: _psi()), (330, lambda t: _psi())],
+                  step_min=5)
+    assert sent == [], sent
+    st = await _state(factory)
+    assert st["pressure"] == 0 and not st.get("pressure_quiet") and not st.get("pressure_cool")
+    assert st["pressure_hist"][-1] == [(t0 + timedelta(minutes=15)).timestamp(), (t0 + timedelta(minutes=160)).timestamp()]
+    await engine.dispose()
+
+
+async def test_routine_pressure_really_longer_is_told(tmp_path, monkeypatch):
+    """Диск все еще не успевает час спустя после обычного конца: алерт с самой бедой и пометкой,
+    потом один отбой"""
+    engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
+    t0 = datetime(2026, 10, 25, 2, 0, tzinfo=timezone.utc)
+    await _set(factory, alert_state={"pressure_hist": _usual_days(t0, 15, 135)})
+    await _replay(factory, cfg, t0, [(0, lambda t: _psi(60)), (200, lambda t: _psi()), (360, lambda t: _psi())],
+                  step_min=5)
+    alerts = _alerts(sent)
+    assert len(alerts) == 1 and len(_oks(sent)) == 1, sent
+    txt = full_text(alerts[0])
+    assert "диск не успевает: все процессы разом ждут диск 60% времени" in txt
+    assert "сегодня держится дольше" in txt
+    await engine.dispose()
+
+
+async def test_hung_pressure_state_closes_once(tmp_path, monkeypatch):
+    """Состояние, оставленное зацикленной выдержкой: тревога висит, "_cool" полчаса назад, эпизод
+    распорядка не закрыт. Давления нет - один отбой и закрытый эпизод, больше ничего"""
+    engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
+    t0 = datetime(2026, 10, 25, 9, 20, tzinfo=timezone.utc)
+    cool = (t0 - timedelta(minutes=38)).isoformat()
+    await _set(factory, alert_state={"pressure": 2, "pressure_cool": cool, "pressure_from": cool, "pressure_res": "io",
+                                     "pressure_usual": "04:58-09:19",
+                                     "pressure_hist": [[(t0 - timedelta(hours=7)).timestamp(), None]]})
+    await _replay(factory, cfg, t0, [(0, lambda t: _psi()), (180, lambda t: _psi())], step_min=5)
+    assert len(sent) == 1 and _oks(sent), sent
+    st = await _state(factory)
+    assert st["pressure"] == 0 and st["pressure_hist"][-1][1] is not None
+    await engine.dispose()
+
+
+def test_held_only_is_not_news():
+    """Уровень, который держит только выдержка (пустой перечень, идет "_cool"), - не беда сейчас:
+    тихий повтор с ним не превращается в "вернулось и держится", распорядок - в "держится дольше\""""
+    assert collector._held_only({"detail": "", "items": [], "cool": "2026-10-25T09:00:00+00:00"})
+    assert collector._held_only({"detail": "", "items": [], "hold": {"web-0": [1, 1]}})
+    assert not collector._held_only({"detail": "диск не успевает", "items": [(2, "io", "диск не успевает")]})
+    assert not collector._held_only({"value": 95, "threshold": 90, "cool": None})
