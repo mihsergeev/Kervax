@@ -10,7 +10,7 @@
 # can tell a VM from a dedicated server and show what the VM has.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without RAID or SMART it reports an empty block
 
 HELPER_DIR=/lib65/kervax
@@ -27,11 +27,20 @@ virt=$(systemd-detect-virt 2>/dev/null || true)
 [ -n "$virt" ] || virt=none
 if [ "$virt" = none ] && ! command -v smartctl >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
-    apt_in() { timeout 300 apt-get -o DPkg::Lock::Timeout=60 install -y --no-install-recommends smartmontools >/dev/null 2>&1; }
-    apt_in || { timeout 300 apt-get -o DPkg::Lock::Timeout=60 update >/dev/null 2>&1 && apt_in; } \
+    # Without questions and without needrestart: run from the installer in a terminal, its apt hook
+    # (debconf, whiptail "Pending kernel upgrade") waited for Enter on the tty, stopped behind
+    # timeout's process group - apt hung for the whole 5 minutes with smartmontools long installed.
+    # needrestart would also restart services left over from earlier upgrades - not our business.
+    apt_q() {
+      DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l timeout -k 10 90 \
+        apt-get -q -y -o DPkg::Lock::Timeout=60 -o Dpkg::Options::=--force-confdef \
+        -o Dpkg::Options::=--force-confold "$@" </dev/null >/dev/null 2>&1
+    }
+    apt_q install --no-install-recommends smartmontools \
+      || { apt_q update && apt_q install --no-install-recommends smartmontools; } \
       || echo "· smartmontools could not be installed: SMART is not watched on this node." >&2
   elif command -v dnf >/dev/null 2>&1; then
-    timeout 300 dnf install -y smartmontools >/dev/null 2>&1 \
+    timeout -k 10 120 dnf install -y -q smartmontools </dev/null >/dev/null 2>&1 \
       || echo "· smartmontools could not be installed: SMART is not watched on this node." >&2
   fi
 fi

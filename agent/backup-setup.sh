@@ -134,7 +134,7 @@ AGENT_USER=kervax
 #         removes only a directory the helper made; KV_DUMP_* no longer leak into the next
 #         request of the same pass;
 #       * restic is downloaded into mktemp -d and checked against the baked sha256 only
-KERVAX_SETUP_VERSION=0.43  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+KERVAX_SETUP_VERSION=0.44  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -1513,6 +1513,15 @@ ensure_restic() {
   rm -rf "$tmp"
 }
 
+# apt without questions and without needrestart: from a terminal its apt hook (debconf window
+# "Pending kernel upgrade") waited for Enter until the timeout, and it would also restart services
+# left over from earlier upgrades - not our business
+apt_q() {
+  DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 NEEDRESTART_MODE=l timeout -k 10 "${APT_TIMEOUT:-120}" \
+    apt-get -q -y -o DPkg::Lock::Timeout=60 -o Dpkg::Options::=--force-confdef \
+    -o Dpkg::Options::=--force-confold "$@" </dev/null >/dev/null 2>&1
+}
+
 # restic_fetch downloads RESTIC_TARGET_VER into a fresh mktemp -d, checks the .bz2 against the sha256
 # BAKED into the helper (not only against github's SHA256SUMS) and prints the directory; the binary
 # is <dir>/restic and has been run once
@@ -1523,7 +1532,7 @@ restic_fetch() {
     aarch64|arm64) arch=arm64; want="$RESTIC_SHA_arm64";;
     *) echo "unknown architecture: $(uname -m)" >&2; return 2;;
   esac
-  command -v bunzip2 >/dev/null 2>&1 || { apt-get update -qq >/dev/null 2>&1 || true; apt-get install -y -qq bzip2 >/dev/null 2>&1 || true; }
+  command -v bunzip2 >/dev/null 2>&1 || { apt_q update || true; apt_q install bzip2 || true; }
   base="https://github.com/restic/restic/releases/download/v$RESTIC_TARGET_VER"
   f="restic_${RESTIC_TARGET_VER}_linux_${arch}.bz2"
   tmp="$(mktemp -d /tmp/kv-restic.XXXXXX)" || return 2

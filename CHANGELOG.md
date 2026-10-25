@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.35] - 2026-10-25
+
+### Fixed
+- Установка агента больше не висит 5 минут на diskhealth-setup: на Ubuntu хук needrestart после apt показывал окно
+  "Pending kernel upgrade" в терминал ssh, а timeout уводил его в фон, и оно стояло до таймаута. Helper'ы
+  (diskhealth-setup 0.3, backup-setup 0.44, backupserver-setup 0.37) ставят пакеты без вопросов и без needrestart,
+  ждут блокировку apt не больше минуты; установщик дает одному helper'у не больше 3 минут и пишет, кто не уложился.
+
 ## [1.8.34] - 2026-10-25
 
 ### Fixed
