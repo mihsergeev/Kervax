@@ -1359,8 +1359,10 @@ async def _send_alerts(
                 same_hosts[same].append(host or name)
                 if check_id is not None:
                     more_ids.setdefault(same_at[same], []).append(check_id)
+                    # причина своя: свернут он по домену, а в группе места его строка своя
+                    # (26.10 у двух свернутых соседей в группе причины не было вовсе)
                     grp_fold.setdefault(same_at[same], []).append(
-                        (check_id, _grp_member(name, host, link_url, "")))
+                        (check_id, _grp_member(name, host, link_url, _site_why(kind, status, msg))))
                 more_names.setdefault(same_at[same], []).append(name)
                 commits.append((kind, inc_id, check_id, flag))
                 continue
@@ -1420,8 +1422,7 @@ async def _send_alerts(
                                 full=full, line=line))
         commits.append((kind, inc_id, check_id, flag))
         if is_default and check_id in places and (g_lvl := site_group.lvl_of(kind, status)):
-            why = sh[2][0] if isinstance(sh, tuple) and sh[2] else ""
-            grp_src[len(texts) - 1] = (g_lvl, check_id, _grp_member(name, host, link_url, why))
+            grp_src[len(texts) - 1] = (g_lvl, check_id, _grp_member(name, host, link_url, _site_why(kind, status, msg)))
 
     # дописываем счётчик только там, где мониторов реально больше одного (в полный текст)
     for zone, idx in dom_at.items():
@@ -1489,6 +1490,12 @@ async def _send_alerts(
                     for attr, value in flag if isinstance(flag, list) else [flag]:
                         setattr(row, attr, value)
         await session.commit()
+
+
+def _site_why(kind: str, status: str, msg: str) -> str:
+    """Причина сбоя монитора из короткого текста алерта: первая строка конкретики."""
+    sh = srv_short.site(kind, status, msg)
+    return sh[2][0] if isinstance(sh, tuple) and sh[2] else ""
 
 
 def _grp_member(name: str, host: str, url: str, why: str) -> dict:
@@ -1618,7 +1625,7 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
         if not ready:
             continue
         mem = g["members"]
-        left = [mem[c]["host"] for c in mem if c not in ready]
+        left = [mem[c] for c in mem if c not in ready]
         text = site_group.back_text(g, base, [mem[c]["host"] for c in ready], left)
         m = alerts.Msg(text, "sites", g.get("grp", ""), kind=g.get("kind", ""), target=g.get("first", ""),
                        recovery=True, full=text)

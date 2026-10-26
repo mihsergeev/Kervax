@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.37] - 2026-10-26
+
+### Fixed
+- Группа мониторов одного сервера: одинаковая причина пишется один раз строкой под заголовком, ниже список
+  мониторов; разные причины - каждая строкой, под ней ее мониторы. То же в отбое ("еще нет: ...") и при правке
+  сообщения. У мониторов, свернутых по домену внутри группы, причина больше не теряется.
+
 ## [1.8.36] - 2026-10-25
 
 ### Changed

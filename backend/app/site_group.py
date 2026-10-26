@@ -180,21 +180,41 @@ def head_html(g: dict, base: str) -> str:
     return html.escape(tg_fmt.field(label))
 
 
+NO_WHY = "без подробностей"
+
+
+def by_why(mem: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Мониторы по причине, в порядке появления. Мониторы без причины - последними: у всех
+    одна беда, а пишется она один раз (26.10 пять строк подряд "сервер не принимает соединение")."""
+    out: dict[str, list[dict]] = {}
+    for m in mem:
+        out.setdefault(m.get("why") or "", []).append(m)
+    return sorted(out.items(), key=lambda kv: not kv[0])
+
+
 def alert_text(g: dict, base: str, cause: list[str] | None = None) -> tuple[str, str, str]:
-    """Сообщение группы: (текст в чат, полный для истории, одна строка для пачки)."""
+    """Сообщение группы: (текст в чат, полный для истории, одна строка для пачки).
+
+    Причина одна у всех - строкой под заголовком, ниже список. Разные - причина, под ней ее
+    мониторы."""
     mem = list((g.get("members") or {}).values())
     n = len(mem)
     lvl = g.get("lvl", "flaky")
     what = f"{n} {_plural(n)} {verb(n, LVL_TITLE.get(lvl, 'с ошибками'))}"
     head = head_html(g, base)
     lines = [f"{LVL_ICON.get(lvl, '🟠🌐')} {head}", f"<b>{html.escape(what)}</b>"]
-    for m in mem[:LIST_MAX]:
-        row = tg_fmt.link(m.get("host") or m.get("name", ""), m.get("url", ""))
-        if m.get("why"):
-            row += " - " + html.escape(m["why"])
-        lines.append(row)
-    if n > LIST_MAX:
-        lines.append(f"и еще {n - LIST_MAX}")
+    parts = by_why(mem)
+    shown = 0
+    for why, ms in parts:
+        if shown >= LIST_MAX:
+            break
+        if why or len(parts) > 1:
+            lines.append(html.escape(tg_fmt.cap(why or NO_WHY)))
+        for m in ms[:LIST_MAX - shown]:
+            lines.append(tg_fmt.link(m.get("host") or m.get("name", ""), m.get("url", "")))
+        shown += min(len(ms), LIST_MAX - shown)
+    if n > shown:
+        lines.append(f"и еще {n - shown}")
     if cause:
         lines.append(html.escape(tg_fmt.fact("На сервере тоже", tg_fmt.names(cause))))
     text = "\n".join(lines)
@@ -203,14 +223,23 @@ def alert_text(g: dict, base: str, cause: list[str] | None = None) -> tuple[str,
     return text, text, line
 
 
-def back_text(g: dict, base: str, names: list[str], left: list[str]) -> str:
-    """Отбой группы одной строкой; если ждем еще кого-то - строка "Еще нет: ..."."""
+def _left_rows(left: list[dict]) -> list[str]:
+    """Кто еще не в норме: "Еще нет: a, b - причина", при разных причинах - строка на причину."""
+    rows = [tg_fmt.names(m.get("host") or m.get("name", "") for m in ms) + (f" - {why}" if why else "")
+            for why, ms in by_why(left)]
+    if len(rows) == 1:
+        return [tg_fmt.fact("Еще нет", rows[0])]
+    return ["Еще нет:"] + [tg_fmt.field(r, tg_fmt.FACT_LEN) for r in rows]
+
+
+def back_text(g: dict, base: str, names: list[str], left: list[dict]) -> str:
+    """Отбой группы одной строкой; если ждем еще кого-то - строка "Еще нет: ..." с причиной."""
     n = len(names)
     what = f"{verb(n, LVL_BACK.get(g.get('lvl', 'flaky'), 'снова отвечают'))}"
     if left:
         what += " " + tg_fmt.names(names)
         text = tg_fmt.recovery(head_html(g, base), what)
-        return text + "\n" + html.escape(tg_fmt.fact("Еще нет", tg_fmt.names(left)))
+        return "\n".join([text] + [html.escape(r) for r in _left_rows(left)])
     text = tg_fmt.recovery(head_html(g, base), f"{what} ({n} {_plural(n)})" if n > 1 else what)
     return text + "\n" + html.escape(tg_fmt.names(names))
 
