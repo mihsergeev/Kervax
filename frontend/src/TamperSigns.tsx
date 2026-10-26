@@ -22,12 +22,15 @@ const fmtDateTime = (ts: string) =>
 
 const size = (n?: number | null) => (n == null ? '?' : fmtBytes(n))
 
+// главная правда стала меньше в разы (как shrank в app/tamper.py), а не только потеряла title
+const shrank = (s: TamperSign) => Number(s.was) >= 2048 && (s.size ?? 0) * 5 <= Number(s.was)
+
 function signText(s: TamperSign, t: T): [string, string] {
-  if (s.key === 'empty')
-    return [t('Главная опустела'), subOf(
-      t('{size} вместо {was}', { size: size(s.size), was: size(Number(s.was)) }),
-      s.title ? t('title был "{title}"', { title: s.title }) : '',
-    )]
+  if (s.key === 'empty') {
+    const sizes = t('{size} вместо {was}', { size: size(s.size), was: size(Number(s.was)) })
+    const was = s.title ? t('title был "{title}"', { title: s.title }) : ''
+    return shrank(s) ? [t('Главная опустела'), subOf(sizes, was)] : [t('С главной пропал title'), subOf(was, sizes)]
+  }
   if (s.key === 'title') return [t('Сменился title'), t('было "{was}", стало "{title}"', { was: String(s.was ?? ''), title: s.title ?? '' })]
   if (s.key === 'bot')
     return [t('Googlebot видит другую страницу'), t('у бота "{title}", {size}; у людей {human}', {
@@ -174,13 +177,28 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
           </div>
         )
       })}
-      {n === 0 && <div className="small">{t('Признаков нет.')}</div>}
+      {v.wall && (
+        // страница проверки не база и не разбор: признаков по главной нет, пока анти-бот не пустит
+        <div className="tamper-banner tamper-banner-info">
+          <span className="tamper-ico">🛡️</span>
+          <span className="tamper-txt">
+            <b>{t('Главная за JS-проверкой анти-бота')}</b>
+            <span className="muted small">
+              {subOf(t('содержимое не проверить, пока проверка не пропустит панель'), v.wall.who,
+                v.wall.cookie ? t('кука {c}', { c: v.wall.cookie }) : '',
+                v.wall.since ? t('с {t}', { t: fmtDateTime(v.wall.since) }) : '')}
+            </span>
+          </span>
+        </div>
+      )}
+      {n === 0 && !v.wall && <div className="small">{t('Признаков нет.')}</div>}
       <div className="tamper-facts">
-        {v.base.title && (
+        {(v.base.title || v.base.size != null) && (
+          // эталон целиком из базы: title и размер одной страницы
           <>
-            <span className="tamper-k">{t('Главная')}</span>
+            <span className="tamper-k">{t('Эталон главной')}</span>
             <span className="tamper-v">
-              {v.base.title} <span className="muted">· {size(v.size ?? v.base.size)}</span>
+              {v.base.title || <span className="muted">{t('без title')}</span>} <span className="muted">· {size(v.base.size)}</span>
             </span>
           </>
         )}

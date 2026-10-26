@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.38] - 2026-10-26
+
+### Fixed
+- Признаки взлома: страница JS-проверки анти-бота (Cloudflare, DDoS-Guard и т.п.) больше не сравнивается с
+  главной - ни эталоном, ни разбором, без алерта, в карточке "Главная за JS-проверкой анти-бота". Если главная
+  только потеряла title, а не стала меньше, пишется "с главной пропал title". Эталон в карточке - title и размер
+  одной страницы.
+
 ## [1.8.37] - 2026-10-26
 
 ### Fixed

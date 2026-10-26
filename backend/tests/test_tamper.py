@@ -364,3 +364,113 @@ def test_postponed_empty_page_keeps_base_size():
     for m in (0, 10):
         st = run(st, obs(size=173, title=""), later + timedelta(minutes=m))
     assert "empty" in st["signs"]
+
+
+# страница JS-проверки анти-бота: картинка-лоадер, кука из Set-Cookie, скрипт ставит свои куки и
+# перезагружает ту же страницу, title нет
+WALL = ("<html><head><meta name='robots' content='noindex, noarchive' /><style>.c{margin:auto}</style></head>"
+        "<body><div class='c'><img src='data:image/gif;base64,R0lGODlhAQABAAAAACw=' /></div><script>"
+        "function get_param(n){return document.cookie.split(';').length}"
+        "setTimeout(function(){document.cookie='__chk_h=' + get_param('__chk_p') + '; Path=/';"
+        "window.location.href = window.location.href; if (window.location.hash){window.location.reload();}}, 1000);"
+        "</script></body></html>") + " " * 12000
+
+
+def wall_of(text, cookies=(), headers=None, url="https://www.example.com/"):
+    return tamper.wall(httpx.Headers(headers or {}), list(cookies), text, tamper.parse_page(text, url))
+
+
+def test_wall_pages_recognized():
+    assert wall_of(WALL, ["__js_p_=1,2,3; Path=/"]) == "кука __js_p_"
+    assert wall_of(WALL, ["__ddg2_=abc; Path=/"]) == "DDoS-Guard"
+    assert wall_of(WALL) == ""  # без известной куки - по виду: noindex, кука и перезагрузка
+    cf = ("<html><head><title>Just a moment...</title></head><body><script>window._cf_chl_opt={cType:'managed'};"
+          "</script></body></html>")
+    assert wall_of(cf, headers={"cf-mitigated": "challenge"}) == "Cloudflare"
+    assert wall_of("<html><body><script src='/.well-known/ddos-guard/check?context=free_splash'></script>"
+                   "</body></html>") == "DDoS-Guard"
+    # не проверка: обычная главная (и с кукой анти-бота), пустая оболочка SPA, заглушка с переходом
+    # на чужой сайт (это уже признак), большая страница без title
+    assert wall_of(PAGE, ["__ddg1_=x; Path=/", "__cf_bm=y; Path=/"]) is None
+    assert wall_of("<html><head></head><body><div id='app'></div><script src='/js/app.js'></script></body></html>",
+                   ["__cf_bm=y"]) is None
+    away = WALL.replace("window.location.href = window.location.href",
+                        "window.location.href = 'https://casino.example.net/'")
+    assert wall_of(away, ["__js_p_=1"]) is None and wall_of(away) is None
+    assert wall_of(WALL + "x" * 70000, ["__js_p_=1"]) is None
+
+
+def test_wall_is_neither_base_nor_state():
+    real = obs(size=197, title="Welcome to Example", domains={})
+    st = run(None, real, NOW)
+    # раньше проверка проходила как главная: 13 КБ без title и "пустая главная" с алертом
+    for m in (60, 70):
+        st = run(st, obs(size=13602, title="", domains={}), NOW + timedelta(minutes=m))
+    assert tamper.level(st) == "hack" and st["signs"]["empty"]["size"] == 13602
+    sent = tamper.alert_due(st, None)[1]
+    # теперь разбор видит проверку: признак по главной снимается, отбоя нет, база прежняя
+    st = tamper.walled(st, "кука __js_p_", NOW + timedelta(hours=2))
+    assert tamper.level(st) == "none" and not st["pend"]
+    assert tamper.alert_due(st, sent) == ("", [])
+    assert st["base"]["title"] == "Welcome to Example" and st["base"]["size"] == 197
+    v = tamper.view(st)
+    assert v["wall"] == {"who": "", "cookie": "__js_p_", "since": (NOW + timedelta(hours=2)).isoformat()}
+    assert v["base"] == {"title": "Welcome to Example", "size": 197}
+    st = tamper.walled(st, "кука __js_p_", NOW + timedelta(hours=3))
+    assert st["wall"]["since"] == (NOW + timedelta(hours=2)).isoformat()
+    # анти-бот пустил - настоящая главная сравнивается с базой, отметка о проверке уходит
+    st = run(st, real, NOW + timedelta(hours=4))
+    assert not st["signs"] and not st["pend"] and "wall" not in st and tamper.view(st)["wall"] is None
+    # файлы сайта и версии за проверкой остаются
+    st2 = {**st, "signs": {"php": {"files": [{"p": "/var/www/a.php"}]}, "title": {"title": "x", "was": "y"}}}
+    assert set(tamper.walled(st2, "", NOW + timedelta(hours=5))["signs"]) == {"php"}
+    # первый разбор за проверкой - базы нет, ее снимет первая настоящая главная
+    first = tamper.walled(None, "Cloudflare", NOW)
+    assert "base" not in first and tamper.view(first)["wall"]["who"] == "Cloudflare"
+    assert run(first, real, NOW + timedelta(hours=1))["base"]["size"] == 197
+
+
+async def test_scan_sees_wall_for_people_and_for_bot(monkeypatch):
+    mode = {"people": "wall"}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        html = {"content-type": "text/html; charset=utf-8"}
+        if "Googlebot" in req.headers["user-agent"]:
+            return httpx.Response(200, text=WALL, headers=[*html.items(), ("set-cookie", "__js_p_=1,2; Path=/")])
+        if mode["people"] == "cf":
+            return httpx.Response(403, text="<html><head><title>Just a moment...</title></head></html>",
+                                  headers={**html, "cf-mitigated": "challenge"})
+        if mode["people"] == "wall":
+            return httpx.Response(200, text=WALL, headers=[*html.items(), ("set-cookie", "__js_p_=1,2; Path=/")])
+        return httpx.Response(200, text=PAGE.replace("<script src='/wp-content/themes/shop/js/custom.js'></script>", ""),
+                              headers=html)
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(tamper.httpx, "AsyncClient",
+                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    chk = SimpleNamespace(target="https://www.example.com/", auth_method="", http_headers="", ignore_tls=False)
+    assert await tamper.scan(chk) == {"wall": "кука __js_p_"}
+    mode["people"] = "cf"
+    assert await tamper.scan(chk) == {"wall": "Cloudflare"}
+    # людям настоящая главная, боту проверка: это не "Googlebot видит другое"
+    mode["people"] = "page"
+    got = await tamper.scan(chk)
+    assert got["obs"]["title"] == "Example Shop" and got["obs"]["bot"] is None
+
+
+def test_title_lost_but_page_grew_is_not_emptied():
+    s = {"size": 13602, "was": 197, "title": "Welcome to Example"}
+    assert tamper.phrase("empty", s) == "с главной пропал title"
+    assert tamper.alert_text({"signs": {"empty": s}}).splitlines()[1] == \
+        'С главной пропал title "Welcome to Example", 13кб вместо 197 байт'
+    small = {"size": 173, "was": 13000, "title": "Shop"}
+    assert tamper.phrase("empty", small) == "главная пустая"
+    assert tamper.alert_text({"signs": {"empty": small}}).splitlines()[1] == "Главная 173 байта вместо 13кб"
+
+
+def test_base_size_follows_only_same_page():
+    st = run(None, obs(), NOW)
+    st = run(st, obs(title="Other Page", size=40000), NOW + timedelta(hours=1))
+    assert st["base"] == {**st["base"], "title": "Example Shop", "size": 13000}
+    st = run(st, obs(size=14000), NOW + timedelta(hours=2))
+    assert st["base"]["size"] == 13200

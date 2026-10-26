@@ -3973,6 +3973,8 @@ export interface TamperView {
   engine: { wp?: string; php?: string; gen?: string }
   domains: string[]
   err: string
+  // главная за JS-проверкой анти-бота: чья проверка (или кука), с какого времени
+  wall?: { who: string; cookie: string; since?: string | null } | null
 }
 
 // кнопки признаков: "это ок" на группу (arg пусто) или строку, all - Разобрались;

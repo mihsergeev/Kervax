@@ -7954,6 +7954,7 @@ button.upd-go.upd-sure, button.upd-go.upd-sure:hover {
 .tamper-banner-warn {
   background: color-mix(in srgb, var(--degraded) 10%, transparent); border-color: color-mix(in srgb, var(--degraded) 40%, transparent);
 }
+.tamper-banner-info { background: var(--hover); border-color: var(--border-strong); }
 .tamper-row { display: flex; align-items: flex-start; gap: 0.6rem; padding: 0.42rem 0.3rem; border-radius: 8px; }
 .tamper-row > .lk-dot { margin-top: 0.45rem; }
 .tamper-ico { flex: 0 0 auto; width: 1.25em; text-align: center; }

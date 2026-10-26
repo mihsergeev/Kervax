@@ -22,6 +22,11 @@ document.write со script/iframe, переход на адрес, адрес .j
 который был на странице с первого разбора, но тогда не прочитался, и вендорная сборка (*.min.js,
 *.bundle.js, vendor/, известные библиотеки) при первом чтении отдают домены в базу без признака.
 
+Страница JS-проверки анти-бота (Cloudflare, DDoS-Guard и т.п.: заглушка, которая ставит куку и
+перезагружается) - не главная: ни базой, ни разбором она не становится, признаки по содержимому
+главной на это время снимаются без алерта, в карточке "за проверкой анти-бота". То же для ответа
+Googlebot: проверка вместо страницы - не "видит другое".
+
 Версии с дырами берутся из открытых источников (api.wordpress.org, php.net) раз в сутки и
 хранятся в настройках панели: без сети работаем по последнему загруженному, а если не
 загружали ни разу - версии просто не проверяем.
@@ -116,6 +121,7 @@ class _Page(HTMLParser):
         self.srcs: list[tuple[str, str]] = []  # (тег, src)
         self.inline: list[str] = []
         self.generator = ""
+        self.robots = ""
 
     def handle_starttag(self, tag, attrs):
         a = {k.lower(): (v or "") for k, v in attrs}
@@ -125,6 +131,8 @@ class _Page(HTMLParser):
             self.srcs.append((tag, a["src"].strip()))
         elif tag == "meta" and a.get("name", "").lower() == "generator":
             self.generator = self.generator or a.get("content", "")[:120]
+        elif tag == "meta" and a.get("name", "").lower() == "robots":
+            self.robots = a.get("content", "").lower()[:120]
         # ld+json и шаблоны - данные, а не код: ссылки на соцсети оттуда ничего не грузят
         typ = a.get("type", "").lower()
         if tag == "script" and not a.get("src") and (not typ or "script" in typ or typ == "module"):
@@ -206,7 +214,66 @@ def parse_page(text: str, url: str) -> dict:
         if is_external(h, host):
             domains.setdefault(h, "inline")
     return {"title": clean_title(p.title), "domains": domains, "js": own_js[:_MAX_JS],
-            "generator": p.generator.strip()}
+            "generator": p.generator.strip(), "robots": p.robots, "inline": "\n".join(p.inline)}
+
+
+# ---------- страница JS-проверки анти-бота ----------
+# Сайт за анти-ботом (Cloudflare, DDoS-Guard, Qrator и т.п.) отдает проверяющему не главную, а
+# заглушку: скрипт ставит куку и перезагружает страницу. Кого пустят дальше, решает анти-бот, и
+# заглушка с настоящей главной меняются местами. Сравнивать их нельзя ни в какую сторону.
+
+_WALL_MAX = 64_000
+_WALL_STATUS = frozenset({200, 202, 403, 429, 503})
+# сами себя выдают: такое бывает только на странице проверки
+_WALL_BODY = re.compile(r"_cf_chl_opt|window\._cf_chl|/\.well-known/ddos-guard/check|sucuri_cloudproxy_js|gokuProps", re.I)
+_WALL_TITLE = re.compile(r"^(?:just a moment|attention required! \| cloudflare|ddos-guard|checking your browser"
+                         r"|проверка браузера)", re.I)
+# куки и метки анти-ботов: их ставят и на настоящих страницах, довод только вместе с видом заглушки
+_WALL_COOKIE = re.compile(
+    r"^(?:(__ddg\w*)|(cf_chl\w*|__cf_bm|cf_clearance)|(qrator_\w+)|(sucuri_cloudproxy\w*)|(incap_ses\w*|visid_incap\w*)"
+    r"|(swp_token)|(variti\w*)|(aws-waf-token)|(__js_p_|__jhash_|__jua_))$", re.I)
+_WALL_COOKIE_WHO = ("DDoS-Guard", "Cloudflare", "Qrator", "Sucuri", "Imperva", "StormWall", "Variti", "AWS WAF", "")
+_WALL_MARK = re.compile(r"(ddos-guard)|(qrator)|(_Incapsula_Resource)|(stormwall)|(variti)", re.I)
+_WALL_MARK_WHO = ("DDoS-Guard", "Qrator", "Imperva", "StormWall", "Variti")
+_WALL_COOKIE_JS = re.compile(r"document\.cookie\s*=")
+_WALL_RELOAD = re.compile(r"location\.reload\s*\(|location(?:\.href)?\s*=[^=]|location\.(?:replace|assign)\s*\(")
+
+
+def _cookie_names(set_cookies) -> list[str]:
+    return [c.split("=", 1)[0].strip() for c in set_cookies or [] if "=" in c]
+
+
+def wall(headers, set_cookies, text: str, page: dict) -> str | None:
+    """Страница JS-проверки анти-бота вместо главной: None - нет, иначе чей анти-бот (или кука
+    проверки, если имя неизвестно; пусто - узнали по виду). Заглушка - маленькая страница без
+    title и без чужих ресурсов, скрипт которой ставит куку или перезагружает страницу. Скрипт,
+    уводящий на другой сайт, сюда не подходит: это уже признак, а не проверка."""
+    text = text or ""
+    if "challenge" in str(headers.get("cf-mitigated", "")).lower() or _WALL_TITLE.search(page.get("title") or ""):
+        title = (page.get("title") or "").lower()
+        return "Cloudflare" if "cloudflare" in title or headers.get("cf-mitigated") else (
+            "DDoS-Guard" if "ddos" in title else "")
+    m = _WALL_BODY.search(text[:_MAX_BODY])
+    if m:
+        t = m.group(0).lower()
+        return ("Cloudflare" if "cf_chl" in t else "DDoS-Guard" if "ddos" in t else
+                "Sucuri" if "sucuri" in t else "AWS WAF")
+    js = page.get("inline") or ""
+    stub = (len(text) <= _WALL_MAX and not page.get("title") and not page.get("domains")
+            and bool(_WALL_COOKIE_JS.search(js) or _WALL_RELOAD.search(js)))
+    if not stub:
+        return None
+    for name in _cookie_names(set_cookies):
+        c = _WALL_COOKIE.match(name)
+        if c:
+            return _WALL_COOKIE_WHO[c.lastindex - 1] or f"кука {name}"
+    mk = _WALL_MARK.search(text)
+    if mk:
+        return _WALL_MARK_WHO[mk.lastindex - 1]
+    # без известной куки: noindex и скрипт, который ставит куку и перезагружает ту же страницу
+    if "noindex" in (page.get("robots") or "") and _WALL_COOKIE_JS.search(js) and _WALL_RELOAD.search(js):
+        return ""
+    return None
 
 
 def engine(headers: dict, generator: str, text: str) -> dict:
@@ -423,13 +490,33 @@ def observe(state: dict | None, obs: dict, now: datetime, fleet: set[str], versi
         signs["old"] = {"items": old, "since": (signs.get("old") or {}).get("since") or _iso(now)}
     else:
         signs.pop("old", None)
-    # спокойная главная понемногу подтягивает базу размера: сайт растет, база за ним
-    if not emptied and "empty" not in pend and base.get("size") and obs["size"]:
+    # спокойная главная понемногу подтягивает базу размера: сайт растет, база за ним. Только та же
+    # страница (тот же title): размер базы не берется с другой страницы
+    if (not emptied and "empty" not in pend and base.get("size") and obs["size"]
+            and norm_title(obs["title"]) == norm_title(base.get("title") or "")):
         base = {**base, "size": int(base["size"] * 0.8 + obs["size"] * 0.2)}
     st.update(base=base, signs=signs, pend=pend, post=post, engine=obs.get("engine") or {},
               last={"at": _iso(now), "size": obs["size"], "title": obs["title"],
                     "domains": obs["domains"], "bot": bot},
               next=_iso(now + (RECHECK if pend else SCAN_EVERY)))
+    st.pop("err", None)
+    st.pop("wall", None)
+    return st
+
+
+# признаки по содержимому главной: за страницей проверки анти-бота их не проверить
+_PAGE_SIGNS = ("empty", "title", "dom", "bot")
+
+
+def walled(state: dict | None, who: str, now: datetime) -> dict:
+    """Вместо главной - страница JS-проверки анти-бота (wall): ни базой, ни текущим состоянием
+    она не становится. Признаки по содержимому главной снимаем, проверить их нечем; файлы сайта
+    (php, edit) и версии остаются. Пустит анти-бот в следующий раз - сравним с базой как обычно."""
+    st = dict(state or {})
+    st["signs"] = {k: v for k, v in (st.get("signs") or {}).items() if k not in _PAGE_SIGNS}
+    st["pend"] = {k: v for k, v in (st.get("pend") or {}).items() if k not in _PAGE_SIGNS}
+    since = (st.get("wall") or {}).get("since") or _iso(now)
+    st.update(wall={"who": who, "since": since, "at": _iso(now)}, next=_iso(now + SCAN_EVERY))
     st.pop("err", None)
     return st
 
@@ -468,6 +555,8 @@ def _size(b: int) -> str:
 def phrase(key: str, s: dict) -> str:
     """Короткая фраза признака: для строки на главной и алерта."""
     if key == "empty":
+        if not shrank(s):
+            return "с главной пропал title"
         return "главная пустая" if not s.get("title") or s.get("size", 0) < 1024 else "главная опустела"
     if key == "bot":
         return "Googlebot видит другое"
@@ -532,9 +621,19 @@ def alert_text(state: dict) -> str:
     return "\n".join(lines)
 
 
+def shrank(s: dict) -> bool:
+    """Признак "empty": главная правда стала меньше в разы, а не только потеряла title."""
+    size, was = int(s.get("size") or 0), int(s.get("was") or 0)
+    return was >= 2048 and size * 5 <= was
+
+
 def _detail(key: str, s: dict) -> str:
     if key == "empty":
-        return f"главная {_size(int(s.get('size') or 0))} вместо {_size(int(s.get('was') or 0))}"
+        sizes = f"{_size(int(s.get('size') or 0))} вместо {_size(int(s.get('was') or 0))}"
+        if not shrank(s):
+            title = (s.get("title") or "")[:40]
+            return (f'с главной пропал title "{title}", ' if title else "с главной пропал title, ") + sizes
+        return f"главная {sizes}"
     if key == "bot":
         return f'Googlebot видит "{s.get("title", "")[:40]}"' if s.get("title") else "Googlebot видит другое"
     if key == "dom":
@@ -605,11 +704,20 @@ def view(state: dict | None) -> dict | None:
     since = min((r["since"] for r in rows if r.get("since")), default=None)
     base = state.get("base") or {}
     last = state.get("last") or {}
+    w = state.get("wall")
+    if isinstance(w, dict):
+        who = w.get("who", "")
+        cookie = who[5:] if who.startswith("кука ") else ""
+        w = {"who": "" if cookie else who, "cookie": cookie, "since": w.get("since"), "at": w.get("at")}
     return {
         "level": level(state), "summary": summary(state), "since": since, "signs": rows,
+        # эталон - один ответ: title и размер с одной страницы, не текущий размер к старому title
         "base": {"title": base.get("title", ""), "size": base.get("size")},
-        "last_at": last.get("at"), "size": last.get("size"), "engine": state.get("engine") or {},
+        "last_at": (w or {}).get("at") or last.get("at"), "size": last.get("size"),
+        "engine": state.get("engine") or {},
         "domains": sorted(base.get("domains") or {}), "err": state.get("err", ""),
+        # главная за JS-проверкой анти-бота: чья проверка или ее кука, с какого времени
+        "wall": {k: w[k] for k in ("who", "cookie", "since")} if w else None,
     }
 
 
@@ -700,12 +808,17 @@ async def scan(check) -> dict:
             r, text = await _get(client, url, checks_exec._USER_AGENT)
         except httpx.HTTPError as exc:
             return {"err": f"не открылась: {type(exc).__name__}"}
+        final = str(r.url)
+        page = parse_page(text, final) if _is_html(r) else {}
+        # проверка анти-бота бывает и с 403/429/503 (Cloudflare): это не ошибка сайта и не главная
+        if page and r.status_code in _WALL_STATUS:
+            who = wall(r.headers, r.headers.get_list("set-cookie"), text, page)
+            if who is not None:
+                return {"wall": who}
         if not 200 <= r.status_code < 300:
             return {"err": f"ответ {r.status_code}"}
-        if not _is_html(r):
+        if not page:
             return {"err": "не html"}
-        final = str(r.url)
-        page = parse_page(text, final)
         domains = dict(page["domains"])
         host = (urlparse(final).hostname or "").lower()
         js_read: dict[str, list[str]] = {}
@@ -725,7 +838,9 @@ async def scan(check) -> dict:
             br, bt = await _get(client, url, _BOT_UA)
             # Cloudflare и др. режут поддельный Googlebot (403, проверка): это не подмена
             if 200 <= br.status_code < 300 and _is_html(br):
-                bot = {"size": len(br.content), "title": parse_page(bt, str(br.url))["title"]}
+                bp = parse_page(bt, str(br.url))
+                if wall(br.headers, br.headers.get_list("set-cookie"), bt, bp) is None:
+                    bot = {"size": len(br.content), "title": bp["title"]}
         except httpx.HTTPError:
             pass
         return {"obs": {"size": len(r.content), "title": page["title"], "domains": domains, "bot": bot,
@@ -825,6 +940,8 @@ async def _scan_due(session_factory: async_sessionmaker[AsyncSession], now: date
             t = datetime.now(timezone.utc)
             if "obs" in res:
                 row.tamper_state = observe(row.tamper_state, res["obs"], t, fleet_domains(states, cid), vers)
+            elif "wall" in res:
+                row.tamper_state = walled(row.tamper_state, res["wall"], t)
             else:
                 row.tamper_state = failed(row.tamper_state, res["err"], t)
         await s.commit()
@@ -867,5 +984,7 @@ def alert_due(state: dict | None, sent: list | None) -> tuple[str, list] | None:
             return "tamper", sorted(set(keys) | set(sent))
         return None
     if sent:
-        return ("tamperrec", []) if lv == "none" else ("", [])
+        # признаки снялись, потому что главную закрыла проверка анти-бота: сказать "все хорошо"
+        # нечем, молча забываем
+        return ("tamperrec", []) if lv == "none" and not (state or {}).get("wall") else ("", [])
     return None
