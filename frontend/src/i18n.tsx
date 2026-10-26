@@ -3375,6 +3375,18 @@ const EN: Record<string, string> = {
   'бэкапится баз: {n}': 'databases backed up: {n}',
   'до {h}:00': 'until {h}:00',
   'исключено путей: {n}': 'excluded paths: {n}',
+  // старый runner бэкапа: пути в юните (BackupsPage UnitPaths)
+  'пути в юните бэкапа, разобрать не удалось': 'paths in the backup unit, could not be parsed',
+  'в скрипте {script} (его запускает {unit})': 'in the script {script} (run by {unit})',
+  'в ExecStart юнита {unit}': 'in the ExecStart of {unit}',
+  'Задано {where}, панель эти пути не меняет.': 'Set {where}, the panel does not change these paths.',
+  'исключений нет, бэкапится весь /': 'no exclusions, the whole / is backed up',
+  'Разобрать пути из юнита не удалось (путь через переменную или нет файла списка): что бэкапится, панель не знает и дыры в покрытии не ищет.':
+    'Could not parse the paths of the unit (a path through a variable or a missing list file): the panel does not know what is backed up and looks for no coverage gaps.',
+  'Чтобы менять пути из панели, переведите бэкап на runner панели (adopt): репозиторий, пути и время останутся те же. Сначала проверка без изменений, потом перевод:':
+    'To change the paths from the panel, move the backup to the panel runner (adopt): the repository, paths and time stay the same. First a check that changes nothing, then the move:',
+  'Чтобы менять пути из панели, бэкап надо перевести на runner панели, но adopt тут не сработает: в юните нет EnvironmentFile с RESTIC_REPOSITORY и RESTIC_PASSWORD. Настройте бэкап заново кнопкой «Переустановить бэкап».':
+    'To change the paths from the panel the backup has to move to the panel runner, but adopt will not work here: the unit has no EnvironmentFile with RESTIC_REPOSITORY and RESTIC_PASSWORD. Set the backup up again with "Reinstall the backup".',
   'каждый день {time}': 'every day at {time}',
   'куда': 'to',
   'не бэкапится: {list}': 'not backed up: {list}',

@@ -31,6 +31,8 @@ const PHRASES: Rule[] = [
   [/нет сети до сервера бэкапов/g, 'no network to the backup server'],
   [/репозиторий занят чужим локом/g, 'the repository is locked by someone else'],
   [/кончилось место/g, 'out of space'],
+  // старый runner бэкапа: пути в юните (app/backup_unit.py)
+  [/пути заданы в юните бэкапа, панель их не меняет - сначала переведите бэкап на runner панели: /g, 'the paths are set in the backup unit, the panel does not change them - first move the backup to the panel runner: '],
   [/на сервере бэкапов нет репозитория/g, 'no repository on the backup server'],
   [/прогон не уложился в таймаут юнита/g, 'the run did not fit into the unit timeout'],
   // свои бэкапы ноды (app/custom_backups.py evaluate)

@@ -63,7 +63,7 @@ def test_alert_and_home_row():
 def test_helper_has_verify():
     """helper отдает проверку командой verify и запускает её из ежеминутного refresh"""
     src = (Path(__file__).resolve().parents[2] / "agent" / "backup-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.44" in src and "verify_bin()" in src
+    assert "KERVAX_SETUP_VERSION=0.45" in src and "verify_bin()" in src
     # настройки бэкапа - из юнита (EnvironmentFile=, User=), файл переменных читается как данные:
     # на старых нодах /etc/systemd-resta.conf - скрипт уведомления с curl, "." слал ложное
     # "бэкап с ошибкой"; под cron PATH без /usr/sbin, и runuser не находился

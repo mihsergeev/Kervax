@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.39] - 2026-10-27
+
+### Fixed
+- Бэкапы: если restic запускает сам юнит (ExecStart, свой скрипт из ansible-роли), карточка "Расписание и пути"
+  показывает пути и исключения из юнита как есть, с пометкой, что панель их не меняет, и командами перевода на
+  runner панели (adopt). Правка путей для такого runner'а отказывает с подсказкой adopt, аудит покрытия и GitLab
+  смотрят на пути юнита, а если юнит не разобрать - ничего не утверждают. Нужен backup-setup 0.45.
+
 ## [1.8.38] - 2026-10-26
 
 ### Fixed

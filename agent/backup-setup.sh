@@ -134,7 +134,13 @@ AGENT_USER=kervax
 #         removes only a directory the helper made; KV_DUMP_* no longer leak into the next
 #         request of the same pass;
 #       * restic is downloaded into mktemp -d and checked against the baked sha256 only
-KERVAX_SETUP_VERSION=0.44  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.45: the old runner - restic straight in the ExecStart of the backup unit (or in a wrapper script
+#       of its own), not in the script get-config reads. The panel showed "exclude" with empty lists
+#       there and offered to edit paths that never applied. The unit is parsed (continuation lines,
+#       sh -c, --exclude, --exclude-file, --files-from) into report.d/backup-unit.json, only paths
+#       and file names. set-paths refuses such a runner (adopt first), a dump warns when its
+#       directory is outside the unit's paths, and adopt takes the paths from the same parser
+KERVAX_SETUP_VERSION=0.45  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -1173,6 +1179,11 @@ fi
   # be listed explicitly, otherwise the dumps would silently pile up locally and go nowhere.
   local added=""
   local script; script="$(find_script || true)"
+  if [ "$(runner_kind)" = unit ]; then
+    # the old runner: its paths live in the unit, the panel does not edit them - only warn
+    script=""
+    unit_covers "$dir_base" || added=" WARNING: $dir_base is not in the paths of the backup unit (restic in its ExecStart) - the dumps will not reach the backup; move the backup to the panel runner (adopt) or add the directory to the unit"
+  fi
   if [ -n "$script" ]; then
     local cur_mode inc
     cur_mode="$(sed -n 's/^INCLUDE_MODE="\(.*\)".*/\1/p' "$script" | head -1)"
@@ -1465,9 +1476,264 @@ cmd_get_creds() {
 }
 refresh_config() { cmd_get_config > "$CONF_JSON.tmp" 2>/dev/null && mv -f "$CONF_JSON.tmp" "$CONF_JSON" && chmod 0644 "$CONF_JSON"; }
 
+# ---- the OLD runner: restic right in the ExecStart of the backup unit ----
+# Older layouts run restic from the unit itself (ExecStart=.../restic backup /etc /home
+# --exclude=...) or from a wrapper script of their own, not from the script get-config reads.
+# Then INCLUDE_MODE/EXCLUDES_STR say nothing about the real backup, and set-paths would edit a file
+# nobody runs. The paths are read from the unit as they are into report.d/backup-unit.json. Only
+# paths and file names leave the node: the command line itself can hold the repository password.
+UNIT_JSON=/var/lib/kervax/report.d/backup-unit.json
+UNIT_SVCS=(systemd-rest.service restic-backup.service restic.service)
+# restic options that take the NEXT word as their value (--opt=value needs no list)
+RESTIC_VAL_OPTS=" -r --repo --repository-file -p --password-file --password-command --cacert --tls-client-cert --cache-dir --key-hint -o --option --limit-upload --limit-download --pack-size --compression -e --exclude --iexclude --exclude-file --iexclude-file --files-from --files-from-verbatim --files-from-raw --exclude-larger-than --exclude-if-present -H --host --tag --parent --time --stdin-filename --read-concurrency -g --group-by --retry-lock "
+UNIT_LIST_MAX=200   # paths per list in the report: a files-from list can be long
+
+backup_service() { local s; for s in "${UNIT_SVCS[@]}"; do systemctl cat "$s" >/dev/null 2>&1 && { echo "$s"; return 0; }; done; return 1; }
+
+# The commands of the unit's ExecStart, one per line: continuation lines are joined, an empty
+# ExecStart= (a drop-in resetting the list) drops the earlier ones, the -@+!: prefixes are cut off
+unit_execs() {
+  systemctl cat "$1" 2>/dev/null | awk '
+    function emit() { if (line == "") { n = 0; return } sub(/^[-@+!:]+/, "", line); cmds[++n] = line }
+    { sub(/\r$/, "") }
+    cont { line = line " " $0; if (line ~ /\\$/) { sub(/[ \t]*\\$/, "", line); next } cont = 0; emit(); next }
+    /^[ \t]*ExecStart[ \t]*=/ { line = $0; sub(/^[ \t]*ExecStart[ \t]*=[ \t]*/, "", line)
+      if (line ~ /\\$/) { sub(/[ \t]*\\$/, "", line); cont = 1; next } emit() }
+    END { if (cont) emit(); for (i = 1; i <= n; i++) print cmds[i] }'
+}
+
+# $1 a command line -> its words, one per line, quotes and backslashes resolved the shell way.
+# ; & | come out as a lone ";" (the end of a command), < and > as a lone ">" (a redirection).
+cmd_words() {
+  printf '%s' "$1" | awk -v sq="'" 'BEGIN { RS = "\001" } {
+    s = $0; w = ""; has = 0; q = ""; n = length(s)
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1)
+      if (q == sq) { if (c == sq) q = ""; else w = w c; continue }
+      if (q == "\"") {
+        if (c == "\\" && i < n && index("\"\\$`", substr(s, i + 1, 1))) { i++; w = w substr(s, i, 1); continue }
+        if (c == "\"") q = ""; else w = w c
+        continue
+      }
+      if (c == sq || c == "\"") { q = c; has = 1; continue }
+      if (c == "\\" && i < n) { i++; w = w substr(s, i, 1); has = 1; continue }
+      if (c == " " || c == "\t" || c == "\n") { if (has) print w; w = ""; has = 0; continue }
+      if (c == ";" || c == "&" || c == "|") { if (has) print w; w = ""; has = 0; print ";"; continue }
+      if (c == "<" || c == ">") { if (has) print w; w = ""; has = 0; print ">"; continue }
+      w = w c; has = 1
+    }
+    if (has) print w
+  }'
+}
+
+# Paths of every restic backup in a command line (inline, under sh -c '...', after nice/flock and
+# the like, several commands in a row). Prints "i <path>" (backed up), "e <pattern>" (excluded),
+# "ef <file>" (--exclude-file), "ff <file>" (--files-from), "f <flag>", "v" (a path given through a
+# variable, unknown here) and "found". Option values other than paths are never printed.
+restic_cmd_parse() {
+  local words=() out=() w b i=0 n
+  while IFS= read -r w; do words+=("$w"); done < <(cmd_words "$1")
+  n=${#words[@]}
+  # sh -c '<script>': the script is one word, its own words go in its place
+  while [ "$i" -lt "$n" ]; do
+    w="${words[$i]}"; b="${w##*/}"
+    if [[ "$b" =~ ^(ba|da|z)?sh$ ]] && [[ "${words[$((i + 1))]:-}" =~ ^-[a-z]*c$ ]] && [ $((i + 2)) -lt "$n" ]; then
+      while IFS= read -r w; do out+=("$w"); done < <(cmd_words "${words[$((i + 2))]}")
+      out+=(";"); i=$((i + 3)); continue
+    fi
+    out+=("$w"); i=$((i + 1))
+  done
+  local in=0 seen=0 skip="" opt
+  for w in "${out[@]}" ";"; do
+    if [ "$w" = ";" ]; then in=0; seen=0; skip=""; continue; fi
+    if [ "$in" = 0 ]; then
+      b="${w##*/}"
+      # the binary by its name or a variable named after it in a script ($RESTIC, ${RESTIC_BIN})
+      if [ "$b" = restic ] || [[ "$w" =~ ^\$\{?[A-Za-z_]*[Rr][Ee][Ss][Tt][Ii][Cc][A-Za-z_]*\}?$ ]]; then in=1; fi
+      continue
+    fi
+    if [ -n "$skip" ]; then
+      # >> comes out as two ">": the file name is the word after both
+      [ "$skip" = redir ] && [ "$w" = ">" ] && continue
+      opt="$skip"; skip=""
+      case "$opt" in
+        -e|--exclude|--iexclude) echo "e $w" ;;
+        --exclude-file|--iexclude-file) echo "ef $w" ;;
+        --files-from|--files-from-verbatim|--files-from-raw) echo "ff $w" ;;
+      esac
+      continue
+    fi
+    case "$w" in
+      ">") skip=redir; continue ;;
+      --exclude=*|--iexclude=*) echo "e ${w#*=}"; continue ;;
+      --exclude-file=*|--iexclude-file=*) echo "ef ${w#*=}"; continue ;;
+      --files-from=*|--files-from-verbatim=*|--files-from-raw=*) echo "ff ${w#*=}"; continue ;;
+      --exclude-caches) echo "f exclude-caches"; continue ;;
+      -x|--one-file-system) echo "f one-file-system"; continue ;;
+      --*=*) continue ;;
+      -*) [[ "$RESTIC_VAL_OPTS" == *" $w "* ]] && skip="$w"; continue ;;
+    esac
+    if [ "$seen" = 0 ]; then
+      [ "$w" = backup ] && { seen=1; echo found; }
+      continue
+    fi
+    case "$w" in
+      *'$'*) echo v ;;
+      /*) echo "i $w" ;;
+    esac
+  done
+}
+
+# a text file a command runs (its first word, or the script after sh/bash): a wrapper script
+exec_script() {
+  local words=() w b
+  while IFS= read -r w; do words+=("$w"); done < <(cmd_words "$1")
+  [ "${#words[@]}" -gt 0 ] || return 1
+  w="${words[0]}"; b="${w##*/}"
+  if [[ "$b" =~ ^(ba|da|z)?sh$ ]] && [ "${#words[@]}" -gt 1 ]; then
+    case "${words[1]}" in -*c) return 1 ;; esac
+    w="${words[1]}"
+  fi
+  case "$w" in /*) ;; *) return 1 ;; esac
+  [ -f "$w" ] && [ "${w##*/}" != restic ] && grep -Iq . "$w" 2>/dev/null && echo "$w"
+}
+
+# "panel" - the unit runs the script get-config reads (set-paths edits what really runs), "unit" -
+# restic or a script of its own straight from the unit, "" - no backup service
+runner_kind() {
+  local svc="${1:-}" script cmd w
+  [ -n "$svc" ] || svc="$(backup_service)" || return 0
+  script="$(find_script || true)"
+  if [ -n "$script" ]; then
+    while IFS= read -r cmd; do
+      while IFS= read -r w; do [ "$w" = "$script" ] && { echo panel; return 0; }; done < <(cmd_words "$cmd")
+    done < <(unit_execs "$svc")
+  fi
+  echo unit
+}
+
+# The paths of the unit runner in the restic_cmd_parse lines plus "src unit|script" and
+# "script <path>". A wrapper script in the ansible layout (INCLUDE_MODE and *_STR lines) is read
+# the way get-config reads ours; any other script is searched for its restic backup lines.
+unit_paths() {
+  local svc="$1" cmd sp body
+  while IFS= read -r cmd; do
+    if sp="$(exec_script "$cmd")"; then
+      echo "src script"; echo "script $sp"
+      body="$(head -c 262144 "$sp" 2>/dev/null | tr -d '\000')"
+      local mode
+      mode="$(printf '%s\n' "$body" | sed -n 's/^INCLUDE_MODE="\(.*\)".*/\1/p' | head -1)"
+      if [ -n "$mode" ]; then
+        echo found
+        if [ "$mode" = include ]; then
+          printf '%s\n' "$body" | sed -n 's/^INCLUDES_STR="\(.*\)"$/\1/p' | head -1 | grep -oE '"[^"]+"' | tr -d '"' | sed 's/^/i /'
+        else
+          echo "i /"
+          printf '%s\n' "$body" | sed -n 's/^EXCLUDES_STR="\(.*\)"$/\1/p' | head -1 | grep -oE -- '--exclude=[^ ]+' | sed 's/^--exclude=/e /'
+        fi
+        continue
+      fi
+      # continuation lines joined, comments dropped; every line with a restic backup is parsed
+      printf '%s\n' "$body" | awk '{ sub(/\r$/, "") } /^[ \t]*#/ { next }
+        { if (acc != "") $0 = acc " " $0; if ($0 ~ /\\$/) { sub(/\\$/, ""); acc = $0; next } acc = ""; print }' \
+        | grep -E '(restic|RESTIC)[^ ]*[ ].*backup' | while IFS= read -r cmd; do restic_cmd_parse "$cmd"; done
+    else
+      echo "src unit"
+      restic_cmd_parse "$cmd"
+    fi
+  done < <(unit_execs "$svc")
+}
+
+# the lines of a --files-from / --exclude-file list (empty lines and comments skipped)
+list_file() { [ -f "$1" ] && head -c 262144 "$1" 2>/dev/null | tr -d '\000\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v -e '^$' -e '^#' | head -n "$UNIT_LIST_MAX"; }
+
+json_list() {  # the arguments -> a JSON array of strings (control characters removed)
+  local out="" p
+  for p in "$@"; do out="${out:+$out,}\"$(json_escape "$(printf '%s' "$p" | tr -d '\000-\037')")\""; done
+  printf '[%s]' "$out"
+}
+
+# The report of the unit runner: mode, the backed up paths and the exclusions as the unit has them.
+# parsed=false - the unit was not understood (no restic backup found, a path in a variable, a
+# list file missing): the panel then claims nothing about coverage.
+unit_report() {
+  local svc kind
+  svc="$(backup_service)" || { echo '{"v":1,"runner":""}'; return 0; }
+  kind="$(runner_kind "$svc")"
+  if [ "$kind" != unit ]; then printf '{"v":1,"runner":"%s","service":"%s"}\n' "$kind" "$(json_escape "$svc")"; return 0; fi
+  local inc=() exc=() efiles=() ffiles=() flags=() src="unit" script="" found=0 vars=0 missing=0 k v p line
+  while IFS= read -r line; do
+    k="${line%% *}"; v=""; [ "$k" = "$line" ] || v="${line#* }"
+    case "$k" in
+      src) src="$v" ;; script) script="$v" ;; found) found=1 ;; v) vars=1 ;;
+      i) inc+=("$v") ;; e) exc+=("$v") ;; ef) efiles+=("$v") ;; ff) ffiles+=("$v") ;;
+      f) [[ " ${flags[*]-} " == *" $v "* ]] || flags+=("$v") ;;
+    esac
+  done < <(unit_paths "$svc")
+  for p in "${ffiles[@]+"${ffiles[@]}"}"; do
+    [ -f "$p" ] || { missing=1; continue; }
+    while IFS= read -r v; do case "$v" in /*) inc+=("$v") ;; *) vars=1 ;; esac; done < <(list_file "$p")
+  done
+  for p in "${efiles[@]+"${efiles[@]}"}"; do
+    [ -f "$p" ] || { missing=1; continue; }
+    while IFS= read -r v; do exc+=("$v"); done < <(list_file "$p")
+  done
+  # "backup /" with exclusions is the exclude mode, explicit paths are the include mode
+  local mode=include root=0 inc2=()
+  for p in "${inc[@]+"${inc[@]}"}"; do
+    [ "$p" = / ] && { root=1; continue; }
+    p="${p%/}"; [[ " ${inc2[*]-} " == *" $p "* ]] || inc2+=("$p")
+  done
+  if [ "$root" = 1 ]; then mode=exclude; inc2=(); fi
+  local parsed=true
+  { [ "$found" = 1 ] && [ "$vars" = 0 ] && [ "$missing" = 0 ]; } || parsed=false
+  [ "$mode" = include ] && [ "${#inc2[@]}" -eq 0 ] && parsed=false
+  # adopt moves the backup to the panel runner only with the credentials in an EnvironmentFile
+  local envf adopt=false
+  envf="$(systemctl cat "$svc" 2>/dev/null | sed -nE 's/^EnvironmentFile=-?(.+)$/\1/p' | head -1)"
+  if [ -n "$envf" ] && [ -f "$envf" ] && grep -qE '^(export )?RESTIC_REPOSITORY=rest:' "$envf" && grep -qE '^(export )?RESTIC_PASSWORD=.' "$envf"; then
+    adopt=true
+  fi
+  printf '{"v":1,"runner":"unit","service":"%s","source":"%s","script":"%s","parsed":%s,"mode":"%s","includes":%s,"excludes":%s,"exclude_files":%s,"files_from":%s,"flags":%s,"adopt":%s}\n' \
+    "$(json_escape "$svc")" "$src" "$(json_escape "$script")" "$parsed" "$mode" \
+    "$(json_list "${inc2[@]:0:$UNIT_LIST_MAX}")" "$(json_list "${exc[@]:0:$UNIT_LIST_MAX}")" \
+    "$(json_list "${efiles[@]+"${efiles[@]}"}")" "$(json_list "${ffiles[@]+"${ffiles[@]}"}")" \
+    "$(json_list "${flags[@]+"${flags[@]}"}")" "$adopt"
+}
+
+unit_report_maybe() {
+  local out
+  out="$(unit_report 2>/dev/null)" || return 0
+  case "$out" in
+    '{"v":1,"runner":""}') rm -f "$UNIT_JSON" ;;
+    *) install -d -m 0755 "${UNIT_JSON%/*}"
+       printf '%s\n' "$out" > "$UNIT_JSON.tmp" && mv -f "$UNIT_JSON.tmp" "$UNIT_JSON" && chmod 0644 "$UNIT_JSON" ;;
+  esac
+}
+
+path_under() { [ "$1" = "$2" ] || [[ "$1" == "$2"/* ]]; }
+# is the directory in the backup of the unit runner (the dumps have to reach it)
+unit_covers() {  # $1 a directory
+  local d="$1" mode="" inc=() exc=() k v line
+  while IFS= read -r line; do
+    k="${line%% *}"; v="${line#* }"
+    case "$k" in i) inc+=("${v%/}") ;; e) exc+=("${v%/}") ;; esac
+  done < <(unit_paths "$(backup_service)")
+  mode=include; for v in "${inc[@]+"${inc[@]}"}"; do [ -z "$v" ] && mode=exclude; done
+  if [ "$mode" = include ]; then
+    for v in "${inc[@]+"${inc[@]}"}"; do path_under "$d" "$v" && return 0; done
+    return 1
+  fi
+  for v in "${exc[@]+"${exc[@]}"}"; do case "$v" in /*) path_under "$d" "$v" && return 1 ;; esac; done
+  return 0
+}
+
+UNIT_ADOPT_HINT="the backup unit runs restic itself (ExecStart), the panel's paths would not apply there - move it to the panel runner first: sudo /lib65/kervax/kervax-backup-helper adopt"
+
 cmd_set_paths() {
   local mode="$1"; shift
   [ "$mode" = include ] || [ "$mode" = exclude ] || { echo "bad mode" >&2; return 2; }
+  [ "$(runner_kind)" = unit ] && { echo "$UNIT_ADOPT_HINT" >&2; return 2; }
   local script; script="$(find_script)" || { echo "script not found" >&2; return 2; }
   local paths=() p; for p in "$@"; do valid_path "$p" || { echo "bad path: $p" >&2; return 2; }; paths+=("$p"); done
   [ "${#paths[@]}" -gt 0 ] || { echo "no paths" >&2; return 2; }
@@ -1796,29 +2062,24 @@ cmd_adopt() {
   # no longer read back the same from the new env. Such a backup stays as it was
   secret_ok "$repopass" || { echo "the old RESTIC_PASSWORD has characters the panel env cannot hold safely (quotes, \$, \\, ;, spaces, ~) - leaving the old backup as it is" >&2; return 2; }
   repo_url_ok "$repo_url" || { echo "the old RESTIC_REPOSITORY is not a plain rest: address - leaving the old backup as it is" >&2; return 2; }
-  # 4) mode and paths from ExecStart (or from the wrapper script it points to)
-  local execline; execline="$(printf '%s\n' "$unit" | sed -nE 's/^ExecStart=(.*)$/\1/p' | head -1)"
-  local scan="$execline"
-  case "$execline" in
-    *" backup "*) ;;                                  # inline restic
-    /*) local sp; sp="$(printf '%s' "$execline" | awk '{print $1}')"
-        [ -f "$sp" ] && scan="$(cat "$sp" 2>/dev/null)" ;;   # ExecStart points to a script
-  esac
-  local mode="exclude" paths=() e
-  # every --exclude=X (a trailing '/' is stripped and the value validated)
-  while IFS= read -r e; do
-    e="${e%/}"; [ -n "$e" ] && valid_path "$e" && paths+=("$e")
-  done < <(printf '%s\n' "$scan" | grep -oE -- "--exclude=[^ \"']+" | sed 's/^--exclude=//')
-  # include mode: explicit paths are backed up (not '/') and there are no excludes
-  if ! printf '%s' "$scan" | grep -qE 'backup +/( |$|")' && [ "${#paths[@]}" -eq 0 ]; then
-    local tok seen=0
-    for tok in $scan; do
-      if [ "$seen" = 1 ]; then
-        case "$tok" in --*) ;; /*) e="${tok%/}"; valid_path "$e" && paths+=("$e");; esac
-      fi
-      [ "$tok" = backup ] && seen=1
-    done
-    [ "${#paths[@]}" -gt 0 ] && mode="include"
+  # 4) mode and paths from ExecStart (or from the wrapper script it points to): the same parser
+  # the panel's report uses (continuation lines, sh -c, --exclude-file and --files-from lists)
+  local mode="exclude" paths=() e line k v root=0 inc=() exc=() lists=()
+  while IFS= read -r line; do
+    k="${line%% *}"; v="${line#* }"
+    case "$k" in i) [ "$v" = / ] && root=1 || inc+=("${v%/}") ;; e) exc+=("${v%/}") ;; ef|ff) lists+=("$k $v") ;; esac
+  done < <(unit_paths "$svc")
+  for e in "${lists[@]+"${lists[@]}"}"; do
+    while IFS= read -r v; do
+      case "${e%% *}" in ff) case "$v" in /*) inc+=("${v%/}") ;; esac ;; *) exc+=("${v%/}") ;; esac
+    done < <(list_file "${e#* }")
+  done
+  if [ "$root" = 0 ] && [ "${#inc[@]}" -gt 0 ]; then
+    mode="include"
+    for e in "${inc[@]}"; do [ -n "$e" ] && valid_path "$e" && paths+=("$e"); done
+    [ "${#exc[@]}" -gt 0 ] && echo "note: the exclusions inside the included paths are not carried over (${#exc[@]})" >&2
+  else
+    for e in "${exc[@]+"${exc[@]}"}"; do [ -n "$e" ] && valid_path "$e" && paths+=("$e"); done
   fi
   # could not parse -> a safe default: back up / with the usual excludes (no data is lost)
   if [ "${#paths[@]}" -eq 0 ]; then
@@ -2893,7 +3154,7 @@ verify_maybe() {
 case "${1:-}" in
   get-config)    cmd_get_config ;;
   # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
-  refresh)       refresh_config || true; custom_scan_maybe; kube_access_maybe || true; dumps_trigger_maybe || true
+  refresh)       refresh_config || true; unit_report_maybe || true; custom_scan_maybe; kube_access_maybe || true; dumps_trigger_maybe || true
                  dumps_rsyncable_maybe || true; vanished_ok_maybe || true; retry_lock_maybe || true; https_cacert_maybe || true
                  backup_runs_maybe || true; backup_perms_maybe || true; allow_seed_maybe || true; res_cleanup
                  verify_maybe || true ;;

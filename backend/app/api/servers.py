@@ -16,6 +16,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 
+from app import backup_unit
 from app import backup_verify
 from app import relay as relay_mod
 from app import disk_wear
@@ -1275,6 +1276,9 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
     # покрытие путей знаем только для нод с helper'ом (у остальных нет конфига)
     if not bk.get("manageable"):
         return out
+    # старый runner, юнит не разобран: что бэкапится, неизвестно - дыр не выдумываем
+    if not backup_unit.paths_known(bk):
+        return out
     mode = bk.get("mode") or "exclude"
     inc = [p for p in (bk.get("includes") or []) if p.startswith("/")]
     exc = [p for p in (bk.get("excludes") or []) if p.startswith("/")]
@@ -2416,6 +2420,11 @@ async def backup_command(
         payload = {"name": body.unit, "since": body.since_min, "lines": body.lines, "prio": body.prio}
     elif body.mode in ("preview", "run", "restart", "reset"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "этот режим - только у disk_fix и unit_fix")
+    elif body.action == "set_paths" and not backup_unit.paths_editable((srv.last_report or {}).get("backup")):
+        # restic в ExecStart юнита: правка скрипта панели не применится (helper 0.45 тоже откажет)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "пути заданы в юните бэкапа, панель их не меняет - сначала переведите бэкап "
+                            f"на runner панели: {backup_unit.ADOPT_CMD}")
     elif body.action == "deprovision":
         # "Удалить настройку": снять с клиента то, что ставит "Настроить бэкап" (юниты, env с
         # паролем, скрипт, restic панели). Репозиторий на бэкап-сервере не трогается. Живой
@@ -3543,6 +3552,8 @@ async def agent_report(
     report_dict = body.model_dump()
     # адрес репозитория бэкапа - только без логина и пароля, что бы ни прислал helper
     backup_target.clean_report(report_dict)
+    # старый runner (restic в ExecStart юнита): пути бэкапа из самого юнита, а не из скрипта панели
+    backup_unit.apply(report_dict)
     # отчет, собранный до перевода на https, не возвращает старый http-адрес
     backup_target.carry(prev_rep, report_dict, now.timestamp())
     # убийства, которые еще не попали в точку графика (точка пишется раз в минуту)
