@@ -752,11 +752,58 @@ button.linklike.kube-exp-off { display: block; margin: 10px 0 6px; text-align: l
   font-size: 0.82rem;
   cursor: pointer;
 }
-/* Главная в стиле раздела "Сеть": сводка плитками (клик - в раздел), блоки - карточками,
+/* Главная в стиле раздела "Сеть": сводка плитками (HomeTiles.tsx, клик - в раздел), блоки - карточками,
    пункты - строками со своей подложкой и рамкой. Тон блока - в счетчике у подписи */
-.home-tiles { margin: 0 0 0.75rem; }
-.home-tiles .net-tile-label { display: flex; align-items: center; gap: 0.35rem; }
-.home-tiles .sec-icon { width: 1.15em; height: 1.15em; }
+.home-tiles {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: 0.55rem; margin: 0 0 0.75rem;
+}
+.htile {
+  display: flex; flex-direction: column; min-width: 0;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+}
+:root[data-theme='light'] .htile { box-shadow: var(--shadow-card); }
+.htile-bad { background: color-mix(in srgb, var(--down) 6%, var(--bg-card)); border-color: color-mix(in srgb, var(--down) 38%, var(--border)); }
+.htile-warn { background: color-mix(in srgb, var(--degraded) 6%, var(--bg-card)); border-color: color-mix(in srgb, var(--degraded) 38%, var(--border)); }
+button.htile-head, button.htile-row {
+  display: flex; flex-direction: column; align-items: stretch; width: 100%; min-width: 0; margin: 0;
+  background: none; border: 0; box-shadow: none; color: inherit; font: inherit; font-weight: 400; text-align: left;
+}
+button.htile-head { padding: 0.7rem 0.95rem 0.75rem; border-radius: 10px; gap: 0.2rem; }
+button.htile-head:hover, button.htile-row:hover { background: var(--hover); }
+button.htile-head:active, button.htile-row:active { transform: none; }
+button.htile-head:focus-visible, button.htile-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.htile-label { display: flex; align-items: center; gap: 0.4rem; color: var(--text-muted); font-size: 0.86rem; }
+.htile-label .sec-icon { width: 1.15em; height: 1.15em; }
+.htile-go { margin-left: auto; opacity: 0.5; }
+.htile-big { display: flex; align-items: baseline; flex-wrap: wrap; gap: 0 0.4rem; margin-top: 0.15rem; line-height: 1.15; }
+.htile-num { font-size: 1.75rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.htile-unit { color: var(--text-muted); font-size: 0.92rem; }
+.htile-word { font-size: 1rem; font-weight: 600; }
+.htile-chip {
+  align-self: center; font-size: 0.74rem; font-weight: 600; padding: 0.05rem 0.5rem; border-radius: 999px;
+  color: var(--degraded); background: color-mix(in srgb, var(--degraded) 16%, transparent);
+}
+.htile-t-bad { color: var(--down); }
+.htile-t-warn { color: var(--degraded); }
+.htile-t-ok { color: var(--up); }
+.htile-t-muted { color: var(--text-muted); }
+.htile-ok { font-size: 0.86rem; }
+.htile-foot { color: var(--text-muted); font-size: 0.8rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.htile-rows { border-top: 1px solid var(--border); padding: 0.25rem 0.35rem 0.35rem; display: flex; flex-direction: column; }
+button.htile-row { flex-direction: row; align-items: flex-start; gap: 0.5rem; padding: 0.4rem 0.55rem; min-height: 2.1rem; border-radius: 7px; font-size: 0.86rem; }
+.htile-row .lk-dot { width: 8px; height: 8px; margin-top: 0.38em; }
+.htile-row-txt { min-width: 0; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.3; }
+.htile-row-txt b { font-weight: 600; }
+button.htile-more { color: var(--text-muted); font-size: 0.82rem; }
+button.htile-more .htile-row-txt { -webkit-line-clamp: 1; }
+/* телефон: две колонки, плитка со строками - во всю ширину, чтобы имена серверов влезали */
+@media (max-width: 560px) {
+  .home-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.45rem; }
+  .htile-bad, .htile-warn { grid-column: 1 / -1; }
+  button.htile-head { padding: 0.6rem 0.75rem 0.65rem; }
+  .htile-num { font-size: 1.5rem; }
+}
 .net-cards.home-blocks { margin-top: 0; }
 .net-cap { display: flex; align-items: center; gap: 0.45rem; }
 .net-n {
