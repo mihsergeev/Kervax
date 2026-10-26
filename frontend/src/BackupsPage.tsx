@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ApiError,
@@ -23,8 +23,6 @@ import {
   type BackupRun,
   type BackupServerExtra,
   type BackupServerInfo,
-  type BackupServerLegacy,
-  type BackupServerRepoExtra,
   type BackupSetupJob,
   type CustomBackup,
   type RepoStat,
@@ -110,8 +108,7 @@ function statusTone(st: BStatus): string {
 }
 // тон плитки по статусу бэкапа
 const TILE: Record<BStatus, Tone | undefined> = { ok: 'ok', failed: 'bad', stale: 'bad', skipped: 'warn', unknown: undefined }
-// точка строки по тону и подпись плитки из частей (пустые выкидываем)
-const DOT: Record<string, string> = { 't-up': ' lk-dot-ok', 't-down': ' lk-dot-bad', 't-degraded': ' lk-dot-warn' }
+// подпись плитки из частей (пустые выкидываем)
 const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
 // заполнение тома с репозиториями, % (null: helper старше 0.18, данных нет)
 function diskPct(info: BackupServerInfo): number | null {
@@ -1639,40 +1636,37 @@ const BSRV_ROOT = '/app/rest-server'
 // намеренно нет примитива удаления бэкапов (взлом панели не должен стирать копии).
 // Два случая: пустой мусор (терять нечего) и живой, но заброшенный репозиторий —
 // там мы обязаны показать, что именно исчезнет, иначе команда копируется не глядя.
-/** Состояние ротации репозитория: когда чистилось, сколько сняло, каков старейший
- * снапшот. Возраст старейшего — главный признак: он переживает свою политику ровно
- * тогда, когда чистка встала, какой бы ни была причина. */
-function RotationInfo({ r, x, legacy, prune, t }: {
-  r: RepoStat
-  x?: BackupServerRepoExtra // кто чистит и когда удаляли (helper 0.23), нет - helper старый
-  legacy?: BackupServerLegacy | null
-  prune?: string // почему не работает чистка (бэкенд), пусто - работает
-  t: (s: string, v?: Record<string, string | number>) => string
-}) {
+// дата и время коротко: 27.10, 03:16
+function fmtWhen(ts: number): string {
+  return new Date(ts * 1000).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+/** Плитки выбранного репозитория: последний бэкап, размер, снапшоты, хранение, проверка и
+ * чистка, у каждого числа подпись, что оно значит. Возраст старейшего снапшота - главный
+ * признак встающей чистки: он переживает свою политику ровно тогда, когда чистка встала,
+ * какой бы ни была причина. */
+function RepoTiles({ server: s, r, ctx, growth }: { server: Server; r: RepoStat; ctx: RepoCtx; growth?: number }) {
+  const { t } = useI18n()
+  const st = repoState(r, ctx)
+  const now = Date.now() / 1000
+  const ext = bsrvExtra(s)
+  const x = ext?.repos?.[r.name] // кто чистит и когда удаляли (helper 0.23), нет - helper старый
+  const legacy = ext?.legacy
+  const prune = ctx.prune[r.name] // почему не работает чистка (бэкенд), пусто - работает
+  // Обычный интервал бэкапов (бэкенд считает его по последним снапшотам, helper 0.28): с ним
+  // видно, когда ждать следующий бэкап. Без него как раньше: дольше 2 дней - желтым.
+  const cad = s.bsrv_cadence?.[r.name] ?? 0
+  const ageSec = r.last_activity ? now - r.last_activity : 0
+  const fresh: Tone | undefined = !r.last_activity ? undefined : st === 'stale' ? 'bad'
+    : (cad ? ageSec > cad + 1800 : ageSec > 2 * 86400) ? 'warn' : undefined
+  const nextAt = cad > 0 && cad < 2 * 86400 && r.last_activity && st !== 'stale'
+    ? new Date((r.last_activity + cad) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : ''
   const oldest = r.oldest_snapshot ?? 0
   const ts = r.rotation_ts ?? 0
-  // Метрик нет вовсе — значит на сервере нет и prune-скрипта для этого репозитория.
-  // Раньше строка просто исчезала, а политика хранения рядом оставалась: выглядело
-  // так, будто старое вычищается по ней. На деле политику панель показывает из
-  // старого общего конфига, который никто не исполняет, и чистит репозиторий разве
-  // что сам клиент со своей стороны.
-  // С helper'ом 0.23 это уже не догадка: он сам говорит, кто чистит репозиторий. Под
-  // "сервер не чистит" раньше попадали и те, кого чистил старый общий скрипт из cron.
-  const noCleaner = (
-    <span
-      className="muted"
-      title={x
-        ? t('Ни своего prune-скрипта, ни блока в старом общем скрипте у репозитория нет: сервер его не чистит. Старое убирает только сам клиент, если у него это настроено.')
-        : t('У репозитория нет своего prune-скрипта: политика показана из старого общего конфига, но сервер по ней ничего не удаляет. Старое убирает только сам клиент, если у него это настроено.')}
-    >
-      {t('сервер не чистит')}
-    </span>
-  )
-  if (!x && !oldest && !ts) return noCleaner
   const limit = rotationLimitDays(r)
-  const ageDays = oldest ? Math.floor((Date.now() / 1000 - oldest) / 86400) : 0
+  const ageDays = oldest ? Math.floor((now - oldest) / 86400) : 0
   const removed = r.rotation_removed ?? -1
-  const now = Date.now() / 1000
   // Снапшотов не больше, чем политика может оставить: их она и оставила. keep-daily считает
   // дни с бэкапами, а не календарные, и у редко бэкапящегося клиента старый снапшот законен.
   // Так же считает rotation_stale_repos на бэкенде.
@@ -1684,70 +1678,123 @@ function RotationInfo({ r, x, legacy, prune, t }: {
   const alive = removed > 0 || !!(x?.removed_ts && now - x.removed_ts < 3 * 86400)
   // без метрик чистки helper сам видит, когда из репозитория пропадали снапшоты
   const idleDays = x && !x.removed_ts && x.seen_since ? Math.floor((now - x.seen_since) / 86400) : 0
-  const lastRun = legacy?.log_ts ? t('последний прогон {ago}', { ago: fmtAgo(legacy.log_ts) }) : ''
+  const keepParts = [
+    r.keep_daily ? `${r.keep_daily} ${t('дн.')}` : '',
+    r.keep_weekly ? `${r.keep_weekly} ${t('нед.')}` : '',
+    r.keep_monthly ? `${r.keep_monthly} ${t('мес.')}` : '',
+  ].filter(Boolean)
+  const keepLast = r.keep_last ?? 0
+  // Кто чистит и когда. Метрик нет вовсе - значит на сервере нет и prune-скрипта для этого
+  // репозитория: политику панель показывает из старого общего конфига, который никто не
+  // исполняет, и чистит репозиторий разве что сам клиент. С helper'ом 0.23 это уже не догадка:
+  // он сам говорит, кто чистит репозиторий.
+  let clean: { value: string; sub?: string; tone?: Tone; title?: string } | null = null
+  if (off) {
+    clean = {
+      value: t('выключена'),
+      sub: t('выключили вручную'),
+      title: [x?.prune_off_why, t('Включить: вкладка "Чистка", или на сервере бэкапов kervax-backupserver-helper prune-on {name}', { name: r.name })].filter(Boolean).join('\n'),
+    }
+  } else if (ts > 0) {
+    clean = {
+      value: fmtAgo(ts),
+      sub: removed >= 0 ? t('удалено снапшотов: {n}', { n: removed }) : undefined,
+      tone: prune ? 'bad' : r.rotation_ok === 0 ? 'warn' : undefined,
+      title: !prune && r.rotation_ok === 0 ? t('последний прогон завершился ошибкой') : undefined,
+    }
+  } else if (x?.cleaner === 'legacy' && legacy) {
+    const lastRun = legacy.log_ts ? t('последний прогон {ago}', { ago: fmtAgo(legacy.log_ts) }) : ''
+    clean = legacy.where
+      ? { value: cronTime(legacy.schedule), sub: t('чистит старый скрипт'), title: [`${legacy.script}: ${legacy.where}, ${legacy.schedule}`, lastRun].filter(Boolean).join('\n') }
+      : {
+        value: t('не запускается'), sub: t('старый скрипт чистки'), tone: 'bad',
+        title: t('Репозиторий описан в {script}, но этот скрипт не запланирован ни в cron, ни в systemd: старые снапшоты никто не удаляет.', { script: legacy.script }),
+      }
+  } else if (x?.cleaner === 'script') {
+    clean = { value: t('свой скрипт'), sub: t('без метрик'), title: t('Свой prune-скрипт есть, но метрик он не пишет: когда он отработал, панель не знает.') }
+  } else if (x ? !x.cleaner : !oldest && !ts) {
+    clean = {
+      value: t('не чистит'),
+      sub: t('старое убирает только клиент'),
+      title: x
+        ? t('Ни своего prune-скрипта, ни блока в старом общем скрипте у репозитория нет: сервер его не чистит. Старое убирает только сам клиент, если у него это настроено.')
+        : t('У репозитория нет своего prune-скрипта: политика показана из старого общего конфига, но сервер по ней ничего не удаляет. Старое убирает только сам клиент, если у него это настроено.'),
+    }
+  }
+  if (clean && ts <= 0 && !off) {
+    clean.sub = subOf(
+      clean.sub,
+      !!x?.removed_ts && t('удаляли {ago}', { ago: fmtAgo(x.removed_ts) }),
+      idleDays >= 1 && t('удалений нет {n} дн.', { n: idleDays }),
+    )
+  }
+  const chk = x && x.check_ts && (x.check_ok ?? -1) >= 0 ? x : null
+  const parts = chk?.check_parts ?? 0
   return (
-    <>
-      {ts <= 0 && x?.cleaner === 'legacy' && legacy && (legacy.where ? (
-        <span title={[`${legacy.script}: ${legacy.where}, ${legacy.schedule}`, lastRun].filter(Boolean).join('\n')}>
-          {t('чистит старый скрипт')}: {cronTime(legacy.schedule)}
-        </span>
-      ) : (
-        <span className="t-down" title={t('Репозиторий описан в {script}, но этот скрипт не запланирован ни в cron, ни в systemd: старые снапшоты никто не удаляет.', { script: legacy.script })}>
-          {t('старый скрипт чистки не запускается')}
-        </span>
-      ))}
-      {ts <= 0 && x?.cleaner === 'script' && (
-        <span className="muted" title={t('Свой prune-скрипт есть, но метрик он не пишет: когда он отработал, панель не знает.')}>
-          {t('свой prune-скрипт без метрик')}
-        </span>
-      )}
-      {ts <= 0 && x && !x.cleaner && noCleaner}
-      {ts <= 0 && x && x.removed_ts > 0 && (
-        <span title={t('когда из репозитория последний раз удалялись снапшоты (кто бы их ни удалял)')}>
-          {t('удаляли')}: {fmtAgo(x.removed_ts)}
-        </span>
-      )}
-      {ts <= 0 && idleDays >= 1 && (
-        <span className="muted" title={t('панель следит за удалениями с {d}', { d: new Date((x?.seen_since ?? 0) * 1000).toLocaleDateString() })}>
-          {t('удалений нет {n} дн.', { n: idleDays })}
-        </span>
-      )}
-      {x && x.check_ts && (x.check_ok ?? -1) >= 0 ? (
-        <span className={x.check_ok === 0 ? 't-down' : ''}
-          title={x.check_ok === 0
-            ? t('restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере')
-            : (x.check_parts ?? 0) > 0
-              ? t('Недельная проверка целостности: структура и индекс, плюс каждую неделю следующая часть данных. За {n} недель прочитывается весь репозиторий.', { n: x.check_parts ?? 0 })
-              : t('недельная проверка целостности (restic check)')}>
-          {x.check_ok === 0 ? t('проверка не прошла') : t('проверка')}: {fmtAgo(x.check_ts)}
-          {(x.check_parts ?? 0) > 0 && ` (${t('данные {p}/{n}', { p: x.check_part ?? 0, n: x.check_parts ?? 0 })})`}
-        </span>
-      ) : null}
-      {off && (
-        <span className="muted" title={[x?.prune_off_why, t('Включить: вкладка "Чистка", или на сервере бэкапов kervax-backupserver-helper prune-on {name}', { name: r.name })].filter(Boolean).join('\n')}>
-          {t('чистка выключена вручную')}
-        </span>
-      )}
-      {ts > 0 && (
-        <span className={prune ? 't-down' : ''} title={!prune && r.rotation_ok === 0 ? t('последний прогон завершился ошибкой') : undefined}>
-          {t('чистка')}: {fmtAgo(ts)}
-          {removed >= 0 && ` (${t('снято {n}', { n: removed })})`}
-        </span>
-      )}
-      {oldest > 0 && (
-        <span
-          className={stale ? 't-down' : ''}
-          title={!limit
+    <div className="net-tiles repo-tiles">
+      <NetTile
+        label={t('Последний бэкап')}
+        value={r.last_activity ? fmtAgo(r.last_activity) : t('не было')}
+        tone={fresh}
+        sub={subOf(
+          !!r.last_activity && fmtWhen(r.last_activity),
+          cad > 0 && everyLabel(cad, t),
+          !!nextAt && t('следующий к {time}', { time: nextAt }),
+        ) || undefined}
+        title={cad > 0 ? t('ритм по времени последних снапшотов') : undefined}
+      />
+      <NetTile
+        label={t('Размер')}
+        value={fmtBytes(r.size_bytes)}
+        sub={(growth ?? 0) > 0 ? t('за прогон добавляется ~{s}', { s: fmtBytes(growth) }) : undefined}
+        title={(growth ?? 0) > 0 ? t('обычный прирост за прогон после сжатия') : undefined}
+      />
+      <NetTile
+        label={t('Снапшоты')}
+        value={String(r.snapshots)}
+        tone={stale ? 'bad' : undefined}
+        sub={oldest > 0
+          ? limit
+            ? t('старейшему {n} дн., политика держит до {l}', { n: ageDays, l: limit })
+            : t('старейшему {n} дн.', { n: ageDays })
+          : undefined}
+        title={oldest > 0
+          ? !limit
             ? t('политика хранения не задана, судить не о чем')
             : stale && alive
               ? t('Чистка идет, а старые снапшоты остаются: похоже, это другая группа, менялись хост или пути бэкапа. Последние снапшоты каждой группы restic хранит, пока их не удалить вручную.')
-              : t('политика допускает снапшоты возрастом до {n} дн.', { n: limit })}
-        >
-          {t('старейший')}: {ageDays} {t('дн.')}
-          {stale && ` > ${limit}`}
-        </span>
+              : t('политика допускает снапшоты возрастом до {n} дн.', { n: limit })
+          : undefined}
+      />
+      {(keepParts.length > 0 || keepLast > 0) && (
+        <div className="repo-tile-text">
+          <NetTile
+            label={t('Хранит по снапшоту на')}
+            value={keepParts.join(', ') || t('{n} последних', { n: keepLast })}
+            sub={keepParts.length && keepLast ? t('и {n} последних', { n: keepLast }) : undefined}
+            title={t('политика хранения: последних / дневных / недельных / месячных')}
+          />
+        </div>
       )}
-    </>
+      {chk && (
+        <NetTile
+          label={t('Проверка целостности')}
+          value={fmtAgo(chk.check_ts)}
+          tone={chk.check_ok === 0 ? 'bad' : undefined}
+          sub={chk.check_ok === 0
+            ? t('нашла ошибки')
+            : parts > 0
+              ? t('без ошибок, данные по частям: {p} из {n}', { p: chk.check_part ?? 0, n: parts })
+              : t('без ошибок')}
+          title={chk.check_ok === 0
+            ? t('restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере')
+            : parts > 0
+              ? t('Недельная проверка целостности: структура и индекс, плюс каждую неделю следующая часть данных. За {n} недель прочитывается весь репозиторий.', { n: parts })
+              : t('недельная проверка целостности (restic check)')}
+        />
+      )}
+      {clean && <NetTile label={t('Чистка')} value={clean.value} sub={clean.sub || undefined} tone={clean.tone} title={clean.title} />}
+    </div>
   )
 }
 
@@ -1759,9 +1806,9 @@ function rotationLimitDays(r: RepoStat): number {
   return span > 0 ? span + 10 : 0
 }
 
+// раскрывает кнопка "Как удалить" в RepoDetail
 function RepoCleanup({ r }: { r: RepoStat }) {
   const { t } = useI18n()
-  const [open, setOpen] = useState(false)
   const hasData = r.snapshots > 0
   const cmd = [
     `R=${r.name}`,
@@ -1773,29 +1820,22 @@ function RepoCleanup({ r }: { r: RepoStat }) {
   ].join('\n')
   return (
     <div className="repo-cleanup">
-      <button className="ghost repo-cleanup-toggle" onClick={() => setOpen(!open)}>
-        {open ? t('скрыть') : t('🧹 как удалить')}
-      </button>
-      {open && (
-        <>
-          {hasData ? (
-            <div className="form-error small">
-              ⚠️ {t('Будет стерто безвозвратно: {n} снапшотов, {sz}, последний {ago}. Других копий у панели нет.', {
-                n: r.snapshots, sz: fmtBytes(r.size_bytes), ago: fmtAgo(r.last_activity),
-              })}
-              <div className="muted small">
-                {t('Если бэкап еще может понадобиться, приглушите репозиторий (🔕): данные останутся.')}
-              </div>
-            </div>
-          ) : (
-            <div className="muted small">
-              {t('Репозиторий пустой и не инициализирован, удалять нечего, кроме мусора.')}
-            </div>
-          )}
-          <FixSteps steps={[{ id: 'rm', cmd }]} text={() => t('Удалить на бэкап-сервере от root')}
-            foot={t('Панель бэкапы не удаляет, это защита от взлома. Если репозиторий заводил Ansible, проверьте еще строку в sudo crontab -l.')} />
-        </>
+      {hasData ? (
+        <div className="form-error small">
+          ⚠️ {t('Будет стерто безвозвратно: {n} снапшотов, {sz}, последний {ago}. Других копий у панели нет.', {
+            n: r.snapshots, sz: fmtBytes(r.size_bytes), ago: fmtAgo(r.last_activity),
+          })}
+          <div className="muted small">
+            {t('Если бэкап еще может понадобиться, приглушите его кнопкой "Приглушить": данные останутся.')}
+          </div>
+        </div>
+      ) : (
+        <div className="muted small">
+          {t('Репозиторий пустой и не инициализирован, удалять нечего, кроме мусора.')}
+        </div>
       )}
+      <FixSteps steps={[{ id: 'rm', cmd }]} text={() => t('Удалить на бэкап-сервере от root')}
+        foot={t('Панель бэкапы не удаляет, это защита от взлома. Если репозиторий заводил Ansible, проверьте еще строку в sudo crontab -l.')} />
     </div>
   )
 }
@@ -1803,9 +1843,9 @@ function RepoCleanup({ r }: { r: RepoStat }) {
 // Лок в репозитории. Снимать его панель НЕ будет: команда пишет в репо, а панель по
 // договорённости не имеет ни одной операции записи/удаления над бэкапами. Показываем
 // готовую команду для root'а на бэкап-сервере.
+// раскрывает кнопка "Как снять лок" в RepoDetail
 function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
   const { t } = useI18n()
-  const [open, setOpen] = useState(false)
   const [checking, setChecking] = useState(false)
   // пароль берём из prune-env ВНУТРИ sudo bash -c: так он не светится в списке процессов
   const cmd = [
@@ -1843,54 +1883,88 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
   }
   return (
     <div className="repo-cleanup">
-      <button className="ghost repo-cleanup-toggle" onClick={() => setOpen(!open)}>
-        {open ? t('скрыть') : t('🔓 как снять лок')}
-      </button>
-      {open && (
-        <>
-          <FixSteps steps={[{ id: 'unlock', cmd }]} text={() => t('Снять висячие локи на бэкап-сервере от root')}
-            foot={t('Живой лок идущего бэкапа или чистки (моложе 30 минут) команда не тронет. Пароль читается из env внутри команды и в списке процессов не виден.')} />
-          {/* Статус снимается не мгновенно: helper пересчитывает статистику раз в минуту,
-              потом отчёт агента и опрос UI. Без этой подсказки снятый лок выглядел как
-              «панель не заметила», и человек шёл проверять второй раз. */}
-          <div className="repo-unlock-after">
-            <button className="ghost" disabled={checking} onClick={() => {
-              setChecking(true)
-              onChanged()
-              window.setTimeout(() => setChecking(false), 2000)
-            }}>{checking ? t('Проверяю…') : t('Снял, проверить')}</button>
-            <span className="muted small">
-              {t('Статус обновится сам в течение минуты.')}
-            </span>
-          </div>
-        </>
-      )}
+      <FixSteps steps={[{ id: 'unlock', cmd }]} text={() => t('Снять висячие локи на бэкап-сервере от root')}
+        foot={t('Живой лок идущего бэкапа или чистки (моложе 30 минут) команда не тронет. Пароль читается из env внутри команды и в списке процессов не виден.')} />
+      {/* Статус снимается не мгновенно: helper пересчитывает статистику раз в минуту,
+          потом отчёт агента и опрос UI. Без этой подсказки снятый лок выглядел как
+          «панель не заметила», и человек шёл проверять второй раз. */}
+      <div className="repo-unlock-after">
+        <button className="ghost" disabled={checking} onClick={() => {
+          setChecking(true)
+          onChanged()
+          window.setTimeout(() => setChecking(false), 2000)
+        }}>{checking ? t('Проверяю…') : t('Снял, проверить')}</button>
+        <span className="muted small">
+          {t('Статус обновится сам в течение минуты.')}
+        </span>
+      </div>
     </div>
   )
 }
 
-function RepoRow({ server: s, r, ctx, canAct, onChanged, growth, unmonitored }: {
+// Тон репозитория для списка и шапки: красный - проблема (как в счетчиках), желтый - висячий
+// лок моложе суток или старые снапшоты не вычищаются, серый - приглушен
+type RepoTone = 'bad' | 'warn' | 'ok' | 'mute'
+function repoRot(s: Server, name: string) {
+  return (s.bsrv_cleanup?.rotation ?? []).find((x) => x.repo === name)
+}
+function repoTone(s: Server, r: RepoStat, c: RepoCtx): RepoTone {
+  const st = repoState(r, c)
+  if (st === 'muted') return 'mute'
+  if (repoBad(r, c)) return 'bad'
+  if (st === 'stuck' || repoRot(s, r.name)) return 'warn'
+  return 'ok'
+}
+const TONE_DOT: Record<RepoTone, string> = { bad: ' lk-dot-bad', warn: ' lk-dot-warn', ok: ' lk-dot-ok', mute: '' }
+
+// Коротко справа в строке списка: что не так, у здоровых - когда был последний бэкап
+function repoShort(s: Server, r: RepoStat, c: RepoCtx, t: (s: string, v?: Record<string, string | number>) => string): string {
+  const st = repoState(r, c)
+  const cad = s.bsrv_cadence?.[r.name] ?? 0
+  if (st === 'invalid') return t('битый')
+  if (st === 'locked') {
+    const d = Math.floor(lockAge(r) / 86400)
+    return d > 0 ? t('залочен {n} дн.', { n: d }) : t('залочен')
+  }
+  if (st === 'stale') return cad ? t('опоздал') : t('устарел')
+  if (st !== 'muted' && c.prune[r.name]) return t('не чистится')
+  if (st !== 'muted' && c.checks.has(r.name)) return t('ошибки проверки')
+  if (st === 'stuck') return t('лок {n} ч', { n: Math.max(1, Math.floor(lockAge(r) / 3600)) })
+  if (st !== 'muted' && repoRot(s, r.name)) return t('не вычищается')
+  if (st === 'running') return t('идет бэкап')
+  return fmtAgo(r.last_activity)
+}
+
+// что с репозиторием: шапка, почему и что делать; go - ответ в разделе "Чистка"
+type RepoIssue = { tone: RepoTone; head: string; why: string; steps: string[]; go?: boolean }
+
+// Выбранный репозиторий целиком: состояние крупно, что случилось и что делать с кнопками,
+// плитки с подписями, клиент и каталог, старые группы снапшотов
+function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored, dataDir, onGo }: {
   server: Server; r: RepoStat; ctx: RepoCtx; canAct: boolean; onChanged: () => void
   growth?: number // обычный прирост клиента за прогон (после сжатия)
   unmonitored?: boolean // клиента нет в панели
+  dataDir: string
+  onGo: (sec: string) => void
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
-  const [archiving, setArchiving] = useState(false)
+  // что раскрыто под кнопками: форма архива, команда удаления или снятия лока
+  const [open, setOpen] = useState<'' | 'archive' | 'rm' | 'unlock'>('')
   const st = repoState(r, ctx)
   const isMuted = st === 'muted'
-  // именно repoBad, а не своя копия условия: иначе строка и счётчики проблем расходятся
-  // (так «идёт бэкап» — нормальное состояние — какое-то время красилось красным)
-  const tone = isMuted ? 't-muted' : repoBad(r, ctx) ? 't-down' : 't-up'
+  const tone = repoTone(s, r, ctx)
   const now = Date.now() / 1000
-  const ageSec = r.last_activity ? now - r.last_activity : 0
-  // Обычный интервал бэкапов (бэкенд считает его по последним снапшотам, helper 0.28): с ним
-  // видно, когда ждать следующий бэкап. Без него как раньше: дольше 2 дней - желтым.
   const cad = s.bsrv_cadence?.[r.name] ?? 0
-  const freshTone = !r.last_activity ? 'muted' : st === 'stale' ? 't-down'
-    : (cad ? ageSec > cad + 1800 : ageSec > 2 * 86400) ? 't-degraded' : 't-up'
-  const keep = [r.keep_last, r.keep_daily, r.keep_weekly, r.keep_monthly]
-  const hasKeep = keep.some((v) => (v ?? 0) > 0)
+  const ageSec = r.last_activity ? now - r.last_activity : 0
+  // «нечего терять»: репо не инициализирован и снапшотов нет → предлагаем зачистку.
+  // Если снапшоты ЕСТЬ, а config побит — команду НЕ даём: данные могут быть восстановимы,
+  // такое разбирают руками, а не копипастой rm -rf.
+  const junk = st === 'invalid' && r.snapshots === 0
+  const lockDays = Math.floor(lockAge(r) / 86400)
+  const lockHours = Math.max(1, Math.floor(lockAge(r) / 3600))
+  const prune = isMuted ? '' : ctx.prune[r.name]
+  const rot = isMuted ? undefined : repoRot(s, r.name)
   const toggleMute = async () => {
     setBusy(true)
     try {
@@ -1900,107 +1974,145 @@ function RepoRow({ server: s, r, ctx, canAct, onChanged, growth, unmonitored }: 
       setBusy(false)
     }
   }
-  // «нечего терять»: репо не инициализирован и снапшотов нет → предлагаем зачистку.
-  // Если снапшоты ЕСТЬ, а config побит — команду НЕ даём: данные могут быть восстановимы,
-  // такое разбирают руками, а не копипастой rm -rf.
-  const junk = st === 'invalid' && r.snapshots === 0
-  const brokenWithData = st === 'invalid' && r.snapshots > 0
-  const ext = bsrvExtra(s)
-  const lockDays = Math.floor(lockAge(r) / 86400)
-  const lockHours = Math.max(1, Math.floor(lockAge(r) / 3600))
-  const staleTitle = cad
-    ? t('Бэкап опоздал: обычно {every}, последний {ago}.', { every: everyLabel(cad, t), ago: fmtAgo(r.last_activity) })
-    : t('Нет новых бэкапов {n} дн.', { n: Math.floor(ageSec / 86400) })
-  const nextAt = cad > 0 && cad < 2 * 86400 && r.last_activity && st !== 'stale'
-    ? new Date((r.last_activity + cad) * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : ''
+  const issues: RepoIssue[] = []
+  if (st === 'invalid')
+    issues.push(junk
+      ? { tone: 'bad', head: t('Битый и пустой'), why: t('Нет файла config, снапшотов нет: похоже на брошенную настройку, терять нечего.'), steps: [t('удалить на бэкап-сервере командой')] }
+      : { tone: 'bad', head: t('Нет config, а снапшоты есть'), why: t('Нет config, но снапшоты есть ({n} шт., {sz}) — данные могут быть восстановимы. Вслепую не удаляйте, разберитесь на сервере.', { n: r.snapshots, sz: fmtBytes(r.size_bytes) }), steps: [] })
+  if (st === 'locked')
+    issues.push({
+      tone: 'bad',
+      head: lockDays > 0 ? t('Залочен {n} дн.', { n: lockDays }) : t('Залочен'),
+      why: t('Висячий лок держится больше суток: чистка и restic check по репозиторию не идут, пока его не снять.'),
+      steps: [t('снять лок командой от root на бэкап-сервере')],
+    })
+  if (st === 'stale') {
+    const due = cad && r.last_activity ? fmtWhen(r.last_activity + cad) : ''
+    issues.push({
+      tone: 'bad',
+      head: cad ? t('Бэкап опоздал') : t('Нет новых бэкапов {n} дн.', { n: Math.floor(ageSec / 86400) }),
+      why: [
+        cad
+          ? t('Обычно {every}, последний {ago}, следующий ждали к {when}.', { every: everyLabel(cad, t), ago: fmtAgo(r.last_activity), when: due })
+          : t('Последний бэкап {ago}.', { ago: fmtAgo(r.last_activity) }),
+        unmonitored
+          ? t('Клиента нет в панели, поэтому почему бэкап не пришел, панель не видит.')
+          : t('Клиент в панели: почему бэкап не идет, видно в его карточке.'),
+      ].join(' '),
+      steps: [
+        unmonitored
+          ? t('на клиенте {name} посмотреть таймер и лог бэкапа', { name: r.name })
+          : t('открыть клиента {name} в панели и посмотреть его бэкап', { name: r.name }),
+        t('если сервера больше нет - убрать репозиторий в архив'),
+        t('если бэкап разовый или больше не нужен - приглушить'),
+      ],
+    })
+  }
+  if (st === 'stuck')
+    issues.push({
+      tone: 'warn',
+      head: t('Висячий лок {n} ч', { n: lockHours }),
+      why: t('Лок не обновлялся больше 30 минут: процесс, который его взял, умер. Чистка и клиенты обычно снимают такие локи сами, если лок продержится сутки, придет алерт.'),
+      steps: [t('делать ничего не нужно, снять раньше можно командой')],
+    })
+  if (prune) issues.push({ tone: 'bad', head: t('Чистка не работает'), why: prune, steps: [], go: true })
+  if (!isMuted && ctx.checks.has(r.name))
+    issues.push({ tone: 'bad', head: t('Проверка нашла ошибки'), why: t('restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере'), steps: [] })
+  if (rot)
+    issues.push({
+      tone: 'warn',
+      head: t('Старые снапшоты не вычищаются'),
+      why: rot.reasons.join(', '),
+      steps: [rotationAction(rot.cause, t)],
+      go: true,
+    })
+  if (isMuted)
+    issues.push({ tone: 'mute', head: t('Приглушен'), why: t('Алертов по репозиторию нет, последний бэкап {ago}.', { ago: fmtAgo(r.last_activity) }), steps: [] })
+  const boxTone = issues.some((i) => i.tone === 'bad') ? 'bad' : issues.some((i) => i.tone === 'warn') ? 'warn' : 'mute'
+  const head = issues[0]?.head ?? (st === 'running' ? t('Идет бэкап') : t('В порядке'))
+  const flip = (k: typeof open) => setOpen(open === k ? '' : k)
+  const acts: ReactNode[] = []
+  // В архив - то, что хранится как есть: сервера больше нет, бэкапить больше не нужно,
+  // разовый бэкап, проект заморожен. Предлагаем там, где бэкапы и так не приходят.
+  if (canAct && (st === 'stale' || isMuted))
+    acts.push(
+      <button key="arch" className={`ghost row-act${open === 'archive' ? ' on' : ''}`} onClick={() => flip('archive')}
+        title={t('В архив: хранить как есть, без алертов (сервера больше нет, разовый бэкап, проект заморожен)')}>
+        {t('В архив')}
+      </button>,
+    )
+  // Приглушать нечего, пока репозиторий здоров: кнопка на каждом зеленом - бесполезный элемент
+  if (canAct && st !== 'ok' && st !== 'running' && st !== 'stuck')
+    acts.push(
+      <button key="mute" className="ghost row-act" disabled={busy} onClick={toggleMute}
+        title={isMuted ? t('Снять приглушение') : t('Приглушить (разовый/неактуальный)')}>
+        {busy ? '…' : isMuted ? t('Вернуть алерты') : t('Приглушить')}
+      </button>,
+    )
+  // «как удалить» даём только у проблемных: пустой мусор и заброшенные репо — это те,
+  // что реально выводят из эксплуатации. У живого репозитория с ежедневным бэкапом
+  // такая кнопка была бы приглашением к беде.
+  if (canAct && (junk || st === 'stale'))
+    acts.push(
+      <button key="rm" className={`ghost row-act${open === 'rm' ? ' on' : ''}`} onClick={() => flip('rm')}>
+        {open === 'rm' ? t('Скрыть команду') : t('Как удалить')}
+      </button>,
+    )
+  if (canAct && (st === 'locked' || st === 'stuck'))
+    acts.push(
+      <button key="unlock" className={`ghost row-act${open === 'unlock' ? ' on' : ''}`} onClick={() => flip('unlock')}>
+        {open === 'unlock' ? t('Скрыть команду') : t('Как снять лок')}
+      </button>,
+    )
+  if (issues.some((i) => i.go))
+    acts.push(<button key="go" className="ghost row-act" onClick={() => onGo('cleanup')}>{t('К разделу "Чистка"')}</button>)
   return (
-    <div className={`loc-res docker-row repo-row repo-row-col ${tone}`}>
-      <div className="repo-row-main">
-      <span className={`lk-dot${DOT[tone] ?? ''}`} />
-      <div className="docker-c-main">
-        <div className="docker-c-name mono">
-          {r.name}
-          {isMuted && <span className="type-chip">{t('приглушён')}</span>}
-          {st === 'invalid' && <span className="type-chip off">{t('невалиден')}</span>}
-          {st === 'locked' && (
-            <span className="type-chip off" title={t('Висячий лок держится больше суток: чистка и restic check по репозиторию не идут, пока его не снять.')}>
-              {lockDays > 0 ? t('залочен {n} дн.', { n: lockDays }) : t('залочен')}
-            </span>
-          )}
-          {st === 'stuck' && (
-            <span className="type-chip" title={t('Лок не обновлялся больше 30 минут: процесс, который его взял, умер. Чистка и клиенты обычно снимают такие локи сами, если лок продержится сутки, придет алерт.')}>
-              {t('висячий лок {n} ч', { n: lockHours })}
-            </span>
-          )}
-          {st === 'running' && <span className="type-chip">{t('идёт бэкап')}</span>}
-          {unmonitored && (
-            <span className="type-chip" title={t('Клиента этого репозитория нет в панели. Панель следит за ним по ритму бэкапов: опоздавший бэкап видно через интервал и еще четверть его, ежедневный через 30 часов. Агент на самой ноде сказал бы сразу, как бэкап упал.')}>
-              {t('нет в панели')}
-            </span>
-          )}
-          {st === 'stale' && <span className="type-chip off" title={staleTitle}>{cad ? t('опоздал') : t('устарел')}</span>}
-          {ctx.prune[r.name] && !isMuted && (
-            <span className="type-chip off">{t('чистка не работает')}</span>
-          )}
-          {(growth ?? 0) > 0 && (
-            <span className="type-chip" title={t('обычный прирост за прогон после сжатия')}>
-              +{fmtBytes(growth ?? 0)}
-            </span>
-          )}
-        </div>
-        <div className="docker-c-img mono muted small repo-meta">
-          <span>{t('снапшотов: {n}', { n: r.snapshots })}</span>
-          <span>{fmtBytes(r.size_bytes)}</span>
-          <span className={freshTone === 'muted' ? '' : freshTone}>{t('обновлён')}: {fmtAgo(r.last_activity)}</span>
-          {cad > 0 && (
-            <span title={t('по времени последних снапшотов')}>
-              {everyLabel(cad, t)}{nextAt && `, ${t('следующий к {time}', { time: nextAt })}`}
-            </span>
-          )}
-          {hasKeep && (
-            <span title={t('политика хранения: последних / дневных / недельных / месячных')}>
-              {t('хранит')}: {keep.map((v) => v ?? 0).join('/')}
-            </span>
-          )}
-          <RotationInfo r={r} x={ext?.repos?.[r.name]} legacy={ext?.legacy} prune={ctx.prune[r.name]} t={t} />
-        </div>
+    <>
+      <div className="repo-head">
+        <h5 className="mono">{r.name}</h5>
+        <span className={`repo-st repo-st-${tone}`}>
+          <span className={`lk-dot${TONE_DOT[tone]}`} />
+          {head}
+        </span>
+        {unmonitored && (
+          <span className="type-chip" title={t('Клиента этого репозитория нет в панели. Панель следит за ним по ритму бэкапов: опоздавший бэкап видно через интервал и еще четверть его, ежедневный через 30 часов. Агент на самой ноде сказал бы сразу, как бэкап упал.')}>
+            {t('нет в панели')}
+          </span>
+        )}
       </div>
-      {/* В архив - то, что хранится как есть: сервера больше нет, бэкапить больше не нужно,
-          разовый бэкап, проект заморожен. Предлагаем там, где бэкапы и так не приходят. */}
-      {canAct && (st === 'stale' || isMuted) && (
-        <button className="ghost icon-btn repo-mute-btn" disabled={busy} onClick={() => setArchiving(!archiving)}
-          title={t('В архив: хранить как есть, без алертов (сервера больше нет, разовый бэкап, проект заморожен)')}>
-          🗄
-        </button>
-      )}
-      {/* Приглушать нечего, пока репозиторий здоров: кнопка на каждой зелёной строке —
-          это десятки бесполезных элементов, среди которых теряются нужные. Показываем
-          только там, где есть что глушить, и у уже приглушённых (чтобы вернуть). */}
-      {canAct && st !== 'ok' && st !== 'running' && st !== 'stuck' && (
-        <button className="ghost icon-btn repo-mute-btn" disabled={busy} onClick={toggleMute}
-          title={isMuted ? t('Снять приглушение') : t('Приглушить (разовый/неактуальный)')}>
-          {busy ? '…' : isMuted ? '🔔' : '🔕'}
-        </button>
-      )}
-      </div>
-      {ctx.prune[r.name] && !isMuted && <div className="small t-down repo-prune-why">{ctx.prune[r.name]}</div>}
-      {archiving && (
-        <ArchiveForm server={s} repo={r.name} host="" onCancel={() => setArchiving(false)}
-          onDone={() => { setArchiving(false); onChanged() }} />
-      )}
-      <RepoGroups server={s} repo={r.name} ext={ext} canAct={canAct} onChanged={onChanged} />
-      {/* «как удалить» даём только у проблемных: пустой мусор и заброшенные репо — это те,
-          что реально выводят из эксплуатации. У живого репозитория с ежедневным бэкапом
-          такая кнопка была бы приглашением к беде. */}
-      {canAct && (junk || st === 'stale') && <RepoCleanup r={r} />}
-      {canAct && (st === 'locked' || st === 'stuck') && <RepoUnlock r={r} onChanged={onChanged} />}
-      {canAct && brokenWithData && (
-        <div className="muted small repo-cleanup">
-          ⚠️ {t('Нет config, но снапшоты есть ({n} шт., {sz}) — данные могут быть восстановимы. Вслепую не удаляйте, разберитесь на сервере.', { n: r.snapshots, sz: fmtBytes(r.size_bytes) })}
+      {(issues.length > 0 || acts.length > 0) && (
+        <div className={`repo-fix repo-fix-${boxTone}`}>
+          {issues.map((i, k) => (
+            <div key={k} className="repo-fix-item">
+              {(k > 0 || issues.length > 1) && <div className={`repo-fix-h repo-fix-h-${i.tone}`}>{i.head}</div>}
+              <div>{i.why}</div>
+              {i.steps.length === 1 && <div><b>{t('Что делать')}:</b> {i.steps[0]}</div>}
+              {i.steps.length > 1 && (
+                <div className="repo-fix-steps">
+                  <b>{t('Что делать')}</b>
+                  <ol>{i.steps.map((x) => <li key={x}>{x}</li>)}</ol>
+                </div>
+              )}
+            </div>
+          ))}
+          {acts.length > 0 && <div className="repo-acts">{acts}</div>}
+          {open === 'archive' && (
+            <ArchiveForm server={s} repo={r.name} host="" onCancel={() => setOpen('')}
+              onDone={() => { setOpen(''); onChanged() }} />
+          )}
+          {open === 'rm' && <RepoCleanup r={r} />}
+          {open === 'unlock' && <RepoUnlock r={r} onChanged={onChanged} />}
         </div>
       )}
-    </div>
+      <RepoTiles server={s} r={r} ctx={ctx} growth={growth} />
+      <dl className="repo-kv">
+        <dt>{t('Клиент')}</dt>
+        <dd>{unmonitored ? t('нет в панели, панель видит только ритм бэкапов') : t('в панели, со своим агентом')}</dd>
+        <dt>{t('Каталог')}</dt>
+        <dd className="mono">{`${dataDir}/${r.name}`}</dd>
+      </dl>
+      <RepoGroups server={s} repo={r.name} ext={bsrvExtra(s)} canAct={canAct} onChanged={onChanged} />
+    </>
   )
 }
 
@@ -2382,6 +2494,8 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   // клиенты без агента в панели: сломанный бэкап панель видит только по ритму бэкапов
   const unmon = new Set(s.bsrv_unmonitored ?? [])
   const [onlyUnmon, setOnlyUnmon] = useState(false)
+  // выбранный в разделе "Репозитории", пусто - первый в списке
+  const [sel, setSel] = useState('')
   // Кто раздувает сервер: обычный прирост за прогон у клиента, чей репозиторий здесь. Репозиторий
   // назван по клиенту (так его заводит helper), поэтому сопоставляем по имени.
   const growthOf = new Map<string, number>()
@@ -2426,6 +2540,13 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
     .filter((r) => !onlyUnmon || unmon.has(r.name))
     .slice()
     .sort(rcmp[sort])
+  const repoGroups = ([
+    ['bad', t('Требуют внимания')], ['warn', t('Обратить внимание')], ['ok', t('В порядке')], ['mute', t('Приглушены')],
+  ] as [RepoTone, string][])
+    .map(([tone, cap]) => ({ tone, cap, list: repos.filter((r) => repoTone(s, r, ctx) === tone) }))
+    .filter((g) => g.list.length > 0)
+  // выбранный пропал из списка (фильтр, ушел в архив) - первый, то есть самый проблемный
+  const selRepo = repoGroups.flatMap((g) => g.list).find((r) => r.name === sel) ?? repoGroups[0]?.list[0]
   const pct = diskPct(info)
   const free = info.disk_free ?? Math.max((info.disk_total || 0) - (info.disk_used || 0), 0)
   const srvOld = !!info.version && verLt(info.version, RESTSRV_TARGET)
@@ -2699,20 +2820,46 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
                 )}
                 {all.length === 0 ? (
                   <EnableServerStats />
+                ) : repos.length === 0 ? (
+                  <div className="srv-empty">{t('Ничего не найдено.')}</div>
                 ) : (
-                  <div className="loc-results docker-clist">
-                    {repos.length === 0 ? (
-                      <div className="srv-empty">{t('Ничего не найдено.')}</div>
-                    ) : (
-                      repos.map((r) => (
-                        <RepoRow key={r.name} server={s} r={r} ctx={ctx} canAct={canAct} onChanged={onChanged}
-                          growth={growthOf.get(r.name)} unmonitored={unmon.has(r.name)} />
-                      ))
-                    )}
+                  // список слева по группам, как меню сервера, справа выбранный целиком; на
+                  // телефоне вместо списка выпадашка
+                  <div className="bsrv-md">
+                    <div className="bsrv-md-list">
+                      {repoGroups.map((g) => (
+                        <Fragment key={g.tone}>
+                          <div className={`bsrv-md-cap bsrv-md-cap-${g.tone}`}>{g.cap} <span>{g.list.length}</span></div>
+                          {g.list.map((r) => (
+                            <button key={r.name} className={`bsrv-md-it${r.name === selRepo?.name ? ' on' : ''}`} onClick={() => setSel(r.name)}>
+                              <span className={`lk-dot${TONE_DOT[g.tone]}`} />
+                              <span className="bsrv-md-nm mono">{r.name}</span>
+                              <span className={`bsrv-md-r${g.tone === 'bad' ? ' t-down' : g.tone === 'warn' ? ' t-degraded' : ''}`}>
+                                {repoShort(s, r, ctx, t)}
+                              </span>
+                            </button>
+                          ))}
+                        </Fragment>
+                      ))}
+                    </div>
+                    <div className="bsrv-md-body">
+                      <select className="modal-sort bsrv-md-sel" value={selRepo?.name ?? ''} onChange={(e) => setSel(e.target.value)}>
+                        {repoGroups.map((g) => (
+                          <optgroup key={g.tone} label={g.cap}>
+                            {g.list.map((r) => <option key={r.name} value={r.name}>{r.name}</option>)}
+                          </optgroup>
+                        ))}
+                      </select>
+                      {selRepo && (
+                        <RepoDetail key={selRepo.name} server={s} r={selRepo} ctx={ctx} canAct={canAct} onChanged={onChanged}
+                          growth={growthOf.get(selRepo.name)} unmonitored={unmon.has(selRepo.name)}
+                          dataDir={info.data_dir || `${BSRV_ROOT}/data`} onGo={go} />
+                      )}
+                    </div>
                   </div>
                 )}
                 <div className="net-foot">
-                  {t('Читается на сервере без паролей: config (валидность), снапшоты, размер, свежесть, лок, политика хранения. Опоздавшие и устаревшие - красным и алертят. То, что хранится как есть (сервера больше нет, разовый бэкап, проект заморожен), уберите в архив (🗄), временное приглушите (🔕).')}
+                  {t('Читается на сервере без паролей: config, снапшоты, размер, свежесть, лок, политика хранения. Опоздавшие и битые алертят. То, что хранится как есть (сервера больше нет, разовый бэкап, проект заморожен), уберите в архив, временное приглушите.')}
                 </div>
               </div>
             )}
