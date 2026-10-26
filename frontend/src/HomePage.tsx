@@ -21,7 +21,7 @@ import {
   type KnownIssue,
 } from './api'
 import type { Section } from './App'
-import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, srvMutesNow, knownMeta, tallyIssues } from './serverUtils'
+import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, srvMutesNow, knownMeta, tallyTile, type TallyTile } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
 import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, isDecision, kindLabel, liftMute, oomCulpritLabel, type MuteItem } from './mutes'
 import { offLines, rotationLines } from './BsrvCleanup'
@@ -34,7 +34,7 @@ import { IconBackups, IconDocker, IconKube, IconServers, IconSites } from './ico
 import { CountryFlag } from './CountryFlag'
 import { ActGroup, QuickMute } from './ActGroup'
 import { grpMuteTip } from './homeGroups'
-import { NetTile, type Tone } from './NetLinks'
+import { HomeTile, usePlural, type TileIssue } from './HomeTiles'
 import { AgentUpdRow, HelperUpdRow, UpdateAllButton, agentBehind, rolloutHosts as fleetHosts, useFleetRollout, useViaPanels } from './FleetUpdate'
 
 // сколько проблемных строк показывать в карточках главной
@@ -1076,76 +1076,94 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         canMute={!isViewer} onToggle={() => toggleGrp(r.grp)} onMute={muteActs}
         onOpen={(it) => onOpen(it.section, it.id, it.srv, it.sec)} />
     )
-  // Сводка сверху: плитка на раздел, клик ведет в него. Считает те же строки, что "Что сломано"
-  // (serverUtils.tallyIssues): серверы и службы - "Серверы", дальше Docker, Кубер, бэкапы. Проблема -
-  // красная строка, предупреждение - желтая; тон плитки - по худшему
-  const tally = tallyIssues(broken)
-  const probTone = (x: { down: number; warn: number }): Tone => (x.down ? 'bad' : x.warn ? 'warn' : 'ok')
-  const probSub = (x: { down: number; warn: number }) => [
-    x.down > 0 && t('проблем: {n}', { n: x.down }),
-    x.warn > 0 && t('предупреждений: {n}', { n: x.warn }),
-  ]
+  // Сводка сверху: плитка на раздел, клик ведет в него (HomeTiles.tsx). Беды - те же строки, что
+  // "Что сломано" (serverUtils.tallyTile): серверы и службы - "Серверы", дальше Docker, Кубер, бэкапы;
+  // у сайтов - лежащие мониторы, как в блоке "Сайты", и признаки взлома
   const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
-  const tile = (sec: Section, icon: ReactNode, label: string, value: string, sub: string, tone: Tone, unit?: string) => (
-    <button key={sec} className="srv-tile-btn" onClick={() => onNavigate(sec)} title={t('Открыть')}>
-      <NetTile label={<>{icon}{label}</>} value={value} unit={unit} sub={sub} tone={tone} />
-    </button>
+  const pl = usePlural()
+  const issuesOf = (tl: TallyTile): TileIssue[] =>
+    broken
+      .filter((b) => tallyTile(b.section) === tl)
+      .map((b) => ({
+        key: b.key, name: b.name, text: b.text, down: b.tone === 't-down',
+        onOpen: () => onOpen(b.section, b.id, b.srv, b.sec),
+      }))
+  const tile = (sec: Section, icon: ReactNode, label: string, p: Omit<Parameters<typeof HomeTile>[0], 'icon' | 'label' | 'onOpen'>) => (
+    <HomeTile key={sec} icon={icon} label={label} onOpen={() => onNavigate(sec)} {...p} />
   )
+  const loading = (sec: Section, icon: ReactNode, label: string, empty: boolean, none: string) =>
+    tile(sec, icon, label, { value: '—', ok: empty ? none : t('загрузка…'), okTone: 'muted', issues: [] })
   const siteDown = downChecks.filter((c) => c.last_status === 'down').length
   const tiles: ReactNode[] = []
   if (canSee('sites'))
     tiles.push(
       ov == null || ov.total === 0
-        ? tile('sites', <IconSites />, t('Сайты работают'), '—', ov == null ? t('загрузка…') : t('Мониторов пока нет.'), 'muted')
-        : tile(
-            'sites', <IconSites />, t('Сайты работают'), String(ov.up),
+        ? loading('sites', <IconSites />, t('Сайты'), ov != null, t('Мониторов пока нет.'))
+        : tile('sites', <IconSites />, t('Сайты'), {
+            value: String(ov.up), unit: t('из {n}', { n: ov.total }),
             // частично (не отвечает из части локаций) входит в "работают", как плитка "Работает" в
             // разделе Сайты, и так же отдельно подписан: иначе 10 из 12 читалось как "все десять в порядке"
-            subOf(
-              downChecks.length ? t('проблем: {n}', { n: downChecks.length }) : !knownDown && !ov.partial && t('все в норме'),
-              ov.partial > 0 && t('частично: {n}', { n: ov.partial }),
+            ok: ov.partial > 0 ? t('частично: {n}', { n: ov.partial }) : knownDown ? '' : t('все в норме'),
+            okTone: ov.partial > 0 ? 'warn' : 'ok',
+            foot: subOf(
               knownDown && t('известных: {n}', { n: knownDown }),
               ov.open_incidents > 0 && t('открытых инцидентов: {n}', { n: ov.open_incidents }),
             ),
-            siteDown ? 'bad' : downChecks.length || ov.partial ? 'warn' : 'ok',
-            t('из {n}', { n: ov.total }),
-          ),
+            total: subOf(
+              t('работают {n} из {total}', { n: ov.up, total: ov.total }),
+              ov.partial > 0 && t('частично: {n}', { n: ov.partial }),
+              knownDown && t('известных: {n}', { n: knownDown }),
+            ),
+            issues: [
+              ...downChecks.map((c) => ({
+                key: `dc-${c.id}`, name: c.name, down: c.last_status === 'down',
+                text: (c.last_status === 'down' ? t('Недоступно') : c.last_status === 'degraded' ? t('Деградация') : t('Отвечает через раз')) +
+                  (c.last_status !== 'up' && c.last_message ? ` · ${c.last_message}` : ''),
+                onOpen: () => onOpen('sites', c.id),
+              })),
+              ...issuesOf('sites'),
+            ],
+          }),
     )
   if (canSee('servers'))
     tiles.push(
       servers == null || srvTotal === 0
-        ? tile('servers', <IconServers />, t('Серверы онлайн'), '—', servers == null ? t('загрузка…') : t('Серверов пока нет.'), 'muted')
-        : tile(
-            'servers', <IconServers />, t('Серверы онлайн'), String(srvOnline),
+        ? loading('servers', <IconServers />, t('Серверы'), servers != null, t('Серверов пока нет.'))
+        : tile('servers', <IconServers />, t('Серверы'), {
+            value: String(srvOnline), unit: t('из {n}', { n: srvTotal }),
             // оффлайн-нода уже среди строк (srvIssues отдает ей "оффлайн"), отдельно не плюсуем
-            subOf(...probSub(tally.servers), !tally.servers.down && !tally.servers.warn && t('все в норме')),
-            probTone(tally.servers),
-            t('из {n}', { n: srvTotal }),
-          ),
+            ok: srvOnline === srvTotal ? t('все в норме') : t('офлайн: {n}', { n: srvTotal - srvOnline }),
+            okTone: srvOnline === srvTotal ? 'ok' : 'warn',
+            total: t('онлайн {n} из {total}', { n: srvOnline, total: srvTotal }),
+            issues: issuesOf('servers'),
+          }),
     )
   // Docker, Кубер и бэкапы - только если в разделе есть что показать
   if (canSee('docker') && dockerHosts.length)
-    tiles.push(tile(
-      'docker', <IconDocker />, t('Контейнеры Docker'), String(dockerRunning),
-      subOf(t('хостов: {n}', { n: dockerHosts.length }), ...probSub(tally.docker)),
-      probTone(tally.docker),
-    ))
+    tiles.push(tile('docker', <IconDocker />, 'Docker', {
+      value: String(dockerRunning), unit: pl(dockerRunning, t('контейнер'), t('контейнера'), t('контейнеров')),
+      ok: t('все в норме'), foot: t('хостов: {n}', { n: dockerHosts.length }),
+      total: subOf(t('запущено: {n}', { n: dockerRunning }), t('хостов: {n}', { n: dockerHosts.length })),
+      issues: issuesOf('docker'),
+    }))
   if (canSee('kuber') && kubeHosts.length)
-    tiles.push(tile(
-      'kuber', <IconKube />, t('Поды Kubernetes'), String(kubePods),
-      subOf(t('кластеров: {n}', { n: kubeHosts.length }), ...probSub(tally.kuber)),
-      probTone(tally.kuber),
-    ))
+    tiles.push(tile('kuber', <IconKube />, 'Kubernetes', {
+      value: String(kubePods), unit: pl(kubePods, t('под'), t('пода'), t('подов')),
+      ok: t('все в норме'), foot: t('кластеров: {n}', { n: kubeHosts.length }),
+      total: subOf(t('подов: {n}', { n: kubePods }), t('кластеров: {n}', { n: kubeHosts.length })),
+      issues: issuesOf('kuber'),
+    }))
   if (canSee('backups') && backupClients.length + backupServers.length)
-    tiles.push(tile(
-      'backups', <IconBackups />, t('Серверов под бэкапом'), String(backupClients.length),
-      subOf(
+    tiles.push(tile('backups', <IconBackups />, t('Бэкапы'), {
+      value: String(backupClients.length), unit: t('под бэкапом'),
+      ok: t('все свежие'),
+      foot: backupServers.length > 0 ? t('серверов бэкапа: {n}', { n: backupServers.length }) : '',
+      total: subOf(
+        t('под бэкапом: {n}', { n: backupClients.length }),
         backupServers.length > 0 && t('серверов бэкапа: {n}', { n: backupServers.length }),
-        ...probSub(tally.backups),
-        !tally.backups.down && !tally.backups.warn && t('все свежие'),
       ),
-      probTone(tally.backups),
-    ))
+      issues: issuesOf('backups'),
+    }))
   // заглушено целиком (wideMutes): строка на сервер, ведет в его карточку
   const wideRows = canSee('servers')
     ? srvList.map((s) => ({ s, items: wideMutes(s, t) })).filter((x) => x.items.length > 0)
@@ -1224,7 +1242,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           }}
         />
       )}
-      {tiles.length > 0 && <div className="net-tiles home-tiles">{tiles}</div>}
+      {tiles.length > 0 && <div className="home-tiles">{tiles}</div>}
       <div className="net-cards home-blocks">
       {mutes.length > 0 && isAdmin && <MuteHint items={mutes} onOpen={onOpen} onDone={load} />}
       {broken.length > 0 && (
