@@ -2112,6 +2112,20 @@ export type BackupInfo = {
   excludes?: string[]
   repo_dest?: string // куда бэкапится (rest://host:port/name БЕЗ пароля); агент ≥1.43
   helper_version?: number // версия backup-helper на ноде (панель флагует старые)
+  // кто запускает restic (backup-setup 0.45): panel - скрипт панели, unit - restic прямо в ExecStart
+  // юнита или в своем скрипте; тогда mode/includes/excludes взяты из юнита (app/backup_unit.py)
+  runner?: 'panel' | 'unit'
+  unit_paths?: BackupUnitPaths
+}
+export type BackupUnitPaths = {
+  service: string
+  source: 'unit' | 'script'
+  script: string
+  parsed: boolean // false - юнит не разобран, что бэкапится, неизвестно
+  exclude_files: string[]
+  files_from: string[]
+  flags: string[]
+  adopt: boolean // в юните EnvironmentFile с адресом и паролем: adopt переведет на runner панели
 }
 // текущая версия backup-helper'ов: ноды с меньшей → «переустановить helper»
 export const CURRENT_BACKUP_HELPER = 1

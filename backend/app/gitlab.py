@@ -46,7 +46,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from app import tg_fmt
+from app import backup_unit, tg_fmt
 from app.models import Server
 
 log = logging.getLogger("kervax.gitlab")
@@ -499,6 +499,9 @@ def restic_covers(rep: dict, path: str) -> bool:
     bk = (rep or {}).get("backup") or {}
     if not path or not bk.get("configured"):
         return False
+    # старый runner с неразобранным юнитом: путей не знаем, "не сохраняется" не утверждаем
+    if not backup_unit.paths_known(bk):
+        return True
     inc = [p for p in bk.get("includes") or [] if str(p).startswith("/")]
     exc = [p for p in bk.get("excludes") or [] if str(p).startswith("/")]
     if (bk.get("mode") or "exclude") == "include":

@@ -19,6 +19,7 @@ import {
   type BackupCreds,
   type BackupGroup,
   type BackupInfo,
+  type BackupUnitPaths,
   type BackupRun,
   type BackupServerExtra,
   type BackupServerInfo,
@@ -50,7 +51,7 @@ import { MuteChip, collectMutes, muteRows, mutesTileSub } from './mutes'
 import { MutesPanel } from './MutesPanel'
 import { VaultPanel } from './VaultPanel'
 import { DeadBlocks, LegacyPlaque, OffRows, RowFix, bsrvFixText, offLines, rotationAction, rotationLines } from './BsrvCleanup'
-import { FixSteps } from './FixSteps'
+import { FixCmd, FixSteps } from './FixSteps'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits, fmtDur } from './units'
 import { NetTile, TileFilterChip, useTileFilter, type Tone } from './NetLinks'
@@ -258,6 +259,56 @@ function PathsEditor({ value, onChange, junkSet }: {
   )
 }
 
+// Старый runner: restic прямо в ExecStart юнита (или в своем скрипте). Пути показываем как есть, из
+// самого юнита, править их отсюда нельзя - применится только после перевода на runner панели (adopt)
+function UnitPaths({ backup: b, unit: u }: { backup: BackupInfo; unit: BackupUnitPaths }) {
+  const { t } = useI18n()
+  const list = (b.mode === 'include' ? b.includes : b.excludes) ?? []
+  const where = u.source === 'script' && u.script
+    ? t('в скрипте {script} (его запускает {unit})', { script: u.script, unit: u.service })
+    : t('в ExecStart юнита {unit}', { unit: u.service })
+  return (
+    <div className="backup-unit-paths">
+      <div className="backup-manage-row">
+        <label className="backup-manage-label">{t('Что бэкапить')}</label>
+        <span>{!u.parsed ? t('неизвестно') : b.mode === 'include' ? t('Только (include)') : t('Всё, кроме (exclude)')}</span>
+      </div>
+      <div className="muted small">{t('Задано {where}, панель эти пути не меняет.', { where })}</div>
+      {u.parsed ? (
+        list.length > 0
+          ? <pre className="backup-unit-list">{list.join('\n')}</pre>
+          : <div className="muted small">{t('исключений нет, бэкапится весь /')}</div>
+      ) : (
+        <div className="net-note">
+          {t('Разобрать пути из юнита не удалось (путь через переменную или нет файла списка): что бэкапится, панель не знает и дыры в покрытии не ищет.')}
+        </div>
+      )}
+      {(u.files_from.length > 0 || u.exclude_files.length > 0 || u.flags.length > 0) && (
+        <div className="muted small">
+          {u.files_from.length > 0 && <div>--files-from {u.files_from.join(', ')}</div>}
+          {u.exclude_files.length > 0 && <div>--exclude-file {u.exclude_files.join(', ')}</div>}
+          {u.flags.length > 0 && <div>{u.flags.map((f) => `--${f}`).join(' ')}</div>}
+        </div>
+      )}
+      {u.adopt ? (
+        <>
+          <div className="small">
+            {t('Чтобы менять пути из панели, переведите бэкап на runner панели (adopt): репозиторий, пути и время останутся те же. Сначала проверка без изменений, потом перевод:')}
+          </div>
+          <FixCmd cmd={BACKUP_ADOPT_DRY} />
+          <FixCmd cmd={BACKUP_ADOPT} />
+        </>
+      ) : (
+        <div className="muted small">
+          {t('Чтобы менять пути из панели, бэкап надо перевести на runner панели, но adopt тут не сработает: в юните нет EnvironmentFile с RESTIC_REPOSITORY и RESTIC_PASSWORD. Настройте бэкап заново кнопкой «Переустановить бэкап».')}
+        </div>
+      )}
+    </div>
+  )
+}
+const BACKUP_ADOPT = 'sudo /lib65/kervax/kervax-backup-helper adopt'
+const BACKUP_ADOPT_DRY = 'sudo KV_ADOPT_DRYRUN=1 /lib65/kervax/kervax-backup-helper adopt'
+
 function ManageSection({ server: s, backup: b, onChanged }: { server: Server; backup: BackupInfo; onChanged: () => void }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState<string | null>(null)
@@ -302,7 +353,9 @@ function ManageSection({ server: s, backup: b, onChanged }: { server: Server; ba
   const savedListForMode = ((mode === 'include' ? b.includes : b.excludes) || []).join('\n')
   const schedDirty = schedule !== origSchedule
   const winDirty = deadline !== origDeadline || anytime !== origAnytime
-  const pathsDirty = mode !== origMode || curList.join('\n') !== savedListForMode
+  // старый runner: пути в юните, панель их не шлет (helper 0.45 и бэкенд тоже откажут)
+  const unitRunner = b.runner === 'unit'
+  const pathsDirty = !unitRunner && (mode !== origMode || curList.join('\n') !== savedListForMode)
   const dirty = schedDirty || winDirty || pathsDirty
 
   // одна кнопка на всё: расписание и пути — команды ноде (узкий helper), окно — настройка
@@ -372,23 +425,27 @@ function ManageSection({ server: s, backup: b, onChanged }: { server: Server; ba
         <span className="muted small">{t('Бэкап в любое время — не уведомлять о выходе за окно (дневные сервисы)')}</span>
       </label>
 
-      <div className="backup-manage-row">
-        <label className="backup-manage-label">{t('Что бэкапить')}</label>
-        <div className="win-switch">
-          <button className={`win-btn${mode === 'exclude' ? ' win-btn-active' : ''}`} onClick={() => { setMode('exclude'); setPaths((b.excludes || []).join('\n')) }}>
-            {t('Всё, кроме (exclude)')}
-          </button>
-          <button className={`win-btn${mode === 'include' ? ' win-btn-active' : ''}`} onClick={() => { setMode('include'); setPaths((b.includes || []).join('\n')) }}>
-            {t('Только (include)')}
-          </button>
-        </div>
-      </div>
-      {/* мусор (стандартные excludes) — серым, своё — белым; всё в одном редактируемом поле */}
-      <PathsEditor value={paths} onChange={setPaths} junkSet={junkSet} />
-      {mode === 'exclude' && (
-        <div className="muted small backup-paths-hint">
-          {t('Серым — стандартный мусор, белым — добавленное вами.')}
-        </div>
+      {unitRunner && b.unit_paths ? <UnitPaths backup={b} unit={b.unit_paths} /> : (
+        <>
+          <div className="backup-manage-row">
+            <label className="backup-manage-label">{t('Что бэкапить')}</label>
+            <div className="win-switch">
+              <button className={`win-btn${mode === 'exclude' ? ' win-btn-active' : ''}`} onClick={() => { setMode('exclude'); setPaths((b.excludes || []).join('\n')) }}>
+                {t('Всё, кроме (exclude)')}
+              </button>
+              <button className={`win-btn${mode === 'include' ? ' win-btn-active' : ''}`} onClick={() => { setMode('include'); setPaths((b.includes || []).join('\n')) }}>
+                {t('Только (include)')}
+              </button>
+            </div>
+          </div>
+          {/* мусор (стандартные excludes) — серым, своё — белым; всё в одном редактируемом поле */}
+          <PathsEditor value={paths} onChange={setPaths} junkSet={junkSet} />
+          {mode === 'exclude' && (
+            <div className="muted small backup-paths-hint">
+              {t('Серым — стандартный мусор, белым — добавленное вами.')}
+            </div>
+          )}
+        </>
       )}
       {/* одна кнопка «Сохранить» на всё (расписание + окно + пути); шлёт только изменённое.
           «Запустить сейчас» намеренно приглушён — бэкап и так идёт ночью по расписанию. */}
@@ -997,9 +1054,11 @@ function BackupModal({
     manage: b.manageable
       ? subOf(
           b.schedule && t('каждый день {time}', { time: b.schedule }),
-          b.mode === 'include'
-            ? t('бэкапятся только пути: {n}', { n: (b.includes ?? []).length })
-            : t('исключено путей: {n}', { n: (b.excludes ?? []).length }),
+          b.runner === 'unit' && !b.unit_paths?.parsed
+            ? t('пути в юните бэкапа, разобрать не удалось')
+            : b.mode === 'include'
+              ? t('бэкапятся только пути: {n}', { n: (b.includes ?? []).length })
+              : t('исключено путей: {n}', { n: (b.excludes ?? []).length }),
         )
       : t('управление недоступно без helper'),
   }
@@ -3269,11 +3328,13 @@ function BackupSetupModal({ server: s, backupServers, onClose, onDone }: {
   const curSrv = cur ? backupDest(s, backupServers)?.srv : undefined
   const curRepo = cur ? backupRepoStat(cur.repo_dest, backupServers, s) : undefined
   const curMode: 'exclude' | 'include' = cur?.mode === 'include' ? 'include' : 'exclude'
+  // старый runner с неразобранным юнитом: своих путей нет, начинаем со стандартных
+  const curPaths = cur && !(cur.runner === 'unit' && !cur.unit_paths?.parsed) ? cur : null
   const [bsId, setBsId] = useState<number>(
     curSrv && backupServers.some((x) => x.id === curSrv.id) ? curSrv.id : backupServers[0]?.id ?? 0)
   const [mode, setMode] = useState<'exclude' | 'include'>(curMode)
   const [paths, setPaths] = useState(
-    cur ? ((curMode === 'include' ? cur.includes : cur.excludes) ?? []).join('\n') : DEFAULT_EXCLUDES.join('\n'))
+    curPaths ? ((curMode === 'include' ? curPaths.includes : curPaths.excludes) ?? []).join('\n') : DEFAULT_EXCLUDES.join('\n'))
   const [schedule, setSchedule] = useState(cur?.schedule || '23:00')
   const [tls, setTls] = useState(true)
   const [ret, setRet] = useState({

@@ -1437,6 +1437,24 @@ button.ghost.sw-tog-btn { align-self: flex-start; margin: 0; padding: 0.15rem 0.
 .backup-paths-hint {
   margin-top: 0.25rem;
 }
+/* старый runner: пути из юнита, только показ */
+.backup-unit-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.backup-unit-list {
+  margin: 0;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 14rem;
+  overflow: auto;
+}
 .docker-group-head .mon-group-n {
   margin-left: auto;
 }
