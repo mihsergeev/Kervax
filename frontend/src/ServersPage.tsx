@@ -124,7 +124,7 @@ import { type FixStep, FixSteps, useFixDone } from './FixSteps'
 import { GpuCard, GpuChip } from './Gpu'
 import { RoleChips } from './RoleChips'
 import { KnownServerList, knownItems, knownTitle } from './KnownDialog'
-import { AgentUpdRow, agentBehind, helperCmd, hostOf, useFleetRollout } from './FleetUpdate'
+import { AgentUpdRow, UpdCmd, agentBehind, helperCmd, hostOf, useFleetRollout } from './FleetUpdate'
 import { MaintBanner, MaintChip } from './MaintModal'
 
 type MetricKey =
@@ -6191,7 +6191,7 @@ function RelayStatus({ relay, host }: { relay: RelayView; host: string }) {
   return (
     <div className="small form-error">
       📡 {line}
-      <code className="upd-cmd">{cmd}</code>
+      <UpdCmd cmd={cmd} />
       <button
         type="button"
         className="ghost small"

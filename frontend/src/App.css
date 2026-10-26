@@ -7415,6 +7415,54 @@ button.tl-tile-off .net-tile-value {
 .hs-modal .backup-manage, .hs-modal .restore-info { margin-top: 0; padding-top: 0; border-top: 0; }
 .net-card .coverage-group { margin: 0; }
 .hs-modal .repo-row.t-down { border-color: rgba(239, 68, 68, 0.45); }
+/* репозитории бэкап-сервера: список слева по группам, как меню сервера, справа выбранный целиком */
+.bsrv-md { display: grid; grid-template-columns: 270px minmax(0, 1fr); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; min-height: 26rem; }
+.bsrv-md-list { border-right: 1px solid var(--border); background: var(--bg); padding: 6px; display: flex; flex-direction: column; gap: 1px; max-height: 72vh; overflow: auto; }
+.bsrv-md-cap { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--text-muted); padding: 10px 8px 4px; }
+.bsrv-md-cap > span { font-weight: 500; }
+.bsrv-md-cap-bad { color: var(--down); }
+.bsrv-md-cap-warn { color: var(--degraded); }
+button.bsrv-md-it { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: center; width: 100%; padding: 7px 8px; border: 0; border-left: 2px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: 0.86rem; font-weight: 400; text-align: left; cursor: pointer; box-shadow: none; }
+button.bsrv-md-it:hover { background: var(--hover); }
+button.bsrv-md-it.on { background: color-mix(in srgb, var(--accent) 15%, transparent); border-left-color: var(--accent); }
+.bsrv-md-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bsrv-md-r { color: var(--text-muted); font-size: 0.78rem; white-space: nowrap; }
+.bsrv-md-r.t-down, .bsrv-md-r.t-degraded { font-weight: 600; }
+.bsrv-md-body { padding: 14px 16px 18px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.bsrv-md-sel { display: none; }
+.repo-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.repo-head h5 { margin: 0; font-size: 1.15rem; overflow-wrap: anywhere; }
+.repo-st { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; font-size: 0.9rem; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--border); color: var(--text-muted); }
+.repo-st-bad { color: var(--down); border-color: color-mix(in srgb, var(--down) 40%, var(--border)); background: color-mix(in srgb, var(--down) 9%, transparent); }
+.repo-st-warn { color: var(--degraded); border-color: color-mix(in srgb, var(--degraded) 40%, var(--border)); background: color-mix(in srgb, var(--degraded) 9%, transparent); }
+.repo-st-ok { color: var(--up); border-color: color-mix(in srgb, var(--up) 35%, var(--border)); background: color-mix(in srgb, var(--up) 7%, transparent); }
+/* что случилось и что делать: текст, шаги, кнопки, под ними раскрытая команда или форма */
+.repo-fix { display: flex; flex-direction: column; gap: 9px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); font-size: 0.87rem; line-height: 1.5; }
+.repo-fix-bad { border-color: color-mix(in srgb, var(--down) 40%, var(--border)); background: color-mix(in srgb, var(--down) 6%, transparent); }
+.repo-fix-warn { border-color: color-mix(in srgb, var(--degraded) 38%, var(--border)); background: color-mix(in srgb, var(--degraded) 6%, transparent); }
+.repo-fix-item { display: flex; flex-direction: column; gap: 4px; }
+.repo-fix-item + .repo-fix-item { padding-top: 8px; border-top: 1px dashed var(--border); }
+.repo-fix-h { font-weight: 650; }
+.repo-fix-h-bad { color: var(--down); }
+.repo-fix-h-warn { color: var(--degraded); }
+.repo-fix-steps ol { margin: 2px 0 0; padding-left: 1.3rem; }
+.repo-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.repo-acts button.ghost.row-act { padding: 6px 13px; font-size: 0.85rem; }
+.repo-acts button.ghost.row-act.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.repo-fix .repo-cleanup { margin-top: 0; }
+.repo-tiles { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+.repo-kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 16px; margin: 0; font-size: 0.85rem; }
+.repo-kv dt { color: var(--text-muted); }
+.repo-kv dd { margin: 0; overflow-wrap: anywhere; }
+.repo-tile-text > .net-tile { height: 100%; }
+.repo-tile-text .net-tile-value { font-size: 1.05rem; white-space: normal; padding: 0.15rem 0 0.1rem; }
+@media (max-width: 760px) {
+  .bsrv-md { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .bsrv-md-list { display: none; }
+  .bsrv-md-sel { display: block; width: 100%; }
+  .bsrv-md-body { padding: 12px; }
+  .repo-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 /* в строках контейнеров тон показывает точка, цветная полоса слева не нужна */
 .hs-modal .docker-row { border-left-width: 1px; border-left-color: var(--border); }
 .hs-modal .docker-row.docker-row-down { border-color: rgba(239, 68, 68, 0.45); }
@@ -7771,15 +7819,19 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
 /* ---------- "Обновления" на главной и баннер "Серверов" (FleetUpdate.tsx) ---------- */
 .upd-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }
 .upd-head .net-head { flex: 1; }
-/* строку не кликают целиком: действия - кнопки справа, переход - стрелка */
-.home-attention-row.upd-row { cursor: default; gap: 0.5rem; }
+/* строку не кликают целиком: действия - кнопки справа, переход - стрелка.
+   Кнопки одной группой (upd-acts): в узкой колонке (три блока в ряд) группа целиком уходит
+   под текст, а не сжимает его до слова в строке */
+.home-attention-row.upd-row { cursor: default; gap: 0.3rem 0.5rem; flex-wrap: wrap; align-items: flex-start; }
 .home-attention-row.upd-row:hover { background: transparent; }
-.upd-row > button { flex-shrink: 0; }
+.upd-row > .lk-dot { margin-top: 0.45rem; }
+.upd-row .home-attention-txt { flex: 1 1 16rem; }
+.upd-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 0.4rem; margin-left: auto; }
+.upd-acts > button { flex-shrink: 0; }
 .upd-row .upd-open { padding: 0.1rem 0.5rem; }
 .upd-row.upd-ok { background: color-mix(in srgb, var(--up) 9%, transparent); }
 .upd-row.upd-ok .home-attention-txt { color: var(--up); }
-.upd-row.upd-fail { background: color-mix(in srgb, var(--degraded) 6%, transparent); align-items: flex-start; }
-.upd-row.upd-fail > .lk-dot { margin-top: 0.45rem; }
+.upd-row.upd-fail { background: color-mix(in srgb, var(--degraded) 6%, transparent); }
 /* кнопка с подтверждением на месте: "Точно?" желтая, полоска внизу - сколько ждет второго клика */
 .upd-go { position: relative; overflow: hidden; }
 .upd-head .upd-go { padding: 0.3rem 0.9rem; font-size: 0.85rem; }
@@ -7813,16 +7865,15 @@ button.upd-go.upd-sure, button.upd-go.upd-sure:hover {
 .upd-cmd {
   display: block; width: fit-content; max-width: 100%; margin-top: 0.3rem; padding: 0.15rem 0.5rem;
   border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
-  font-size: 0.8rem; overflow-wrap: anywhere;
+  font-size: 0.8rem; overflow-wrap: normal; overflow-x: auto;
 }
+/* слово целиком (Words в FleetUpdate.tsx): перенос только по пробелам */
+.upd-nw { white-space: nowrap; }
 .upd-err { margin-top: 0.4rem; color: var(--down); font-size: 0.85rem; }
 /* баннер "Серверов": та же строка агента, что на главной */
 .agent-update-banner.upd-banner { display: block; padding: 0.35rem 0.6rem; }
 @media (max-width: 600px) {
-  .home-attention-row.upd-row { flex-wrap: wrap; }
   .home-attention-row.upd-row .home-attention-txt { flex: 1 1 calc(100% - 3rem); }
-  /* кнопки строки уходят под текст и встают вровень с ним, а не под точку */
-  .upd-row .home-attention-txt + button { margin-left: 2.2rem; }
   .upd-head .upd-go { width: 100%; }
   .upd-bar { width: 90px; }
 }

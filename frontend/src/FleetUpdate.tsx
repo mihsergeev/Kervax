@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   ApiError, agentUpdate, agentUpdateCancel, closeFleetRollout, getAnsibleAccess, getFleetRollout, startHelperRollout,
   type FleetRollout, type Server,
@@ -224,6 +224,16 @@ function NodeIssues({ rows, onOpenNode }: { rows: NodeState[]; onOpenNode?: (id:
   )
 }
 
+// Перенос только по пробелам: имя ноды, helper'а или плейбука не рвется на дефисе ("web-" / "02")
+function Words({ text }: { text: string }) {
+  return <>{text.split(' ').map((w, i) => <Fragment key={i}>{i > 0 && ' '}<span className="upd-nw">{w}</span></Fragment>)}</>
+}
+
+// Команда в строке: переносится по пробелам, не влезает и одно слово - прокрутка внутри блока
+export function UpdCmd({ cmd }: { cmd: string }) {
+  return <code className="upd-cmd"><Words text={cmd} /></code>
+}
+
 const OpenBtn = ({ onOpen }: { onOpen?: () => void }) => {
   const { t } = useI18n()
   return onOpen ? <button className="ghost small upd-open" title={t('Открыть')} onClick={onOpen}>→</button> : null
@@ -271,19 +281,21 @@ export function AgentUpdRow({ servers, avail, fleet, canUpd, canary, onOpen, onO
             <span className="muted small upd-notes">{notes.map((s) => `${s.name}: ${s.agent_update_note}`).join(' · ')}</span>
           )}
         </span>
-        {canUpd && canary && n > 1 && (
-          <button className="ghost small" disabled={fleet.busy} onClick={() => fleet.startAgent([on[0].id])}
-            title={t('Обновить сначала одну ноду (canary), потом остальные')}>
-            {t('canary - 1 нода')}
-          </button>
-        )}
-        {canUpd && (
-          <ConfirmButton disabled={fleet.busy}
-            label={t('Обновить {n} {nodes}', { n, nodes: nodesAcc(n, t) })}
-            sure={t('Точно? {n} {nodes}', { n, nodes: nodesAcc(n, t) })}
-            onGo={() => fleet.startAgent(on.map((s) => s.id))} />
-        )}
-        <OpenBtn onOpen={onOpen} />
+        <span className="upd-acts">
+          {canUpd && canary && n > 1 && (
+            <button className="ghost small" disabled={fleet.busy} onClick={() => fleet.startAgent([on[0].id])}
+              title={t('Обновить сначала одну ноду (canary), потом остальные')}>
+              {t('canary - 1 нода')}
+            </button>
+          )}
+          {canUpd && (
+            <ConfirmButton disabled={fleet.busy}
+              label={t('Обновить {n} {nodes}', { n, nodes: nodesAcc(n, t) })}
+              sure={t('Точно? {n} {nodes}', { n, nodes: nodesAcc(n, t) })}
+              onGo={() => fleet.startAgent(on.map((s) => s.id))} />
+          )}
+          <OpenBtn onOpen={onOpen} />
+        </span>
       </div>
     )
   }
@@ -312,14 +324,16 @@ export function AgentUpdRow({ servers, avail, fleet, canUpd, canary, onOpen, onO
           {t('Агент {v}: обновились {done} из {n}, остальные сами не обновятся', { v: run!.v, done, n: rows.length })}
           <NodeIssues rows={bad} onOpenNode={onOpenNode} />
         </span>
-        {canUpd && (
-          <button className="ghost small" disabled={fleet.busy}
-            onClick={() => fleet.startAgent(bad.filter((r) => r.s.enabled).map((r) => r.s.id))}>
-            {t('Повторить: {n}', { n: bad.length })}
-          </button>
-        )}
-        <button className="ghost small" onClick={() => close('agent')}>{t('скрыть')}</button>
-        <OpenBtn onOpen={onOpen} />
+        <span className="upd-acts">
+          {canUpd && (
+            <button className="ghost small" disabled={fleet.busy}
+              onClick={() => fleet.startAgent(bad.filter((r) => r.s.enabled).map((r) => r.s.id))}>
+              {t('Повторить: {n}', { n: bad.length })}
+            </button>
+          )}
+          <button className="ghost small" onClick={() => close('agent')}>{t('скрыть')}</button>
+          <OpenBtn onOpen={onOpen} />
+        </span>
       </div>
     )
   }
@@ -334,13 +348,15 @@ export function AgentUpdRow({ servers, avail, fleet, canUpd, canary, onOpen, onO
         {going.length > 0 && <span className="muted small upd-notes">{t('качают: {list}', { list: shortList(going, t, 3) })}</span>}
         <NodeIssues rows={open.filter((r) => r.why)} onOpenNode={onOpenNode} />
       </span>
-      {canUpd && (
-        <button className="ghost small" disabled={fleet.busy} title={t('Снять обновление с тех, кто еще не обновился')}
-          onClick={() => fleet.stopAgent(open.map((r) => r.s.id))}>
-          {t('стоп')}
-        </button>
-      )}
-      <OpenBtn onOpen={onOpen} />
+      <span className="upd-acts">
+        {canUpd && (
+          <button className="ghost small" disabled={fleet.busy} title={t('Снять обновление с тех, кто еще не обновился')}
+            onClick={() => fleet.stopAgent(open.map((r) => r.s.id))}>
+            {t('стоп')}
+          </button>
+        )}
+        <OpenBtn onOpen={onOpen} />
+      </span>
     </div>
   )
 }
@@ -402,9 +418,14 @@ export function HelperUpdRow({ servers, fleet, canUpd, via, onOpen }: {
     if (!pending.length) return null
     const n = pending.length
     // что именно поменяет прогон: helper'ы с версиями, плюс настройка юнита агента (watchdog)
-    const what = helperGroups(servers).map((g) => g.fresh
-      ? t('{helper} не стоит', { helper: g.name })
-      : `${g.name} ${g.a} -> ${g.b}`)
+    // не поставленные одним перечнем: "не стоят: a, b, c", а не "a не стоит, b не стоит, ..."
+    const groups = helperGroups(servers)
+    const fresh = groups.filter((g) => g.fresh).map((g) => g.name)
+    const what = [
+      ...(fresh.length > 1 ? [t('не стоят: {list}', { list: fresh.join(', ') })]
+        : fresh.map((name) => t('{helper} не стоит', { helper: name }))),
+      ...groups.filter((g) => !g.fresh).map((g) => `${g.name} ${g.a} -> ${g.b}`),
+    ]
     // настройка systemd-юнита агента (нет watchdog и т.п.) - тем же плейбуком; отказ
     // самообновления агента ansible не чинит, он отдельной строкой
     for (const s of servers) {
@@ -418,15 +439,18 @@ export function HelperUpdRow({ servers, fleet, canUpd, via, onOpen }: {
         <span className="home-attention-ico">🧩</span>
         <span className="home-attention-txt">
           {t('helper\'ы: обновить на {n} {nodes}', { n, nodes: nodesLoc(n, t) })}{' '}
-          <span className="muted small">({[what.join(', '), shortList(pending, t, 3)].filter(Boolean).join('; ')})</span>
-          {canUpd && <code className="upd-cmd">{ansibleCmd(pending, via)}</code>}
+          <span className="muted small"><Words text={`(${shortList(pending, t, 3)})`} /></span>
+          {what.length > 0 && <span className="muted small upd-notes"><Words text={what.join(' · ')} /></span>}
+          {canUpd && <UpdCmd cmd={ansibleCmd(pending, via)} />}
         </span>
-        {canUpd && (
-          <button className="ghost small" disabled={fleet.busy} onClick={() => startHelpers(fleet, pending, via)}>
-            {t('Скопировать команду')}
-          </button>
-        )}
-        <OpenBtn onOpen={onOpen} />
+        <span className="upd-acts">
+          {canUpd && (
+            <button className="ghost small" disabled={fleet.busy} onClick={() => startHelpers(fleet, pending, via)}>
+              {t('Скопировать команду')}
+            </button>
+          )}
+          <OpenBtn onOpen={onOpen} />
+        </span>
       </div>
     )
   }
@@ -476,11 +500,13 @@ export function HelperUpdRow({ servers, fleet, canUpd, via, onOpen }: {
           </div>
         )}
         {/* команда нужна, пока прогона нет; пошел - видно прогресс, копия - кнопкой */}
-        {(done === 0 || stuck) && <code className="upd-cmd">{cmd}</code>}
+        {(done === 0 || stuck) && <UpdCmd cmd={cmd} />}
       </span>
-      {canUpd && again}
-      {(stuck || !canUpd) && <button className="ghost small" onClick={() => close('helpers')}>{t('скрыть')}</button>}
-      <OpenBtn onOpen={onOpen} />
+      <span className="upd-acts">
+        {canUpd && again}
+        {(stuck || !canUpd) && <button className="ghost small" onClick={() => close('helpers')}>{t('скрыть')}</button>}
+        <OpenBtn onOpen={onOpen} />
+      </span>
     </div>
   )
 }
