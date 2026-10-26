@@ -3772,6 +3772,13 @@ const EN: Record<string, string> = {
   // --- признаки взлома сайта (TamperSigns.tsx) ---
   'Признаки взлома': 'Signs of compromise',
   'Главная опустела': 'Home page went empty',
+  'С главной пропал title': 'Home page lost its title',
+  'Главная за JS-проверкой анти-бота': 'Home page is behind an anti-bot JS check',
+  'содержимое не проверить, пока проверка не пропустит панель': 'content cannot be checked until the check lets the panel through',
+  'за JS-проверкой анти-бота, не проверить': 'behind an anti-bot JS check, cannot check',
+  'Эталон главной': 'Home page baseline',
+  'без title': 'no title',
+  'кука {c}': 'cookie {c}',
   '{size} вместо {was}': '{size} instead of {was}',
   'title был "{title}"': 'title was "{title}"',
   'Сменился title': 'Title changed',

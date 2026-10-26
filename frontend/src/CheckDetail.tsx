@@ -490,7 +490,8 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
       check.check_domain && check.domain_days != null && `${t('домен')} ${expiryText(check.domain_days, t)}`,
     ) || t('нет данных'),
     tamper: tamper
-      ? tamper.err && !tamper.last_at ? t('разобрать не удалось: {err}', { err: tamper.err }) : t('признаков нет')
+      ? tamper.wall ? t('за JS-проверкой анти-бота, не проверить')
+        : tamper.err && !tamper.last_at ? t('разобрать не удалось: {err}', { err: tamper.err }) : t('признаков нет')
       : t('еще не разбирали'),
     inc: incFresh.length
       ? t('за {w}: {n}, последний {t}', { w: winLabel, n: incFresh.length, t: fmtDateTime(incFresh[0].started_at) })
