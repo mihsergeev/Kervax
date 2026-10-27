@@ -3679,7 +3679,8 @@ export type WebErrorRow = {
   lines_n: number // сколько строк сохранено за окно
   // почему 502/504 (helper 0.26): до какого upstream nginx не достучался и как, за окно;
   // c - контейнер docker по адресу или upstream ingress-nginx
-  ups?: { u: string; k: string; n: number; c?: string }[]
+  // s, i, h - сервис (ns/имя), Ingress и хосты за upstream ingress-nginx без живых подов (helper 0.28)
+  ups?: { u: string; k: string; n: number; c?: string; s?: string; i?: string; h?: string }[]
   gone?: boolean // лога больше нет в отчете: ошибки за окно - история (сайты разнесли по логам)
 }
 // Все строки с 5xx одного лога за окно - для .txt

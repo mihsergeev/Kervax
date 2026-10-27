@@ -224,7 +224,7 @@ def test_tg_short_format_a():
 def test_helper_collects_trust():
     src = (Path(__file__).resolve().parents[2] / "agent" / "webserver-setup.sh").read_text(encoding="utf-8")
     # пробел перед комментарием: иначе bash взял бы "0.27#" значением, а хвост выполнил командой
-    assert "KERVAX_SETUP_VERSION=0.27  # " in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.28  # " in src and "\r" not in src
     for part in ("extract_realip()", "caddy_realip()", "collect_realip_traefik()", "report.d/web-realip.json"):
         assert part in src, part
     assert collector._recovery_detail("cf_realip", {}, {}).startswith("белые списки больше не обходятся")

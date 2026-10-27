@@ -273,6 +273,8 @@ const PHRASES: Rule[] = [
   [/ не принял соединение вовремя/g, ' did not accept the connection in time'],
   [/ не ответил вовремя/g, ' timed out'],
   [/ без живых серверов/g, ' has no live servers'],
+  [/нет живых подов у сервиса (\S+)/g, 'no ready pods behind service $1'],
+  [/ срезан лимитом запросов \(limit_req\)/g, ' is cut by the request limit (limit_req)'],
   [/ недоступен по сети/g, ' is unreachable'],
   [/ закрыл соединение, не ответив/g, ' closed the connection without a response'],
   [/ сбросил соединение/g, ' reset the connection'],

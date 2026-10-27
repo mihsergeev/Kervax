@@ -252,10 +252,10 @@ def _rate_body() -> str:
 
 
 def test_helper_version_and_wiring():
-    assert "KERVAX_SETUP_VERSION=0.27" in SRC and "\r" not in SRC
+    assert "KERVAX_SETUP_VERSION=0.28" in SRC and "\r" not in SRC
     body = _rate_body()
     # строки ошибок nginx в потоке контейнера: не в счет запросов, но причина берется
-    assert "\\[(emerg|alert|crit|error|warn|notice|info|debug)\\]/ { up_take($0); next }" in body
+    assert "\\[(emerg|alert|crit|error|warn|notice|info|debug)\\]/ { if ($0 ~ /limiting requests/) lim++; up_take($0); next }" in body
     assert '"$UPFN"' in body and "up_out(el, kk) }" in body
     # error-лог хостового nginx - пятой колонкой карты, читается раз за запуск
     assert "errlog_chunk \"$ef\"" in body and 'uj=",\\"up\\":$up"' in body

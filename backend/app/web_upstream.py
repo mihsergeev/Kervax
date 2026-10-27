@@ -2,7 +2,11 @@
 webserver-setup 0.26). Helper берет строки error-лога nginx про upstream и отдает по каждому
 логу "up": [{"u": адрес, "k": вид, "n": в минуту, "c": имя}], где имя - контейнер docker по его
 адресу или upstream ingress-nginx. Алерт по 5xx без этого говорил только, сколько ошибок и по
-каким путям, а за причиной надо было идти в error-лог на сервер."""
+каким путям, а за причиной надо было идти в error-лог на сервер.
+
+С helper 0.28 там же вид noep: ingress-nginx ответил 503 сам, потому что у сервиса нет ни одного
+живого пода, - с "s" (namespace/сервис), "i" (Ingress) и "h" (хосты) из его nginx.conf. У нод со
+старым helper тот же вид панель находит по строкам с 5xx (from_lines)."""
 
 from __future__ import annotations
 
@@ -25,11 +29,16 @@ KINDS: dict[str, str] = {
     "ssl": "не прошел TLS",
     "bad": "ответил не по протоколу",
     "other": "ошибка связи",
+    # ingress-nginx ответил 503 сам, не спросив под (helper 0.28); текст - в item_text
+    "noep": "без живых подов",
+    "limit": "срезан лимитом запросов (limit_req)",
 }
 
 _ADDR = re.compile(r"^[A-Za-z0-9._:/@\[\]-]{1,120}$")
 _NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 _IP_PORT = re.compile(r"^\d+\.\d+\.\d+\.\d+(:\d+)?$")
+_SVC = re.compile(r"^[A-Za-z0-9._-]{1,80}/[A-Za-z0-9._-]{1,80}$")
+_HOST = re.compile(r"^[A-Za-z0-9.*_-]{1,120}$")
 UP_MAX = 8  # столько пар "адрес + вид" храним в минуте лога
 
 
@@ -52,8 +61,67 @@ def clean(items) -> list[dict] | None:
         c = str(it.get("c") or "")
         if _NAME.match(c):
             x["c"] = c
+        _svc_fields(x, it)
         out.append(x)
     return out[:UP_MAX] or None
+
+
+def _svc_fields(x: dict, it: dict) -> None:
+    """Сервис за upstream ingress-nginx (helper 0.28): "s" - namespace/сервис, "i" - Ingress,
+    "h" - до трех хостов через пробел."""
+    sv, ing = str(it.get("s") or ""), str(it.get("i") or "")
+    if _SVC.match(sv):
+        x["s"] = sv
+    if _NAME.match(ing):
+        x["i"] = ing
+    hosts = [h for h in str(it.get("h") or "").split() if _HOST.match(h)][:3]
+    if hosts:
+        x["h"] = " ".join(hosts)
+
+
+# Строка ingress-nginx (формат по умолчанию), на которую он ответил сам: 503, а за
+# [ns-svc-port] [альтернативный] вместо адреса пода "-"
+_NOEP_LINE = re.compile(r'" 503 \d+ .*?\[([A-Za-z0-9_.-]{1,120})\] \[[^\]]*\] - ')
+
+
+def from_lines(lines, codes, e5: int, namespaces=()) -> list[dict] | None:
+    """Вид noep по сохраненным строкам с 5xx - для нод, где helper старше 0.28. Только если вся
+    минута такая: все строки - 503 без upstream и других кодов нет. Строк до пяти, поэтому
+    минуту, где есть и другие ошибки, не угадываем - она считается как раньше."""
+    lines = [str(x) for x in lines or [] if x]
+    if not lines or not e5 or set((codes or {}).keys()) - {"503"}:
+        return None
+    names = [m.group(1) if (m := _NOEP_LINE.search(x)) else None for x in lines]
+    if None in names:
+        return None
+    out = []
+    for name in dict.fromkeys(names):
+        x = {"u": name, "k": "noep", "n": max(1, round(e5 * names.count(name) / len(names)))}
+        sv = svc_of(name, namespaces)
+        if sv:
+            x["s"] = sv
+        out.append(x)
+    return out
+
+
+def svc_of(name: str, namespaces) -> str:
+    """Upstream ingress-nginx "ns-сервис-порт" -> "ns/сервис" по namespace'ам кластера (из отчета
+    агента). Дефисы есть и в именах, поэтому без списка namespace'ов не делим."""
+    ns = max((n for n in namespaces or () if n and name.startswith(n + "-")), key=len, default="")
+    if not ns:
+        return ""
+    rest = name[len(ns) + 1:].rsplit("-", 1)[0]
+    return f"{ns}/{rest}" if rest and _SVC.match(f"{ns}/{rest}") else ""
+
+
+def noep_services(items, e5) -> list[str]:
+    """Upstream'ы без живых подов, если ими объясняется минута: не меньше 80% ее 5xx - ответы
+    ingress-nginx без upstream. Пусто - минута обычная."""
+    got = [it for it in items if isinstance(it, dict) and it.get("k") == "noep"] if isinstance(items, list) else []
+    n = sum(int(it.get("n") or 0) for it in got)
+    if not got or not e5 or n < 0.8 * int(e5):
+        return []
+    return list(dict.fromkeys(str(it.get("u") or "") for it in got if it.get("u")))
 
 
 def add(acc: dict, items) -> None:
@@ -66,6 +134,9 @@ def add(acc: dict, items) -> None:
         a["n"] += int(it.get("n") or 0)
         if it.get("c"):
             a["c"] = str(it["c"])  # имя - самое свежее: контейнер могли пересоздать
+        for f in ("s", "i", "h"):
+            if it.get(f):
+                a[f] = str(it[f])
 
 
 def top(acc: dict, n: int = 8) -> list[dict]:
@@ -82,7 +153,18 @@ def who(it: dict) -> str:
     return f"{c} ({u})"
 
 
+def svc_text(it: dict) -> str:
+    """"shop/shop-back (ingress shop, api.example.com)": сервис без живых подов и где он виден.
+    Без helper 0.28 - имя upstream ingress-nginx, как в его логе."""
+    where = ([f"ingress {it['i']}"] if it.get("i") else []) + str(it.get("h") or "").split()
+    return str(it.get("s") or it.get("u") or "?") + (f" ({', '.join(where)})" if where else "")
+
+
 def item_text(it: dict) -> str:
+    if it.get("k") == "noep":
+        return f"нет живых подов у сервиса {svc_text(it)}"
+    if it.get("k") == "limit":
+        return f"{svc_text(it)} {KINDS['limit']}"
     return f"{who(it)} {KINDS.get(str(it.get('k')), KINDS['other'])}"
 
 
