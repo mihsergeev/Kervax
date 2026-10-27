@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.53"
+const version = "2.54"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -5540,15 +5540,49 @@ func kubeValidName(s string) bool { return kubeNameRe.MatchString(s) }
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
-// procRunning — есть ли процесс с таким comm (скан /proc/*/comm).
+// подменяется в тестах
+var procRoot = "/proc"
+
+// procRunning — есть ли процесс с таким comm (скан /proc/*/comm) на самом хосте. Процессы из
+// контейнеров Docker видны в /proc хоста, но кластера на хосте не делают: стенд k3s в контейнере
+// (образ rancher/k3s) на сервере бэкапов превращал его в "Kubernetes без доступа" и звал ставить
+// kube-setup и kubeexpiry-setup.
 func procRunning(name string) bool {
-	ents, _ := os.ReadDir("/proc")
+	ents, _ := os.ReadDir(procRoot)
 	for _, e := range ents {
 		if _, err := strconv.Atoi(e.Name()); err != nil {
 			continue
 		}
-		if b, err := os.ReadFile("/proc/" + e.Name() + "/comm"); err == nil {
-			if strings.TrimSpace(string(b)) == name {
+		b, err := os.ReadFile(procRoot + "/" + e.Name() + "/comm")
+		if err != nil || strings.TrimSpace(string(b)) != name {
+			continue
+		}
+		cg, _ := os.ReadFile(procRoot + "/" + e.Name() + "/cgroup")
+		if inDockerCt(string(cg)) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// inDockerCt — процесс внутри контейнера Docker, а не в поде кластера хоста. Под с docker-
+// рантаймом лежит в kubepods, и его контейнер ниже ("kubepods.slice/.../docker-<id>.scope"):
+// это кластер хоста (kube-apiserver у kubeadm - статический под). Kind и k3d наоборот: сначала
+// контейнер Docker, кластер внутри него.
+func inDockerCt(cg string) bool {
+	for _, ln := range strings.Split(cg, "\n") {
+		f := strings.SplitN(ln, ":", 3)
+		if len(f) != 3 {
+			continue
+		}
+		segs := strings.Split(strings.Trim(f[2], "/"), "/")
+		for i, sg := range segs {
+			if strings.HasPrefix(sg, "kubepods") {
+				break
+			}
+			if (strings.HasPrefix(sg, "docker-") && strings.HasSuffix(sg, ".scope")) ||
+				(i > 0 && segs[i-1] == "docker" && len(sg) == 64) {
 				return true
 			}
 		}

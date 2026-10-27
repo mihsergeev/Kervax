@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.44] - 2026-10-28
+
+### Changed
+- TG-алерт "Покрытие": имя сервера ведет туда, где это чинится (Кубер, Докер или карточка сервера), есть строка
+  "Что сделать" с готовой командой. Сервер с несколькими пунктами идет одной строкой, серверы с одинаковыми
+  пунктами - вместе.
+
+### Fixed
+- Агент 2.54: k3s, kubelet и k0s внутри контейнера Docker не считаются кластером на сервере - стенд rancher/k3s
+  давал ложное "Kubernetes без доступа" и "нужен kubeexpiry-setup".
+
 ## [1.8.43] - 2026-10-28
 
 ### Fixed

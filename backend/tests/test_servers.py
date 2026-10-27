@@ -1797,14 +1797,17 @@ async def test_daily_uncovered_digest(tmp_path, monkeypatch):
     from app.alerts import full_text
 
     msg, full = sent[0], full_text(sent[0])
-    # в чате - чего не хватает и где, по строке на дыру
+    # в чате - чего не хватает и где, одной строкой на сервер
     assert "новая-нода" in msg
     assert "dbstat-setup" in msg, "не сказано, чего не хватает"
     assert "Docker без доступа" in msg
+    assert msg.split("Что сделать")[0].count("новая-нода") == 1, "сервер повторяется на каждую дыру"
+    # и что сделать: команда плейбука для helper'а, прокси Docker - по ссылке
+    assert "<code>ansible-playbook playbooks/kervax_helpers.yml -l 'новая-нода'</code>" in msg, msg
+    assert "read-only proxy" in msg
     # в полном тексте - словами и с готовой командой
     assert "инвентарь СУБД" in full, "не сказано, чего не хватает"
     assert "kervax_helpers.yml" in full, "нет готовой команды — сводка не действие, а новость"
-    assert "kervax_helpers.yml" not in msg, "команда в чате - подробность для панели"
     assert "мёртвая-нода" not in full and "мертвая-нода" not in msg, "оффлайновую ноду звать чинить рано"
     assert "timesync-setup" not in full, "установленный helper попал в сводку"
 
