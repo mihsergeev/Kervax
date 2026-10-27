@@ -28,6 +28,7 @@ WEB_LINES_KEEP = timedelta(days=7)       # строки 5xx: в них адре�
 DOMAIN_PROBES_KEEP = timedelta(days=7)   # проверки домена из мастера живут часы
 PROBES_KEEP = timedelta(days=1)          # ручные проверки нужны на время ожидания ответа
 REQUESTS_KEEP = timedelta(days=2)        # левые запросы к панели: алерту нужны 10 минут, окну - сутки
+AUTOBAN_KEEP = timedelta(days=90)        # баны сканеров: повтор helper считает за 30 дней, история - квартал
 AUDIT_KEEP = timedelta(days=365)         # журнал действий: "кто это включил" спрашивают и через полгода
 
 # группы со сроком из настроек: ключ срока и таблицы, первая - главная (самая старая запись)
@@ -46,6 +47,7 @@ FIXED = [
     ("domain_probes", DOMAIN_PROBES_KEEP, ["domain_probes"]),
     ("probes", PROBES_KEEP, ["probe_requests"]),
     ("panel_requests", REQUESTS_KEEP, ["request_stats"]),
+    ("autoban", AUTOBAN_KEEP, ["autoban_bans"]),
     ("panel_errors", panel_errors_mod.KEEP, ["panel_errors"]),
 ]
 # примерный размер строки с индексами, байт (по продам) - только для оценки в SQLite

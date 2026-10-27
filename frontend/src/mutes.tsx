@@ -63,6 +63,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'log_errors', label: 'Всплеск ошибок в логах' },
   { k: 'fpm', label: 'PHP-FPM не справляется' },
   { k: 'gitlab', label: 'GitLab устарел' },
+  { k: 'autoban', label: 'Автобан сканеров не в порядке' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
   { k: 'backup_growth', label: 'Бэкап: резкий прирост' },
   { k: 'docker_sock', label: 'Docker: внешний прокси с docker-сокетом' },
@@ -116,6 +117,13 @@ export const LOGERR_MUTE = 'logerr:'
 export const FPM_MUTE = 'fpm:'
 // Один GitLab: gitlab:<хост из external_url или имя контейнера>
 export const GITLAB_MUTE = 'gitlab:'
+// Одна беда автобана: autoban:self:<адрес> | autoban:cant | autoban:noeffect | autoban:avalanche
+export const AUTOBAN_MUTE = 'autoban:'
+const AUTOBAN_WHAT: Record<string, string> = {
+  cant: 'не может банить',
+  noeffect: 'бан не действует',
+  avalanche: 'лавина банов',
+}
 // OOM из-за одного виновника (кто занимал память): oom:svc:<служба> | oom:ct:<контейнер> | oom:pod:<uid> |
 // oom:cg:<cgroup> | oom:proc:<процесс>; OOM из-за других приходят. "oom" целиком - все OOM сервера
 export const OOM_MUTE = 'oom:'
@@ -225,6 +233,11 @@ export function muteKindLabel(k: string, t: TFn): string | null {
     return `${t('пул PHP-FPM')}: ${p ?? ''} (${w})`
   }
   if (k.startsWith(GITLAB_MUTE)) return `GitLab: ${k.slice(GITLAB_MUTE.length)}`
+  if (k.startsWith(AUTOBAN_MUTE)) {
+    const key = k.slice(AUTOBAN_MUTE.length)
+    if (key.startsWith('self:')) return `${t('автобан: свой адрес')} ${key.slice(5)}`
+    return `${t('автобан')}: ${t(AUTOBAN_WHAT[key] ?? key)}`
+  }
   if (k.startsWith(MEMLIM_MUTE)) return `${t('у лимита памяти, так задумано')}: ${k.slice(MEMLIM_MUTE.length).replace(/^(docker|pod|unit):/, '').replace(/^\?\//, '')}`
   if (k.startsWith(LEAK_MUTE)) return `${t('рост памяти')}: ${k.slice(LEAK_MUTE.length).replace(/^(docker|pod|proc):/, '')}`
   if (k.startsWith(RESTARTS_MUTE)) {

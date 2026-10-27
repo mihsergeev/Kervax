@@ -2156,6 +2156,28 @@ button.ghost.sw-tog-btn { align-self: flex-start; margin: 0; padding: 0.15rem 0.
   overflow: auto;
 }
 
+/* автобан сканеров (AutobanSection): строки банов как строки 5xx, режим - три кнопки */
+.ab-card { display: flex; flex-direction: column; gap: 0.5rem; }
+.ab-modes { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; }
+.ab-modes .ab-mode-on {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.ab-list { display: flex; flex-direction: column; gap: 0.35rem; }
+.ab-row { border-left-color: var(--degraded); }
+.ab-row.ab-row-watch { border-left-color: var(--border); }
+.ab-row.ab-row-own { border-left-color: var(--up); }
+.ab-hist { opacity: 0.8; }
+.ab-bad { color: var(--down); }
+.ab-warn { color: var(--degraded); }
+.ab-allow {
+  width: 100%;
+  min-height: 9rem;
+  box-sizing: border-box;
+  font-size: 0.8rem;
+}
+
 /* окно "Отчет" (ReportModal): столбики по дням, плотно, сетка через четверть высоты */
 .rp-chart-box { display: flex; flex-direction: column; gap: 0.3rem; }
 .rp-chart {

@@ -1181,6 +1181,35 @@ class OomEvent(Base):
     count: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class AutobanBan(Base):
+    """Бан сканера (helper autoban-setup, report.d/autoban.json): одна строка на бан адреса на
+    сервере. Helper держит только активные, история и сводка в Telegram - отсюда. watch - бан
+    режима наблюдения (в файрвол не ушел), seen - сколько раз адрес приходил после бана (бан не
+    действует), ended_at/end - когда и почему кончился (expired, unban, gone), digested - ушел в сводку."""
+
+    __tablename__ = "autoban_bans"
+    __table_args__ = (
+        UniqueConstraint("server_id", "ip", "since", name="uq_autoban_bans_key"),
+        Index("ix_autoban_bans_lookup", "server_id", "since"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    server_id: Mapped[int] = mapped_column(Integer)
+    ip: Mapped[str] = mapped_column(String(64))
+    since: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    n: Mapped[int] = mapped_column(Integer, default=1)  # который это бан адреса за 30 дней
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    paths: Mapped[list] = mapped_column(JSON, default=list)  # до трех путей-ловушек
+    more: Mapped[int] = mapped_column(Integer, default=0)  # еще столько разных ловушек
+    where: Mapped[str] = mapped_column(String(120), default="")  # домен, сервис ingress или лог
+    watch: Mapped[bool] = mapped_column(Boolean, default=False)
+    seen: Mapped[int] = mapped_column(Integer, default=0)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    end: Mapped[str] = mapped_column(String(16), default="")
+    digested: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class OomKill(Base):
     """Убийства OOM killer из журнала ядра (helper units-setup 0.5, report.d/oom.json): одна
     строка на убитый процесс, на убийство systemd-oomd или на отметку systemd "в юните убит

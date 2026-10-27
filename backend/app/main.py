@@ -10,6 +10,7 @@ from app.api import (
     alerts,
     ansible as ansible_api,
     audit,
+    autoban as autoban_api,
     auth,
     backup as backup_api,
     branding,
@@ -113,6 +114,7 @@ def create_app() -> FastAPI:
     app.include_router(users_api.router, prefix="/api")
     app.include_router(login_guard.router, prefix="/api")
     app.include_router(panel_requests.router, prefix="/api")
+    app.include_router(autoban_api.router, prefix="/api")
     # ошибки интерфейса и "сообщить о проблеме" - любая учетка, просмотр - админ
     app.include_router(panel_errors_api.router, prefix="/api")
     app.include_router(audit.router, prefix="/api")

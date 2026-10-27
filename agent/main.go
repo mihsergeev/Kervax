@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.54"
+const version = "2.55"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -7547,6 +7547,10 @@ const unitsReqDir = "/var/lib/kervax/units-req"
 const unitsResDir = "/var/lib/kervax/units-res"
 const duResDir = "/var/lib/kervax/du-res"
 
+// спул автобана сканеров (autoban-setup): режим, разбан, белый список панели
+const autobanReqDir = "/var/lib/kervax/autoban-req"
+const autobanResDir = "/var/lib/kervax/autoban-res"
+
 // collectBackupServer — nil, если нода не сервер бэкапов. Детект по docker-контейнеру
 // rest-server (без прав); per-repo статистику (снапшоты/свежесть/лок) добавляет helper
 // (backupserver-setup.sh) — без restic и без паролей.
@@ -7816,6 +7820,17 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 			return
 		}
 		res, out := spoolInFor(unitsReqDir, unitsResDir, cmd.ID, lines, "units-setup", 6*time.Minute)
+		postBackupResult(panelURL, token, cmd.ID, res, out)
+		return
+	case "autoban":
+		// автобан сканеров: режим (on/watch/off), разбан адреса или белый список панели. Забанить
+		// панель не может - банит сам helper autoban-setup по логам ноды
+		lines, ok := autobanLines(cmd)
+		if !ok {
+			postBackupResult(panelURL, token, cmd.ID, false, "неизвестное действие или адрес")
+			return
+		}
+		res, out := spoolInFor(autobanReqDir, autobanResDir, cmd.ID, lines, "autoban-setup", 2*time.Minute)
 		postBackupResult(panelURL, token, cmd.ID, res, out)
 		return
 	case "unit_journal":
@@ -8099,6 +8114,45 @@ func unitFixLines(cmd backupCommand) ([]string, bool) {
 		return nil, false
 	}
 	return []string{"op=" + cmd.Mode, "unit=" + u}, true
+}
+
+// autobanLines - запрос helper'у autoban-setup. Mode: on/watch/off - режим; unban - снять бан
+// с адреса Name; allow - белый список панели целиком, в Paths строки "сеть подпись". Адреса и
+// сети разбираются здесь и еще раз в helper'е, подпись - без управляющих символов, до 40 знаков.
+func autobanLines(cmd backupCommand) ([]string, bool) {
+	switch cmd.Mode {
+	case "on", "watch", "off":
+		return []string{"op=mode", "mode=" + cmd.Mode}, true
+	case "unban":
+		ip := net.ParseIP(cmd.Name)
+		if ip == nil {
+			return nil, false
+		}
+		return []string{"op=unban", "ip=" + ip.String()}, true
+	case "allow":
+		if len(cmd.Paths) > 2000 {
+			return nil, false
+		}
+		lines := []string{"op=allow"}
+		for _, p := range cmd.Paths {
+			c, label, _ := strings.Cut(strings.TrimSpace(p), " ")
+			if _, _, err := net.ParseCIDR(c); err != nil && net.ParseIP(c) == nil {
+				return nil, false
+			}
+			label = strings.Map(func(r rune) rune {
+				if r < 0x20 || r == 0x7f || r == '"' || r == '\\' {
+					return -1
+				}
+				return r
+			}, strings.TrimSpace(label))
+			if rs := []rune(label); len(rs) > 40 {
+				label = string(rs[:40])
+			}
+			lines = append(lines, strings.TrimSpace("net="+c+" "+label))
+		}
+		return lines, true
+	}
+	return nil, false
 }
 
 // journalMaxOut - сколько текста журнала отдавать панели: она принимает до 100 000 символов

@@ -128,6 +128,7 @@ import { RoleChips } from './RoleChips'
 import { KnownServerList, knownItems, knownTitle } from './KnownDialog'
 import { AgentUpdRow, UpdCmd, agentBehind, helperCmd, hostOf, useFleetRollout } from './FleetUpdate'
 import { MaintBanner, MaintChip } from './MaintModal'
+import { AutobanSection } from './AutobanSection'
 
 type MetricKey =
   | 'cpu'
@@ -7119,7 +7120,8 @@ function ServerDetail({
   // Раздел держится и на истории за период, а не только на последнем отчете: блок
   // helper'а бывает пропущен (установка helper'а, ротация всех логов разом), и раздел
   // вместе со ссылкой из алерта пропадал бы на эту минуту
-  const hasWeb = !!wr || M.some((m) => m.web_rpm != null)
+  // автобан (helper autoban-setup) живет в Веб: блок есть и там, где access-логов нет и считать нечего
+  const hasWeb = !!wr || M.some((m) => m.web_rpm != null) || !!r.extras?.autoban
   const webColors = new Map<string, string>()
   if (hasWeb)
     for (const k of ['web', 'web5xx'] as const)
@@ -7806,6 +7808,7 @@ function ServerDetail({
               <WebNow server={s} />
               <WebErrorList server={s} t={t} onChanged={onChanged} onUnauthorized={onUnauthorized} />
             </div>
+            <AutobanSection server={s} onUnauthorized={onUnauthorized} />
             <div className="chart-grid">
               {chartCard(
                 'web',

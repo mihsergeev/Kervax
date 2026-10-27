@@ -3,6 +3,7 @@ import base64
 import contextlib
 import gzip
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -41,6 +42,7 @@ from app import reboot_survive
 from app import ssh_audit
 from app import web_certs
 from app import cf_realip
+from app import autoban as autoban_mod
 from app import web_upstream
 from app import web_config
 from app import webfiles as webfiles_mod
@@ -111,6 +113,7 @@ from app.schemas import (
     HelperRunOut,
     AlertSnoozeIn,
     BackupCommandIn,
+    AutobanCmdIn,
     BackupCommandOut,
     BackupAuditMuteIn,
     CustomBackupIgnoreIn,
@@ -734,6 +737,7 @@ _SETUP_LABEL = {
     "sockfix-setup": "Compose внешнего прокси: сокет и образ",
     "relay-setup": "Ретранслятор для агентов",
     "webfiles-setup": "Файлы сайтов: признаки взлома",
+    "autoban-setup": "Автобан сканеров",
 }
 
 
@@ -2075,6 +2079,44 @@ async def server_web_errors(
     return out
 
 
+@router.get("/{server_id}/autoban")
+async def server_autoban(server_id: int, user: CurrentUser, session: SessionDep,
+                         days: int = Query(default=30, ge=1, le=90)) -> dict:
+    """Блок "Автобан" раздела Веб: режим, активные баны, кого бы забанило, свои адреса в ловушках,
+    где бан не работает, и история банов за days дней."""
+    server = await _get_or_404(server_id, session, user)
+    now = datetime.now(timezone.utc)
+    return {"view": autoban_mod.view(server, now),
+            "history": await autoban_mod.history(session, server.id, days=days),
+            "helper": str(((server.last_report or {}).get("setup_versions") or {}).get("autoban-setup") or "")}
+
+
+@router.post("/{server_id}/autoban", response_model=BackupCommandOut)
+async def server_autoban_cmd(server_id: int, body: AutobanCmdIn, user: AdminUser,
+                             session: SessionDep) -> BackupCommandOut:
+    """Переключить режим автобана на ноде или снять бан. Только админ: это правка файрвола ноды,
+    хоть и только в сторону "пускать". Через спул helper'а autoban-setup, как кнопки units-setup."""
+    server = await _get_or_404(server_id, session, user)
+    if not autoban_mod.agent_ok(server):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"агент {server.agent_version or '?'} не умеет команды автобана, нужен {autoban_mod.AGENT_MIN}+")
+    payload = None
+    if body.op == "unban":
+        try:
+            ip = str(ipaddress.ip_address(body.ip.strip()))
+        except ValueError:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "не адрес") from None
+        payload = {"name": ip}
+        await autoban_mod.mark_unban(session, server.id, ip)
+    c = BackupCommand(server_id=server_id, action="autoban", mode=body.op, payload=payload, created_by=user.username)
+    session.add(c)
+    await session.commit()
+    await session.refresh(c)
+    await audit.record(session, user.username, "autoban_unban" if body.op == "unban" else "autoban_mode",
+                       (payload or {}).get("name") or body.op, f"srv={server_id}")
+    return BackupCommandOut.model_validate(c)
+
+
 @router.get("/{server_id}/web-errors/lines", response_model=list[str])
 async def server_web_error_lines(
     server_id: int,
@@ -2379,7 +2421,7 @@ async def _take_backup_commands(session, server_id: int) -> list[dict]:
 
 # Сколько ждать ответа агента, прежде чем считать команду пропавшей. disk_fix дольше:
 # docker builder prune по кэшу в десятки ГБ идет минутами, агент ждет helper до 15 минут.
-_CMD_TIMEOUT = {"disk_fix": 16 * 60, "unit_fix": 7 * 60, "unit_journal": 2 * 60}
+_CMD_TIMEOUT = {"disk_fix": 16 * 60, "unit_fix": 7 * 60, "unit_journal": 2 * 60, "autoban": 3 * 60}
 
 
 def _backup_cmd_out(c: BackupCommand, now: datetime) -> BackupCommandOut:
@@ -3564,6 +3606,7 @@ async def agent_report(
         # журнал OOM-событий: одна запись на отчёт с киллом (когда + кого)
         session.add(OomEvent(server_id=server.id, ts=now, victim=victim, count=oom_delta))
     await _store_web_errors(session, server, body, now)
+    await autoban_mod.store(session, server, body.extras, now)
     report_dict = body.model_dump()
     # адрес репозитория бэкапа - только без логина и пароля, что бы ни прислал helper
     backup_target.clean_report(report_dict)
