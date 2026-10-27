@@ -440,6 +440,9 @@ def test_failed_integrity_checks():
         "muted": {"check_ts": ts - 3600, "check_ok": 0},
     }}
     assert collector.failed_checks(bs, extra, {"muted"}, now) == ["broken"]
+    # архив хранится как есть: в списке репозиториев его нет, и плитка не должна считать беду,
+    # которую негде увидеть
+    assert collector.failed_checks(bs, extra, {"muted"}, now, {"broken": {"why": "сервера нет"}}) == []
 
 
 def test_backup_server_old_restic():
