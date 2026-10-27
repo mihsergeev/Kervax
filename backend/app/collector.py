@@ -2904,13 +2904,15 @@ def long_locked_repos(bs: dict, muted: set, now: datetime) -> list[tuple[str, in
 _BACKUP_CHECK_FRESH = 14 * 86400
 
 
-def failed_checks(bs: dict, extra: dict, muted: set, now: datetime) -> list[str]:
-    """Репозитории, у которых последняя недельная проверка не прошла. Без заглушенных."""
+def failed_checks(bs: dict, extra: dict, muted: set, now: datetime, archive: dict | None = None) -> list[str]:
+    """Репозитории, у которых последняя недельная проверка не прошла. Без заглушенных и без
+    архива: архив хранится как есть и без алертов, в списке репозиториев его нет, а плитка
+    считала бы беду, которую негде увидеть. Правило то же, что у bsrvRepoProblems фронта."""
     out = []
     for r in bs.get("repos") or []:
         name = r.get("name") or ""
         o = ((extra or {}).get("repos") or {}).get(name)
-        if not name or name in muted or not isinstance(o, dict):
+        if not name or name in muted or archived_repo(archive, name) or not isinstance(o, dict):
             continue
         ts = int(o.get("check_ts") or 0)
         if int(o.get("check_ok") if o.get("check_ok") is not None else -1) == 0 \
@@ -4436,7 +4438,8 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # Бэкап-сервер: не прошла проверка целостности репозитория
     bsrv = rep.get("backup_server") or {}
     if bsrv.get("present"):
-        bad = failed_checks(bsrv, bsrv_extra(rep), set(getattr(s, "backup_repo_mutes", None) or []), now)
+        bad = failed_checks(bsrv, bsrv_extra(rep), set(getattr(s, "backup_repo_mutes", None) or []), now,
+                            getattr(s, "backup_repo_archive", None))
         if bad:
             add("backup_check", 2, "не прошла проверка целостности: " + ", ".join(bad[:3])
                 + (f" и еще {len(bad) - 3}" if len(bad) > 3 else ""), _BSRV_SEC["backup_check"], "backup_check",
@@ -8052,7 +8055,8 @@ async def evaluate_servers(
         # сломанном и раз в сутки, пока не починят; отбой, когда все проверки снова прошли.
         cr = rules.get("backup_check")
         if online_now and bsrv.get("present") and "backup_check" not in mutes:
-            bad = failed_checks(bsrv, bsrv_extra(s.last_report or {}), set(s.backup_repo_mutes or []), now)
+            bad = failed_checks(bsrv, bsrv_extra(s.last_report or {}), set(s.backup_repo_mutes or []), now,
+                                s.backup_repo_archive)
             prev = st.get("backup_checks") if isinstance(st.get("backup_checks"), dict) else {}
             prev_names = list(prev.get("repos") or [])
             prev_ts = float(prev.get("ts") or 0)

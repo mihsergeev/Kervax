@@ -34,7 +34,7 @@ import {
 } from './api'
 import { BACKUP_HTTP_MUTE, backupServerToHttps, backupToHttps, updateServer } from './api'
 import { trBackend } from './backendText'
-import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, hasOwnFileBackup, shortList, srvIpHit, srvIssues, srvMuted, type BackupDest } from './serverUtils'
+import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, hasOwnFileBackup, shortList, srvIpHit, srvIssues, srvMuted, srvMutesNow, type BackupDest } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
@@ -55,6 +55,10 @@ import { byteUnits, fmtDur } from './units'
 import { NetTile, TileFilterChip, useTileFilter, type Tone } from './NetLinks'
 import { HomeTile, tileIssues } from './HomeTiles'
 import { backupProblems, byTone, probRows, srvIssueRows } from './sectionIssues'
+import {
+  bsrvExtra, bsrvRepoProblems, lockAge, repoBad, repoCtx, repoRot, repoRunning, repoState, repoTone,
+  type RepoCtx, type RepoProblem, type RepoTone,
+} from './bsrvRepos'
 
 // Сводка покрытия, когда замечаний нет: базы на ноде могут быть и без дампа панели - их бэкапит
 // владелец (галка "бэкаплю сам"). Раньше тут было "баз не найдено" рядом с плиткой "Баз на ноде 1"
@@ -1484,53 +1488,6 @@ function HostRow({
     </button>
   )
 }
-
-// Лок держится всё время бэкапа и освежается раз в 5 мин — сам по себе он значит
-// «бэкап идёт», а не «сломалось». Проблема — лок, который перестали освежать.
-const LOCK_STUCK_SECONDS = 30 * 60
-// Висячий лок моложе суток снимают сами чистка и клиент (restic unlock перед работой).
-// Дольше суток он уже точно остановил ежедневную чистку: с этого порога шлется алерт
-// backup_lock, и тут с него же репозиторий считается проблемным.
-const LOCK_LONG_SECONDS = 86400
-// сколько секунд висит висячий лок (0 - лока нет или он живой); helper 0.23 отдает
-// самый старый висячий лок, так что это время, с которого репозиторий заблокирован
-function lockAge(r: RepoStat): number {
-  if (!r.locked || !r.lock_ts) return 0
-  const age = Date.now() / 1000 - r.lock_ts
-  return age > LOCK_STUCK_SECONDS ? age : 0
-}
-function lockStuck(r: RepoStat): boolean {
-  if (!r.locked) return false
-  if (!r.lock_ts) return true // helper < v5 времени лока не отдаёт — считаем висячим
-  return lockAge(r) > 0
-}
-function lockLong(r: RepoStat): boolean {
-  return !!r.locked && (!r.lock_ts || lockAge(r) > LOCK_LONG_SECONDS)
-}
-// stuck - висячий лок моложе суток: видно, но проблемой не считается (уйдет сам)
-type RepoState = 'archived' | 'muted' | 'invalid' | 'locked' | 'stuck' | 'running' | 'stale' | 'ok'
-// Что панель знает о репозиториях сервера сверх них самих: приглушенные, архив и причины, по
-// которым репозиторий сейчас в алерте backup_repo. Причины считает бэкенд: с ритмом бэкапов
-// (клиент без агента опаздывает через сутки с небольшим, недельный бэкап не устаревает за 3
-// дня), так что список, счетчики и алерт расходиться не могут.
-// prune - репозитории, у которых не работает чистка (не открывает, падает, не запускается).
-// checks - не прошла последняя недельная проверка, моложе двух недель (как у алерта backup_check).
-type RepoCtx = {
-  muted: Set<string>; archived: Set<string>; reasons: Record<string, string>; prune: Record<string, string>
-  checks: Set<string>
-}
-function repoCtx(s: Server): RepoCtx {
-  const now = Date.now() / 1000
-  return {
-    muted: new Set(s.backup_repo_mutes ?? []),
-    archived: new Set(Object.keys(s.backup_repo_archive ?? {}).filter((k) => !k.includes('|'))),
-    reasons: s.bsrv_repo_reasons ?? {},
-    prune: s.bsrv_prune ?? {},
-    checks: new Set(Object.entries(bsrvExtra(s)?.repos ?? {})
-      .filter(([, x]) => x.check_ok === 0 && !!x.check_ts && now - x.check_ts < 14 * 86400)
-      .map(([n]) => n)),
-  }
-}
 // интервал бэкапов словами: раз в сутки, раз в 6 ч, раз в неделю
 function everyLabel(sec: number, t: (s: string, v?: Record<string, string | number>) => string): string {
   const h = sec / 3600
@@ -1542,32 +1499,6 @@ function everyLabel(sec: number, t: (s: string, v?: Record<string, string | numb
 }
 function fmtDay(ts: number): string {
   return ts ? new Date(ts * 1000).toLocaleDateString() : '-'
-}
-function repoState(r: RepoStat, c: RepoCtx): RepoState {
-  if (c.archived.has(r.name)) return 'archived'
-  if (c.muted.has(r.name)) return 'muted'
-  if (!r.valid) return 'invalid'
-  if (lockLong(r)) return 'locked'
-  if (r.locked && !lockStuck(r)) return 'running'
-  if (c.reasons[r.name]) return 'stale'
-  if (lockStuck(r)) return 'stuck'
-  return 'ok'
-}
-// проблемный = не ок, не заглушен и не в архиве (для счетчиков и акцентов)
-function repoBad(r: RepoStat, c: RepoCtx): boolean {
-  const st = repoState(r, c)
-  if (st === 'muted' || st === 'archived') return false
-  // неработающая чистка - проблема при любом другом состоянии: нет ни ротации, ни проверки.
-  // Не прошедшая проверка - тоже: в окне сервера было "все ок" при красной "проверка не прошла"
-  return (st !== 'ok' && st !== 'running' && st !== 'stuck') || !!c.prune[r.name] || c.checks.has(r.name)
-}
-// Блок helper'а backupserver-setup 0.23: кто чистит репозитории и когда из них что-то
-// удалялось. Старше 15 минут - helper встал, по такому блоку не судим.
-function bsrvExtra(s: Server): BackupServerExtra | null {
-  const b = s.last_report?.extras?.['backup-server']
-  if (!b || b.v !== 1 || !b.ts) return null
-  const ref = s.last_report?.clock_unix || Date.now() / 1000
-  return ref - b.ts > 15 * 60 ? null : b
 }
 // "30 16 * * *" -> "16:30"; остальное расписание показываем как есть
 function cronTime(sched: string): string {
@@ -1904,19 +1835,6 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
   )
 }
 
-// Тон репозитория для списка и шапки: красный - проблема (как в счетчиках), желтый - висячий
-// лок моложе суток или старые снапшоты не вычищаются, серый - приглушен
-type RepoTone = 'bad' | 'warn' | 'ok' | 'mute'
-function repoRot(s: Server, name: string) {
-  return (s.bsrv_cleanup?.rotation ?? []).find((x) => x.repo === name)
-}
-function repoTone(s: Server, r: RepoStat, c: RepoCtx): RepoTone {
-  const st = repoState(r, c)
-  if (st === 'muted') return 'mute'
-  if (repoBad(r, c)) return 'bad'
-  if (st === 'stuck' || repoRot(s, r.name)) return 'warn'
-  return 'ok'
-}
 const TONE_DOT: Record<RepoTone, string> = { bad: ' lk-dot-bad', warn: ' lk-dot-warn', ok: ' lk-dot-ok', mute: '' }
 
 // Коротко справа в строке списка: что не так, у здоровых - когда был последний бэкап
@@ -1928,7 +1846,7 @@ function repoShort(s: Server, r: RepoStat, c: RepoCtx, t: (s: string, v?: Record
     const d = Math.floor(lockAge(r) / 86400)
     return d > 0 ? t('залочен {n} дн.', { n: d }) : t('залочен')
   }
-  if (st === 'stale') return cad ? t('опоздал') : t('устарел')
+  if (st === 'stale') return repoRunning(r) ? t('опоздал, идет бэкап') : cad ? t('опоздал') : t('устарел')
   if (st !== 'muted' && c.prune[r.name]) return t('не чистится')
   if (st !== 'muted' && c.checks.has(r.name)) return t('ошибки проверки')
   if (st === 'stuck') return t('лок {n} ч', { n: Math.max(1, Math.floor(lockAge(r) / 3600)) })
@@ -1966,6 +1884,9 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
   const lockDays = Math.floor(lockAge(r) / 86400)
   const lockHours = Math.max(1, Math.floor(lockAge(r) / 3600))
   const prune = isMuted ? '' : ctx.prune[r.name]
+  // беды репозитория (bsrvRepoProblems): красная - если ее алерт не заглушен
+  const probs = ctx.probs.get(r.name) ?? []
+  const alertTone = (k: RepoProblem['kind']): RepoTone => (probs.some((p) => p.kind === k && p.off) ? 'mute' : 'bad')
   const rot = isMuted ? undefined : repoRot(s, r.name)
   const toggleMute = async () => {
     setBusy(true)
@@ -1983,30 +1904,36 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
       : { tone: 'bad', head: t('Нет config, а снапшоты есть'), why: t('Нет config, но снапшоты есть ({n} шт., {sz}) — данные могут быть восстановимы. Вслепую не удаляйте, разберитесь на сервере.', { n: r.snapshots, sz: fmtBytes(r.size_bytes) }), steps: [] })
   if (st === 'locked')
     issues.push({
-      tone: 'bad',
+      tone: alertTone('lock'),
       head: lockDays > 0 ? t('Залочен {n} дн.', { n: lockDays }) : t('Залочен'),
       why: t('Висячий лок держится больше суток: чистка и restic check по репозиторию не идут, пока его не снять.'),
       steps: [t('снять лок командой от root на бэкап-сервере')],
     })
   if (st === 'stale') {
     const due = cad && r.last_activity ? fmtWhen(r.last_activity + cad) : ''
+    // Лок живой: прямо сейчас идет новый прогон. Опоздание он не снимает, пока не запишет
+    // снапшот, но что делать - другое: сначала дождаться его, а не идти разбирать таймер
+    const run = repoRunning(r)
     issues.push({
-      tone: 'bad',
-      head: cad ? t('Бэкап опоздал') : t('Нет новых бэкапов {n} дн.', { n: Math.floor(ageSec / 86400) }),
+      tone: alertTone('repo'),
+      head: run ? t('Бэкап опоздал, сейчас идет новый') : cad ? t('Бэкап опоздал') : t('Нет новых бэкапов {n} дн.', { n: Math.floor(ageSec / 86400) }),
       why: [
         cad
           ? t('Обычно {every}, последний {ago}, следующий ждали к {when}.', { every: everyLabel(cad, t), ago: fmtAgo(r.last_activity), when: due })
           : t('Последний бэкап {ago}.', { ago: fmtAgo(r.last_activity) }),
-        unmonitored
-          ? t('Клиента нет в панели, поэтому почему бэкап не пришел, панель не видит.')
-          : t('Клиент в панели: почему бэкап не идет, видно в его карточке.'),
+        run
+          ? t('Сейчас в репозиторий идет бэкап (лок обновлен {ago}), но снапшота он еще не записал. Прошлый прогон, похоже, не дошел до конца.', { ago: fmtAgo(r.lock_ts) })
+          : unmonitored
+            ? t('Клиента нет в панели, поэтому почему бэкап не пришел, панель не видит.')
+            : t('Клиент в панели: почему бэкап не идет, видно в его карточке.'),
       ].join(' '),
       steps: [
-        unmonitored
-          ? t('на клиенте {name} посмотреть таймер и лог бэкапа', { name: r.name })
-          : t('открыть клиента {name} в панели и посмотреть его бэкап', { name: r.name }),
-        t('если сервера больше нет - убрать репозиторий в архив'),
-        t('если бэкап разовый или больше не нужен - приглушить'),
+        ...(run ? [t('дождаться конца текущего прогона: запишет снапшот - опоздание уйдет само')] : []),
+        run && unmonitored ? t('если не запишет - на клиенте {name} посмотреть лог бэкапа, почему прошлый прогон оборвался', { name: r.name })
+          : run ? t('если не запишет - открыть клиента {name} в панели и посмотреть, почему прошлый прогон оборвался', { name: r.name })
+            : unmonitored ? t('на клиенте {name} посмотреть таймер и лог бэкапа', { name: r.name })
+              : t('открыть клиента {name} в панели и посмотреть его бэкап', { name: r.name }),
+        ...(run ? [] : [t('если сервера больше нет - убрать репозиторий в архив'), t('если бэкап разовый или больше не нужен - приглушить')]),
       ],
     })
   }
@@ -2017,9 +1944,9 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
       why: t('Лок не обновлялся больше 30 минут: процесс, который его взял, умер. Чистка и клиенты обычно снимают такие локи сами, если лок продержится сутки, придет алерт.'),
       steps: [t('делать ничего не нужно, снять раньше можно командой')],
     })
-  if (prune) issues.push({ tone: 'bad', head: t('Чистка не работает'), why: prune, steps: [], go: true })
+  if (prune) issues.push({ tone: alertTone('prune'), head: t('Чистка не работает'), why: prune, steps: [], go: true })
   if (!isMuted && ctx.checks.has(r.name))
-    issues.push({ tone: 'bad', head: t('Проверка нашла ошибки'), why: t('restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере'), steps: [] })
+    issues.push({ tone: alertTone('check'), head: t('Проверка нашла ошибки'), why: t('restic check нашел ошибки, вывод в логе prune-скрипта на бэкап-сервере'), steps: [] })
   if (rot)
     issues.push({
       tone: 'warn',
@@ -2030,13 +1957,19 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
     })
   if (isMuted)
     issues.push({ tone: 'mute', head: t('Приглушен'), why: t('Алертов по репозиторию нет, последний бэкап {ago}.', { ago: fmtAgo(r.last_activity) }), steps: [] })
+  // беда есть, а ее алерт на сервере заглушен: иначе серый репозиторий без объяснения
+  const offAlerts = [...new Set(probs.filter((p) => p.off).map((p) => p.alert))]
+  if (offAlerts.length)
+    issues.push({ tone: 'mute', head: t('Алерт заглушен'), why: t('Алерт по этой беде на сервере заглушен ({list}), в счетчиках ее нет.', { list: offAlerts.join(', ') }), steps: [] })
   const boxTone = issues.some((i) => i.tone === 'bad') ? 'bad' : issues.some((i) => i.tone === 'warn') ? 'warn' : 'mute'
   const head = issues[0]?.head ?? (st === 'running' ? t('Идет бэкап') : t('В порядке'))
   const flip = (k: typeof open) => setOpen(open === k ? '' : k)
   const acts: ReactNode[] = []
   // В архив - то, что хранится как есть: сервера больше нет, бэкапить больше не нужно,
-  // разовый бэкап, проект заморожен. Предлагаем там, где бэкапы и так не приходят.
-  if (canAct && (st === 'stale' || isMuted))
+  // разовый бэкап, проект заморожен. Предлагаем там, где бэкапы и так не приходят: не при
+  // идущем прямо сейчас прогоне
+  const dead = st === 'stale' && !repoRunning(r)
+  if (canAct && (dead || isMuted))
     acts.push(
       <button key="arch" className={`ghost row-act${open === 'archive' ? ' on' : ''}`} onClick={() => flip('archive')}
         title={t('В архив: хранить как есть, без алертов (сервера больше нет, разовый бэкап, проект заморожен)')}>
@@ -2054,7 +1987,7 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
   // «как удалить» даём только у проблемных: пустой мусор и заброшенные репо — это те,
   // что реально выводят из эксплуатации. У живого репозитория с ежедневным бэкапом
   // такая кнопка была бы приглашением к беде.
-  if (canAct && (junk || st === 'stale'))
+  if (canAct && (junk || dead))
     acts.push(
       <button key="rm" className={`ghost row-act${open === 'rm' ? ' on' : ''}`} onClick={() => flip('rm')}>
         {open === 'rm' ? t('Скрыть команду') : t('Как удалить')}
@@ -2560,9 +2493,12 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   const checked = Object.entries(ext?.repos ?? {}).filter(([n, x]) =>
     !ctx.archived.has(n) && (x.check_ok ?? -1) >= 0 && !!x.check_ts && now - x.check_ts < 14 * 86400)
   const checkedOk = checked.filter(([, x]) => x.check_ok === 1).length
-  const smuted = new Set(s.alert_mutes ?? [])
+  // заглушено насовсем или снузом - как у плитки раздела (backupProblems)
+  const smuted = srvMutesNow(s)
   const audit = (s.backup_audit ?? []).filter((x) => !x.muted)
-  const pruneNames = Object.keys(ctx.prune).filter((n) => !muted.has(n) && !ctx.archived.has(n)).sort()
+  const repoProbs = bsrvRepoProblems(s)
+  const pruneNames = repoProbs.filter((p) => p.kind === 'prune' && !p.off).map((p) => p.repo).sort()
+  const pruneOff = repoProbs.filter((p) => p.kind === 'prune' && p.off).map((p) => p.repo).sort()
   const rot = s.bsrv_rotation ?? []
   // клиенты, чей бэкап идет сюда по http (бэкенд: backup_https.bs_id - этот сервер)
   const httpClients = servers.filter((c) => c.backup_https?.bs_id === s.id).sort((a, b) => a.name.localeCompare(b.name))
@@ -2590,17 +2526,18 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   const add = (sec: string, x: SecItem) => (items[sec] ??= []).push(x)
   if (s.online) {
     if (!info.running) add('server', { level: 2, text: t('rest-server остановлен') })
-    const locked = all.filter((r) => !muted.has(r.name) && r.locked && r.lock_ts && now - r.lock_ts > 86400)
-    if (locked.length && !smuted.has('backup_lock'))
+    // беды репозиториев - те же, по которым список ставит их в "Требуют внимания"
+    const locked = repoProbs.filter((p) => p.kind === 'lock' && !p.off)
+    if (locked.length)
       add('repos', {
         level: 2,
         count: locked.length,
-        since: new Date(Math.min(...locked.map((r) => r.lock_ts ?? now)) * 1000).toISOString(),
+        since: new Date(Math.min(...locked.map((p) => p.since ?? now)) * 1000).toISOString(),
         text: t('залочен больше суток, чистка не идет: {list}', {
-          list: locked.map((r) => `${r.name} (${Math.floor((now - (r.lock_ts ?? now)) / 86400)} ${t('дн.')})`).join(', '),
+          list: locked.map((p) => `${p.repo} (${Math.floor((now - (p.since ?? now)) / 86400)} ${t('дн.')})`).join(', '),
         }),
       })
-    const badNames = Object.keys(s.bsrv_repo_reasons ?? {}).sort()
+    const badNames = repoProbs.filter((p) => p.kind === 'repo' && !p.off).map((p) => p.repo).sort()
     if (badNames.length)
       add('repos', {
         level: 2,
@@ -2610,7 +2547,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
       })
     for (const i of srvIssues(s, t).filter((x) => x.section === 'backups' && x.srv))
       add(BSRV_SEC_IDS.has(i.sec ?? '') ? i.sec! : 'repos', { level: i.tone === 't-down' ? 2 : 1, text: i.text, since: i.since })
-    if (pruneNames.length && !smuted.has('backup_prune'))
+    if (pruneNames.length)
       add('cleanup', { level: 2, count: pruneNames.length, text: t('чистка не работает: {list}', { list: shortList(pruneNames, t, 3) }) })
     // по строке на то, что делать: перевести на чистку панели, удалить старые группы и т.п.
     if (rot.length && !smuted.has('backup_rotation'))
@@ -2654,14 +2591,17 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   if (gaps.length) soft('coverage', t('не бэкапится: {list}', { list: shortList(gaps.map((x) => x.subject), t, 3) }))
   if (!ext && !infoSec.cleanup.level) infoSec.cleanup.idle = true
   if (s.online) {
-    const lockedAll = all.filter((r) => !muted.has(r.name) && r.locked && r.lock_ts && now - r.lock_ts > 86400)
+    const lockedAll = repoProbs.filter((p) => p.kind === 'lock' && p.off)
+    const repoOff = repoProbs.filter((p) => p.kind === 'repo' && p.off).map((p) => p.repo).sort()
     markMuted(infoSec, [
       ...srvMuted(s, t).filter((i) => i.section === 'backups' && i.srv)
         .map((i) => ({ sec: BSRV_SEC_IDS.has(i.sec ?? '') ? i.sec! : 'repos', text: i.text })),
-      ...(lockedAll.length && smuted.has('backup_lock')
-        ? [{ sec: 'repos', text: t('залочен больше суток: {list}', { list: shortList(lockedAll.map((r) => r.name), t, 3) }) }] : []),
-      ...(pruneNames.length && smuted.has('backup_prune')
-        ? [{ sec: 'cleanup', text: t('чистка не работает: {list}', { list: shortList(pruneNames, t, 3) }) }] : []),
+      ...(lockedAll.length
+        ? [{ sec: 'repos', text: t('залочен больше суток: {list}', { list: shortList(lockedAll.map((p) => p.repo), t, 3) }) }] : []),
+      ...(repoOff.length
+        ? [{ sec: 'repos', text: t('репозиториев с проблемой: {n} ({list})', { n: repoOff.length, list: shortList(repoOff, t, 3) }) }] : []),
+      ...(pruneOff.length
+        ? [{ sec: 'cleanup', text: t('чистка не работает: {list}', { list: shortList(pruneOff, t, 3) }) }] : []),
       ...(rot.length && smuted.has('backup_rotation')
         ? rotationLines(s, t).map((x) => ({ sec: 'cleanup', text: x.text })) : []),
     ], t)

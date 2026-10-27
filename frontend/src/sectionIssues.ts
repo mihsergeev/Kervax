@@ -1,5 +1,6 @@
 import type { Section } from './App'
 import type { Check, Server } from './api'
+import { bsrvRepoProblems, type RepoProblemKind } from './bsrvRepos'
 import { offLines, rotationLines } from './BsrvCleanup'
 import { backupAlive, knownActive, srvIssues, srvMutesNow } from './serverUtils'
 
@@ -116,33 +117,34 @@ export function backupProblems(servers: Server[], t: T): ProbItem[] {
     }
     if (bs?.present) {
       if (!bs.running) out.push({ key: `bs-stop-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'server', text: t('{name}: rest-server остановлен', { name: s.name }) })
-      const rmuted = new Set(s.backup_repo_mutes ?? [])
       const smuted = mnow
       const now = Date.now() / 1000
-      const live = (bs.repos || []).filter((r) => !rmuted.has(r.name))
+      // репозитории - одной функцией со списком и бейджами карточки (bsrvRepoProblems)
+      const probs = bsrvRepoProblems(s).filter((p) => !p.off)
+      const names = (k: RepoProblemKind) => probs.filter((p) => p.kind === k).map((p) => p.repo).sort()
       // Висячий лок дольше суток - своей строкой, как и свой алерт backup_lock: в общем
       // счетчике было не видно ни что это лок, ни что из-за него не идет чистка. Лок идущего
       // бэкапа и висячий моложе суток проблемой не считаются (их снимут чистка и клиент).
-      const locked = live.filter((r) => r.locked && r.lock_ts && now - r.lock_ts > 86400)
-      if (locked.length > 0 && !smuted.has('backup_lock'))
+      const locked = probs.filter((p) => p.kind === 'lock')
+      if (locked.length > 0)
         out.push({
           key: `bs-lock-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'repos',
-          since: new Date(Math.min(...locked.map((r) => r.lock_ts ?? now)) * 1000).toISOString(),
+          since: new Date(Math.min(...locked.map((p) => p.since ?? now)) * 1000).toISOString(),
           text: t('{name}: залочен больше суток, чистка не идет - {list}', {
             name: s.name,
-            list: locked.map((r) => `${r.name} (${Math.floor((now - (r.lock_ts ?? now)) / 86400)} ${t('дн.')})`).join(', '),
+            list: locked.map((p) => `${p.repo} (${Math.floor((now - (p.since ?? now)) / 86400)} ${t('дн.')})`).join(', '),
           }),
         })
       // те же репозитории, что в алерте backup_repo: бэкенд считает их с ритмом бэкапов (клиент
       // без агента опаздывает через сутки с небольшим), без приглушенных и архива
-      const badNames = Object.keys(s.bsrv_repo_reasons ?? {}).sort()
-      if (badNames.length > 0 && !off('backup_repo')) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'repos', since: s.alert_since?.backup_repo,
+      const badNames = names('repo')
+      if (badNames.length > 0) out.push({ key: `bs-repo-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'repos', since: s.alert_since?.backup_repo,
         text: t('{name}: репозиториев с проблемой - {n} ({list})', { name: s.name, n: badNames.length,
           list: badNames.slice(0, 3).join(', ') + (badNames.length > 3 ? ', ...' : '') }) })
       // чистка не работает (не открывает репозиторий, падает, не запускается): те же
       // репозитории, что в алерте backup_prune, считает бэкенд
-      const pruneNames = Object.keys(s.bsrv_prune ?? {}).sort()
-      if (pruneNames.length > 0 && !smuted.has('backup_prune'))
+      const pruneNames = names('prune')
+      if (pruneNames.length > 0)
         out.push({
           key: `bs-prune-${s.id}`, id: s.id, name: s.name, cc: s.country, down: true, srv: true, sec: 'cleanup',
           text: t('{name}: чистка не работает - {list}', {
