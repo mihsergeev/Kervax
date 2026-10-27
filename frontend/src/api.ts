@@ -2421,10 +2421,10 @@ export type Server = {
   // OOM (backend app/oom.py): эпизодов за 7 дней, последний, юниты, убитые OOM
   oom?: OomSummary | null
   // SSH (helper changes-setup 0.3): как пускает соединение из интернета; open - порт открыт снаружи
-  // по внешней проверке (null - не знаем)
+  // по внешней проверке (null - не знаем); allowlist - файрвол ноды пускает на порт только белый список
   ssh?: {
     ports: number[]; password: boolean; root: string; root_password: boolean; guard: string
-    fail: number; accepted_password: number; open: boolean | null
+    fail: number; accepted_password: number; open: boolean | null; allowlist?: boolean
     fail_top?: { ip: string; n: number }[] // откуда перебор, больше всех сверху
   } | null
   // вход по паролю на открытом SSH: key - решение "вход по паролю нужен" (muted), fix - как выключить

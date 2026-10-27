@@ -221,9 +221,11 @@ def text_of(e: dict) -> str:
     return str(e.get("text") or "") + (KNOWN_NOTE if e.get("known") else "")
 
 
-def apply_snapshot(state: dict | None, snap: dict, now: datetime, known: set[str] | None = None) -> dict:
+def apply_snapshot(state: dict | None, snap: dict, now: datetime, known: set[str] | None = None,
+                   srv: Server | None = None) -> dict:
     """Новый servers.changes: снимок, лента с новыми событиями, отметка последнего алертного.
-    known - ключи, которые парк уже видел (known_fps): их добавление в ленту без алерта."""
+    known - ключи, которые парк уже видел (known_fps): их добавление в ленту без алерта. srv - чей
+    снимок: для памяти перебора SSH, был ли уже белый список (ssh_audit.note_brute)."""
     st = dict(state or {})
     prev = st.get("snap") if isinstance(st.get("snap"), dict) else None
     if prev is not None and prev.get("ts") == snap.get("ts"):
@@ -231,7 +233,7 @@ def apply_snapshot(state: dict | None, snap: dict, now: datetime, known: set[str
     logv = [e for e in st.get("log") or [] if isinstance(e, dict)]
     stamp = datetime.fromtimestamp(int(snap["ts"]), timezone.utc).isoformat()
     logins = ssh_login_events(st, snap, stamp) if (snap.get("ssh") or {}).get("logins") is not None else []
-    ssh_audit.note_brute(st, snap, stamp)  # перебор помним: волны ботов не должны давать отбой
+    ssh_audit.note_brute(st, snap, stamp, srv)  # перебор помним: волны ботов не должны давать отбой
     if prev is not None or logins:
         events = [dict(e, ts=stamp) for e in (diff(prev, snap) if prev is not None else []) + logins]
         for e in events:
@@ -431,7 +433,7 @@ async def track(session_factory: async_sessionmaker[AsyncSession], now: datetime
             cur = srv.changes if isinstance(srv.changes, dict) else {}
             if (cur.get("snap") or {}).get("ts") == snap.get("ts"):
                 continue
-            srv.changes = apply_snapshot(cur, snap, now, known)
+            srv.changes = apply_snapshot(cur, snap, now, known, srv)
             known.update(fp for _u, fp in _keys(snap))
             n += 1
         if n:

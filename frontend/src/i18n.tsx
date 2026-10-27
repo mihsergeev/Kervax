@@ -2217,6 +2217,7 @@ const EN: Record<string, string> = {
   'root': 'root',
   'открыт в интернет': 'open to the internet',
   'закрыт снаружи': 'closed from outside',
+  'root входит по SSH паролем, порт {ports} открыт только белому списку': 'root logs in over SSH with a password, port {ports} is open to the allow list only',
   'снаружи не проверялся': 'not checked from outside',
   'по паролю': 'with a password',
   'по ключу': 'with a key',

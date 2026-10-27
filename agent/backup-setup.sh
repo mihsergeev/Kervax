@@ -140,7 +140,7 @@ AGENT_USER=kervax
 #       sh -c, --exclude, --exclude-file, --files-from) into report.d/backup-unit.json, only paths
 #       and file names. set-paths refuses such a runner (adopt first), a dump warns when its
 #       directory is outside the unit's paths, and adopt takes the paths from the same parser
-KERVAX_SETUP_VERSION=0.45  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+KERVAX_SETUP_VERSION=0.46  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -3047,17 +3047,70 @@ verify_restic() {
 
 verify_json_str() { printf '%s' "$1" | tr -d '\000-\037' | cut -c1-200 | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
+# The locks in the repository, one line each: "<kind> <id>". mine - left by a restic of this check
+# that is gone (this host, the backup user, shared, not refreshed for 30 minutes); stale - one
+# restic itself counts as stale (older than 30 minutes, or of this host with its process gone), not
+# ours; excl - a live exclusive lock (the prune or check of the backup server); live - the rest.
+verify_locks() {
+  local out id j host user pid t ts now me alive
+  now=$(date +%s); me=$(hostname)
+  # read to the end, never through head: a restic cut off by SIGPIPE is what leaves a lock behind
+  out=$(verify_restic list locks --no-lock 2>/dev/null) || return 1
+  for id in $(printf '%s\n' "$out" | grep -E '^[0-9a-f]{64}$' || true); do
+    j=$(verify_restic cat lock --no-lock "$id" 2>/dev/null | tr -d '\n') || continue  # released meanwhile
+    host=$(sed -n 's/.*"hostname": *"\([^"]*\)".*/\1/p' <<<"$j")
+    user=$(sed -n 's/.*"username": *"\([^"]*\)".*/\1/p' <<<"$j")
+    pid=$(sed -n 's/.*"pid": *\([0-9]*\).*/\1/p' <<<"$j")
+    t=$(sed -n 's/.*"time": *"\([^"]*\)".*/\1/p' <<<"$j")
+    ts=$(date -d "$t" +%s 2>/dev/null || echo 0)
+    alive=0
+    [ "$host" = "$me" ] && [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = restic ] && alive=1
+    if [ "$host" = "$me" ] && [ "$alive" = 0 ] && [ "$user" = "$VUSER" ] && [ $((now - ts)) -gt 1800 ] \
+       && [[ "$j" == *'"exclusive": false'* || "$j" == *'"exclusive":false'* ]]; then
+      echo "mine $id"
+    elif [ $((now - ts)) -gt 1800 ] || { [ "$host" = "$me" ] && [ "$alive" = 0 ]; }; then
+      echo "stale $id"
+    elif [[ "$j" == *'"exclusive": true'* || "$j" == *'"exclusive":true'* ]]; then
+      echo "excl $id"
+    else
+      echo "live $id"
+    fi
+  done
+}
+
+# Before 0.46 the dump check below read restic through head: restic died of SIGPIPE and its lock
+# stayed in the repository, and a client's own prune (without unlock) failed on it every week.
+# Those locks are removed here, and only those: "restic unlock" removes every stale lock, so it
+# runs only when each stale lock is ours. Live locks it never touches. Echoes how many went.
+verify_locks_clear() {
+  local l before after
+  l=$(verify_locks) || { echo 0; return 0; }
+  before=$(grep -c '^mine ' <<<"$l" || true)
+  if [ "$before" -eq 0 ] || grep -q '^stale ' <<<"$l"; then echo 0; return 0; fi
+  verify_restic unlock >/dev/null 2>&1 || { echo 0; return 0; }
+  after=$(verify_locks | grep -c '^mine ' || true)
+  echo $((before - ${after:-0} > 0 ? before - ${after:-0} : 0))
+}
+
 cmd_verify() {
-  local now t0 err="" errf tmpf snapj snapid stime sts lock="" mode incs excs dirs=() d f live got rc
-  local ok=0 skipped=0 bad="" checked=0 dumps="" e dir newest head kind
+  local now t0 err="" errf tmpf snapj snapid stime sts lock="--no-lock" mode incs excs dirs=() d f live got rc
+  local ok=0 skipped=0 bad="" checked=0 dumps="" e dir newest head kind cleared=0 w
   now=$(date +%s); t0=$now
   if ! verify_ctx; then
     printf '{"v":1,"ts":%s,"skip":"no restic backup with an env file"}\n' "$now"; return 0
   fi
   errf=$(mktemp); tmpf=$(mktemp)
-  case "$(verify_restic --help 2>/dev/null)" in *--retry-lock*) lock="--retry-lock 30m" ;; esac
+  cleared=$(verify_locks_clear)
+  # Every read here is --no-lock: a lock is a file written into the repository, and a restic killed
+  # mid-read (head below, the timeout around the check) leaves it there. Without a lock nothing
+  # stops the server's prune from repacking under the check, so an exclusive lock is waited out
+  # first, as --retry-lock did (it means nothing next to --no-lock).
+  for w in $(seq 40); do
+    grep -q '^excl ' <<<"$(verify_locks 2>/dev/null)" || break
+    [ "$w" -lt 40 ] && sleep 30 || err="the repository is locked exclusively (prune or check) for 20 minutes"
+  done
   # shellcheck disable=SC2086
-  snapj=$(verify_restic snapshots --json --latest 1 --host "$(hostname)" $lock 2>"$errf") || err="snapshots: $(tail -c 300 "$errf")"
+  [ -n "$err" ] || snapj=$(verify_restic snapshots --json --latest 1 --host "$(hostname)" $lock 2>"$errf") || err="snapshots: $(tail -c 300 "$errf")"
   # (|| true: under pipefail a grep without a match would stop the whole helper)
   snapid=$(printf '%s' "$snapj" | grep -o '"id":"[0-9a-f]\{64\}"' | head -1 | cut -d'"' -f4 || true)
   stime=$(printf '%s' "$snapj" | grep -o '"time":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
@@ -3105,6 +3158,8 @@ cmd_verify() {
       newest=$(find "$dir" -maxdepth 1 -type f -name '*.gz' ! -newermt "@$sts" -printf '%T@ %p\n' 2>/dev/null \
                | sort -rn | head -1 | cut -d' ' -f2- || true)
       [ -n "$newest" ] || continue
+      # head cuts restic off after 8 MB (SIGPIPE): a dump is gigabytes, and the signature is in the
+      # first kilobytes. Harmless with --no-lock: a restic that holds no lock leaves nothing behind
       # shellcheck disable=SC2086
       head=$(verify_restic dump $lock "$snapid" "$newest" 2>/dev/null | head -c 8388608 | gzip -dc 2>/dev/null | head -c 4096 | tr -d '\000' || true)
       kind=bad
@@ -3117,8 +3172,9 @@ cmd_verify() {
     done
   fi
   rm -f "$errf" "$tmpf"
-  printf '{"v":1,"ts":%s,"secs":%s,"snap":"%s","snap_ts":%s,"files":{"ok":%s,"skipped":%s,"bad":[%s]},"dumps":[%s],"err":"%s"}\n' \
-    "$now" "$(( $(date +%s) - t0 ))" "${snapid:0:8}" "$sts" "$ok" "$skipped" "$bad" "$dumps" "$(verify_json_str "$err")"
+  printf '{"v":1,"ts":%s,"secs":%s,"snap":"%s","snap_ts":%s,"files":{"ok":%s,"skipped":%s,"bad":[%s]},"dumps":[%s],"locks_cleared":%s,"err":"%s"}\n' \
+    "$now" "$(( $(date +%s) - t0 ))" "${snapid:0:8}" "$sts" "$ok" "$skipped" "$bad" "$dumps" "${cleared:-0}" \
+    "$(verify_json_str "$err")"
 }
 
 # Once a week after a successful backup, in the background: the per-minute refresh must not wait
@@ -3126,7 +3182,9 @@ verify_maybe() {
   local age=$VERIFY_EVERY timer svc res last
   verify_ctx || return 0
   [ "$VUSER" = root ] || command -v runuser >/dev/null 2>&1 || return 0
-  [ -f "$VERIFY_JSON" ] && age=$(( $(date +%s) - $(stat -c %Y "$VERIFY_JSON" 2>/dev/null || echo 0) ))
+  # a check by a helper before 0.46 (no locks_cleared) may have left its lock: the next one goes now
+  [ -f "$VERIFY_JSON" ] && grep -q '"locks_cleared":' "$VERIFY_JSON" \
+    && age=$(( $(date +%s) - $(stat -c %Y "$VERIFY_JSON" 2>/dev/null || echo 0) ))
   [ "$age" -ge "$VERIFY_EVERY" ] || return 0
   # a check that keeps dying (timeout, no runuser) is retried every 6 hours, not every minute
   [ -f "$VERIFY_JSON.try" ] && [ $(( $(date +%s) - $(stat -c %Y "$VERIFY_JSON.try" 2>/dev/null || echo 0) )) -lt 21600 ] && return 0

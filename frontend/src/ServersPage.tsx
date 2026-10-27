@@ -4575,7 +4575,8 @@ function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () =
 }
 
 // SSH: как пускает соединение из интернета (helper changes-setup 0.3). Судим только порт, открытый
-// снаружи по внешней проверке: SSH за белым списком с паролем - не дыра. Совет виден и рядом с
+// снаружи по внешней проверке: SSH за белым списком с паролем - не дыра (файрвол ноды пускает на порт
+// лишь конкретные сети), root по паролю за ним - замечание только здесь. Совет виден и рядом с
 // проблемой: у него "как исправить" (готовые команды, сначала - кому добавить ключ) и решение "вход
 // по паролю нужен" - принятый совет уходит из "Требует действий", здесь приглушен с "вернуть"
 function SshLogin({ server: s, onChanged }: { server: Server; onChanged: () => void }) {
@@ -4591,7 +4592,9 @@ function SshLogin({ server: s, onChanged }: { server: Server; onChanged: () => v
   if (!v) return null
   const probs = (s.problems ?? []).filter((p) => p.kind === 'ssh_risk')
   const adv = s.ssh_advice ?? []
-  const openText = v.open === true ? t('открыт в интернет') : v.open === false ? t('закрыт снаружи') : t('снаружи не проверялся')
+  const openText = v.open === true ? t('открыт в интернет') : v.allowlist ? t('только белому списку')
+    : v.open === false ? t('закрыт снаружи') : t('снаружи не проверялся')
+  const fenced = v.root_password && v.allowlist && v.open !== true && probs.length === 0 && adv.length === 0
   const rootText = v.root === 'yes' ? (v.root_password ? t('по паролю') : t('по ключу')) : v.root === 'no' ? t('запрещен') : t('только по ключу')
   const top = v.fail_top ?? []
   return (
@@ -4603,6 +4606,11 @@ function SshLogin({ server: s, onChanged }: { server: Server; onChanged: () => v
       {probs.map((p) => (
         <div key={p.text} className={p.level >= 2 ? 'net-prob' : 'net-note'}>{p.text}</div>
       ))}
+      {fenced && (
+        <div className="net-note">
+          {t('root входит по SSH паролем, порт {ports} открыт только белому списку', { ports: v.ports.join(', ') })}
+        </div>
+      )}
       {adv.map((a) => (
         <div key={a.kind}>
           <div className={`osupd-adv ${a.muted ? 'osupd-adv-off' : a.level >= 2 ? 'net-prob' : 'net-note'}`}>
