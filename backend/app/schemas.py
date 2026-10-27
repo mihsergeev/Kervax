@@ -2177,6 +2177,25 @@ class BackupCommandIn(BaseModel):
         return v
 
 
+class AutobanCmdIn(BaseModel):
+    """Автобан сканеров: режим или разбан адреса. Забанить из панели нельзя - банит helper сам."""
+
+    op: str = Field(pattern="^(on|watch|off|unban)$")
+    ip: str = Field(default="", max_length=64)
+
+
+class AutobanNetIn(BaseModel):
+    net: str = Field(min_length=1, max_length=64)
+    label: str = Field(default="", max_length=40)
+
+
+class AutobanSettingsIn(BaseModel):
+    """Белый список автобана (свои адреса: VPN, дом, офис, другие панели) и сводка банов."""
+
+    allow: list[AutobanNetIn] = Field(default_factory=list, max_length=500)
+    digest: str = Field(default="day", pattern="^(day|hour|off)$")
+
+
 class BackupCommandOut(BaseModel):
     """Статус/результат backup-команды (панель поллит после постановки)."""
 

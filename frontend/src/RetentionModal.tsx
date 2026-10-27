@@ -48,6 +48,7 @@ const FIXED: Record<string, string> = {
   domain_probes: 'Проверки домена при добавлении сайта',
   probes: 'Ручные проверки',
   panel_requests: 'Левые запросы к панели',
+  autoban: 'Автобан сканеров: история банов',
   panel_errors: 'Ошибки панели и сообщения о проблемах',
 }
 const PRESETS: [number, string][] = [

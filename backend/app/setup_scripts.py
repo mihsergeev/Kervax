@@ -76,6 +76,12 @@ def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bo
     # helper 0.7 шел, и устаревший helper там никто не флагал
     if name == "webserver-setup":
         return bool(rep.get("web_services")) or bool((rep.get("extras") or {}).get("web-rate"))
+    # autoban-setup - где webserver-setup нашел access-логи (банить можно только по ним) или helper
+    # уже присылает отчет. Ставится ansible'ом в режиме watch: сам ничего не банит, пока не включат
+    if name == "autoban-setup":
+        ex = rep.get("extras") or {}
+        logs = (ex.get("web-rate") or {}).get("logs") if isinstance(ex.get("web-rate"), dict) else None
+        return bool(logs) or "autoban" in ex
     # webfiles-setup - где сайты на самом сервере: nginx или Apache (в том числе в контейнерах),
     # пулы PHP-FPM от fpm-setup или helper уже присылает файлы. Только прокси (Traefik, Envoy,
     # ingress) - не повод: кода сайтов на такой ноде нет. Блок fpm сам по себе тоже не повод:
@@ -166,6 +172,7 @@ _HELPER_LABEL = {
     "sockfix-setup": "compose внешнего прокси: сокет и образ",
     "relay-setup": "ретранслятор для агентов",
     "webfiles-setup": "признаки взлома в файлах сайтов",
+    "autoban-setup": "автобан сканеров",
 }
 
 

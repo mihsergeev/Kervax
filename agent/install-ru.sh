@@ -115,6 +115,7 @@ if [ "$UNINSTALL" = 1 ]; then
         case "$u" in *."$kind") systemctl disable --now "$u" >/dev/null 2>&1 || true ;; esac
       done
     done
+    if command -v nft >/dev/null 2>&1; then nft delete table inet kervax_autoban >/dev/null 2>&1 || true; fi
     # файлы юнитов, drop-in'ы (спул, вотчдог) и ссылки включения, если disable не сработал
     rm -rf /etc/systemd/system/kervax-*
     find /etc/systemd/system -name 'kervax-*' \( -type l -o -type f \) -delete 2>/dev/null || true

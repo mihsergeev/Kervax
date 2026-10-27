@@ -69,6 +69,7 @@ from app import tg_bot
 from app import web_certs
 from app import web_config
 from app import cf_realip
+from app import autoban as autoban_mod
 from app import changes as srv_changes
 from app import timeline as timeline_mod
 from app import open_ports
@@ -84,6 +85,7 @@ from app.setup_scripts import current_setup_versions, gaps
 from app.config import Settings, get_settings
 from app.models import (
     AgentPathProbe,
+    AutobanBan,
     AuditLog,
     MaintenanceWindow,
     AgentProbe,
@@ -346,7 +348,7 @@ _SRV_SECTION = {
     "net_health": "nethealth",
     "link": "links", "traffic": "traffic",
     "access_change": "changes", "mem_leak": "memleak", "mem_limit": "memlimit", "ssh_risk": "ssh", "access_risk": "access",
-    "listen_gone": "exposure", "disk_slow": "disklat", "gpu": "gpu", "gpu_heat": "gpu",
+    "listen_gone": "exposure", "disk_slow": "disklat", "gpu": "gpu", "gpu_heat": "gpu", "autoban": "web",
 }
 
 
@@ -2180,6 +2182,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "ошибок в логах снова обычно: за час меньше половины порога"
     if key == "gitlab":
         return "GitLab в порядке: патчи стоят, остановки пройдены, автообновление и фоновые миграции не стоят"
+    if key == "autoban":
+        return "автобан снова в порядке: свои адреса не банит, баны держатся, лавины нет"
     if key == "fpm":
         return "PHP-FPM снова в норме: запросы не ждут воркеров и не убиваются по таймауту, воркеры не падают"
     if key == "disk_forecast":
@@ -4379,6 +4383,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # PHP-FPM (helper fpm-setup): пул подолгу упирается в pm.max_children или рвет запросы по таймауту
     for x in fpm_pools.problems(s, now):
         add("fpm", x["level"], x["text"], "fpm", fpm_pools.MUTE_PREFIX + x["key"], section="services")
+    # Автобан сканеров (helper autoban-setup): бан своего адреса, не может банить, бан не действует, лавина
+    for x in autoban_mod.problems(s, now):
+        add("autoban", x["level"], x["text"], "web", autoban_mod.MUTE_PREFIX + x["key"])
     # GitLab (helper gitlab-setup): отстал от патча или остановки, автообновление встало, упали миграции
     for x in gitlab_mod.problems(s, now):
         add("gitlab", x["level"], x["text"], "gitlab", gitlab_mod.MUTE_PREFIX + x["key"], section="services")
@@ -4588,7 +4595,7 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # ноды, и каждые 10 минут снова. kervax-agent, kervax-dumps (дампы баз для бэкапа) и kervax-relay
 # (ретранслятор, через него ходят агенты других серверов) не тут: их падение - повод для алерта.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(changes|cron|db-stats|disk-health|disk-usage|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|queues|relay-sync|sockfix|units|web-rate|web-sites|webfiles|workers"
+    r"kervax-(autoban|changes|cron|db-stats|disk-health|disk-usage|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|queues|relay-sync|sockfix|units|web-rate|web-sites|webfiles|workers"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
@@ -4824,6 +4831,9 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
         return all(k in fpm_pools.muted_keys(s, now) for k in sig)
     if key == "gitlab":
         return all(k in gitlab_mod.muted_keys(s, now) for k in sig)
+    if key == "autoban":
+        done = autoban_mod.muted_keys(s)
+        return all(k in done or k.split(":")[0] in done for k in sig)
     if key == "mem_leak":
         # растет как росло, но памяти теперь хватает (или правило 1.4.278: раньше алертил любой
         # рост): "память больше не растет" было бы неправдой
@@ -6879,6 +6889,14 @@ def _server_conditions(s: Server, now: datetime,
                       {"detail": "\n".join(x["text"] for x in fp[:3])
                                  + (f"\nи еще {len(fp) - 3}" if len(fp) > 3 else ""),
                        "sig": [x["key"] for x in fp], "items": fp, "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
+    # Автобан сканеров: выдержка "не может банить" (10 минут) - в helper'е (err_since), остальное и так
+    # устойчиво (бан своего адреса, доля вернувшихся за сутки, банов за час). sig - какие беды
+    if online and autoban_mod.block(rep, now) is not None:
+        ap = autoban_mod.problems(s, now)
+        out["autoban"] = (max((x["level"] for x in ap), default=0),
+                          {"detail": "\n".join(x["text"] for x in ap[:3])
+                                     + (f"\nи еще {len(ap) - 3}" if len(ap) > 3 else ""),
+                           "sig": [x["key"] for x in ap], "items": ap, "parts": [(x["key"], x["text"]) for x in ap], "sep": "\n"})
     # GitLab: поводы - даты выпусков и состояние автообновления, не всплески; выдержка не нужна. sig - инстансы
     # Выпусков нет (база пустая или не прочиталась): "устарел" не проверить. Объявленный алерт
     # замирает как был, без отбоя; сломанное автообновление и миграции видны и без выпусков
@@ -7435,7 +7453,7 @@ async def evaluate_servers(
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "mem_limit", "db_health",
                        "web_config", "web_cert", "webfiles", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
                        "cf_realip",
-                       "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm", "gitlab"):
+                       "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm", "gitlab", "autoban"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
@@ -8690,6 +8708,10 @@ async def _prune(
         await session.execute(
             delete(RequestStat).where(RequestStat.minute < now - retention_mod.REQUESTS_KEEP)
         )
+        # баны сканеров: история в карточке сервера
+        await session.execute(
+            delete(AutobanBan).where(AutobanBan.since < now - retention_mod.AUTOBAN_KEEP)
+        )
         # журнал ошибок панели: месяц и не больше panel_errors.MAX_ROWS строк
         await panel_errors.prune(session, now)
         # разовые проверки доменов из мастера живут часы; неделя — с большим запасом
@@ -9034,6 +9056,9 @@ async def collector_loop(
             await stage("зависшие команды", _expire_commands(session_factory))
             await stage("левые запросы к панели", request_watch.check(
                 session_factory, settings, datetime.now(timezone.utc)))
+            # автобан: белый список панели на ноды и сводка банов раз в сутки (или в час)
+            await stage("белый список автобана", autoban_mod.sync_allow(session_factory, datetime.now(timezone.utc)))
+            await stage("сводка автобана", autoban_mod.send_digest(session_factory, settings, datetime.now(timezone.utc)))
             # внешняя проверка портов идет фоном: закрытый файрволом порт отвечает только таймаутом
             await stage("что открыто в интернет", open_ports.start_scan(
                 session_factory, datetime.now(timezone.utc)))

@@ -28,7 +28,7 @@ MORNING_HOUR = 9
 ITEM_MUTE: dict[str, tuple[str, bool]] = {
     "units": ("unit:", True), "workers": ("worker:", True), "queue_stuck": ("qstuck:", True),
     "queue_failed": ("qfail:", True), "cron_stuck": ("cron:", True), "log_errors": ("logerr:", True),
-    "fpm": ("fpm:", True), "gitlab": ("gitlab:", True),
+    "fpm": ("fpm:", True), "gitlab": ("gitlab:", True), "autoban": ("autoban:", True),
     "kube_cron": ("kube_cron:", True), "kube_job": ("kube_job:", True), "kube_pod": ("kube_pod:", True),
     "docker_down": ("docker_down:", True), "docker_loop": ("docker_loop:", True),
     "kube_restarts": ("restarts:", False), "docker_restarts": ("restarts:", False),

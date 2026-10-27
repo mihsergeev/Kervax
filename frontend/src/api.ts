@@ -4279,3 +4279,37 @@ export type InvServer = {
 export function getInventory(): Promise<{ servers: InvServer[] }> {
   return api<{ servers: InvServer[] }>('/api/report/inventory')
 }
+
+// --- автобан сканеров (helper autoban-setup, backend/app/autoban.py) ---
+export type AutobanBan = {
+  ip: string; cc: string; since: number; until: number; n: number; hits: number; paths: string[]; more: number
+  where: string; watch: boolean; seen: number; why: string
+}
+export type AutobanView = {
+  mode: 'on' | 'watch' | 'off'; auto: string; can: boolean; nft: boolean; err: string; logs: number
+  hour: number; day: number; drops: number
+  bans: AutobanBan[]; would: AutobanBan[]
+  own: { ip: string; cc: string; label: string; hits: number; paths: string[]; more: number; last: number }[]
+  proxy: { ip: string; n: number; share: number }[]
+  self: { ip: string; label: string; ts: number }[]
+  notes: { k: string; level: number; text: string }[]
+  problems: { key: string; level: number; text: string }[]
+  agent_ok: boolean
+}
+export type AutobanHist = AutobanBan & { ended: number | null; end: string }
+export type AutobanData = { view: AutobanView | null; history: AutobanHist[]; helper: string }
+export type AutobanSettings = {
+  allow: { net: string; label: string }[]; digest: 'day' | 'hour' | 'off'; auto: { net: string; label: string }[]
+}
+export function serverAutoban(id: number): Promise<AutobanData> {
+  return api<AutobanData>(`/api/servers/${id}/autoban`)
+}
+export function autobanCommand(id: number, op: 'on' | 'watch' | 'off' | 'unban', ip = ''): Promise<BackupCommand> {
+  return api<BackupCommand>(`/api/servers/${id}/autoban`, { method: 'POST', body: JSON.stringify({ op, ip }) })
+}
+export function autobanSettings(): Promise<AutobanSettings> {
+  return api<AutobanSettings>('/api/autoban/settings')
+}
+export function saveAutobanSettings(body: { allow: { net: string; label: string }[]; digest: string }): Promise<AutobanSettings> {
+  return api<AutobanSettings>('/api/autoban/settings', { method: 'PUT', body: JSON.stringify(body) })
+}

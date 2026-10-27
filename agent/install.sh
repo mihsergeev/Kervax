@@ -115,6 +115,8 @@ if [ "$UNINSTALL" = 1 ]; then
         case "$u" in *."$kind") systemctl disable --now "$u" >/dev/null 2>&1 || true ;; esac
       done
     done
+    # bans of autoban-setup live in their own nftables table: without the helper nobody lifts them
+    if command -v nft >/dev/null 2>&1; then nft delete table inet kervax_autoban >/dev/null 2>&1 || true; fi
     # unit files, drop-ins (spool, watchdog) and enable links left by a failed disable
     rm -rf /etc/systemd/system/kervax-*
     find /etc/systemd/system -name 'kervax-*' \( -type l -o -type f \) -delete 2>/dev/null || true
