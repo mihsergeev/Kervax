@@ -59,7 +59,7 @@ def test_advice_only_when_open_to_the_internet():
     assert nog.endswith(", от перебора не защищает ни fail2ban, ни sshguard")
     assert ssh_audit.view(s, NOW) == {"ports": [2221], "password": True, "root": "prohibit-password",
                                       "root_password": False, "guard": "fail2ban", "fail": 0,
-                                      "accepted_password": 0, "open": True, "fail_top": []}
+                                      "accepted_password": 0, "open": True, "allowlist": False, "fail_top": []}
 
 
 def test_alert_on_root_password_and_unguarded_brute_force():
@@ -269,4 +269,77 @@ def test_brute_memory_only_from_the_internet():
     t = NOW + timedelta(minutes=20)
     st = srv_changes.apply_snapshot(st, {"v": 1, "ts": int(t.timestamp()),
                                          "ssh": _ssh(fail=40, fail_top=[{"ip": "198.51.100.9", "n": 40}])}, t)
-    assert st["ssh_brute"] == {"ts": t.isoformat(), "n": 40, "top": [{"ip": "198.51.100.9", "n": 40}]}
+    assert st["ssh_brute"] == {"ts": t.isoformat(), "n": 40, "top": [{"ip": "198.51.100.9", "n": 40}], "fw": False}
+
+
+_FW = {"src": "iptables", "p4": "DROP", "p6": "DROP", "idrop": "46", "fdrop": "", "fwd": [],
+       "in": ["4 10.0.0.0/8 *", "4 127.0.0.1/32 *", "4 192.0.2.10/32 *", "4 198.51.100.0/24 *"]}
+
+
+def test_ssh_behind_allowlist_is_not_open():
+    """GPU-нода клиента за NAT (снаружи SSH на другом порту): root по паролю, шел перебор с внешних
+    адресов, потом ноду закрыли ufw - deny incoming и allow from по белому списку. Проверка портов
+    видит filtered, а карточка еще сутки писала "открыт в интернет" и ssh_risk висел: держала
+    память о переборе до ufw. Теперь SSH "по белому списку", тревоги нет, замечание в карточке."""
+    from app import changes as srv_changes
+    top = [{"ip": "203.0.113.148", "n": 3}]
+    s = _srv(exposure=_ex(state="filtered", port=22))
+    st: dict = {}
+
+    def step(t, fail, fw=None):
+        nonlocal st
+        sn = {"v": 1, "ts": int(t.timestamp()), "ssh": _ssh(root="yes", guard="", ports=[22], fail=fail, fail_top=top)}
+        if fw is not None:
+            sn["fw"] = fw
+        s.last_report = {"extras": {"changes": sn}}
+        st = srv_changes.apply_snapshot(st, sn, t, srv=s)
+        s.changes, s.last_seen = st, t
+        return collector._server_conditions(s, t)["ssh_risk"][0]
+
+    assert step(NOW, 33) == 2 and st["ssh_brute"]["fw"] is False and "ssh_fw" not in st
+    # включили белый список: в первом снимке неудачные входы еще старые (за 10 минут до него)
+    t1 = NOW + timedelta(minutes=10)
+    assert step(t1, 31, _FW) == 2  # перебор в самом снимке - пока открыт
+    assert st["ssh_fw"] == t1.isoformat() and st["ssh_brute"]["fw"] is False
+    t2 = t1 + timedelta(minutes=10)
+    assert step(t2, 0, _FW) == 0
+    assert ssh_audit.problems(s, t2) == [] and ssh_audit.advice(s, t2) == []
+    v = ssh_audit.view(s, t2)
+    assert v["open"] is False and v["allowlist"] is True and v["password"] and v["root_password"]
+    # перебор пришел уже при белом списке: файрвол пускает в обход - держим открытым сутки, как раньше
+    t3 = t2 + timedelta(minutes=10)
+    assert step(t3, 35, _FW) == 2 and st["ssh_brute"]["fw"] is True and st["ssh_fw"] == t1.isoformat()
+    assert step(t3 + timedelta(hours=3), 0, _FW) == 2
+    assert ssh_audit.view(s, t3 + timedelta(hours=3))["open"] is True
+
+
+def test_allowlist_needs_default_deny_and_no_wide_allow():
+    s = _srv(ssh=_ssh(ports=[22]))
+    ssh = _ssh(ports=[22])
+
+    def fw_is(**kw):
+        s.last_report = {"extras": {"changes": {"v": 1, "ts": 1, "ssh": ssh, "fw": dict(_FW, **kw)}}}
+        return ssh_audit.allowlisted(s, ssh)
+
+    assert fw_is()
+    assert not fw_is(**{"in": _FW["in"] + ["4 * 22"]})  # allow 22 всем
+    assert not fw_is(**{"in": _FW["in"] + ["4 0.0.0.0/4 22"]})  # сеть шире /8 - не белый список
+    assert fw_is(**{"in": _FW["in"] + ["4 * 80,443"]})  # всем открыты другие порты
+    assert not fw_is(p4="ACCEPT", idrop="6")  # остальных по умолчанию пускают
+    assert fw_is(p4="ACCEPT", idrop="46")  # "отбросить остальное" при политике ACCEPT
+    s.last_report = {"extras": {"changes": {"v": 1, "ts": 1, "ssh": ssh}}}
+    assert not ssh_audit.allowlisted(s, ssh)  # helper старше 0.7: не знаем
+    # глобальный IPv6 на ноде: смотрим и его семейство
+    s.last_report = {"ips": ["2001:db8::5", "203.0.113.5"],
+                     "extras": {"changes": {"v": 1, "ts": 1, "ssh": ssh, "fw": dict(_FW, p6="ACCEPT", idrop="4")}}}
+    assert not ssh_audit.allowlisted(s, ssh)
+    s.last_report["ips"] = ["fe80::1", "203.0.113.5"]
+    assert ssh_audit.allowlisted(s, ssh)
+
+
+def test_ssh_open_to_all_still_alerts_with_firewall():
+    """Файрвол есть, но 22 открыт всем: внешняя проверка видит open - тревога остается"""
+    s = _srv(ssh=_ssh(root="yes", ports=[22]), exposure=_ex(port=22))
+    s.last_report["extras"]["changes"]["fw"] = dict(_FW, **{"in": _FW["in"] + ["4 * 22"]})
+    assert [lv for lv, _t in ssh_audit.problems(s, NOW)] == [2]
+    assert ssh_audit.view(s, NOW)["allowlist"] is False

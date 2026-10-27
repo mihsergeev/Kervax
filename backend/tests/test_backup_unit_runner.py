@@ -201,7 +201,7 @@ def test_adopt_takes_the_paths_of_the_unit(tmp_path):
 
 
 def test_helper_version_and_refresh():
-    assert re.search(r"^KERVAX_SETUP_VERSION=0\.45  # MAJOR", SRC, re.M)
+    assert re.search(r"^KERVAX_SETUP_VERSION=0.46  # MAJOR", SRC, re.M)
     assert "refresh_config || true; unit_report_maybe || true;" in SRC
     assert backup_unit.HELPER == "0.45"
 

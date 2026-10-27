@@ -695,8 +695,7 @@ def only_allowlist(srv: Server, ip: str, port: int, via_ips: list[str]) -> bool:
     по умолчанию отказ (политика DROP или "отбросить остальное"), правила "всем" на этот порт
     нет, а правило для сети с адресом проверки есть. Чего не знаем (helper старше 0.7, nftables
     для контейнеров, порты Kubernetes) - считаем открытым: лучше лишний алерт, чем пропущенная дыра."""
-    fw = _fw(srv)
-    if not fw or not via_ips:
+    if not via_ips:
         return False
     try:
         fam = ipaddress.ip_address(ip).version
@@ -710,20 +709,36 @@ def only_allowlist(srv: Server, ip: str, port: int, via_ips: list[str]) -> bool:
             continue
         if a.version == fam:
             vias.append(a)
-    path = _port_path(srv, port)
-    if not vias or path is None:
-        return False
+    nets = allow_nets(srv, port, fam) if vias else None
+    return nets is not None and any(v in net for net in nets for v in vias)
+
+
+def allow_nets(srv: Server, port: int, fam: int) -> list | None:
+    """Сети, с которых файрвол ноды пускает на порт (семейство fam), когда остальным по умолчанию
+    отказ; [] - не пускает никого. None - пускает кого угодно или не знаем (helper старше 0.7,
+    nftables для контейнеров, порты Kubernetes)."""
+    fw = _fw(srv)
+    path = _port_path(srv, port) if fw else None
+    if path is None:
+        return None
     kind, p = path
     if kind == "in":
         if str(fw.get(f"p{fam}") or "").upper() not in ("DROP", "REJECT") and str(fam) not in str(fw.get("idrop") or ""):
-            return False
+            return None
         rules = _fw_rules(fw.get("in"), fam)
     else:
         if str(fam) not in str(fw.get("fdrop") or ""):
-            return False
+            return None
         rules = _fw_rules(fw.get("fwd"), fam)
     hit = [net for net, spec in rules if _covers(spec, p)]
-    return None not in hit and any(v in net for net in hit for v in vias)
+    return None if None in hit else hit
+
+
+def own_families(srv: Server) -> list[int]:
+    """Какими семействами нода видна снаружи: IPv4 всегда (бывает за NAT), IPv6 - если на
+    интерфейсах есть глобальный адрес."""
+    ips = (srv.last_report or {}).get("ips") or []
+    return [4] + ([6] if any(isinstance(ip, str) and ":" in ip and _public(ip) for ip in ips) else [])
 
 
 def mark_allow(srv: Server, rows: list[dict], via_ips: list[str] | None) -> list[dict]:

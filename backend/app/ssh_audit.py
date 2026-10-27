@@ -16,6 +16,12 @@
 сразу - когда исправили настройку (root без пароля, пароли выключены, поставили fail2ban); если
 закрыли порт - когда за час (или сутки для root) перебора больше не было.
 
+Закрыли порт файрволом ноды (остальным отказ, на порт SSH только allow с конкретных сетей) - SSH
+"по белому списку", и перебор, записанный до этого, больше не держит его открытым: GPU-нода после
+ufw с белым списком еще сутки числилась "открыт в интернет" с тревогой root по паролю. Перебор,
+пришедший уже при белом списке (в памяти "fw"), и перебор в текущем снимке держат открытым как
+раньше: значит, файрвол пускает в обход того, что видит helper (или в списке есть боты).
+
 Что делать:
 - root входит по паролю на открытый SSH - проблема и алерт;
 - вход по паролю включен, порт открыт, идет перебор, а fail2ban/sshguard/crowdsec нет -
@@ -42,6 +48,7 @@ from app.models import Server
 BRUTE_MIN = 30  # неудачных входов за 10 минут: это уже перебор, а не опечатка
 BRUTE_ON = timedelta(hours=1)  # перебор "идет", пока был выше порога за последний час
 BRUTE_HOLD = timedelta(days=1)  # перебор с внешних адресов доказывает, что SSH открыт, на сутки
+BRUTE_WINDOW = timedelta(minutes=10)  # за сколько helper считает неудачные входы
 MUTE_PREFIX = "ssh:"
 DROPIN = "/etc/ssh/sshd_config.d/00-no-password.conf"
 CONF = "/etc/ssh/sshd_config"
@@ -101,6 +108,14 @@ def internet_open(srv: Server, ssh: dict, now: datetime) -> bool | None:
     return any(x.get("state") == "open" and not x.get("allow") for x in rows)
 
 
+def allowlisted(srv: Server, ssh: dict) -> bool:
+    """Файрвол ноды пускает на все порты SSH только с конкретных сетей (или никого), остальным
+    отказ - по свежему отчету helper'а (changes-setup 0.7, open_ports.allow_nets)."""
+    ports = [int(p) for p in ssh.get("ports") or [] if str(p).isdigit()]
+    return bool(ports) and all(open_ports.allow_nets(srv, p, fam) is not None
+                               for p in ports for fam in open_ports.own_families(srv))
+
+
 def brute_from_internet(ssh: dict) -> bool:
     """Идет перебор, и с внешних адресов (changes-setup 0.4 шлет, откуда больше всего попыток)."""
     if int(ssh.get("fail") or 0) < BRUTE_MIN:
@@ -109,13 +124,32 @@ def brute_from_internet(ssh: dict) -> bool:
                for x in ssh.get("fail_top") or [] if isinstance(x, dict))
 
 
-def note_brute(state: dict, snap: dict, stamp: str) -> None:
+def note_brute(state: dict, snap: dict, stamp: str, srv: Server | None = None) -> None:
     """Запомнить перебор из снимка helper'а (changes.apply_snapshot): state["ssh_brute"] - когда
-    последний раз было BRUTE_MIN+ с внешних адресов, сколько и откуда больше всех."""
+    последний раз было BRUTE_MIN+ с внешних адресов, сколько, откуда больше всех и шел ли уже при
+    белом списке (fw). state["ssh_fw"] - с какого снимка SSH по белому списку (снимок - из
+    srv.last_report): неудачные входы считаются за 10 минут, и в первом снимке после ufw они еще
+    старые."""
     ssh = snap.get("ssh") if isinstance(snap.get("ssh"), dict) else {}
-    if ssh and brute_from_internet(ssh):
+    if not ssh:
+        return
+    since = None
+    if srv is not None and allowlisted(srv, ssh):
+        since = state.get("ssh_fw") or stamp
+        state["ssh_fw"] = since
+    else:
+        state.pop("ssh_fw", None)
+    if brute_from_internet(ssh):
         top = [x for x in ssh.get("fail_top") or [] if isinstance(x, dict) and x.get("ip")][:1]
-        state["ssh_brute"] = {"ts": stamp, "n": int(ssh.get("fail") or 0), "top": top}
+        old = since is not None and _ts(stamp) - _ts(since) >= BRUTE_WINDOW
+        state["ssh_brute"] = {"ts": stamp, "n": int(ssh.get("fail") or 0), "top": top, "fw": old}
+
+
+def _ts(v: str) -> datetime:
+    try:
+        return datetime.fromisoformat(str(v))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _brute_mem(srv: Server) -> tuple[datetime, dict] | None:
@@ -130,11 +164,14 @@ def _brute_mem(srv: Server) -> tuple[datetime, dict] | None:
 
 
 def brute_recent(srv: Server, ssh: dict, now: datetime, hold: timedelta) -> bool:
-    """Перебор с внешних адресов в этом снимке или был за hold"""
+    """Перебор с внешних адресов в этом снимке или был за hold - кроме записанного до того, как
+    SSH закрыли белым списком"""
     if brute_from_internet(ssh):
         return True
     mem = _brute_mem(srv)
-    return mem is not None and now - mem[0] <= hold
+    if mem is None or now - mem[0] > hold:
+        return False
+    return bool(mem[1].get("fw")) or not allowlisted(srv, ssh)
 
 
 def reachable(srv: Server, ssh: dict, now: datetime) -> bool:
@@ -308,7 +345,8 @@ def password_fix(srv: Server, ssh: dict, now: datetime) -> list[dict]:
 
 
 def view(srv: Server, now: datetime) -> dict | None:
-    """Для карточки: порты, пароль, root, защита от перебора, неудачные входы, открыт ли порт"""
+    """Для карточки: порты, пароль, root, защита от перебора, неудачные входы, открыт ли порт (open)
+    и пускает ли на него файрвол только белый список (allowlist)"""
     ssh = block(srv.last_report or {})
     if ssh is None:
         return None
@@ -316,4 +354,5 @@ def view(srv: Server, now: datetime) -> dict | None:
             "root_password": root_password(ssh), "guard": str(ssh.get("guard") or ""),
             "fail": int(ssh.get("fail") or 0), "accepted_password": int(ssh.get("accp") or 0),
             "open": True if brute_recent(srv, ssh, now, BRUTE_HOLD) else internet_open(srv, ssh, now),
+            "allowlist": allowlisted(srv, ssh),
             "fail_top": [x for x in ssh.get("fail_top") or [] if isinstance(x, dict)][:5]}
