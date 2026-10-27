@@ -1982,6 +1982,9 @@ async def _store_web_errors(session, server: Server, body, now: datetime) -> Non
     )
     if dup is not None:
         return
+    kube = getattr(body, "kube", None) or {}
+    namespaces = {str(p.get("ns")) for k in ("pods", "workloads") for p in kube.get(k) or []
+                  if isinstance(p, dict) and p.get("ns")}
     for x in bad[:20]:
         codes = x.get("c5") if isinstance(x.get("c5"), dict) else None
         paths = [p for p in (x.get("p5") or []) if isinstance(p, dict)][:8] or None
@@ -1995,8 +1998,20 @@ async def _store_web_errors(session, server: Server, body, now: datetime) -> Non
             log=str(x.get("log") or "")[:512], label=web_log_label(x)[:255],
             e5=int(x.get("e5") or 0), rpm=int(x.get("rpm") or 0),
             codes=codes, paths=paths, lines=lines, hosts=hosts,
-            ups=web_upstream.clean(x.get("up")),
+            ups=_web_ups(x, codes, lines, namespaces),
         ))
+
+
+def _web_ups(x: dict, codes, lines, namespaces: set[str]) -> list[dict] | None:
+    """Почему 5xx минуты лога. 503, на которые ingress-nginx ответил сам (нет живых подов), helper
+    0.28 отдает видом noep; у старого helper их видно только по строкам - берем оттуда."""
+    ups = web_upstream.clean(x.get("up")) or []
+    if not any(it["k"] in ("noep", "limit") for it in ups):
+        ups += web_upstream.from_lines(lines, codes, int(x.get("e5") or 0), namespaces) or []
+    for it in ups:
+        if it["k"] in ("noep", "limit") and "s" not in it and (sv := web_upstream.svc_of(it["u"], namespaces)):
+            it["s"] = sv
+    return ups[:web_upstream.UP_MAX] or None
 
 
 @router.get("/{server_id}/web-errors", response_model=list[WebErrorOut])

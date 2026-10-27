@@ -56,7 +56,7 @@ def test_alert_and_home():
 
 def test_helper_checks_configs():
     src = (Path(__file__).resolve().parents[2] / "agent" / "webserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.27" in src and "check_configs()" in src and "report.d/web-config.json" in src
+    assert "KERVAX_SETUP_VERSION=0.28" in src and "check_configs()" in src and "report.d/web-config.json" in src
     assert "nginx -t" in src and "caddy validate" in src and "\r" not in src
 
 

@@ -220,6 +220,10 @@ def _web5xx(body: str, extra: list[str]) -> list[tuple[str, str]] | None:
     why = re.search(r"Почему: (.+?)(?: - \d+)?(?:, |\. (?=[А-ЯA-Z])|\.?$)", body)
     if not pct:
         return None
+    # helper 0.28: ingress-nginx отвечал 503 сам - у сервиса нет живых подов
+    noep = re.search(r"Почему: нет живых подов у сервиса ([^\s,(]+)", body)
+    if noep:
+        return [(f"нет живых подов у сервиса {noep.group(1)}", f"{pct.group(1)}% запросов, nginx отвечает 503")]
     what = f"ошибки 5xx на {site.group(1)}" if site else "ошибки 5xx"
     return [(what, f"{pct.group(1)}% запросов" + (f", чаще {path.group(1)}" if path else "")
              + (f", {why.group(1)}" if why else ""))]

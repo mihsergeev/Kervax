@@ -5474,6 +5474,33 @@ def restart_blip(ups, e5, ts: datetime, deploys: list[tuple[datetime, str]] | No
     return n >= _DEPLOY_SHARE * int(e5)
 
 
+# Нет живых подов. Пока у сервиса нет ни одного готового пода, ingress-nginx отвечает 503 сам
+# (helper 0.28: вид noep). При выкатке это минуты: 27.10.2026 на одной ноде Flux впервые
+# создал namespace с Ingress на два новых хоста, первый под четыре минуты не мог скачать образ, и
+# 503 получили сканеры, пришедшие по логам CT за новым сертификатом, и cert-manager. Ушел алерт
+# "2.42% запросов закончились ошибкой 5xx", а аварии не было. По парку за неделю таких
+# эпизодов было пять, все от одной до пяти минут: выкатки и временные поды ACME. Такие минуты
+# считаются, только если сервис без подов уже _NOEP_HOLD (от первой такой минуты в окне до
+# последней): дольше - это не выкатка, а сломанный сервис, и алерт уходит с причиной.
+_NOEP_HOLD = timedelta(minutes=10)
+
+
+def noep_held(rows) -> set[str]:
+    """Upstream'ы ingress-nginx, у которых нет живых подов дольше _NOEP_HOLD. rows - минуты
+    с ошибками одного сервера: (src_ts, ups, e5)."""
+    seen: dict[str, list[int]] = {}
+    for src, ups, e5 in rows:
+        for name in web_upstream.noep_services(ups, e5):
+            seen.setdefault(name, []).append(int(src))
+    return {n for n, ts in seen.items() if max(ts) - min(ts) >= _NOEP_HOLD.total_seconds()}
+
+
+def noep_short(ups, e5, held: set[str]) -> bool:
+    """5xx минуты - короткий переходный период без подов: выкатка, а не сбой."""
+    names = web_upstream.noep_services(ups, e5)
+    return bool(names) and not set(names) & held
+
+
 async def web_deploys(session: AsyncSession, since: datetime,
                       server_id: int | None = None) -> dict[int, list[tuple[datetime, str]]]:
     """Выкладки контейнеров с since минус три минуты: {server_id: [(время, контейнер)]}."""
@@ -5602,17 +5629,27 @@ async def web_error_window(session: AsyncSession,
     # же минута helper'а может попасть в две точки подряд.
     per: dict[int, dict[str, dict[int, int]]] = {}
     probes: dict[int, dict[tuple[str, int], int]] = {}
-    for sid, label, log, src, e5, paths, ups, ts in await session.execute(
+    samples = (await session.execute(
         select(WebErrorSample.server_id, WebErrorSample.label, WebErrorSample.log,
                WebErrorSample.src_ts, WebErrorSample.e5, WebErrorSample.paths, WebErrorSample.ups,
                WebErrorSample.ts)
         .where(WebErrorSample.ts >= since, WebErrorSample.e5 > 0)
-    ):
+    )).all()
+    by_sid: dict[int, list] = {}
+    for sid, _label, _log, src, e5, _paths, ups, _ts in samples:
+        by_sid.setdefault(sid, []).append((src, ups, e5))
+    held = {sid: noep_held(rows) for sid, rows in by_sid.items()}
+    for sid, label, log, src, e5, paths, ups, ts in samples:
         key = web_label_key(label or log)
-        if probe_only(paths) or restart_blip(ups, e5, ts, deploys.get(sid)):
-            probes.setdefault(sid, {})[(key, int(src))] = int(e5 or 0)
+        # Несколько логов с одним ключом (поды одного ingress-контроллера) в одну минуту
+        # складываются: раньше последний затирал остальных
+        if (probe_only(paths) or restart_blip(ups, e5, ts, deploys.get(sid))
+                or noep_short(ups, e5, held[sid])):
+            pk = probes.setdefault(sid, {})
+            pk[(key, int(src))] = pk.get((key, int(src)), 0) + int(e5 or 0)
             continue
-        per.setdefault(sid, {}).setdefault(key, {})[int(src)] = int(e5 or 0)
+        pl = per.setdefault(sid, {}).setdefault(key, {})
+        pl[int(src)] = pl.get(int(src), 0) + int(e5 or 0)
     return {sid: (float(t or 0), float(e or 0), int(n or 0), per.get(sid, {}),
                   float(sum((probes.get(sid) or {}).values())))
             for sid, t, e, n in rows}
@@ -5762,6 +5799,7 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
                                      WebErrorSample.ts >= now - _WEB_ERR_WINDOW)
     ))
     deploys = (await web_deploys(session, now - _WEB_ERR_WINDOW, server_id)).get(server_id)
+    held = noep_held((r.src_ts, getattr(r, "ups", None), r.e5) for r in rows)
     by_log: dict[str, list] = {}
     codes: dict[str, int] = {}
     paths: dict[str, int] = {}
@@ -5774,6 +5812,8 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
             continue  # минута, где 500 только сканерам: в алерт она не входит
         if restart_blip(getattr(r, "ups", None), r.e5, r.ts, deploys):
             continue  # секунды выкладки контейнера: тоже не сбой
+        if noep_short(getattr(r, "ups", None), r.e5, held):
+            continue  # сервис без подов пару минут: выкатка
         acc = by_log.setdefault(web_label_key(r.label or r.log), [r.label, 0])
         acc[0] = r.label or acc[0]  # подпись - самая свежая
         acc[1] += int(r.e5 or 0)
@@ -5790,6 +5830,14 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
     return {"logs": logs, "codes": codes, "paths": paths, "hosts": hosts, "ups": ups}
 
 
+def _where_label(label: str) -> str:
+    """Подпись лога для "больше всего". У ingress-контроллера в скобках первые хосты из всех его
+    Ingress - не те, что падают: 27.10.2026 503 отдавал новый сервис, а в алерте стояли два
+    соседних сайта. Домены пода с несколькими сайтами не пишем, какой сервис - скажет "почему"."""
+    m = re.fullmatch(r"([^()]*/[^()]*) \((.+)\)", str(label or ""))
+    return m.group(1) if m and ("," in m.group(2) or " +" in m.group(2)) else str(label or "")
+
+
 def web_where_text(where: dict) -> str:
     """"Больше всего: nginx (form.shop.example, mobile.shop.example +2) - 41. Коды: 502 - 30, 504 - 11. Чаще всего
     падает: /api/v1/form - 38.» Каждый кусок - только если данные есть: коды и пути
@@ -5797,7 +5845,7 @@ def web_where_text(where: dict) -> str:
     out = []
     logs = [x for x in where.get("logs") or [] if x[1] > 0]
     if logs:
-        top = ", ".join(f"{label} - {n}" for label, n in logs[:2])
+        top = ", ".join(f"{_where_label(label)} - {n}" for label, n in logs[:2])
         more = f" и ещё {len(logs) - 2} лог(а)" if len(logs) > 2 else ""
         out.append(f"больше всего: {top}{more}")
     # общий лог нескольких сайтов, разложенный по доменам (helper 0.21): какой сайт падает

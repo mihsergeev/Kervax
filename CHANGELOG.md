@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.46] - 2026-10-28
+
+### Fixed
+- Веб 5xx: 503, которые ingress-nginx отдает сам, пока у сервиса нет живых подов, первые 10 минут не алертят
+  (выкатка, первый под качает образ). Дольше - алерт "Нет живых подов, nginx отвечает 503" с сервисом и хостом,
+  а не "N% запросов с ошибкой 5xx". helper webserver-setup 0.28: вид noep с namespace, сервисом, Ingress и
+  хостами из nginx.conf контроллера, 503 от limit_req отдельно; без нового helper панель находит то же по строкам
+  ошибок.
+- Веб 5xx: в "Больше всего" у ingress-контроллера больше нет хостов всех его Ingress, а строки нескольких подов
+  одного контроллера за одну минуту больше не затирают друг друга.
+
 ## [1.8.45] - 2026-10-28
 
 ### Fixed

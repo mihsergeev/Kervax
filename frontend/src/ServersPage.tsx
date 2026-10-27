@@ -1498,12 +1498,23 @@ const UP_KIND: Record<string, string> = {
   ssl: 'не прошел TLS',
   bad: 'ответил не по протоколу',
   other: 'ошибка связи',
+  limit: 'срезан лимитом запросов (limit_req)',
 }
 // имя upstream: контейнер с портом вместо его адреса, если имя известно
 function upWho(x: { u: string; c?: string }): string {
   if (!x.c) return x.u
   if (/^\d+\.\d+\.\d+\.\d+(:\d+)?$/.test(x.u)) return x.c + (x.u.includes(':') ? x.u.slice(x.u.indexOf(':')) : '')
   return `${x.c} (${x.u})`
+}
+// ingress-nginx ответил 503 сам (helper 0.28): сервис, его Ingress и хосты
+function upSvc(x: { u: string; s?: string; i?: string; h?: string }): string {
+  const where = [...(x.i ? [`ingress ${x.i}`] : []), ...(x.h ? x.h.split(' ') : [])]
+  return (x.s || x.u) + (where.length ? ` (${where.join(', ')})` : '')
+}
+function upText(x: { u: string; k: string; c?: string; s?: string; i?: string; h?: string }, t: (s: string, v?: Record<string, string | number>) => string): string {
+  if (x.k === 'noep') return t('нет живых подов у сервиса {s}', { s: upSvc(x) })
+  if (x.k === 'limit') return `${upSvc(x)} ${t(UP_KIND.limit)}`
+  return `${upWho(x)} ${t(UP_KIND[x.k] ?? UP_KIND.other)}`
 }
 
 // Ошибки 5xx по логам за сутки: куда ведёт ссылка из алерта. Где (домены, под или
@@ -1669,7 +1680,7 @@ function WebErrorList({
               <div className="web-err-line small">
                 <span className="muted">{t('почему')}: </span>
                 <span className="mono">
-                  {(r.ups ?? []).slice(0, 4).map((x) => `${upWho(x)} ${t(UP_KIND[x.k] ?? UP_KIND.other)} (${x.n})`).join(', ')}
+                  {(r.ups ?? []).slice(0, 4).map((x) => `${upText(x, t)} (${x.n})`).join(', ')}
                 </span>
               </div>
             )}

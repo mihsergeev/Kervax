@@ -3160,6 +3160,8 @@ const EN: Record<string, string> = {
   'не прошел TLS': 'failed TLS',
   'ответил не по протоколу': 'answered off protocol',
   'ошибка связи': 'connection error',
+  'нет живых подов у сервиса {s}': 'service {s} has no ready pods',
+  'срезан лимитом запросов (limit_req)': 'is cut by the request limit (limit_req)',
   'по доменам': 'by domain',
   'с {a} по {b}': 'from {a} to {b}',
   'Алерт по ошибкам 5xx, % за 15 минут (0 = выкл)': '5xx error alert, % over 15 minutes (0 = off)',

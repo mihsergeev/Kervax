@@ -31,7 +31,12 @@ set -euo pipefail
 #       the client address: real_ip_header + set_real_ip_from, trusted_proxies, forwardedHeaders
 #       -> report.d/web-realip.json. Trust in anyone plus 80/443 open past Cloudflare means the
 #       allow/deny lists open to a forged CF-Connecting-IP or X-Forwarded-For
-KERVAX_SETUP_VERSION=0.27  # MAJOR.MINOR; compared component-wise
+# 0.28: a 503 that ingress-nginx answers itself (empty $upstream_addr right after
+#       [ns-svc-port]) is the "noep" kind of "up": the service has no ready pods. With
+#       "limiting requests" lines in the same stream it is "limit" (limit_req) instead. The
+#       upstream name gets the namespace, service, Ingress and hosts from the controller's
+#       nginx.conf, so the alert names the service instead of all domains of the controller
+KERVAX_SETUP_VERSION=0.28  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -905,7 +910,8 @@ count_codes() {
     # /.env"») идут в тот же поток контейнера, но это не запросы: у них нет кода, и
     # они раздували и «всего», и «без кода». В счет запросов не идут; с 0.26 из них берем,
     # почему nginx не достучался до upstream.
-    /[0-9][0-9][0-9][0-9]\/[0-9][0-9]\/[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] \[(emerg|alert|crit|error|warn|notice|info|debug)\]/ { up_take($0); next }
+    # "limiting requests" (0.28) - limit_req срезал запрос: 503 без upstream тогда не "нет подов"
+    /[0-9][0-9][0-9][0-9]\/[0-9][0-9]\/[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9] \[(emerg|alert|crit|error|warn|notice|info|debug)\]/ { if ($0 ~ /limiting requests/) lim++; up_take($0); next }
     { s=""
       if (match($0, /\\?"[ \t]+[1-5][0-9][0-9]([ \t]|$)/)) { s=substr($0,RSTART,RLENGTH); gsub(/[^0-9]/,"",s) }
       else if (match($0, /[ \t][1-5][0-9][0-9][ \t]+\\?"[A-Z]+ /)) { s=substr($0,RSTART+1,3) }
@@ -946,6 +952,11 @@ count_codes() {
         if (match($0, /\[[A-Za-z0-9_.-]+\] \[[^]]*\] [0-9.]+:[0-9]+/)) {
           q = substr($0, RSTART, RLENGTH); ad = q; sub(/^.*\] /, "", ad)
           ing[ad] = substr(q, 2, index(q, "]") - 2) }
+        # 503 без upstream (0.28): у ingress-nginx за [ns-svc-port] [альтернативный] сразу "-"
+        # вместо адреса - nginx ответил сам, не спросив под: у сервиса нет живых подов (или
+        # limit_req, см. END). Такой ответ - 190 байт за 0.000 с
+        else if (s == "503" && match($0, /\[[A-Za-z0-9_.-]+\] \[[^]]*\] - /)) {
+          q = substr($0, RSTART + 1, RLENGTH); ne[substr(q, 1, index(q, "]") - 1)]++ }
         # Путь запроса с ошибкой: «МЕТОД /путь» ищем где угодно в строке - так он
         # находится во всех форматах. Query отрезаем (там бывают токены), номера и
         # длинные hex-идентификаторы сворачиваем, чтобы /user/123 и /user/456 были одним
@@ -992,6 +1003,7 @@ count_codes() {
         printf "%s{\"h\":\"%s\",\"rpm\":%.0f,\"e5\":%.0f}", (k++?",":""), best, hn[best]*60*kk/el, be*60*kk/el
         delete hn[best] }
       printf "]\n"
+      for (x in ne) un[x SUBSEP (lim ? "limit" : "noep")] += ne[x]
       up_out(el, kk) }'
 }
 
@@ -1059,6 +1071,48 @@ ipmap_load() {
   # shellcheck disable=SC2046
   IPMAP=$(docker ps -q 2>/dev/null | xargs -r docker inspect \
           -f '{{.Name}}{{range .NetworkSettings.Networks}} {{.IPAddress}}{{end}}' 2>/dev/null | sed 's#^/##')
+}
+# Upstream ingress-nginx -> namespace, сервис, Ingress и хосты (0.28): строка "имя TAB ns/сервис
+# TAB ingress TAB хосты". Берем из nginx.conf контроллера через /proc/<pid>/root: у каждого
+# location там set $namespace, $ingress_name, $service_name и $proxy_upstream_name, а выше -
+# server_name. Только когда есть 503 без upstream, один раз за запуск.
+INGMAP=""
+INGMAP_DONE=0
+ingmap_load() {
+  INGMAP_DONE=1
+  INGMAP=$(for p in /proc/[0-9]*; do
+      [ "$(cat "$p/comm" 2>/dev/null)" = nginx ] || continue
+      tr '\0' ' ' < "$p/cmdline" 2>/dev/null | grep -q 'master process' || continue
+      cat "$p/root/etc/nginx/nginx.conf" 2>/dev/null
+    done | ing_conf)
+}
+# до трех хостов на upstream; только имена из [A-Za-z0-9_.-], иначе JSON отчета сломается
+ing_conf() {
+  awk '
+    function v(x) { gsub(/[";]/, "", x); return (x ~ /^[A-Za-z0-9_.-]+$/) ? x : "" }
+    $1 == "server" && $2 == "{" { h = ns = ig = sv = "" }
+    $1 == "server_name" { h = $2; sub(/;$/, "", h); if (h == "_" || h !~ /^[A-Za-z0-9.*_-]+$/) h = "" }
+    $1 == "set" && $2 == "$namespace" { ns = v($3) }
+    $1 == "set" && $2 == "$ingress_name" { ig = v($3) }
+    $1 == "set" && $2 == "$service_name" { sv = v($3) }
+    $1 == "set" && $2 == "$proxy_upstream_name" {
+      u = v($3); if (u == "" || ns == "" || sv == "") next
+      who[u] = ns "/" sv; ing[u] = ig
+      if (h != "" && !((u, h) in seen) && nh[u] < 3) { seen[u, h] = 1; nh[u]++; hs[u] = hs[u] (hs[u] == "" ? "" : " ") h } }
+    END { for (u in who) printf "%s\t%s\t%s\t%s\n", u, who[u], ing[u], hs[u] }'
+}
+ing_names() {  # $1 - JSON из up_out; к "noep" и "limit" дописываем "s" (ns/сервис), "i" и "h"
+  [ -n "$INGMAP" ] || { printf '%s' "$1"; return; }
+  printf '%s' "$1" | awk -v m="$INGMAP" '
+    BEGIN { n = split(m, L, "\n")
+            for (i = 1; i <= n; i++) if (split(L[i], f, "\t") >= 2) { sv[f[1]] = f[2]; ig[f[1]] = f[3]; hs[f[1]] = f[4] } }
+    { out = ""; s = $0
+      while (match(s, /"u":"[A-Za-z0-9_.-]+","k":"(noep|limit)"/)) {
+        u = substr(s, RSTART + 5); u = substr(u, 1, index(u, "\"") - 1)
+        out = out substr(s, 1, RSTART + RLENGTH - 1)
+        if (u in sv) out = out ",\"s\":\"" sv[u] "\",\"i\":\"" ig[u] "\",\"h\":\"" hs[u] "\""
+        s = substr(s, RSTART + RLENGTH) }
+      printf "%s", out s }'
 }
 up_names() {  # $1 - JSON из up_out; имя контейнера кладем в "c", если там еще нет имени
   [ -n "$IPMAP" ] || { printf '%s' "$1"; return; }
@@ -1245,6 +1299,7 @@ if [ -s "$MAP" ]; then
       [ -n "$ue" ] && [ "$ue" != "[]" ] && up=$ue
     fi
     case "$up" in *\"u\":\"[0-9]*) [ "$IPMAP_DONE" = 1 ] || ipmap_load; up=$(up_names "$up") ;; esac
+    case "$up" in *'"k":"noep"'*|*'"k":"limit"'*) [ "$INGMAP_DONE" = 1 ] || ingmap_load; up=$(ing_names "$up") ;; esac
     uj=""; [ "$up" != "[]" ] && uj=",\"up\":$up"
     # shellcheck disable=SC2086
     set -- $counts
