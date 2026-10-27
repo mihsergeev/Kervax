@@ -8685,6 +8685,92 @@ _UNCOVERED_PERIOD = 24 * 3600
 _UNCOVERED_SUSTAIN = 3600
 
 
+_UNCOV_HELPERS = "ansible-playbook playbooks/kervax_helpers.yml -l '{}'"
+# сколько строк "что - где" в чате, остальные серверы - "и еще N"
+_UNCOV_ROWS = 3
+
+
+def _uncov_what(keys: list[str]) -> str:
+    """Чего не хватает на сервере, коротко: "Kubernetes без доступа, нет kubeexpiry-setup"."""
+    out = []
+    for k in keys:
+        if k == "kube":
+            out.append("Kubernetes без доступа")
+        elif k == "docker":
+            out.append("Docker без доступа")
+        elif k.startswith("helper:"):
+            out.append(f"нет {k.removeprefix('helper:')}")
+    return ", ".join(out)
+
+
+def _uncov_url(base: str, srv: Server, keys: list[str]) -> str:
+    """Куда ведет имя сервера: туда, где дыра видна и расписано, как ее закрыть. Кубер и Докер
+    без доступа - их раздел с блоком "Нет доступа" и командой; helper - карточка сервера, сверху
+    "Нужно действие на сервере" с командой установки."""
+    if not base or srv.id is None:
+        return ""
+    if "kube" in keys:
+        return f"{base}/?kube={srv.id}"
+    if "docker" in keys:
+        return f"{base}/?docker={srv.id}"
+    return f"{base}/?server={srv.id}"
+
+
+def _uncov_fix(rows: list[tuple[Server, list[str]]]) -> list[tuple[str, str]]:
+    """Что сделать: (подпись, команда). Команда пустая - шаги в панели по ссылке.
+
+    Kubernetes - kube-setup помечен "только вручную", плейбук ставит его лишь по
+    kervax_install, и тем же прогоном доставит остальные helper'ы ноды. Остальные helper'ы -
+    обычный прогон плейбука по этим нодам. Доступ к Docker плейбук не дает (включить прокси -
+    решение человека), поэтому эти ноды в команду не идут."""
+    kube = [s.name or "" for s, ks in rows if "kube" in ks]
+    helpers = [s.name or "" for s, ks in rows
+               if "kube" not in ks and any(k.startswith("helper:") for k in ks)]
+    out: list[tuple[str, str]] = []
+    if kube:
+        out.append(("Доступ в Kubernetes",
+                    _UNCOV_HELPERS.format(",".join(kube)) + " -e kervax_install=kube-setup"))
+    if helpers:
+        out.append(("Helper'ы", _UNCOV_HELPERS.format(",".join(helpers))))
+    if any("docker" in ks for _, ks in rows):
+        out.append(("Docker", "включите read-only proxy, команда в разделе Докер по ссылке"))
+    return out
+
+
+def _uncov_short(rows: list[tuple[Server, list[str]]], base: str) -> str:
+    """Короткий текст в чат: серверы с одинаковыми дырами одной строкой, у каждого имя ссылкой
+    туда, где это чинится, и что сделать - один раз на всех.
+
+        🧩 Покрытие
+        Новое без мониторинга
+        bk-01: Kubernetes без доступа, нет kubeexpiry-setup
+        Что сделать: ansible-playbook playbooks/kervax_helpers.yml -l 'bk-01' -e ...
+    """
+    groups: dict[str, list[str]] = {}
+    for srv, ks in rows:
+        groups.setdefault(_uncov_what(ks), []).append(tg_fmt.link(srv.name or "", _uncov_url(base, srv, ks)))
+    lines = ["🧩 <b>Покрытие</b>", "<b>Новое без мониторинга</b>"]
+    for what, links in list(groups.items())[:_UNCOV_ROWS]:
+        shown = links[:tg_fmt.NAMES_MAX]
+        more = f" и еще {len(links) - len(shown)}" if len(links) > len(shown) else ""
+        if len(links) == 1:
+            lines.append(f"{links[0]}: {html.escape(what, quote=False)}")
+        else:
+            lines.append(f"{html.escape(tg_fmt.cap(what), quote=False)}: {', '.join(shown)}{more}")
+    rest = sum(len(v) for v in list(groups.values())[_UNCOV_ROWS:])
+    if rest:
+        lines.append(f"И еще {rest} {alerts._servers_word(rest)}")
+    # одно действие - строкой "Что сделать: ...", несколько - по строке с подписью, к чему оно
+    fix = [(what, html.escape(how, quote=False) if what == "Docker" else f"<code>{html.escape(how, quote=False)}</code>")
+           for what, how in _uncov_fix(rows)]
+    if len(fix) == 1:
+        lines.append(f"Что сделать: {fix[0][1]}")
+    elif fix:
+        lines.append("Что сделать:")
+        lines += [f"{html.escape(what, quote=False)}: {how}" for what, how in fix]
+    return "\n".join(lines)
+
+
 def _uncov_since(state: dict, keys: set[str], now: datetime) -> dict:
     """Отметки «когда эту дыру увидели впервые»: старые сохраняем, ушедшие забываем."""
     old = state.get("uncov") or {}
@@ -8743,7 +8829,7 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
     cur = current_setup_versions()
     lines: list[str] = []
     hosts: list[str] = []
-    by_gap: dict[str, list[str]] = {}  # чего не хватает -> на каких серверах (для чата)
+    rows: list[tuple[Server, list[str]]] = []  # сервер и чего на нем не хватает (для чата)
     for srv in sorted(servers, key=lambda x: x.name or ""):
         # Оффлайновую ноду не зовём чинить: её отчёт устарел, и первым делом её
         # надо поднять — об этом уже есть свой алерт.
@@ -8769,30 +8855,26 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
             "; ".join(html.escape(txt, quote=False) for _, txt in g),
         ))
         hosts.append(srv.name or "")
-        for _k, txt in g:
-            m = re.search(r"«([^»]+)»", txt)
-            by_gap.setdefault(m.group(1) if m else re.sub(r"\s*\(.*\)$", "", txt), []).append(srv.name or "")
+        rows.append((srv, [k for k, _ in g]))
 
     if not lines:
         return
-    cmd = "ansible-playbook playbooks/kervax_helpers.yml -l '{}'".format(",".join(hosts))
+    cmd = _UNCOV_HELPERS.format(",".join(hosts))
     default = settings_store.SERVER_ALERT_KINDS["uncovered"][1]
     tpl = rule.get("text") or default
-    try:
-        body = tpl.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
-    except (KeyError, IndexError, ValueError):
-        body = default.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
     if tpl == default:
-        # коротко (app/tg_fmt.py): чего не хватает и где; полный список и команда - в истории
-        if len(by_gap) == 1:
-            gap, where = next(iter(by_gap.items()))
-            u_what, u_facts = f"Нет helper'а {gap}", [tg_fmt.names(where)]
-        else:
-            u_what = "Новое без покрытия мониторингом"
-            u_facts = [f"{gap}: {tg_fmt.names(where, 2)}" for gap, where in list(by_gap.items())[:2]]
-        text = alerts.Msg(tg_fmt.render("🧩", "<b>Покрытие</b>", u_what, u_facts), "servers", "",
-                          kind="uncovered", full=f"🧩 {body}")
+        # коротко: что и где (имя ссылкой туда, где это чинится) и что сделать; в историю - то же
+        # с подписями helper'ов словами
+        full = "🧩 новое без покрытия мониторингом:\n{}\n{}".format(
+            "\n".join(lines), "\n".join(f"↳ {what}: {html.escape(how, quote=False)}" for what, how in _uncov_fix(rows)))
+        text = alerts.Msg(_uncov_short(rows, settings.panel_url.rstrip("/")), "servers", "",
+                          kind="uncovered", full=full)
     else:
+        # свой шаблон: {cmd} как раньше - плейбук по всем серверам сводки
+        try:
+            body = tpl.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
+        except (KeyError, IndexError, ValueError):
+            body = default.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
         text = alerts.Msg(f"🧩 {body}", "servers", "", kind="uncovered")
     if await alerts.dispatch(cfg, True, [text], threshold, parse_mode="HTML",
                              session_factory=session_factory):
