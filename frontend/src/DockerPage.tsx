@@ -29,6 +29,8 @@ import { fmtRel } from './ServersPage'
 import { helperCmd, hostOf } from './FleetUpdate'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
+import { HomeTile, tileIssues, usePlural, type TileIssue } from './HomeTiles'
+import { byTone, dockerProblems, probRows, srvIssueRows } from './sectionIssues'
 import { fmtBytes } from './units'
 import { LockedLogs } from './LogsLocked'
 
@@ -1367,31 +1369,23 @@ function dockerHit(f: DFilter, { s, d }: DHost, t: (k: string, p?: Record<string
     const xs = cs.filter((c) => c.state !== 'running').map((c) => c.name)
     return xs.length ? t('остановлены: {list}', list(xs)) : null
   }
-  if (f === 'alerts') {
-    const al = Object.entries(s.docker_alerts ?? {})
-    const down = al.filter(([, v]) => v === 'down').map(([k]) => k)
-    const loop = al.filter(([, v]) => v !== 'down').map(([k]) => k)
-    const unh = cs.filter((c) => c.health === 'unhealthy').map((c) => c.name)
-    const flap = Object.entries(s.restarts_day ?? {})
-      .filter(([k, v]) => k.startsWith('docker:') && v >= RESTARTS_DAY_MIN)
-      .map(([k]) => k.slice('docker:'.length))
-    return subOf(
-      down.length > 0 && t('упали: {list}', list(down)),
-      loop.length > 0 && t('по кругу: {list}', list(loop)),
-      unh.length > 0 && t('unhealthy: {list}', list(unh)),
-      flap.length > 0 && t('часто перезапускаются: {list}', list(flap)),
-    ) || null
-  }
+  // проблемы ('alerts') - строки первой плитки (sectionIssues.dockerProblems), подпись дает страница
+  if (f === 'alerts') return null
+  return dockerAttn(s, t).join(' · ') || null
+}
+
+// Замечания по хосту (плитка "Замечания" и ее фильтр): не авария, а что поправить. docker-сокета у
+// прокси здесь нет: он среди проблем первой плитки, как на главной
+function dockerAttn(s: Server, t: (k: string, p?: Record<string, string | number>) => string): string[] {
+  const list = (xs: string[]) => ({ list: shortList(xs, t, 8) })
   const risk = (s.docker_risk ?? []).filter((x) => !x.muted).map((x) => x.name)
   const noboot = (s.noboot?.docker ?? []).filter((x) => !x.muted).map((x) => x.name)
-  const sock = (s.docker_exposed ?? []).map((x) => x.name)
-  const old = (s.proxy_outdated ?? []).map((x) => x.name)
-  return subOf(
-    sock.length > 0 && t('docker-сокет у прокси: {list}', list(sock)),
+  const old = (s.proxy_outdated ?? []).filter((p) => !p.muted).map((x) => x.name)
+  return [
     risk.length > 0 && t('ключи от хоста: {list}', list(risk)),
     noboot.length > 0 && t('без restart policy: {list}', list(noboot)),
     old.length > 0 && t('старый прокси: {list}', list(old)),
-  ) || null
+  ].filter((x): x is string => !!x)
 }
 
 export function DockerPage({
@@ -1453,6 +1447,12 @@ export function DockerPage({
   const allHosts = (servers ?? [])
     .map((s) => ({ s, d: s.last_report?.docker }))
     .filter((x): x is DHost => !!x.d?.present)
+  // проблемы - как у плитки Docker на главной; под фильтром "проблемы" хост подписан ими
+  const probs = byTone([
+    ...probRows(dockerProblems(servers ?? [], t), 'docker'),
+    ...srvIssueRows(servers ?? [], t, (sec) => sec === 'docker'),
+  ])
+  const probHint = (id: number) => probs.filter((x) => x.id === id).map((x) => x.text).join(' · ') || null
   const q = query.trim().toLowerCase()
   const hosts = allHosts
     .filter(({ s, d }) => {
@@ -1468,7 +1468,7 @@ export function DockerPage({
         .toLowerCase()
       return hay.includes(q) || srvIpHit(s, q)
     })
-    .map((h) => ({ ...h, hint: tile ? dockerHit(tile, h, t) : null }))
+    .map((h) => ({ ...h, hint: tile === 'alerts' ? probHint(h.s.id) : tile ? dockerHit(tile, h, t) : null }))
     .filter((h) => !tile || h.hint)
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
 
@@ -1488,40 +1488,35 @@ export function DockerPage({
         })()
 
   const open = allHosts.find(({ s }) => s.id === openId)
-  // Сводка: что запущено, что упало и где есть что поправить. Считаем по хостам на связи: у
-  // молчащих данные старые, и "все запущены" по ним было бы неправдой. Молчащие названы в
-  // первой плитке по именам, а когда не осталось ни одного хоста на связи с доступом, остальных
-  // плиток нет: "0 из 0, все запущены" ничего бы не сказало
+  // Сводка: хосты, контейнеры и замечания. Проблемы - те же строки, что у плитки Docker на главной
+  // (dockerProblems и srvIssues раздела docker): упавшие и крутящиеся контейнеры, сокет у прокси; первая
+  // плитка показывает их крупно и фильтрует хосты с ними. Считаем по хостам на связи: у молчащих
+  // данные старые, и "все запущены" по ним было бы неправдой. Молчащие названы в первой плитке, а
+  // когда не осталось ни одного хоста на связи с доступом, плитки контейнеров нет
+  const pl = usePlural()
   const live = allHosts.filter(({ s }) => s.online)
   const names = (xs: DHost[]) => shortList(xs.map(({ s }) => s.name), t, 2)
   const offHosts = allHosts.filter(({ s }) => !s.online)
   const noAccHosts = live.filter(({ d }) => !d.access)
   const cAll = live.flatMap(({ d }) => d.containers ?? [])
   const totalRunning = cAll.filter((c) => c.state === 'running').length
-  const alerts = live.flatMap(({ s }) => Object.values(s.docker_alerts ?? {}))
-  const aDown = alerts.filter((a) => a === 'down').length
-  const unhealthy = cAll.filter((c) => c.health === 'unhealthy').length
-  const flappy = live.reduce(
-    (n, { s }) => n + Object.entries(s.restarts_day ?? {}).filter(([k, v]) => k.startsWith('docker:') && v >= RESTARTS_DAY_MIN).length,
-    0,
+  const reach = subOf(
+    noAccHosts.length > 0 && t('без доступа: {list}', { list: names(noAccHosts) }),
+    offHosts.length > 0 && t('не на связи: {list}', { list: names(offHosts) }),
   )
-  const sockHosts = live.filter(({ s }) => (s.docker_exposed?.length ?? 0) > 0)
-  const riskHosts = live.filter(({ s }) => (s.docker_risk ?? []).some((x) => !x.muted))
-  const nobootHosts = live.filter(({ s }) => (s.noboot?.docker ?? []).some((x) => !x.muted))
-  const oldHosts = live.filter(({ s }) => (s.proxy_outdated ?? []).some((p) => !p.muted))
-  const attn = live.filter(
-    ({ s }) =>
-      (s.docker_exposed?.length ?? 0) > 0 ||
-      (s.docker_risk ?? []).some((x) => !x.muted) ||
-      (s.noboot?.docker ?? []).some((x) => !x.muted) ||
-      (s.proxy_outdated ?? []).some((p) => !p.muted),
-  ).length
+  const openRow = (id: number, sec?: string) => {
+    setLinkSec({ id, sec: sec ?? null })
+    setOpenId(id)
+  }
+  const probIss = tileIssues(probs, (_sec, id, _srv, sec) => id != null && openRow(id, sec))
+  const attnIss: TileIssue[] = live.flatMap(({ s }) =>
+    dockerAttn(s, t).map((text, n) => ({ key: `${s.id}-${n}`, name: s.name, text, down: false, onOpen: () => openRow(s.id, 'host') })))
   // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
   const filterLabel: Record<DFilter, string> = {
-    stopped: t('остановленные контейнеры'), alerts: t('аварии'), attn: t('хосты с замечаниями'),
+    stopped: t('остановленные контейнеры'), alerts: t('проблемы'), attn: t('хосты с замечаниями'),
   }
   const filterEmpty: Record<DFilter, string> = {
-    stopped: t('Все контейнеры запущены.'), alerts: t('Аварий нет.'), attn: t('Замечаний нет.'),
+    stopped: t('Все контейнеры запущены.'), alerts: t('Проблем нет.'), attn: t('Замечаний нет.'),
   }
 
   return (
@@ -1550,51 +1545,41 @@ export function DockerPage({
         </div>
       </div>
       {allHosts.length > 0 && (
-        <div className="net-tiles hs-tiles">
-          <NetTile
-            label={t('Хосты с Docker')}
+        <div className="home-tiles sec-tiles">
+          <HomeTile
+            label={t('Хосты')}
             value={String(allHosts.length)}
-            sub={subOf(
-              noAccHosts.length > 0 && t('без доступа: {list}', { list: names(noAccHosts) }),
-              offHosts.length > 0 && t('не на связи: {list}', { list: names(offHosts) }),
-            ) || t('все на связи')}
-            tone={noAccHosts.length || offHosts.length ? 'warn' : 'ok'}
-            {...tileProps(null)}
+            unit={pl(allHosts.length, t('хост'), t('хоста'), t('хостов'))}
+            ok={reach || t('все на связи')}
+            okTone={reach ? 'warn' : 'ok'}
+            total={subOf(t('хостов: {n}', { n: allHosts.length }), reach)}
+            issues={probIss}
+            wide
+            active={probIss.length ? tile === 'alerts' : tile === null}
+            title={probIss.length ? t('показать хосты с проблемами') : t('показать все')}
+            onOpen={() => setTile(probIss.length && tile !== 'alerts' ? 'alerts' : null)}
           />
-          {live.some(({ d }) => d.access) && <>
-          <NetTile
-            label={t('Контейнеры запущены')}
-            value={String(totalRunning)}
-            unit={t('из {n}', { n: cAll.length })}
-            sub={cAll.length > totalRunning ? t('остановлено: {n}', { n: cAll.length - totalRunning }) : t('все запущены')}
-            tone={cAll.length > totalRunning ? undefined : 'ok'}
-            {...tileProps('stopped')}
-          />
-          <NetTile
-            label={t('Аварии')}
-            value={String(alerts.length)}
-            sub={subOf(
-              aDown > 0 && t('упали: {n}', { n: aDown }),
-              alerts.length - aDown > 0 && t('по кругу: {n}', { n: alerts.length - aDown }),
-              unhealthy > 0 && t('unhealthy: {n}', { n: unhealthy }),
-              flappy > 0 && t('часто перезапускаются: {n}', { n: flappy }),
-            ) || t('нет')}
-            tone={alerts.length ? 'bad' : unhealthy || flappy ? 'warn' : 'ok'}
-            {...tileProps('alerts')}
-          />
-          <NetTile
-            label={t('Хосты с замечаниями')}
-            value={String(attn)}
-            sub={subOf(
-              sockHosts.length > 0 && t('docker-сокет у прокси: {list}', { list: names(sockHosts) }),
-              riskHosts.length > 0 && t('ключи от хоста: {list}', { list: names(riskHosts) }),
-              nobootHosts.length > 0 && t('без restart policy: {list}', { list: names(nobootHosts) }),
-              oldHosts.length > 0 && t('старый прокси: {list}', { list: names(oldHosts) }),
-            ) || t('все в порядке')}
-            tone={attn ? 'warn' : 'ok'}
-            {...tileProps('attn')}
-          />
-          </>}
+          {live.some(({ d }) => d.access) && (
+            <HomeTile
+              label={t('Контейнеры')}
+              value={String(totalRunning)}
+              unit={t('из {n}', { n: cAll.length })}
+              ok={cAll.length > totalRunning ? t('остановлено: {n}', { n: cAll.length - totalRunning }) : t('все запущены')}
+              okTone={cAll.length > totalRunning ? 'muted' : 'ok'}
+              {...tileProps('stopped')}
+              onOpen={tileProps('stopped').onClick}
+            />
+          )}
+          {attnIss.length > 0 && (
+            <HomeTile
+              label={t('Замечания')}
+              value=""
+              total={t('не авария, но стоит поправить')}
+              issues={attnIss}
+              {...tileProps('attn')}
+              onOpen={tileProps('attn').onClick}
+            />
+          )}
         </div>
       )}
       {allHosts.length > 1 && (

@@ -763,6 +763,10 @@ button.linklike.kube-exp-off { display: block; margin: 10px 0 6px; text-align: l
   background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
 }
 :root[data-theme='light'] .htile { box-shadow: var(--shadow-card); }
+/* в шапке раздела: плиток меньше, во всю ширину не растягиваются; нажатая - фильтр списка */
+.home-tiles.sec-tiles { grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); }
+.htile.htile-active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.sec-tiles .htile-wide:is(.htile-bad, .htile-warn) { grid-column: span 2; }
 .htile-bad { background: color-mix(in srgb, var(--down) 6%, var(--bg-card)); border-color: color-mix(in srgb, var(--down) 38%, var(--border)); }
 .htile-warn { background: color-mix(in srgb, var(--degraded) 6%, var(--bg-card)); border-color: color-mix(in srgb, var(--degraded) 38%, var(--border)); }
 button.htile-head, button.htile-row {
@@ -799,7 +803,7 @@ button.htile-more { color: var(--text-muted); font-size: 0.82rem; }
 button.htile-more .htile-row-txt { -webkit-line-clamp: 1; }
 /* телефон: две колонки, плитка со строками - во всю ширину, чтобы имена серверов влезали */
 @media (max-width: 560px) {
-  .home-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.45rem; }
+  .home-tiles, .home-tiles.sec-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.45rem; }
   .htile-bad, .htile-warn { grid-column: 1 / -1; }
   button.htile-head { padding: 0.6rem 0.75rem 0.65rem; }
   .htile-num { font-size: 1.5rem; }

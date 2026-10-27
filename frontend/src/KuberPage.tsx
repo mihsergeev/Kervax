@@ -41,6 +41,8 @@ import { ipHit, memLimChip, shortList, sinceShort, srvIps, srvIssues, srvMuted }
 import { EnrollModal, fmtRel, InstallModal } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
+import { HomeTile, tileIssues, usePlural } from './HomeTiles'
+import { byTone, srvIssueRows } from './sectionIssues'
 import { KubeRestartsSec } from './KubeRestarts'
 import { LockedLogs, LOGS_LOCKED } from './LogsLocked'
 
@@ -1703,7 +1705,7 @@ function HostRow({
 }
 
 type KHost = { s: Server; d: KubeInfo }
-type KFilter = 'nodes' | 'pods' | 'attn'
+type KFilter = 'nodes' | 'pods' | 'problems'
 
 // Что из нажатой плитки нашлось в кластере - строка под его именем; null - кластер под плитку
 // не подходит. Условия те же, что у чисел в плитках: кластеры на связи, ноды и поды - только
@@ -1735,18 +1737,8 @@ function kubeHit(f: KFilter, { s, d }: KHost, t: (k: string, p?: Record<string, 
       slow.length > 0 && t('не готовы: {list}', list(slow)),
     ) || null
   }
-  const exp = liveExpiry(s)
-  const what = (e: KubeExpiry) => `${t(EXPIRY_KIND[e.kind] ?? e.kind)} ${e.where}`
-  const flux = (s.last_report?.flux ?? []).filter((x) => !x.ready && !FLUX_TRANSIENT.has(x.reason ?? '')).map((x) => x.where)
-  const expired = exp.filter((e) => daysLeft(e.expires) < 0).map(what)
-  const soon = exp.filter((e) => daysLeft(e.expires) >= 0 && daysLeft(e.expires) <= expiryHorizon(s)).map(what)
-  const jobs = [...new Set([...Object.keys(s.kube_cron_issues ?? {}), ...(d.failed_jobs ?? []).map((j) => `${j.ns}/${j.name}`)])]
-  return subOf(
-    flux.length > 0 && t('Flux встал: {list}', list(flux)),
-    expired.length > 0 && t('сроки истекли: {list}', list(expired)),
-    soon.length > 0 && t('сроки скоро: {list}', list(soon)),
-    jobs.length > 0 && t('задания упали: {list}', list(jobs)),
-  ) || null
+  // проблемы - строки первой плитки (srvIssues раздела kuber), подпись дает страница
+  return null
 }
 
 export function KuberPage({
@@ -1816,6 +1808,9 @@ export function KuberPage({
   const allHosts = (servers ?? [])
     .map((s) => ({ s, d: s.last_report?.kube }))
     .filter((x): x is KHost => !!x.d?.present)
+  // проблемы - как у плитки Kubernetes на главной; под фильтром "проблемы" кластер подписан ими
+  const probs = byTone(srvIssueRows(servers ?? [], t, (sec) => sec === 'kuber'))
+  const probHint = (id: number) => probs.filter((x) => x.id === id).map((x) => x.text).join(' · ') || null
   const q = query.trim().toLowerCase()
   const hosts = allHosts
     .filter(({ s, d }) => {
@@ -1833,7 +1828,7 @@ export function KuberPage({
       // адреса самой ноды и узлов кластера
       return hay.includes(q) || ipHit([...srvIps(s), ...(d.nodes ?? []).map((n) => n.ip)], q)
     })
-    .map((h) => ({ ...h, hint: tile ? kubeHit(tile, h, t) : null }))
+    .map((h) => ({ ...h, hint: tile === 'problems' ? probHint(h.s.id) : tile ? kubeHit(tile, h, t) : null }))
     .filter((h) => !tile || h.hint)
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
 
@@ -1853,10 +1848,11 @@ export function KuberPage({
         })()
 
   const open = allHosts.find(({ s }) => s.id === openId)
-  // Сводка: ноды, поды и то, что встало или скоро истечет. Считаем по кластерам на связи: у
-  // молчащих данные старые, и "все работают" по ним было бы неправдой. Молчащие названы в первой
-  // плитке по именам. Ноды и поды - по кластерам с доступом к API, замечания - по всем на связи
-  // (сроки и Flux приносят helper'ы); когда считать не по чему, плитки нет
+  // Сводка: кластеры, ноды и поды. Проблемы - те же строки, что у плитки Kubernetes на главной
+  // (srvIssues раздела kuber, с бэкенда по правилам алертов: поды, ноды, сроки, Flux, задания);
+  // первая плитка показывает их крупно и фильтрует кластеры с ними. Ноды и поды - справочно и
+  // фильтром. Считаем по кластерам на связи: у молчащих данные старые
+  const pl = usePlural()
   const live = allHosts.filter(({ s }) => s.online)
   const names = (xs: KHost[]) => shortList(xs.map(({ s }) => s.name), t, 2)
   const offHosts = allHosts.filter(({ s }) => !s.online)
@@ -1868,23 +1864,30 @@ export function KuberPage({
   const pAll = live.flatMap(({ d }) => (d.access ? d.pods ?? [] : []))
   const { running: pRun, active: pAct } = podCounts(pAll)
   const pBad = pAll.filter((p) => !podFinished(p) && podTone(p) === 't-down').length
-  const fluxHosts = live.filter(({ s }) => (s.last_report?.flux ?? []).some((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? '')))
-  const expiredHosts = live.filter(({ s }) => liveExpiry(s).some((e) => daysLeft(e.expires) < 0))
-  const soonHosts = live.filter(({ s }) =>
-    liveExpiry(s).some((e) => daysLeft(e.expires) >= 0 && daysLeft(e.expires) <= expiryHorizon(s)))
-  const cronHosts = live.filter(({ s }) =>
-    Object.keys(s.kube_cron_issues ?? {}).length > 0 || (s.last_report?.kube?.failed_jobs ?? []).length > 0)
-  const attn = live.filter(({ s }) =>
-    (s.last_report?.flux ?? []).some((f) => !f.ready && !FLUX_TRANSIENT.has(f.reason ?? '')) ||
-    liveExpiry(s).some((e) => daysLeft(e.expires) <= expiryHorizon(s)) ||
-    Object.keys(s.kube_cron_issues ?? {}).length > 0 ||
-    (s.last_report?.kube?.failed_jobs ?? []).length > 0).length
+  const reach = subOf(
+    noAccHosts.length > 0 && t('без доступа: {list}', { list: names(noAccHosts) }),
+    offHosts.length > 0 && t('не на связи: {list}', { list: names(offHosts) }),
+  )
+  const nodesNote = subOf(
+    nAll.length > nReady && t('не готовы: {n}', { n: nAll.length - nReady }),
+    nPress > 0 && t('под давлением: {n}', { n: nPress }),
+    nUnmon > 0 && t('без агента: {n}', { n: nUnmon }),
+  )
+  const podsNote = subOf(
+    pBad > 0 && t('падают: {n}', { n: pBad }),
+    pAct - pRun - pBad > 0 && t('не готовы: {n}', { n: pAct - pRun - pBad }),
+  )
+  const probIss = tileIssues(probs, (_sec, id, _srv, sec) => {
+    if (id == null) return
+    setLinkTab({ id, tab: sec ?? null })
+    setOpenId(id)
+  })
   // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
   const filterLabel: Record<KFilter, string> = {
-    nodes: t('ноды не готовы или с замечаниями'), pods: t('поды не работают'), attn: t('кластеры с замечаниями'),
+    nodes: t('ноды не готовы или с замечаниями'), pods: t('поды не работают'), problems: t('проблемы'),
   }
   const filterEmpty: Record<KFilter, string> = {
-    nodes: t('Все ноды готовы.'), pods: t('Все поды работают.'), attn: t('Замечаний нет.'),
+    nodes: t('Все ноды готовы.'), pods: t('Все поды работают.'), problems: t('Проблем нет.'),
   }
 
   return (
@@ -1913,53 +1916,38 @@ export function KuberPage({
         </div>
       </div>
       {allHosts.length > 0 && (
-        <div className="net-tiles hs-tiles">
-          <NetTile
+        <div className="home-tiles sec-tiles">
+          <HomeTile
             label={t('Кластеры')}
             value={String(allHosts.length)}
-            sub={subOf(
-              noAccHosts.length > 0 && t('без доступа: {list}', { list: names(noAccHosts) }),
-              offHosts.length > 0 && t('не на связи: {list}', { list: names(offHosts) }),
-            ) || t('все на связи')}
-            tone={noAccHosts.length || offHosts.length ? 'warn' : 'ok'}
-            {...tileProps(null)}
+            unit={pl(allHosts.length, t('кластер'), t('кластера'), t('кластеров'))}
+            ok={reach || t('все на связи')}
+            okTone={reach ? 'warn' : 'ok'}
+            total={subOf(t('кластеров: {n}', { n: allHosts.length }), reach)}
+            issues={probIss}
+            wide
+            active={probIss.length ? tile === 'problems' : tile === null}
+            title={probIss.length ? t('показать кластеры с проблемами') : t('показать все')}
+            onOpen={() => setTile(probIss.length && tile !== 'problems' ? 'problems' : null)}
           />
           {live.some(({ d }) => d.access) && <>
-          <NetTile
-            label={t('Ноды готовы')}
+          <HomeTile
+            label={t('Ноды')}
             value={String(nReady)}
             unit={t('из {n}', { n: nAll.length })}
-            sub={subOf(
-              nPress > 0 && t('под давлением: {n}', { n: nPress }),
-              nUnmon > 0 && t('без агента: {n}', { n: nUnmon }),
-            ) || t('все готовы')}
-            tone={nReady < nAll.length ? 'bad' : nPress || nUnmon ? 'warn' : 'ok'}
+            ok={nodesNote || t('все готовы')}
+            okTone={nodesNote ? 'warn' : 'ok'}
             {...tileProps('nodes')}
+            onOpen={tileProps('nodes').onClick}
           />
-          <NetTile
-            label={t('Поды работают')}
+          <HomeTile
+            label={t('Поды')}
             value={String(pRun)}
             unit={t('из {n}', { n: pAct })}
-            sub={subOf(
-              pBad > 0 && t('падают: {n}', { n: pBad }),
-              pAct - pRun - pBad > 0 && t('не готовы: {n}', { n: pAct - pRun - pBad }),
-            ) || t('все работают')}
-            tone={pBad ? 'bad' : pRun < pAct ? 'warn' : 'ok'}
+            ok={podsNote || t('все работают')}
+            okTone={podsNote ? 'warn' : 'ok'}
             {...tileProps('pods')}
-          />
-          </>}
-          {live.length > 0 && <>
-          <NetTile
-            label={t('Кластеры с замечаниями')}
-            value={String(attn)}
-            sub={subOf(
-              fluxHosts.length > 0 && t('Flux встал: {list}', { list: names(fluxHosts) }),
-              expiredHosts.length > 0 && t('сроки истекли: {list}', { list: names(expiredHosts) }),
-              soonHosts.length > 0 && t('сроки скоро: {list}', { list: names(soonHosts) }),
-              cronHosts.length > 0 && t('задания упали: {list}', { list: names(cronHosts) }),
-            ) || t('все в порядке')}
-            tone={fluxHosts.length || expiredHosts.length ? 'bad' : attn ? 'warn' : 'ok'}
-            {...tileProps('attn')}
+            onOpen={tileProps('pods').onClick}
           />
           </>}
         </div>
