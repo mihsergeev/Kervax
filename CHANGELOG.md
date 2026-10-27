@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.42] - 2026-10-28
+
+### Changed
+- Шапки разделов Серверы, Сайты, Докер, Кубер, Сервисы и Бэкапы - такие же плитки, как на главной: пока все хорошо -
+  число и "все в норме", когда есть беда - крупно "N проблем" и строки "сервер - что", клик ведет к проблеме.
+  Число в плитке, список под ее фильтром и главная теперь сходятся. Лишние плитки-счетчики убраны или слиты.
+
 ## [1.8.41] - 2026-10-27
 
 ### Changed

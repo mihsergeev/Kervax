@@ -53,6 +53,8 @@ import { FixCmd, FixSteps } from './FixSteps'
 import { CountryFlag } from './CountryFlag'
 import { byteUnits, fmtDur } from './units'
 import { NetTile, TileFilterChip, useTileFilter, type Tone } from './NetLinks'
+import { HomeTile, tileIssues } from './HomeTiles'
+import { backupProblems, byTone, probRows, srvIssueRows } from './sectionIssues'
 
 // Сводка покрытия, когда замечаний нет: базы на ноде могут быть и без дампа панели - их бэкапит
 // владелец (галка "бэкаплю сам"). Раньше тут было "баз не найдено" рядом с плиткой "Баз на ноде 1"
@@ -3653,7 +3655,7 @@ function BackupSetupModal({ server: s, backupServers, onClose, onDone }: {
 }
 
 type BHost = { s: Server; d: BackupInfo }
-type BFilter = 'clients' | 'nobackup' | 'servers' | 'verify'
+type BFilter = 'clients' | 'nobackup' | 'servers' | 'verify' | 'problems'
 
 // Плитка "Восстановление проверено X из N": под нее попадают клиенты без пройденной проверки,
 // N - X строк. Строка под именем - что с проверкой (тексты бэкенда и так начинаются с того, что
@@ -3788,38 +3790,56 @@ export function BackupsPage({
   // требуют бэкапа (галка не стоит) — наверх, красным; «не требуется» — в отдельный подвал внизу
   const noBackupReq = noBackupAll.filter((s) => !s.backup_not_required).sort((a, b) => a.name.localeCompare(b.name))
   const noBackupOpt = noBackupAll.filter((s) => s.backup_not_required).sort((a, b) => a.name.localeCompare(b.name))
-  // сводка плитками: клиенты по статусу, ноды без бэкапа, бэкап-серверы, проверка восстановления
-  const failedN = allHosts.filter(({ d }) => backupStatus(d) === 'failed').length
-  const staleN = allHosts.filter(({ d }) => backupStatus(d) === 'stale').length
-  const ownBadN = allHosts.filter(({ s }) => ownBackupProblems(s).length > 0).length
-  const ownOnlyBadN = ownOnly.filter((s) => ownBackupProblems(s).length > 0).length
+  // сводка плитками: проблемы (как на главной), ноды без бэкапа, бэкап-серверы, проверка восстановления
   const srvStat = srvHosts.map(({ s, d }) => {
     const ctx = repoCtx(s)
     const repos = (d.repos ?? []).filter((r) => !ctx.archived.has(r.name))
-    return { name: s.name, repos: repos.length, bad: repos.filter((r) => repoBad(r, ctx)).length, pct: diskPct(d) ?? -1, down: !d.running }
+    return { name: s.name, repos: repos.length, pct: diskPct(d) ?? -1 }
   })
   const repoN = srvStat.reduce((a, x) => a + x.repos, 0)
-  const repoBadN = srvStat.reduce((a, x) => a + x.bad, 0)
-  const srvDownN = srvStat.filter((x) => x.down).length
   const pctMax = Math.max(-1, ...srvStat.map((x) => x.pct))
   // "диск до 88%" ничего не говорит: какой сервер и насколько занят
   const fullest = srvStat.find((x) => x.pct === pctMax)
   const verified = allHosts.filter(({ s }) => s.backup_verify)
   const verBadN = verified.filter(({ s }) => (s.backup_verify?.level ?? 0) >= 2).length
   const verWarnN = verified.filter(({ s }) => (s.backup_verify?.level ?? 0) === 1).length
+  // Проблемы - те же строки, что у плитки "Бэкапы" на главной (backupProblems и srvIssues раздела):
+  // клиенты, бэкап-серверы и ноды без бэкапа. Первая плитка показывает их крупно, под ее фильтром
+  // в каждом блоке страницы остаются ноды с ними, клиент подписан своими строками
+  const probs = byTone([
+    ...probRows(backupProblems(servers ?? [], t), 'backups'),
+    ...srvIssueRows(servers ?? [], t, (sec) => sec === 'backups'),
+  ])
+  const probIds = new Set(probs.map((x) => x.id))
+  const probHint = (id: number) => probs.filter((x) => x.id === id).map((x) => x.text).join(' · ') || null
+  const probIss = tileIssues(probs, (_sec, id, srv, sec) => {
+    if (id == null) return
+    if (srv) {
+      setLinkSrvSec({ id, sec: sec ?? null })
+      setOpenSrvId(id)
+    } else {
+      setLinkSec({ id, sec: sec ?? null })
+      setOpenId(id)
+    }
+  })
+  const names = (xs: Server[]) => shortList(xs.map((s) => s.name), t, 2)
+  const verNote = subOf(
+    verBadN > 0 && t('не прошло: {n}', { n: verBadN }),
+    verWarnN > 0 && t('с замечаниями: {n}', { n: verWarnN }),
+  )
   const q = query.trim().toLowerCase()
   // Поиск обязан действовать на ВСЮ страницу. Раньше он сужал только клиентов, а
   // бэкап-серверы и «не требуется» оставались как есть — при активном фильтре это
   // читалось как «ничего не бэкапится», хотя ноды просто не подходили под запрос.
   const match = (s: Server) =>
-    !q || [s.name, s.group_name].join(' ').toLowerCase().includes(q) || srvIpHit(s, q)
+    (tile !== 'problems' || probIds.has(s.id)) && (!q || [s.name, s.group_name].join(' ').toLowerCase().includes(q) || srvIpHit(s, q))
   // Нажатая плитка оставляет свой блок страницы, тот, что она считает: клиентов, бэкап-серверы,
   // ноды без бэкапа (вместе со своим бэкапом и "не требуется" - их числа в той же плитке) или
   // клиентов без пройденной проверки восстановления. Поиск действует поверх
-  const showSec = (sec: BFilter) => !tile || tile === sec || (sec === 'clients' && tile === 'verify')
+  const showSec = (sec: BFilter) => !tile || tile === sec || tile === 'problems' || (sec === 'clients' && tile === 'verify')
   const hosts = (showSec('clients') ? allHosts : [])
     .filter(({ s }) => match(s))
-    .map((h) => ({ ...h, hint: tile === 'verify' ? verifyHit(h.s, t) : null }))
+    .map((h) => ({ ...h, hint: tile === 'verify' ? verifyHit(h.s, t) : tile === 'problems' ? probHint(h.s.id) : null }))
     .filter((h) => tile !== 'verify' || h.hint)
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
   const srvHostsView = showSec('servers') ? srvHosts.filter(({ s }) => match(s)) : []
@@ -3831,11 +3851,11 @@ export function BackupsPage({
   // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
   const filterLabel: Record<BFilter, string> = {
     clients: t('клиенты'), nobackup: t('без бэкапа'), servers: t('бэкап-серверы'),
-    verify: t('без пройденной проверки восстановления'),
+    verify: t('без пройденной проверки восстановления'), problems: t('проблемы'),
   }
   const filterEmpty: Record<BFilter, string> = {
     clients: t('Клиентов с бэкапом нет.'), nobackup: t('Бэкап есть у всех нод.'), servers: t('Бэкап-серверов нет.'),
-    verify: t('Восстановление проверено у всех клиентов.'),
+    verify: t('Восстановление проверено у всех клиентов.'), problems: t('Проблем нет.'),
   }
 
   const groups: { key: string; label: string; items: typeof hosts }[] =
@@ -3892,72 +3912,73 @@ export function BackupsPage({
         </div>
       </div>
       {servers && allHosts.length + srvHosts.length + noBackupAll.length + ownOnly.length + setupBad.length > 0 && (
-        <div className="net-tiles hs-tiles">
-          <NetTile
-            label={t('Клиенты')}
+        <div className="home-tiles sec-tiles">
+          <HomeTile
+            label={t('Бэкапы')}
             value={String(allHosts.length)}
-            sub={subOf(
-              failedN > 0 && t('ошибка: {n}', { n: failedN }),
-              staleN > 0 && t('не свежий: {n}', { n: staleN }),
-              ownBadN > 0 && t('свой бэкап с проблемой: {n}', { n: ownBadN }),
-            ) || (allHosts.length ? t('все свежие') : undefined)}
-            tone={failedN || staleN ? 'bad' : ownBadN ? 'warn' : allHosts.length ? 'ok' : undefined}
-            {...tileProps('clients')}
+            unit={t('под бэкапом')}
+            ok={allHosts.length ? t('все свежие') : t('клиентов нет')}
+            okTone={allHosts.length ? 'ok' : 'muted'}
+            total={t('под бэкапом: {n}', { n: allHosts.length })}
+            issues={probIss}
+            wide
+            active={probIss.length ? tile === 'problems' : tile === 'clients'}
+            title={probIss.length ? t('показать ноды с проблемами') : t('показать в списке')}
+            onOpen={() => setTile(probIss.length ? (tile !== 'problems' ? 'problems' : null) : tile !== 'clients' ? 'clients' : null)}
           />
-          <NetTile
-            label={t('Без бэкапа')}
-            value={String(noBackupReq.length + setupBad.length)}
-            sub={subOf(
-              setupBad.length > 0 && t('настройка не прошла: {n}', { n: setupBad.length }),
-              ownOnly.length > 0 && t('свой бэкап: {n}', { n: ownOnly.length }),
-              ownOnlyBadN > 0 && t('с проблемой: {n}', { n: ownOnlyBadN }),
-              noBackupOpt.length > 0 && t('не требуется: {n}', { n: noBackupOpt.length }),
-            ) || t('у всех нод есть')}
-            tone={noBackupReq.length || setupBad.length || ownOnlyBadN ? 'bad' : 'ok'}
-            {...tileProps('nobackup')}
-          />
+          {noBackupAll.length + ownOnly.length + setupBad.length > 0 && (
+            <HomeTile
+              label={t('Без бэкапа')}
+              value={String(noBackupReq.length + setupBad.length)}
+              ok={noBackupReq.length + setupBad.length
+                ? t('нужен бэкап: {list}', { list: names([...setupBad, ...noBackupReq]) }) : t('у всех нод есть')}
+              okTone={noBackupReq.length + setupBad.length ? 'warn' : 'ok'}
+              foot={subOf(
+                ownOnly.length > 0 && t('свой бэкап: {n}', { n: ownOnly.length }),
+                noBackupOpt.length > 0 && t('не требуется: {n}', { n: noBackupOpt.length }),
+              )}
+              {...tileProps('nobackup')}
+              onOpen={tileProps('nobackup').onClick}
+            />
+          )}
           {srvHosts.length > 0 && (
-            <NetTile
+            <HomeTile
               label={t('Бэкап-серверы')}
               value={String(srvHosts.length)}
-              sub={subOf(
-                t('репозиториев: {n}', { n: repoN }),
-                repoBadN > 0 && t('проблемных: {b}', { b: repoBadN }),
-                srvDownN > 0 && t('остановлено: {n}', { n: srvDownN }),
-                pctMax >= 0 && fullest && (srvStat.length > 1
-                  ? t('диск больше всех занят у {name}: {p}%', { name: fullest.name, p: pctMax })
-                  : t('диск занят на {p}%', { p: pctMax })),
-              )}
-              tone={repoBadN || srvDownN || pctMax >= 90 ? 'bad' : pctMax >= 80 ? 'warn' : 'ok'}
+              ok={pctMax >= 0 && fullest ? (srvStat.length > 1
+                ? t('диск больше всех занят у {name}: {p}%', { name: fullest.name, p: pctMax })
+                : t('диск занят на {p}%', { p: pctMax })) : undefined}
+              okTone={pctMax >= 80 ? 'warn' : 'muted'}
+              foot={t('репозиториев: {n}', { n: repoN })}
               {...tileProps('servers')}
+              onOpen={tileProps('servers').onClick}
             />
           )}
           {verified.length > 0 && (
-            <NetTile
+            <HomeTile
               label={t('Восстановление проверено')}
               value={String(verified.length - verBadN - verWarnN)}
               unit={t('из {n}', { n: allHosts.length })}
-              sub={subOf(
-                verBadN > 0 && t('не прошло: {n}', { n: verBadN }),
-                verWarnN > 0 && t('с замечаниями: {n}', { n: verWarnN }),
-              ) || undefined}
-              tone={verBadN ? 'bad' : verWarnN ? 'warn' : verified.length === allHosts.length ? 'ok' : undefined}
+              ok={verNote || (verified.length === allHosts.length ? t('у всех прошло') : t('не проверялось: {n}', { n: allHosts.length - verified.length }))}
+              okTone={verNote ? 'warn' : verified.length === allHosts.length ? 'ok' : 'muted'}
               {...tileProps('verify')}
+              onOpen={tileProps('verify').onClick}
             />
           )}
           {/* как "Бэкап-серверы": нет заглушенного - нет и плитки, здесь это редкость */}
           {mutes.length > 0 && (
-            <NetTile
+            <HomeTile
               label={t('Заглушено')}
               value={String(mutes.length)}
-              sub={subOf(
+              ok={subOf(
                 mutesSub.where,
                 nRepo > 0 && t('репозиториев: {n}', { n: nRepo }),
                 mutes.length > nRepo && t('пунктов покрытия: {n}', { n: mutes.length - nRepo }),
               )}
+              okTone="muted"
               title={mutes.map((r) => `${r.server}: ${r.label}`).join('\n')}
               active={mutesOpen}
-              onClick={() => setMutesOpen(true)}
+              onOpen={() => setMutesOpen(true)}
             />
           )}
         </div>

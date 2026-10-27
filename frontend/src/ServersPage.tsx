@@ -72,7 +72,7 @@ import {
 } from './api'
 import { StackedAreaChart, type ChartMark, type Series } from './charts/StackedAreaChart'
 import { OnboardBlock } from './OnboardBlock'
-import { diskHealth, diskUsage, fmtSetupVersion, limText, memLimFacts, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, srvMuted, tallyServers, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { diskHealth, diskUsage, fmtSetupVersion, limText, memLimFacts, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, srvMuted, tallyTile, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
@@ -118,6 +118,8 @@ import { VulnsCard } from './VulnsCard'
 import { JournalCard, JournalModal, journalBlocker } from './UnitJournal'
 import { LockedLogs } from './LogsLocked'
 import { LinksCard, NetTile, TrafficCard, type Tone } from './NetLinks'
+import { HomeTile, tileIssues } from './HomeTiles'
+import { byTone, srvIssueRows } from './sectionIssues'
 import { DiskWritersBlock, NetUsersCard } from './Usage'
 import { SoftwareCard } from './Software'
 import { type FixStep, FixSteps, useFixDone } from './FixSteps'
@@ -5076,47 +5078,6 @@ function ProcCard({ title, procs, kind, total, t }: {
   )
 }
 
-function SrvTile({
-  num,
-  label,
-  tone,
-  sub,
-  title,
-  active,
-  expands,
-  onClick,
-}: {
-  num: number
-  label: string
-  tone?: 'up' | 'down' | 'degraded' | 'muted'
-  // строки под подписью: что именно и где (плитка "Заглушено")
-  sub?: string[]
-  title?: string
-  active: boolean
-  // плитка открывает панель, а не фильтрует список
-  expands?: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      className={`stat-tile stat-tile-btn${sub ? ' stat-tile-wide' : ''}${active ? ' stat-tile-active' : ''}`}
-      onClick={onClick}
-      title={title || undefined}
-      aria-pressed={expands ? undefined : active}
-      aria-expanded={expands ? active : undefined}
-      aria-haspopup={expands ? 'dialog' : undefined}
-    >
-      <div className={`stat-num${tone ? ` t-${tone}` : ''}`}>{num}</div>
-      <div className="stat-lbl">{label}</div>
-      {sub?.filter(Boolean).map((x) => (
-        <div key={x} className="stat-sub">
-          {x}
-        </div>
-      ))}
-    </button>
-  )
-}
-
 function Meter({ label, value }: { label: string; value: number | null }) {
   return (
     <div className="srv-meter">
@@ -5230,13 +5191,17 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
   const [mutesOpen, setMutesOpen] = useState(false)
   const online = servers?.filter((s) => s.online).length ?? 0
   const total = servers?.length ?? 0
-  // серверы с бедой - по тем же строкам и цветам, что "Что сломано" на главной (serverUtils.tallyServers):
-  // с проблемой (есть красная) и только с предупреждениями. Плитка фильтрует список по обоим, поэтому
-  // число - сумма, а подпись говорит, что в нем
-  const srvTally = tallyServers(servers ?? [], t)
-  const problems = srvTally.down + srvTally.warn
-  const problemsLabel = !srvTally.warn ? t('С проблемами') : !srvTally.down ? t('С предупреждениями')
-    : t('С проблемами и предупреждениями')
+  // беды серверов - те же строки, что у плитки "Серверы" на главной: серверы и службы
+  // (sectionIssues.srvIssueRows). Плитка показывает их крупно и фильтрует список по ним; строка
+  // ведет в карточку сервера, служба - в "Сервисы"
+  const probs = byTone(srvIssueRows(servers ?? [], t, (sec) => tallyTile(sec) === 'servers'))
+  const probIds = new Set(probs.map((x) => x.id))
+  const probIss = tileIssues(probs, (sec, id, srv, dsec) => {
+    if (id == null) return
+    if (sec !== 'servers') return onOpen?.(sec, id, srv, dsec)
+    setDetailSec(dsec ?? null)
+    setDetailId(id)
+  })
   const detail = detailId != null ? servers?.find((s) => s.id === detailId) : undefined
   // ссылка на удаленный или чужой сервер: сказать об этом и убрать id из адреса, а не молча
   // показать список
@@ -5246,7 +5211,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
   const visible = (servers ?? []).filter((s) => {
     if (filter === 'online' && !s.online) return false
     if (filter === 'offline' && s.online) return false
-    if (filter === 'problem' && srvIssues(s, t).length === 0) return false
+    if (filter === 'problem' && !probIds.has(s.id)) return false
     if (!q) return true
     return [s.name, s.group_name, s.hostname, s.os]
       .some((v) => v?.toLowerCase().includes(q)) || srvIpHit(s, q)
@@ -5374,47 +5339,33 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
 
   return (
     <div>
-      {servers && (
-        <div className="stat-tiles">
-          {/* «Проблемы» — первой: жмут чаще всего */}
-          <SrvTile
-            num={problems}
-            tone={srvTally.down ? 'down' : 'degraded'}
-            label={problemsLabel}
-            title={t('серверов с проблемами: {d}, только с предупреждениями: {w}', { d: srvTally.down, w: srvTally.warn })}
-            active={filter === 'problem'}
-            onClick={() => setFilter((f) => (f === 'problem' ? 'all' : 'problem'))}
+      {servers && total > 0 && (
+        <div className="home-tiles sec-tiles">
+          <HomeTile
+            label={t('Серверы')}
+            value={String(online)}
+            unit={t('из {n}', { n: total })}
+            ok={online < total ? t('офлайн: {n}', { n: total - online }) : t('все в норме')}
+            okTone={online < total ? 'warn' : 'ok'}
+            total={t('онлайн {n} из {total}', { n: online, total })}
+            issues={probIss}
+            wide
+            active={probIss.length ? filter === 'problem' : filter === 'all'}
+            title={probIss.length ? t('показать серверы с проблемами') : t('показать все')}
+            onOpen={() => setFilter((f) => (probIss.length && f !== 'problem' ? 'problem' : 'all'))}
           />
-          <SrvTile
-            num={total}
-            label={t('Всего')}
-            active={filter === 'all'}
-            onClick={() => setFilter('all')}
-          />
-          <SrvTile
-            num={online}
-            tone="up"
-            label={t('Онлайн')}
-            active={filter === 'online'}
-            onClick={() => setFilter((f) => (f === 'online' ? 'all' : 'online'))}
-          />
-          <SrvTile
-            num={total - online}
-            tone="down"
-            label={t('Оффлайн')}
-            active={filter === 'offline'}
-            onClick={() => setFilter((f) => (f === 'offline' ? 'all' : 'offline'))}
-          />
-          <SrvTile
-            num={mutes.length}
-            tone="muted"
-            label={t('Заглушено')}
-            sub={[mutesSub.where, mutesSub.when]}
-            title={mutesSub.all}
-            active={mutesOpen}
-            expands
-            onClick={() => setMutesOpen(true)}
-          />
+          {mutes.length > 0 && (
+            <HomeTile
+              label={t('Заглушено')}
+              value={String(mutes.length)}
+              ok={mutesSub.where}
+              okTone="muted"
+              foot={mutesSub.when}
+              title={mutesSub.all}
+              active={mutesOpen}
+              onOpen={() => setMutesOpen(true)}
+            />
+          )}
         </div>
       )}
 

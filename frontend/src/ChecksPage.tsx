@@ -25,7 +25,9 @@ import { ImportModal } from './ImportModal'
 import { useI18n } from './i18n'
 import { MaintChip } from './MaintModal'
 import { useAuth } from './auth'
-import { knownMeta, knownText } from './serverUtils'
+import { knownActive, knownMeta, knownText } from './serverUtils'
+import { HomeTile, tileIssues } from './HomeTiles'
+import { byTone, siteIssueRows } from './sectionIssues'
 
 type Props = {
   onUnauthorized: () => void
@@ -95,7 +97,7 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
   // область bulk-настройки: null = ко всем; массив id = к выбранным
   const [bulkIds, setBulkIds] = useState<number[] | null>(null)
   const [importOpen, setImportOpen] = useState(false)
-  const [statusFilter, setStatusFilter] = useState<CheckStatus | 'all' | 'disabled' | 'partial' | 'flaky'>(
+  const [statusFilter, setStatusFilter] = useState<CheckStatus | 'all' | 'disabled' | 'partial' | 'flaky' | 'problem'>(
     'all',
   )
   const [query, setQuery] = useState('')
@@ -229,6 +231,20 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
   const groupNames = ov
     ? [...new Set(ov.checks.map((c) => c.group_name?.trim()).filter(Boolean))].sort()
     : []
+  const probs = byTone(siteIssueRows(ov?.checks ?? [], t))
+  const probIds = new Set(probs.map((x) => x.id))
+  const probIss = tileIssues(probs, (_sec, id, _srv, sec) => {
+    if (id == null) return
+    setLinkSec({ id, sec: sec ?? null })
+    setDetailId(id)
+  })
+  const knownN = (ov?.checks ?? []).filter((c) => c.enabled && knownActive(c.known_issue) &&
+    (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since)).length
+  const siteFoot = [
+    knownN > 0 && t('известных: {n}', { n: knownN }),
+    ov && ov.open_incidents > 0 && t('открытых инцидентов: {n}', { n: ov.open_incidents }),
+  ].filter(Boolean).join(' · ')
+  const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
   const q = query.trim().toLowerCase()
   // перетаскивание доступно только в обычном виде (все статусы, группировка не «по типу»).
   // При активном поиске/выборе выключено: drop отправил бы только видимую
@@ -238,6 +254,8 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
   const byStatus =
     statusFilter === 'all'
       ? checks
+      : statusFilter === 'problem'
+        ? checks.filter((c) => probIds.has(c.id))
       : statusFilter === 'partial'
         ? checks.filter(
             (c) => c.enabled && c.last_status !== 'down' && (c.loc_down?.length ?? 0) > 0,
@@ -465,65 +483,46 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
 
   return (
     <div>
-      {ov && (
-        <div className="stat-tiles">
-          <Tile
-            label={t('Всего')}
-            value={ov.total}
-            active={statusFilter === 'all'}
-            onClick={() => setStatusFilter('all')}
+      {ov && ov.total > 0 && (
+        <div className="home-tiles sec-tiles">
+          {/* беды - те же строки, что у плитки "Сайты" на главной (sectionIssues.siteIssueRows):
+              лежащие, деградация, "через раз" и признаки взлома. Плитка показывает их крупно и
+              фильтрует список по ним */}
+          <HomeTile
+            label={t('Сайты')}
+            value={String(ov.up)}
+            unit={t('из {n}', { n: ov.total })}
+            ok={t('все в норме')}
+            foot={siteFoot}
+            total={subOf(t('работают {n} из {total}', { n: ov.up, total: ov.total }), siteFoot)}
+            issues={probIss}
+            wide
+            active={probIss.length ? statusFilter === 'problem' : statusFilter === 'all'}
+            title={probIss.length ? t('показать мониторы с проблемами') : t('показать все')}
+            onOpen={() => setStatusFilter((f) => (probIss.length && f !== 'problem' ? 'problem' : 'all'))}
           />
-          <Tile
-            label={t('Работает')}
-            value={ov.up}
-            tone="up"
-            active={statusFilter === 'up'}
-            onClick={() => toggleFilter('up')}
-          />
-          <Tile
-            label={t('Деградация')}
-            value={ov.degraded}
-            tone="degraded"
-            active={statusFilter === 'degraded'}
-            onClick={() => toggleFilter('degraded')}
-          />
-          <Tile
-            label={t('Недоступно')}
-            value={ov.down}
-            tone="down"
-            active={statusFilter === 'down'}
-            onClick={() => toggleFilter('down')}
-          />
-          {/* Сайт может отвечать с основной проверки и НЕ отвечать из локации —
-              по статусу он «работает», и в счётчиках проблем раньше не появлялся
-              вовсе: «Недоступно: 1», хотя проблемных мониторов два. */}
+          {/* Сайт может отвечать с основной проверки и НЕ отвечать из локации - по статусу он
+              "работает" и в беды не идет, но видно его здесь */}
           {ov.partial > 0 && (
-            <Tile
+            <HomeTile
               label={t('Частично')}
-              value={ov.partial}
-              tone="degraded"
+              value={String(ov.partial)}
+              ok={t('не отвечают из части локаций')}
+              okTone="warn"
               active={statusFilter === 'partial'}
-              onClick={() => toggleFilter('partial')}
-            />
-          )}
-          {/* Сбои вперемешку с успешными проверками: по последней проверке сайт обычно
-              "работает", и без отдельной плитки его не видно среди проблем */}
-          {(ov.flaky ?? 0) > 0 && (
-            <Tile
-              label={t('Через раз')}
-              value={ov.flaky ?? 0}
-              tone="degraded"
-              active={statusFilter === 'flaky'}
-              onClick={() => toggleFilter('flaky')}
+              title={statusFilter === 'partial' ? t('снять фильтр') : t('показать в списке')}
+              onOpen={() => toggleFilter('partial')}
             />
           )}
           {ov.disabled > 0 && (
-            <Tile
+            <HomeTile
               label={t('Выключены')}
-              value={ov.disabled}
-              muted
+              value={String(ov.disabled)}
+              ok={t('не проверяются')}
+              okTone="muted"
               active={statusFilter === 'disabled'}
-              onClick={() => toggleFilter('disabled')}
+              title={statusFilter === 'disabled' ? t('снять фильтр') : t('показать в списке')}
+              onOpen={() => toggleFilter('disabled')}
             />
           )}
         </div>
@@ -892,35 +891,6 @@ function GroupSummary({ items }: { items: Check[] }) {
       {degraded > 0 && <span className="uptime-badge t-degraded">{degraded} ▼</span>}
       {down === 0 && degraded === 0 && <span className="t-up mon-group-ok">✓</span>}
     </span>
-  )
-}
-
-function Tile({
-  label,
-  value,
-  tone,
-  muted,
-  active,
-  onClick,
-}: {
-  label: string
-  value: number
-  tone?: CheckStatus
-  muted?: boolean
-  active?: boolean
-  onClick?: () => void
-}) {
-  return (
-    <button
-      className={`stat-tile${onClick ? ' stat-tile-btn' : ''}${active ? ' stat-tile-active' : ''}`}
-      onClick={onClick}
-      type="button"
-    >
-      <div className={`stat-num ${tone ? `t-${tone}` : ''}${muted ? ' stat-num-muted' : ''}`}>
-        {value}
-      </div>
-      <div className="stat-lbl">{label}</div>
-    </button>
   )
 }
 

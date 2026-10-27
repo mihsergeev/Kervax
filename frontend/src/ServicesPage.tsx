@@ -43,6 +43,8 @@ import { WebFiles, webfilesBad } from './WebFiles'
 import { GitlabSection, gitlabLine } from './GitlabSection'
 import { byteUnits, fmtInt } from './units'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
+import { HomeTile, tileIssues, usePlural } from './HomeTiles'
+import { byTone, srvIssueRows } from './sectionIssues'
 import { EXPIRY_SHOW_DAYS, EXPIRY_WARN_DAYS, expiryTone } from './checkUtils'
 
 // Список сайтов веб-сервиса: превью + раскрытие в скроллящийся список с фильтром (у
@@ -2521,7 +2523,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   // раздел из ссылки - до первого открытия карточки этой ноды
   const [linkSec, setLinkSec] = useState<{ id: number | null; sec: string | null }>({ id: null, sec: null })
   const [query, setQuery] = useState('')
-  const { tile, setTile, tileProps } = useTileFilter<SFilter>()
+  const { tile, setTile, tileProps } = useTileFilter<SFilter | 'problems'>()
   const [searchRo, setSearchRo] = useState(true) // защита от автозаполнения, см. «Бэкапы»
   const [groupBy, setGroupBy] = useState<'none' | 'group'>(
     () => (localStorage.getItem('kervax_services_groupby') as 'none' | 'group') || 'group',
@@ -2590,6 +2592,10 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const all = withCron.filter((r) => r.items.length > 0)
   // Ищем и по ноде, и по СЕРВИСУ: на этой странице чаще спрашивают «где у меня redis»,
   // а не «что на ноде X» — поиск только по именам нод отвечал бы на другой вопрос.
+  // проблемы служб (srvIssues раздела services: базы, 5xx, очереди, конфиги) - строками первой
+  // плитки; на главной они в плитке "Серверы". Под фильтром "проблемы" нода подписана ими
+  const probs = byTone(srvIssueRows(servers ?? [], t, (sec) => sec === 'services'))
+  const probHint = (id: number) => probs.filter((x) => x.id === id).map((x) => x.text).join(' · ') || null
   const q = query.trim().toLowerCase()
   // нажатая плитка оставляет ноды с ее сервисами (очереди - как в плитке, только на связи)
   const rows = (q
@@ -2601,7 +2607,8 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
           .includes(q) || srvIpHit(server, q),
       )
     : all
-  ).filter((r) => !tile || ((tile !== 'queues' || r.server.online) && r.items.some(SVC_OF[tile])))
+  ).filter((r) => !tile || (tile === 'problems' ? !!probHint(r.server.id)
+    : (tile !== 'queues' || r.server.online) && r.items.some(SVC_OF[tile])))
   const open = withCron.find((r) => r.server.id === openId)
   const groups: { key: string; label: string; items: SrvServices[] }[] =
     groupBy === 'none'
@@ -2639,10 +2646,22 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const qAll = rabbit.flatMap(({ it }) => it.svc?.queues ?? [])
   const qHotAll = qAll.filter(qHot)
   // нажатая плитка: подпись чипа над списком и что сказать, если под нее ничего не попало
-  const filterLabel: Record<SFilter, string> = { db: t('базы данных'), web: t('веб-серверы'), queues: t('очереди') }
-  const filterEmpty: Record<SFilter, string> = {
-    db: t('Баз данных не найдено.'), web: t('Веб-серверов не найдено.'), queues: t('Очередей нет.'),
+  const filterLabel: Record<SFilter | 'problems', string> = {
+    db: t('базы данных'), web: t('веб-серверы'), queues: t('очереди'), problems: t('проблемы'),
   }
+  const filterEmpty: Record<SFilter | 'problems', string> = {
+    db: t('Баз данных не найдено.'), web: t('Веб-серверов не найдено.'), queues: t('Очередей нет.'), problems: t('Проблем нет.'),
+  }
+  const pl = usePlural()
+  const webNote = subOf(
+    cfgBad.length > 0 && t('конфиг с ошибкой: {list}', { list: names(cfgBad) }),
+    certs.length > 0 && t('сертификаты истекают: {list}', { list: names(certs.map((c) => c.label)) }),
+  )
+  const probIss = tileIssues(probs, (_sec, id, _srv, sec) => {
+    if (id == null) return
+    setLinkSec({ id, sec: sec ?? null })
+    setOpenId(id)
+  })
 
   return (
     <div>
@@ -2668,49 +2687,51 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
         </div>
       )}
       {all.length > 0 && (
-        <div className="net-tiles hs-tiles">
-          <NetTile
-            label={t('Ноды с сервисами')}
+        <div className="home-tiles sec-tiles">
+          <HomeTile
+            label={t('Ноды')}
             value={String(all.length)}
-            sub={subOf(
-              t('типов сервисов: {n}', { n: kindsAll.size }),
-              offNames.length > 0 && t('не на связи: {list}', { list: names(offNames) }),
-            )}
-            tone={offNames.length ? 'warn' : undefined}
-            {...tileProps(null)}
+            unit={pl(all.length, t('нода'), t('ноды'), t('нод'))}
+            ok={offNames.length ? t('не на связи: {list}', { list: names(offNames) }) : t('все в норме')}
+            okTone={offNames.length ? 'warn' : 'ok'}
+            foot={t('типов сервисов: {n}', { n: kindsAll.size })}
+            total={subOf(t('нод: {n}', { n: all.length }), offNames.length > 0 && t('не на связи: {list}', { list: names(offNames) }))}
+            issues={probIss}
+            wide
+            active={probIss.length ? tile === 'problems' : tile === null}
+            title={probIss.length ? t('показать ноды с проблемами') : t('показать все')}
+            onOpen={() => setTile(probIss.length && tile !== 'problems' ? 'problems' : null)}
           />
-          <NetTile
+          <HomeTile
             label={t('Базы данных')}
             value={String(dbItems.length)}
-            sub={live.length ? subOf(
-              dbBad.length > 0 && t('проблемы: {list}', { list: names(dbBad) }),
-              dbWarn.length > 0 && t('предупреждения: {list}', { list: names(dbWarn) }),
-            ) || t('все в порядке') : t('свежих данных нет')}
-            tone={!live.length ? undefined : dbBad.length ? 'bad' : dbWarn.length ? 'warn' : 'ok'}
+            ok={!live.length ? t('свежих данных нет') : dbBad.length || dbWarn.length
+              ? t('с замечаниями: {list}', { list: names([...dbBad, ...dbWarn]) }) : t('все в порядке')}
+            okTone={!live.length ? 'muted' : dbBad.length || dbWarn.length ? 'warn' : 'ok'}
             {...tileProps('db')}
+            onOpen={tileProps('db').onClick}
           />
-          <NetTile
+          <HomeTile
             label={t('Веб-серверы')}
             value={String(webItems.length)}
-            sub={subOf(
+            ok={webNote || t('все в порядке')}
+            okTone={webNote ? 'warn' : 'ok'}
+            foot={subOf(
               t('сайтов: {n}', { n: siteN }),
               sitesCtx.hosts != null && missN > 0 && t('без монитора: {n}', { n: missN }),
-              cfgBad.length > 0 && t('конфиг с ошибкой: {list}', { list: names(cfgBad) }),
-              certs.length > 0 && t('сертификаты истекают: {list}', { list: names(certs.map((c) => c.label)) }),
             )}
-            tone={cfgBad.length || certs.some((c) => c.days <= 1) ? 'bad' : certs.some((c) => c.days <= 7) ? 'warn' : 'ok'}
             {...tileProps('web')}
+            onOpen={tileProps('web').onClick}
           />
           {rabbit.length > 0 && (
-            <NetTile
+            <HomeTile
               label={t('Очереди')}
               value={String(rabbit.reduce((n, { it }) => n + (it.svc?.total ?? 0), 0))}
-              sub={subOf(
-                t('сообщений: {m}', { m: rpmText(qAll.reduce((a, x) => a + qDepth(x), 0)) }),
-                qHotAll.length > 0 && t('переполнены: {list}', { list: names(qHotAll.map((x) => x.name)) }),
-              )}
-              tone={qHotAll.length ? 'warn' : 'ok'}
+              ok={qHotAll.length ? t('переполнены: {list}', { list: names(qHotAll.map((x) => x.name)) }) : t('все в порядке')}
+              okTone={qHotAll.length ? 'warn' : 'ok'}
+              foot={t('сообщений: {m}', { m: rpmText(qAll.reduce((a, x) => a + qDepth(x), 0)) })}
               {...tileProps('queues')}
+              onOpen={tileProps('queues').onClick}
             />
           )}
         </div>
@@ -2760,7 +2781,8 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
               <div className="loc-results">
                 {g.items.map((r) => (
                   <HostRow key={r.server.id} srv={r} showGroup={groupBy !== 'group'} onOpen={() => setOpenId(r.server.id)}
-                    only={tile ? SVC_OF[tile] : undefined} hint={tile ? svcHit(tile, r, sitesCtx, t) : null} />
+                    only={tile && tile !== 'problems' ? SVC_OF[tile] : undefined}
+                    hint={tile === 'problems' ? probHint(r.server.id) : tile ? svcHit(tile, r, sitesCtx, t) : null} />
                 ))}
               </div>
             </div>
