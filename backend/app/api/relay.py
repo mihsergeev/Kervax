@@ -53,8 +53,10 @@ async def install_via(server_id: int, body: InstallViaIn, user: CurrentUser, ses
     свой прокси панель не видит вовсе: браузер дописывает его в команду сам.
 
     GRE - включает серверу GRE до панели, как галочка в настройках (своя /30, строка хосту панели),
-    в ответе готов ли хост панели и чем начать команду (gre). Любой другой путь GRE выключает:
-    иначе helper gre-setup все равно поставился бы и увел агента в туннель."""
+    в ответе готов ли хост панели и чем начать команду (gre). Окно зовет его только кнопкой
+    "Включить GRE", а не выбором пути. Другие пути GRE не трогают: включенный в этом окне GRE
+    окно выключает само (PUT /gre), когда уходят на другой путь или закрывают окно, так и не
+    поставив агента, а включенный раньше выключают только кнопкой."""
     server = await _get_or_404(server_id, session, user)
     ip = body.ip.strip()
     if ip and not agent_ip_valid(ip):
@@ -94,7 +96,8 @@ async def install_via(server_id: int, body: InstallViaIn, user: CurrentUser, ses
             await gre_mod.allocate(session, server)
         except ValueError as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
-    server.gre_enabled = body.mode == "gre"
+    if body.mode == "gre":
+        server.gre_enabled = True
     changed = via != server.relay_via_id
     server.relay_via_id = via
     try:

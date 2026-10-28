@@ -348,19 +348,36 @@ def install_cmd(remote: str, node_net: str, peer: str) -> str:
     return f"sh -c '{script}' - {remote} {node_net} {peer}"
 
 
-def install_view(server: Server, host: dict | None = None, now: float | None = None) -> dict:
+def _listed_at(data_dir: str | None = None) -> float | None:
+    """Когда панель последний раз переписала data/gre_tunnels (mtime), None - файла нет."""
+    try:
+        return os.stat(os.path.join(data_dir or get_settings().data_dir, TUNNELS)).st_mtime
+    except OSError:
+        return None
+
+
+# хостовый скрипт пишет ts в конце прогона: прогон, начатый до записи списка, может закончиться
+# чуть позже нее и строки нового сервера еще не знать
+HOST_SKIP_SLACK = 60
+
+
+def install_view(server: Server, host: dict | None = None, now: float | None = None,
+                 listed: float | None = None) -> dict:
     """Можно ли выдавать команду установки через GRE: хост панели должен уже держать свою сторону
     туннеля к этому адресу ноды, иначе команда поднимет туннель в пустоту и будет ждать панель.
 
     state: ready - cmd и connect для команды; off - GRE не включен; no_ip - не известен публичный
     адрес ноды; host_missing - хостовый ops/gre-sync.sh не отвечает вовсе (не стоит); host_stale -
     отвечал, но давно (age - секунд); host_wait - еще не поднял туннель к этому адресу (path-юнит
-    или крон раз в 2 минуты); host_error - поднять не смог (error)."""
-    out = {"state": "off", "cmd": "", "connect": "", "error": "", "age": None}
+    сразу или крон раз в 2 минуты); host_skip - прогон после записи списка был, а туннеля к этому
+    адресу в ответе нет (age - секунд с записи списка); host_error - поднять не смог (error).
+    net - сеть туннеля сервера, когда GRE включен."""
+    out = {"state": "off", "cmd": "", "connect": "", "error": "", "age": None, "net": ""}
     if not server.gre_enabled:
         return out
     mine, node = addrs(server.gre_net or "")
     peer = peer_of(server)
+    out["net"] = server.gre_net if mine else ""
     if not mine or not peer:
         return {**out, "state": "no_ip"}
     host = host if host is not None else host_state()
@@ -374,6 +391,9 @@ def install_view(server: Server, host: dict | None = None, now: float | None = N
     elif now - (host.get("ts") or 0) > HOST_STALE:
         return {**out, "state": "host_stale", "age": int(now - (host.get("ts") or 0))}
     elif hi is None or hi.get("peer") != peer:
+        listed = _listed_at() if listed is None else listed
+        if listed is not None and (host.get("ts") or 0) > listed + HOST_SKIP_SLACK:
+            return {**out, "state": "host_skip", "age": int(now - listed)}
         return {**out, "state": "host_wait"}
     elif not hi.get("ok"):
         return {**out, "state": "host_error", "error": str(hi.get("error") or "")[:300]}

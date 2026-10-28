@@ -2645,6 +2645,15 @@ button.ip-mode.ip-mode-on:hover { border-color: var(--accent); background: color
 .ip-fields { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.7rem 0.85rem; border: 1px solid var(--border); border-radius: 10px; }
 .ip-fields .field { margin: 0; }
 .ip-fields p { margin: 0; }
+/* путь через GRE: кнопка включить/выключить со строкой пояснения, шаги с полосой */
+.ip-gre-act { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem 0.75rem; }
+.ip-gre-act > button { flex: none; }
+.ip-gre-act > span { flex: 1 1 16rem; min-width: 0; line-height: 1.4; }
+.ip-gre-other { margin-top: 0.5rem; padding: 0.55rem 0.85rem; border: 1px solid var(--border); border-radius: 10px; }
+.ip-gre-progress .cmd-progress-steps { gap: 0.3rem 0.8rem; }
+.ip-gre-progress .cmd-step-cur .cmd-step-ic { color: inherit; }
+.ip-gre-progress.cmd-progress-error .cmd-step-cur { color: var(--down); }
+.ip-gre-progress p { overflow-wrap: anywhere; line-height: 1.4; }
 @media (max-width: 600px) {
   .ip-modes { grid-template-columns: minmax(0, 1fr); }
   .ic-cmd-row { flex-direction: column; }

@@ -788,6 +788,7 @@ def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
     except (TypeError, ValueError):
         return []
     sv = rep.get("setup_versions") or {}
+    via_gre = bool(rep.get("connect")) or server.gre_agent_at is not None
     out: list[HelperAdvice] = []
     # идём по тому, что панель РЕАЛЬНО раздаёт (cur), а не по списку в коде
     for name, c in sorted(cur.items()):
@@ -798,8 +799,10 @@ def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
         inst = None if inst is None else str(inst)
         # relay-setup и gre-setup - не про установщик: галочку ставят уже на живой ноде, и
         # установщик, прошедший раньше, его не принесет. Спрятать его на 20 минут значило
-        # оставить kervax_outdated пустым как раз тогда, когда человек пошел гонять плейбук
-        if inst is None and fresh and name not in ("relay-setup", "gre-setup"):
+        # оставить kervax_outdated пустым как раз тогда, когда человек пошел гонять плейбук.
+        # Кроме установки "Через GRE" из окна: GRE включен до установщика, и gre-setup он ставит сам,
+        # а агент с первого отчета ходит туннелем (connect= в отчете, отчет с адреса в туннеле)
+        if inst is None and fresh and (name not in ("relay-setup", "gre-setup") or (name == "gre-setup" and via_gre)):
             continue
         if inst is None or _ver_key(inst) < _ver_key(c):
             out.append(
