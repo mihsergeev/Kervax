@@ -23,6 +23,12 @@
 # Через него установщик качает агента, а агент получает proxy= в конфиге и тоже шлет
 # в панель все через него.
 #
+# Нода, чье TCP-соединение до панели DPI замораживает после ~16 КБ, идет через голый GRE-туннель
+# до хоста панели ("Через GRE" в окне установки): команда сначала поднимает туннель и передает
+# адрес панели в нем в KERVAX_CONNECT (или --connect <адрес>). Все запросы установщика идут на
+# этот адрес с именем панели в TLS и SNI (curl --resolve), агент получает connect= в конфиге.
+# Helper gre-setup подхватывает туннель в течение минуты.
+#
 # Это русская версия установщика: отличается только языком сообщений.
 # Английская — agent/install.sh, её же раздаёт панель по /api/agent/install.sh.
 #
@@ -42,14 +48,19 @@ set -eu
 URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0
 # KERVAX_PROXY в окружении - то же, что --proxy: так его передает команда установки из панели
 PROXY="${KERVAX_PROXY:-}"; WANT_PROXY=0
+# KERVAX_CONNECT (или --connect): адрес панели внутри GRE-туннеля, см. шапку
+CONNECT="${KERVAX_CONNECT:-}"; WANT_CONNECT=0
 for a in "$@"; do
   if [ "$WANT_CA" = 1 ]; then CA_FILE="$a"; WANT_CA=0; continue; fi
   if [ "$WANT_PROXY" = 1 ]; then PROXY="$a"; WANT_PROXY=0; continue; fi
+  if [ "$WANT_CONNECT" = 1 ]; then CONNECT="$a"; WANT_CONNECT=0; continue; fi
   case "$a" in
     --ca-file) WANT_CA=1 ;;
     --ca-file=*) CA_FILE="${a#--ca-file=}" ;;
     --proxy) WANT_PROXY=1 ;;
     --proxy=*) PROXY="${a#--proxy=}" ;;
+    --connect) WANT_CONNECT=1 ;;
+    --connect=*) CONNECT="${a#--connect=}" ;;
     --docker) WANT_DOCKER=1 ;;
     --no-auto) NO_AUTO=1 ;;
     --uninstall) UNINSTALL=1 ;;
@@ -201,12 +212,35 @@ if [ "$PROXY_OK" = 0 ]; then
   echo "--proxy нужен вида http://логин:пароль@хост:порт (подходят и https://, socks5://)." >&2
   exit 1
 fi
+if [ -n "$CONNECT" ] && [ -n "$PROXY" ]; then
+  echo "--connect (GRE до панели) и --proxy вместе не бывают: выберите что-то одно." >&2
+  exit 1
+fi
+case "$CONNECT" in
+  "" | [0-9]*.[0-9]*.[0-9]*.[0-9]*) case "$CONNECT" in *[!0-9.]*) CONNECT_OK=0 ;; *) CONNECT_OK=1 ;; esac ;;
+  *) CONNECT_OK=0 ;;
+esac
+if [ "$CONNECT_OK" = 0 ]; then
+  echo "--connect - это IPv4-адрес панели внутри GRE-туннеля." >&2
+  exit 1
+fi
 # Все запросы к панели идут через pcurl: с --proxy он добавляет прокси, и только им.
 # Helper'ы, пришедшие с панели, работают без него (свои загрузки, локальный API
 # Kubernetes) и его не видят.
 pcurl() {
   if [ -n "$PROXY" ]; then curl --proxy "$PROXY" "$@"; else curl "$@"; fi
 }
+# Через GRE каждый curl этого установщика идет на адрес панели в туннеле, в том числе в условиях
+# helper'ов (условие gre-setup тоже спрашивает панель): имя остается в TLS и SNI, подменяется
+# только адрес, и только для хоста и порта панели
+if [ -n "$CONNECT" ]; then
+  PANEL_HP=${URL#*://}; PANEL_HP=${PANEL_HP%%/*}; PANEL_HP=${PANEL_HP##*@}
+  case "$PANEL_HP" in
+    *:*) ;;
+    *) case "$URL" in http://*) PANEL_HP="$PANEL_HP:80" ;; *) PANEL_HP="$PANEL_HP:443" ;; esac ;;
+  esac
+  curl() { command curl --resolve "$PANEL_HP:$CONNECT" "$@"; }
+fi
 
 if [ "$(id -u)" != "0" ]; then
   echo "Нужен root (sudo)." >&2
@@ -281,6 +315,7 @@ if [ -n "$CA_FILE" ]; then
 fi
 
 echo "→ Скачиваю агент ($ARCH)..."
+[ -n "$CONNECT" ] && echo "  через GRE-туннель: панель на $CONNECT"
 # Каталог агента — /opt/kervax-agent, НЕ /opt/kervax. Панель по умолчанию
 # ставится именно в /opt/kervax (так делает quickstart.sh), и раньше агент
 # селился внутрь неё, а следом делал chown -R kervax по всему каталогу. На
@@ -361,6 +396,9 @@ url=$URL
 token=$TOKEN
 EOF
 [ -n "$PROXY" ] && printf 'proxy=%s\n' "$PROXY" >> "$CONF"
+# агент (2.56+) ходит на адрес панели в GRE-туннеле; дальше connect= держит helper gre-setup
+# и убирает, когда туннель перестает отвечать
+[ -n "$CONNECT" ] && printf 'connect=%s\n' "$CONNECT" >> "$CONF"
 chown kervax "$CONF" 2>/dev/null || true
 chmod 0600 "$CONF"
 umask 022

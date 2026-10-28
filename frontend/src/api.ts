@@ -3576,10 +3576,23 @@ export type GreNeed = { big_ok: number; big_n: number; small_ok: number; small_n
 export function setGre(id: number, enabled: boolean): Promise<Server> {
   return api<Server>(`/api/servers/${id}/gre`, { method: 'PUT', body: JSON.stringify({ enabled }) })
 }
-// путь агента в панель для команды установки: proxy - адрес прокси с логином (ретранслятор, локация)
-export type InstallVia = { mode: 'direct' | 'relay' | 'location' | 'custom'; relay_id?: number; location_id?: number; ip?: string }
-export function installVia(id: number, body: InstallVia): Promise<{ proxy: string; ip: string }> {
-  return api<{ proxy: string; ip: string }>(`/api/servers/${id}/install-via`, { method: 'POST', body: JSON.stringify(body) })
+// путь агента в панель для команды установки: proxy - адрес прокси с логином (ретранслятор, локация),
+// gre - для пути через GRE (он же включает серверу GRE до панели)
+export type InstallVia = { mode: 'direct' | 'relay' | 'location' | 'custom' | 'gre'; relay_id?: number; location_id?: number; ip?: string }
+export function installVia(id: number, body: InstallVia): Promise<{ proxy: string; ip: string; gre: GreInstall | null }> {
+  return api<{ proxy: string; ip: string; gre: GreInstall | null }>(`/api/servers/${id}/install-via`, { method: 'POST', body: JSON.stringify(body) })
+}
+// путь через GRE в окне установки (app/gre.install_view): команду можно выдать только при ready,
+// cmd - начало команды (поднять туннель на ноде), connect - адрес панели в туннеле
+export type GreInstall = {
+  state: 'ready' | 'off' | 'no_ip' | 'host_missing' | 'host_stale' | 'host_wait' | 'host_error'
+  cmd: string
+  connect: string
+  error: string
+  age: number | null
+}
+export function greInstall(id: number): Promise<GreInstall> {
+  return api<GreInstall>(`/api/servers/${id}/gre-install`)
 }
 // шаг 3 окна установки, пока агент молчит (app/install_watch.py): firewall '' | open | opening |
 // no_ip | stale, relay '' | opening | open, *_at - когда нода скачала установщик и агента

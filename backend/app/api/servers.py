@@ -12,6 +12,7 @@ import secrets
 import string
 import tempfile
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -509,15 +510,20 @@ def _install_cmd(token: str) -> str:
     аргументом: аргументы видит в ps любой пользователь ноды все минуты установки, а с токеном
     можно забирать команды вместо ноды. Присваивание перед командой в argv не попадает, а
     окружение процесса читает только его владелец; exec sh передает его install.sh. Прокси окно
-    передает так же, переменной KERVAX_PROXY перед sh -c: ее берут и этот curl, и install.sh."""
+    передает так же, переменной KERVAX_PROXY перед sh -c: ее берут и этот curl, и install.sh.
+    Путь через GRE - переменной KERVAX_CONNECT (адрес панели в туннеле): curl идет на него с
+    именем панели в TLS и SNI (--resolve), install.sh так же, и пишет агенту connect=."""
     base = get_settings().panel_url.rstrip("/") or "https://ПАНЕЛЬ"
     ca = panel_ca_pem()
     # с корнем аргументы начинаются с "--ca-file <файл>": curl берет тот же файл вторым аргументом
     cacert = ' --cacert "$2"' if ca else ""
+    u = urlsplit(base)
+    hostport = f"{u.hostname or 'ПАНЕЛЬ'}:{u.port or (80 if u.scheme == 'http' else 443)}"
     script = (
         "f=$(mktemp) && for i in $(seq 24); do"
         f" curl -fsL --compressed --connect-timeout 10 -m 120{cacert}"
         ' ${KERVAX_PROXY:+--proxy "$KERVAX_PROXY"}'
+        f' ${{KERVAX_CONNECT:+--resolve "{hostport}:$KERVAX_CONNECT"}}'
         f' -o "$f" {base}/api/agent/install.sh && exec sh "$f" "$@";'
         f' echo "{INSTALL_WAIT_MSG}" >&2; sleep 10; done;'
         f' echo "{INSTALL_GIVEUP_MSG}" >&2; exit 1'

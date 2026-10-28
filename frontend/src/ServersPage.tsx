@@ -1,4 +1,4 @@
-import { localizeInstallCmd, withProxy } from './installProxy'
+import { localizeInstallCmd, withGre, withProxy } from './installProxy'
 import { InstallPath, type InstallMode } from './InstallPath'
 import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -5670,7 +5670,6 @@ function ServerRow({
   const issues = srvIssues(s, t)
   const onFire = s.online && issues.length > 0
   const known = knownItems(s, t)
-  const muteItems = collectMutes(s, t, ['alert'])
   return (
     // Вся карточка — вход в сервер, как строки «Докера», «Сервисов» и «Сайтов». Раньше
     // открывали только имя с адресом: наведение на карточку ничего не подсвечивало, а
@@ -5772,7 +5771,8 @@ function ServerRow({
           {s.gpu_sum && (
             <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
           )}
-          {muteItems.length > 0 && <MuteChip items={muteItems} t={t} />}
+          {/* заглушки в списке не показываем: чип со сроком без состава читался как отключенный
+              мониторинг сервера, а речь об одном-двух алертах. Что именно заглушено - в карточке */}
           {!s.online && <span className="type-chip off">{t('оффлайн')}</span>}
         </div>
         <div className="check-target mono"><ServerAddr s={s} t={t} /></div>
@@ -5945,11 +5945,14 @@ export function InstallModal({
   const { t } = useI18n()
   useEscape(onClose)
   const [copied, setCopied] = useState('')
-  // путь до панели (InstallPath): прокси ретранслятора, локации или свой - в команду
-  const [path, setPath] = useState<InstallMode>(mode ?? 'direct')
+  // путь до панели (InstallPath): прокси ретранслятора, локации или свой - в команду; GRE - начало
+  // команды, которое поднимает туннель. Серверу с GRE до панели окно сразу предлагает GRE
+  const start: InstallMode = mode ?? (enroll.server.gre_enabled ? 'gre' : 'direct')
+  const [path, setPath] = useState<InstallMode>(start)
   const [proxy, setProxy] = useState('')
+  const [gre, setGre] = useState<{ cmd: string; connect: string } | null>(null)
   const base = localizeInstallCmd(enroll.install_cmd, t)
-  const cmd = withProxy(base, proxy)
+  const cmd = path === 'gre' ? localizeInstallCmd(withGre(enroll.install_cmd, gre), t) : withProxy(base, proxy)
   // путь через прокси выбран, а прокси в команде еще нет: копировать рано
   const pending = path !== 'direct' && cmd === base
   // живая проверка: поллим сервер, пока агент не пришлёт первый отчёт
@@ -5994,10 +5997,14 @@ export function InstallModal({
           </div>
           <InstallPath
             server={enroll.server}
-            initial={mode}
+            initial={start}
             onMode={setPath}
             onProxy={(p) => {
               setProxy(p)
+              setCopied('')
+            }}
+            onGre={(g) => {
+              setGre(g)
               setCopied('')
             }}
           />
@@ -6010,12 +6017,17 @@ export function InstallModal({
             <span className="ic-once muted small">{t('токен показывается один раз')}</span>
           </div>
           <div className="ic-cmd-row">
-            <InstallCmd cmd={cmd} token={enroll.token} />
+            {pending && path === 'gre' ? (
+              // команда без туннеля на такой ноде висела бы часами: до готовности хоста ее нет вовсе
+              <pre className="install-cmd ic-cmd ic-cmd-wait muted">{t('Команда появится, когда хост панели поднимет свою сторону туннеля')}</pre>
+            ) : (
+              <InstallCmd cmd={cmd} token={enroll.token} />
+            )}
             <button className={`ic-copy${connected ? ' ghost' : ''}`} disabled={pending} onClick={() => copy(cmd, 'cmd')}>
               {copied === 'cmd' ? t('Скопировано ✓') : t('Копировать')}
             </button>
           </div>
-          {pending && (
+          {pending && path !== 'gre' && (
             <p className="ic-hint t-degraded small">{t('Сначала заполните поля выше: прокси попадет в команду')}</p>
           )}
           <details className="ic-more">
@@ -6030,7 +6042,11 @@ export function InstallModal({
               {t('Допишите в конец команды любое имя этого инстанса, например main. Агенты будут работать рядом, каждый со своей панелью.')}
             </p>
             <div className="ic-cmd-row">
-              <InstallCmd cmd={cmd} token={enroll.token} add="main" />
+              {pending && path === 'gre' ? (
+                <pre className="install-cmd ic-cmd ic-cmd-wait muted">{t('Команда появится, когда хост панели поднимет свою сторону туннеля')}</pre>
+              ) : (
+                <InstallCmd cmd={cmd} token={enroll.token} add="main" />
+              )}
               <button className="ghost ic-copy" disabled={pending} onClick={() => copy(`${cmd} main`, 'main')}>
                 {copied === 'main' ? t('Скопировано ✓') : t('Копировать')}
               </button>
@@ -6933,7 +6949,7 @@ function ServerDetail({
             {/* что заглушено - значком, сами заглушки в разделе "Алерты" */}
             {muteItems.length > 0 && (
               <button className="srv-head-chip" onClick={() => go('alerts')}>
-                <MuteChip items={muteItems} t={t} />
+                <MuteChip items={muteItems} t={t} what />
               </button>
             )}
             {/* заметка живет в редактировании сервера, здесь - значком с текстом в подсказке */}

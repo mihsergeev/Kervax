@@ -449,17 +449,24 @@ function muteWhen(items: MuteItem[], t: TFn): string {
   return u ? t('ещё {d}', { d: muteLeft(u, t) }) : ''
 }
 
-// Чип в строке списка: словом, без эмодзи, как остальные чипы строки
-export function MuteChip({ items, t }: { items: MuteItem[]; t: TFn }) {
+// Чип словом, без эмодзи, как остальные чипы. what - что именно заглушено ("заглушено: 5xx сайт"),
+// а не на сколько: в шапке сервера голое "заглушено бессрочно" читалось как "сервер не мониторим"
+export function MuteChip({ items, t, what }: { items: MuteItem[]; t: TFn; what?: boolean }) {
   const perm = items.some((i) => !i.until)
   return (
     <span
       className={`type-chip mute-chip${perm ? ' mute-chip-perm' : ''}`}
       title={items.map((i) => muteText(i, t)).join('\n')}
     >
-      {t('заглушено')}
-      <span className="mute-chip-when"> {muteWhen(items, t)}</span>
-      {items.length > 1 && ` · ${items.length}`}
+      {what ? (
+        t('заглушено: {list}', { list: muteBrief(items, t) })
+      ) : (
+        <>
+          {t('заглушено')}
+          <span className="mute-chip-when"> {muteWhen(items, t)}</span>
+          {items.length > 1 && ` · ${items.length}`}
+        </>
+      )}
     </span>
   )
 }
