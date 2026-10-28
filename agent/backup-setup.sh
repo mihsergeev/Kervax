@@ -140,7 +140,11 @@ AGENT_USER=kervax
 #       sh -c, --exclude, --exclude-file, --files-from) into report.d/backup-unit.json, only paths
 #       and file names. set-paths refuses such a runner (adopt first), a dump warns when its
 #       directory is outside the unit's paths, and adopt takes the paths from the same parser
-KERVAX_SETUP_VERSION=0.46  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.47: a network failure on the way to the backup server (a stalled or dropped connection, exit 1
+#       with timeout / connection reset / 502-504 and the like in the output) is retried in the same
+#       run: up to 3 attempts 5 minutes apart, the metrics once after the last one. Other exit codes
+#       end at once. The panel runner has the loop, older scripts get it on the next refresh
+KERVAX_SETUP_VERSION=0.47  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -881,6 +885,80 @@ retry_lock_maybe() {
   rm -f "$f.blk"
   if bash -n "$f.tmp" 2>/dev/null && grep -qF "$RETRY_MARK" "$f.tmp" && grep -qF "$RETRY_EVAL" "$f.tmp"; then
     cp -a "$f" "$f.kervax-pre-retry.bak"
+    chmod --reference="$f" "$f.tmp"; chown --reference="$f" "$f.tmp"; mv -f "$f.tmp" "$f"
+  else
+    rm -f "$f.tmp"
+  fi
+}
+
+# A connection to the backup server that stalls or drops on the way (request timeout, connection
+# timed out) fails the night backup with exit 1, though the server is fine and the next run passes.
+# Such a failure is retried in the same run: up to 3 attempts 5 minutes apart, only for exit 1 with
+# a network error in the output. Exit 10/11/12 (no repository, lock, password) and everything else
+# end at once; no unlock between attempts (the runner did it once before the first one). RC is the
+# result of the last attempt, the metrics are written once after the block.
+NET_RETRY_MARK='# kervax-net-retry: 1'
+net_retry_block() {
+  printf '%s\n' "$NET_RETRY_MARK" \
+    '# A network failure on the way to the backup server is retried: up to 3 attempts 5 minutes apart' \
+    '# (exit 1 with a network error only; a wrong password, a missing repository or a lock end at once).' \
+    'BK_TRIES=3' \
+    'BK_PAUSE=300' \
+    'BK_OUT="$(mktemp 2>/dev/null)" || BK_OUT=/dev/null' \
+    'BK_TRY=1' \
+    'while :; do' \
+    '  echo "restic backup: attempt $BK_TRY of $BK_TRIES"' \
+    "  $RETRY_EVAL"' 2>&1 | tee "$BK_OUT"' \
+    '  RC=${PIPESTATUS[0]}' \
+    '  [ "$RC" -eq 1 ] && [ "$BK_TRY" -lt "$BK_TRIES" ] || break' \
+    "  grep -aqiE 'timeout|timed out|connection reset|connection refused|broken pipe|unexpected EOF|no route to host|network is unreachable|TLS handshake|502 Bad Gateway|503 Service Unavailable|504 Gateway' \"\$BK_OUT\" || break" \
+    '  echo "restic backup: attempt $BK_TRY failed on the network (exit $RC), next one in $BK_PAUSE s"' \
+    '  sleep "$BK_PAUSE"' \
+    '  BK_TRY=$((BK_TRY + 1))' \
+    'done' \
+    '[ "$BK_OUT" = /dev/null ] || rm -f "$BK_OUT"'
+}
+# Scripts made earlier (the ansible role, an older helper) get the block once, after retry_lock_maybe
+# gave them RETRY_EVAL: the single RETRY_EVAL line with "RC=$?" right after it (same line after ";" -
+# the helper's runner - or the next line - the ansible role) is replaced by the block; what stood
+# before and after it on that line stays on lines of its own. A script that already retries (the
+# marker, or a block put in by hand: BK_TRIES / "попытка") is left alone. Same safety as above: bash -n
+# before replacing, the original kept as .kervax-pre-netretry.bak.
+net_retry_maybe() {
+  local f; f="$(find_script)" || return 0
+  [ -n "$f" ] && [ -f "$f" ] || return 0
+  grep -qF "$NET_RETRY_MARK" "$f" && return 0
+  grep -qE 'BK_TRIES=|попытка' "$f" && return 0
+  [ "$(grep -cF "$RETRY_EVAL" "$f")" = 1 ] || return 0
+  net_retry_block > "$f.blk"
+  awk -v bf="$f.blk" -v ev="$RETRY_EVAL" '
+    function flush_block(ind,   l) { while ((getline l < bf) > 0) print ind l; close(bf) }
+    function trim(s) { sub(/^[ \t;]+/, "", s); sub(/[ \t;]+$/, "", s); return s }
+    wait_rc {
+      wait_rc = 0
+      if ($0 ~ /^[ \t]*RC=\$\?[ \t]*$/) { if (pre != "") print ind pre; flush_block(ind); done = 1; next }
+      bad = 1; print held
+    }
+    (i = index($0, ev)) && !done && !bad {
+      ind = $0; sub(/[^ \t].*$/, "", ind)
+      pre = trim(substr($0, 1, i - 1)); post = substr($0, i + length(ev))
+      if (post ~ /^[ \t]*;[ \t]*RC=\$\?([ \t;]|$)/) {
+        sub(/^[ \t]*;[ \t]*RC=\$\?/, "", post); post = trim(post)
+        if (pre != "") print ind pre
+        flush_block(ind)
+        if (post != "") print ind post
+        done = 1; next
+      }
+      if (post ~ /^[ \t]*$/) { held = $0; wait_rc = 1; next }
+      bad = 1
+    }
+    { print }
+    END { if (wait_rc) print held; if (!done || bad) exit 1 }' "$f" > "$f.tmp"
+  local rc=$?
+  rm -f "$f.blk"
+  if [ "$rc" = 0 ] && bash -n "$f.tmp" 2>/dev/null && grep -qF "$NET_RETRY_MARK" "$f.tmp" \
+     && [ "$(grep -cF "$RETRY_EVAL" "$f.tmp")" = 1 ]; then
+    cp -a "$f" "$f.kervax-pre-netretry.bak"
     chmod --reference="$f" "$f.tmp"; chown --reference="$f" "$f.tmp"; mv -f "$f.tmp" "$f"
   else
     rm -f "$f.tmp"
@@ -1909,7 +1987,12 @@ fi
 # (restic 0.16+; an older restic does not know the flag and runs as before).
 KV_RETRY_LOCK=""
 case "$(${BACKUP_CMD%% *} --help 2>/dev/null)" in *--retry-lock*) KV_RETRY_LOCK=" --retry-lock 2h" ;; esac
-ts_start=$(date +%s); set +e; eval "${BACKUP_CMD/ backup / backup$KV_RETRY_LOCK }"; RC=$?; set -e; dur=$(( $(date +%s) - ts_start ))
+ts_start=$(date +%s); set +e
+RUNNER_BODY
+    # the duration covers all the attempts
+    net_retry_block
+    cat <<'RUNNER_BODY'
+set -e; dur=$(( $(date +%s) - ts_start ))
 if [ $RC -eq 0 ] || [ $RC -eq 3 ]; then write_metrics 1 0 "$dur"; else write_metrics 0 0 "$dur"; fi
 RUNNER_BODY
     vanished_ok_block
@@ -3213,7 +3296,7 @@ case "${1:-}" in
   get-config)    cmd_get_config ;;
   # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
   refresh)       refresh_config || true; unit_report_maybe || true; custom_scan_maybe; kube_access_maybe || true; dumps_trigger_maybe || true
-                 dumps_rsyncable_maybe || true; vanished_ok_maybe || true; retry_lock_maybe || true; https_cacert_maybe || true
+                 dumps_rsyncable_maybe || true; vanished_ok_maybe || true; retry_lock_maybe || true; net_retry_maybe || true; https_cacert_maybe || true
                  backup_runs_maybe || true; backup_perms_maybe || true; allow_seed_maybe || true; res_cleanup
                  verify_maybe || true ;;
   custom-scan)   cmd_custom_scan ;;
