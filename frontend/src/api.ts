@@ -2071,7 +2071,7 @@ export type FailedUnit = {
   status: number | null // код выхода или номер сигнала
   since: number // когда упал (unix, часы ноды), 0 - неизвестно
   restarts: number | null
-  log: string[]
+  log?: string[] // нет у учетки только для просмотра без галки "может читать логи"
 }
 export type UnitsBlock = { v: number; ts: number; units: FailedUnit[]; fix: boolean }
 // DNS ноды (агент 2.25): каждый резолвер напрямую раз в минуту, резолв имени не из кэша раз в 5 минут
@@ -2848,7 +2848,9 @@ export type WebRate = {
   rpm: number
   e5?: number // ответов 5xx в минуту по всем логам
   logs?: {
-    log: string
+    // путь лога; учетке только для просмотра без галки "может читать логи" бэкенд его не отдает
+    // (_strip_logs в api/servers.py), подпись тогда из name и sites
+    log?: string
     name?: string // ns/под для логов kubernetes: «0.log» в панели ни о чём не говорит
     rpm: number
     e5?: number

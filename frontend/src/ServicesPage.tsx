@@ -30,7 +30,7 @@ import { useI18n } from './i18n'
 import { toastError } from './toast'
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
-import { shortList, srvIpHit, srvIssues, srvMuted, webRate } from './serverUtils'
+import { shortList, srvIpHit, srvIssues, srvMuted, webLogLabel, webRate } from './serverUtils'
 import { fmtRel } from './ServersPage'
 import { FixSteps, useFixDone } from './FixSteps'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
@@ -2135,7 +2135,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                             list: rate.logs!.slice()
                               .sort((a, b) => b.rpm - a.rpm)
                               .slice(0, 3)
-                              .map((l) => `${l.sites?.[0] || l.log.split('/').pop()} ${rpmText(l.rpm)}`)
+                              .map((l) => `${l.sites?.[0] || webLogLabel(l)} ${rpmText(l.rpm)}`)
                               .join(', '),
                           })}`}
                         </div>

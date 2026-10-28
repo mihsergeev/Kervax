@@ -2036,8 +2036,11 @@ async def server_web_errors(
     session: SessionDep,
     hours: int = Query(default=24, ge=1, le=720),
 ) -> list[WebErrorOut]:
-    """Ошибки 5xx по логам за окно: где, сколько, какие коды и пути. Сюда ведёт алерт."""
+    """Ошибки 5xx по логам за окно: где, сколько, какие коды и пути. Сюда ведёт алерт.
+    Сами строки access-лога (в URL бывают токены) - как у /lines: учетке только для просмотра
+    только с галкой "может читать логи", без нее сводка без строк."""
     server = await _get_or_404(server_id, session, user)
+    logs_ok = not (user.role == "viewer" and not user.can_read_logs)
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
     # какие логи нода пишет сейчас: остальные за окно - история (сайты разнесли по логам)
     web = ((server.last_report or {}).get("extras") or {}).get("web-rate")
@@ -2081,7 +2084,7 @@ async def server_web_errors(
     for k, a in sorted(acc.items(), key=lambda kv: -kv[1]["errors"]):
         top = sorted(a["paths"].items(), key=lambda kv: -kv[1])[:8]
         hosts = sorted(a["hosts"].items(), key=lambda kv: -kv[1])[:10]
-        got = lines.get(k, [])
+        got = lines.get(k, []) if logs_ok else []
         out.append(WebErrorOut(**{**a, "key": k, "paths": [{"p": p, "n": n} for p, n in top],
                                   "hosts": [{"h": h, "n": n} for h, n in hosts],
                                   "lines": got[-5:], "lines_n": len(got),

@@ -143,7 +143,10 @@ async def test_rejected_error_is_visible_in_send_alert(http):
     """Кнопка "проверить" в настройках видит отказ: chat not found не выдается за успех."""
     http.answer = lambda url, j: _Resp({"ok": False, "description": "Bad Request: chat not found"}, 400)
     errors = await alerts.send_alert(_cfg(), "проверка")
-    assert errors == ["Telegram: HTTP 400: Bad Request: chat not found"] and errors.rejected == 1
+    assert errors.rejected == 1 and len(errors) == 1
+    # что делать, а не голое HTTP 400; исходный ответ Telegram остается в скобках
+    assert errors[0].startswith("Telegram: бот не состоит в чате ")
+    assert errors[0].endswith("(HTTP 400: Bad Request: chat not found)")
 
 
 @pytest.mark.parametrize("fail", ["connect", "timeout", "502", "429"])
@@ -282,3 +285,22 @@ def test_msg_mutes_survive_tail_and_storm():
     (storm,) = alerts.merge_storm(parts)
     assert storm.mutes == ["disk:/data", "disk:/var"]
     assert storm.tail("\n📝 заметка").mutes == storm.mutes
+
+
+@pytest.mark.parametrize("code,data,want", [
+    (403, {"description": "Forbidden: bot was blocked by the user"}, "бота заблокировали"),
+    (403, {"description": "Forbidden: bot can't initiate conversation with a user"}, "нажмите Start"),
+    (403, {"description": "Forbidden: bot was kicked from the supergroup chat"}, "удалили из чата -100"),
+    (400, {"description": "Bad Request: group chat was upgraded to a supergroup chat",
+           "parameters": {"migrate_to_chat_id": -1009}}, "новый id -1009"),
+    (401, {"description": "Unauthorized"}, "токен бота неверный"),
+    (404, {"description": "Not Found"}, "проверьте токен и адрес API"),
+])
+def test_tg_rejection_says_what_to_do(code, data, want):
+    msg = alerts._tg_error(_Resp(data, code), code, "-100")
+    assert want in msg and msg.endswith(f"(HTTP {code}: {data['description']})")
+
+
+def test_tg_unknown_rejection_stays_raw():
+    r = _Resp({"description": "Bad Request: something new"}, 400)
+    assert alerts._tg_error(r, 400, "-100") == "HTTP 400: Bad Request: something new"

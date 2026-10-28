@@ -6,9 +6,11 @@
 сломан — т.е. ловит ровно те случаи, когда сама панель сообщить о себе не может.
 """
 import asyncio
+import contextlib
 import contextvars
 import logging
 import os
+import tempfile
 import time
 
 import httpx
@@ -157,11 +159,18 @@ async def write_heartbeat(
         ]
         os.makedirs(settings.data_dir, exist_ok=True)
         path = os.path.join(settings.data_dir, "heartbeat")
-        tmp = f"{path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-        os.chmod(tmp, 0o600)  # креды каналов — не мир-читаемо
-        os.replace(tmp, path)
+        # свой временный файл (mkstemp, сразу 600 - креды каналов не мир-читаемы ни на миг):
+        # общее heartbeat.tmp у двух писателей давало бы ту же гонку, что у agent_allow_ips
+        fd, tmp = tempfile.mkstemp(dir=settings.data_dir, prefix="heartbeat.")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
     except Exception:  # noqa: BLE001 — пульс не должен ронять цикл планировщика
         log.warning("не удалось записать heartbeat", exc_info=True)
 

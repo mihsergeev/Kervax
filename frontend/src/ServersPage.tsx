@@ -3366,12 +3366,12 @@ type UnitHint = { what: string; steps: UnitStep[]; foot?: string; noRestart?: bo
 // плейбук сам смотрит, где есть что убирать, поэтому сразу на весь парк
 const CLEANUP = 'ansible-playbook playbooks/units_cleanup.yml -l kervax'
 function unitHint(u: FailedUnit, all: FailedUnit[], t: TFn): UnitHint | null {
-  const log = u.log.join('\n')
+  const log = (u.log ?? []).join('\n')
   const n = u.unit
   const again = t('Перезапуск не поможет: юнит упадет снова.')
   const fleet = (text: string): UnitStep => ({ id: 'fleet', alt: true, text, cmd: CLEANUP })
   // у давно упавшего mdmonitor.service лог уже ротирован, причину видно у mdmonitor-oneshot
-  const mdNoMail = all.some((x) => x.unit.startsWith('mdmonitor') && x.log.join('\n').includes('No mail address'))
+  const mdNoMail = all.some((x) => x.unit.startsWith('mdmonitor') && (x.log ?? []).join('\n').includes('No mail address'))
   if (n.startsWith('mdmonitor') && (log.includes('No mail address') || (!log && mdNoMail))) {
     // как в units_cleanup.yml: таймер oneshot выключить, mdmonitor.service замаскировать (его
     // запускает еще и правило udev), отметку сбросить у тех, что упали. Таймер трогаем, только
@@ -4796,10 +4796,10 @@ function FailedUnits({ server: s, onChanged, onOom }: { server: Server; onChange
           const us = st[key]
           const ol = units.length === 1 ? oomOf(u) : undefined
           // одинаковые строки у юнитов карточки - один раз
-          const ulog = [...new Set(units.flatMap((x) => x.log))]
+          const ulog = [...new Set(units.flatMap((x) => x.log ?? []))]
           const log = ol?.line ? [`kernel: ${ol.line}`, ...ulog] : ulog
           // журнал - у того, по чьему логу видна причина; "назад" - по последнему падению
-          const jrUnit = (units.find((x) => x.log.length) ?? u).unit
+          const jrUnit = (units.find((x) => x.log?.length) ?? u).unit
           const latest = units.reduce((a, b) => ((b.since ?? 0) > (a.since ?? 0) ? b : a))
           return (
             <div key={key} className={`unit-row${perm || snoozed || ol?.quiet ? ' unit-muted' : ''}`}>
@@ -7471,7 +7471,7 @@ function ServerDetail({
                     .slice(0, 5)
                     .map((l) => (
                       <StatRow
-                        key={l.log}
+                        key={l.log ?? webLogLabel(l)}
                         color={webColor('web', webSeriesName(webLogLabel(l)))}
                         name={webLogLabel(l)}
                         value={fmtCount(l.rpm)}
