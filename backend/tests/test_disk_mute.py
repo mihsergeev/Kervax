@@ -93,7 +93,6 @@ def test_used_replacement_disk_is_quiet():
     assert disk_health_problems(block) == []
     hist = disk_wear.update(None, block, NOW)
     assert not hist["DISK-NEW"].get("soon")
-    assert disk_health_problems(block, wear_hist=hist) == []
 
 
 async def test_lifted_by_collector(tmp_path, monkeypatch):

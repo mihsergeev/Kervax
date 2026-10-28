@@ -46,7 +46,7 @@ def test_apt_only_through_quiet_wrapper():
 
 
 def test_versions_bumped_for_the_apt_fix():
-    for name, ver in (("diskhealth-setup.sh", "0.4"), ("backup-setup.sh", "0.47"), ("backupserver-setup.sh", "0.37")):
+    for name, ver in (("diskhealth-setup.sh", "0.5"), ("backup-setup.sh", "0.47"), ("backupserver-setup.sh", "0.38")):
         assert f"\nKERVAX_SETUP_VERSION={ver}  # MAJOR.MINOR" in _src(name), name
 
 

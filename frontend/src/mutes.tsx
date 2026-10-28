@@ -11,6 +11,7 @@ import {
   snoozeServer,
   snoozeServerAlert,
   muteServerKeys,
+  type MuteLive,
   type Server,
 } from './api'
 import { HOME_MUTE, homeMuteLabel } from './homeGroups'
@@ -24,6 +25,10 @@ export type MuteItem = {
   group: MuteGroup
   // что снимать: ключ в alert_mutes или alert_snoozes, имя репо, ключ покрытия; '' - снуз всего сервера
   key: string
+  // есть ли сейчас то, что она глушит (app/mute_watch.py); нет - панель этого не видит
+  live?: MuteLive
+  // временная кончилась при живой проблеме, панель ее держит: исходный срок (until - до чего продлено)
+  over?: string
 }
 
 export type MuteGroup = 'alert' | 'repo' | 'audit'
@@ -319,6 +324,33 @@ export function kindLabel(k: string, t: TFn): string {
   return muteKindLabel(k, t) ?? t(SNOOZE_KINDS.find((x) => x.k === k)?.label ?? RULE_KIND_LABELS[k] ?? k)
 }
 
+// Состояние заглушки алертов: есть ли сейчас то, что она глушит, и держит ли ее панель после срока
+export function withLive(s: Server, i: MuteItem): MuteItem {
+  const live = s.mute_live?.[i.key]
+  const over = i.until ? s.mute_over?.[i.key]?.at : undefined
+  return { ...i, ...(live ? { live } : {}), ...(over ? { over } : {}) }
+}
+
+// "5 мин" / "3 ч" / "2 дн" от момента в прошлом
+export function agoShort(iso: string, t: TFn, now = Date.now()): string {
+  const m = Math.max(1, Math.round((now - Date.parse(iso)) / 60000))
+  if (m < 60) return t('{n} мин', { n: m })
+  const h = Math.round(m / 60)
+  return h < 48 ? t('{n} ч', { n: h }) : t('{n} дн', { n: Math.round(h / 24) })
+}
+
+// Тихо достаточно долго, чтобы предлагать снять: не минутное затишье между волнами
+export const QUIET_OFFER_MS = 3600_000
+export const muteQuiet = (i: MuteItem, now = Date.now()) =>
+  i.live?.on === 0 && now - Date.parse(i.live.t) >= QUIET_OFFER_MS
+
+// Рядом с заглушкой: "тихо 2 дн" или "сейчас есть: 3 пода не работают". Пусто - панель не видит
+export function muteLiveText(i: MuteItem, t: TFn, now = Date.now()): string {
+  if (!i.live) return ''
+  if (i.live.on === 0) return t('тихо {d}', { d: agoShort(i.live.t, t, now) })
+  return i.live.w ? t('сейчас есть: {w}', { w: i.live.w }) : t('проблема сейчас есть')
+}
+
 // Всё заглушённое по серверу. groups сужает до «своей» страницы.
 export function collectMutes(
   s: Server,
@@ -330,11 +362,11 @@ export function collectMutes(
   const out: MuteItem[] = []
   if (groups.includes('alert')) {
     if (s.snooze_until && new Date(s.snooze_until).getTime() > now)
-      out.push({ label: t('Весь сервер'), until: s.snooze_until, group: 'alert', key: '' })
+      out.push(withLive(s, { label: t('Весь сервер'), until: s.snooze_until, group: 'alert', key: '' }))
     for (const [k, u] of Object.entries(s.alert_snoozes ?? {}))
-      if (new Date(u).getTime() > now) out.push({ label: label(k), until: u, group: 'alert', key: k })
+      if (new Date(u).getTime() > now) out.push(withLive(s, { label: label(k), until: u, group: 'alert', key: k }))
     for (const k of s.alert_mutes ?? [])
-      if (!isDecision(k)) out.push({ label: label(k), until: null, group: 'alert', key: k })
+      if (!isDecision(k)) out.push(withLive(s, { label: label(k), until: null, group: 'alert', key: k }))
   }
   if (groups.includes('repo'))
     for (const r of s.backup_repo_mutes ?? [])
@@ -420,8 +452,16 @@ export function muteLeft(until: string, t: TFn): string {
 
 // Строка «что и насколько» — для подсказки
 export function muteText(i: MuteItem, t: TFn): string {
-  return `${i.label} — ${i.until ? t('ещё {d}', { d: muteLeft(i.until, t) }) : (i.group === 'alert' && muteAutoNote(i.key, t)) || t('бессрочно')}`
+  const when = i.over
+    ? t('срок вышел {d}, а проблема есть', { d: muteDate(i.over) })
+    : i.until ? t('ещё {d}', { d: muteLeft(i.until, t) }) : (i.group === 'alert' && muteAutoNote(i.key, t)) || t('бессрочно')
+  const live = i.over ? '' : muteLiveText(i, t)
+  return `${i.label} — ${when}${live ? `, ${live}` : ''}`
 }
+
+// "30.10, 18:22"
+export const muteDate = (u: string) =>
+  new Date(u).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 
 // Короткая подпись для сводки. Типы алертов перечисляем поимённо (их единицы), а репо
 // и пункты покрытия сворачиваем в счётчик: на серверах их по 5-6, полным списком они

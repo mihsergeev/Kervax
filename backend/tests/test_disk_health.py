@@ -63,7 +63,8 @@ def test_rebuild_progress_and_spare():
 
 def test_smart_failed_worn_out_ssd_is_not_critical():
     """mon-a 05.10.2026: Micron 1100 выработал ресурс (202 = 0), SMART говорит FAILED.
-    Менять надо, но диск работает: проблема, а не авария."""
+    helper до 0.5 не говорит, какой атрибут провален: менять надо, но диск работает - проблема,
+    а не авария."""
     worn = _disk("sda", "170516095C98", type="sata", health="FAILED!", failing=True, wear=100,
                  realloc=1, pending=0, uncorr=0, crc=0)
     dying = _disk("sdb", "X1", type="sata", health="FAILED!", failing=True, wear=None)
@@ -74,25 +75,71 @@ def test_smart_failed_worn_out_ssd_is_not_critical():
     assert probs[0] == (3, "smart:X1", "диск sdb (Samsung SSD 990 PRO 2TB, X1): SMART считает диск неисправным")
 
 
-def test_growing_counters_wear_crc_and_nvme_warning():
+def test_smart_failed_only_by_wear_attribute_is_not_a_problem():
+    """helper 0.5 называет провалившиеся атрибуты (failnow): FAILED только по остатку ресурса -
+    износ, а не поломка. По любому другому атрибуту - авария, сколько бы ни было износа."""
+    worn = _disk("sda", "W1", type="sata", health="FAILED!", failing=True, wear=100,
+                 failnow="Percent_Lifetime_Remain")
+    bad = _disk("sdb", "W2", type="sata", health="FAILED!", failing=True, wear=100,
+                failnow="Percent_Lifetime_Remain,Reallocated_Sector_Ct")
+    probs = disk_health_problems({"v": 1, "ts": 1, "disks": [worn, bad]})
+    assert [(lvl, k) for lvl, k, _t in probs] == [(3, "smart:W2")]
+
+
+def test_nvme_wear_over_100_with_clean_smart_is_healthy():
+    """Повод: два NVMe в RAID1 с Percentage Used 212% и 137%, запас 100%, ни одной ошибки, журнал
+    ядра чистый - а панель красила их красным. Percentage Used - оценка вендора (бывает до 255),
+    за 100% диск выходит из гарантии, а не из строя."""
+    disks = [_disk("nvme0n1", "N0", wear=212, poh=40000), _disk("nvme1n1", "N1", wear=137, poh=40000),
+             _disk("nvme2n1", "N2", wear=93), _disk("nvme3n1", "N3", wear=100, spare=97)]
+    block = {"v": 1, "ts": 1, "raid": [_raid("md0", "nvme0n1p1 nvme1n1p1", active=2)], "disks": disks}
+    assert disk_health_problems(block) == []
+    assert disk_health_problems(block, short=True) == []
+
+
+def test_real_signs_of_a_dying_nvme():
+    disks = [
+        _disk("nvme0n1", "S1", spare=15),                     # запас ниже 20% - пора менять
+        _disk("nvme1n1", "S2", spare=8, spare_thr=10),        # ниже порога, а бит еще не стоит
+        _disk("nvme2n1", "S3", spare=5, crit="0x01", health="FAILED!", failing=True),
+        _disk("nvme3n1", "S4", media=3, wear=212),            # давние ошибки носителя - тоже признак
+        _disk("nvme4n1", "S5", grow={"ioerr": 4}),            # журнал ошибок NVMe: новые ошибки I/O
+        _disk("nvme5n1", "S6", crit="0x0c"),
+        _disk("nvme6n1", "S7", spare=99),                     # начал тратить запас - только заметка
+    ]
+    by_key = {k: (lvl, t) for lvl, k, t in disk_health_problems({"v": 1, "ts": 1, "disks": disks}, short=True)}
+    assert by_key["spare:S1"] == (2, "диск nvme0n1: запас ячеек 15% (порог 10%) - пора менять")
+    assert by_key["spare:S2"] == (3, "диск nvme1n1: запас ячеек 8% при пороге 10% - менять")
+    # бит 0 сам говорит про запас: одна строка, без отдельной про SMART
+    assert by_key["crit:S3"] == (3, "диск nvme2n1: NVMe сообщает - запас ячеек ниже порога (0x01)")
+    assert "spare:S3" not in by_key and "smart:S3" not in by_key
+    assert by_key["media:S4"] == (2, "диск nvme3n1: ошибок носителя 3 (данные не прочитались) - пора менять")
+    assert by_key["errlog:S5"][0] == 2 and "журнале ошибок NVMe" in by_key["errlog:S5"][1]
+    assert by_key["crit:S6"] == (3, "диск nvme5n1: NVMe сообщает - надежность снижена из-за ошибок носителя "
+                                    "или внутренних, диск перешел в режим только чтения (0x0c)")
+    assert not any(k.endswith(":S7") for k in by_key)
+
+
+def test_growing_counters_crc_and_nvme_warning():
     disks = [
         _disk("sda", "A", grow={"realloc": 8, "pending": 3}),
         _disk("sdb", "B", grow={"crc": 5}),
-        _disk("nvme0n1", "C", wear=93),
         _disk("nvme1n1", "D", crit="0x04"),
         _disk("nvme2n1", "E", crit="0x02"),
-        # статичные счетчики без роста - не новость
-        _disk("sdc", "F", realloc=32, media=4),
+        # статичные счетчики SATA без роста - не новость
+        _disk("sdc", "F", type="sata", realloc=32, media=4),
+        _disk("nvme3n1", "G", media=2, grow={"media": 2}),
     ]
     probs = disk_health_problems({"v": 1, "ts": 1, "disks": disks})
     by_key = {k: (lvl, t) for lvl, k, t in probs}
     assert by_key["grow:A"] == (2, "диск sda (Samsung SSD 990 PRO 2TB, A): за сутки выросли ошибки - "
                                    "переназначенные сектора +8, нечитаемые сектора +3")
     assert by_key["crc:B"][0] == 1 and "кабель" in by_key["crc:B"][1]
-    assert by_key["wear:C"] == (1, "диск nvme0n1 (Samsung SSD 990 PRO 2TB, C): износ 93%, пора планировать замену")
     assert by_key["crit:D"][0] == 3
     assert by_key["hot:E"][0] == 2
     assert not any(k.endswith(":F") for k in by_key)
+    # рост и так говорит про ошибки носителя: отдельной строки нет
+    assert "grow:G" in by_key and "media:G" not in by_key
 
 
 def test_missing_disk():
@@ -206,6 +253,46 @@ async def test_disk_health_alert_lifecycle(tmp_path, monkeypatch):
     await engine.dispose()
 
 
+async def test_open_wear_alert_closes_quietly(tmp_path, monkeypatch):
+    """Алерт, открытый раньше только из-за износа (wear:, wearsoon:), после обновления панели
+    закрывается без "диски снова в порядке": диски не чинились, просто износ больше не поломка."""
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'dw.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    block = {"v": 1, "ts": int(now.timestamp()) - 30, "virt": "none", "container": False, "smart": True,
+             "raid": [_raid("md0", "nvme0n1p1 nvme1n1p1", active=2)],
+             "disks": [_disk("nvme0n1", "N0", wear=212), _disk("nvme1n1", "N1", wear=137)],
+             "missing": [], "io": {"count": 0, "last": []}}
+    async with factory() as s:
+        s.add(Server(name="db-a", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, cpu_alert_percent=0, mem_alert_percent=0,
+                     last_report={"clock_unix": int(now.timestamp()), "uptime_seconds": 100000,
+                                  "extras": {"disk-health": block}},
+                     alert_state={"disk_health": 1, "disk_health_sig": ["wear:N0", "wear:N1"],
+                                  "disk_health_told": ["wear:N0", "wear:N1"]}))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    assert sent == []
+    async with factory() as s:
+        srv = (await s.execute(select(Server))).scalars().one()
+        assert int((srv.alert_state or {}).get("disk_health") or 0) == 0
+        assert not any(p["kind"] == "disk_health" for p in collector.server_problems(srv, now))
+    await engine.dispose()
+
+
 def test_virtual_disks_of_a_vm_are_listed_and_quiet():
     # helper 0.2 на ВМ перечисляет виртуальные диски без SMART: проблем по ним не бывает, а
     # "пропавшим" отсоединенный облачный том не становится (на ВМ helper не помнит диски)
@@ -215,7 +302,7 @@ def test_virtual_disks_of_a_vm_are_listed_and_quiet():
              "disks": [vd, dict(vd, dev="sdb", ok=False)], "missing": [], "io": {"count": 0, "last": []}}
     assert disk_health_problems(block) == []
     src = (Path(__file__).resolve().parents[2] / "agent" / "diskhealth-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.4" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.5" in src and "\r" not in src
     body = src[src.index("elif ! $container; then"):src.index("EOF_VLSBLK\nfi")]
     assert 'add_disk "$name" "$model" "$serial" "$tran" "$size" "$rota" true virtual' in body
     assert "SEEN_NOW" not in body and "PRESENT" not in body and "smartctl" not in body

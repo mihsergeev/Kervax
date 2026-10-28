@@ -23,7 +23,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_state, backup_verify
+from app import bsrv_mirror
 from app import home_mute, kube_coverage, os_support
+from app import mute_watch
 from app import request_watch
 from app import panel_errors
 from app import inside_probe
@@ -365,7 +367,7 @@ _BACKUP_SEC = {"backup_failed": "runs", "backup_stale": "runs", "backup_growth":
                "backup_custom": "own"}
 # раздел окна сервера бэкапов по алерту и по проблеме
 _BSRV_SEC = {"backup_repo": "repos", "backup_lock": "repos", "backup_unmonitored": "repos", "backup_check": "repos",
-             "backup_prune": "cleanup", "backup_rotation": "cleanup"}
+             "backup_prune": "cleanup", "backup_rotation": "cleanup", "backup_mirror": "mirror"}
 # раздел карточки сервисов ноды по алерту и по проблеме
 _SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "queue_failed": "queues", "workers": "workers", "cron_stuck": "cron", "log_errors": "logs", "fpm": "fpm", "gitlab": "gitlab", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs", "webfiles": "files",
             "llm": "llm"}
@@ -391,6 +393,7 @@ _ALERT_SECTION = {
     "backup_unmonitored": "backups",
     "backup_check": "backups",
     "backup_prune": "backups",
+    "backup_mirror": "backups",
     "kube_pod": "kuber",
     "kube_cron": "kuber",
     "kube_node": "kuber",
@@ -3487,7 +3490,20 @@ _DISK_HEALTH_MAX_AGE = 30 * 60
 _DISK_IO_MIN = 10
 # Пачки ошибок в пределах часа - одна история, а не алерт и отбой на каждую пачку
 _DISK_IO_HOLD = timedelta(hours=1)
-_DISK_WEAR_WARN = 90
+# Запас ячеек NVMe (Available Spare): ниже - пора менять, даже если до порога вендора еще есть
+_DISK_SPARE_LOW = 20
+# Биты Critical Warning NVMe
+_NVME_CRIT_BITS = (
+    (0x01, "запас ячеек ниже порога"),
+    (0x02, "перегрев"),
+    (0x04, "надежность снижена из-за ошибок носителя или внутренних"),
+    (0x08, "диск перешел в режим только чтения"),
+    (0x10, "отказ резервного питания кэша"),
+    (0x20, "постоянная память только для чтения"),
+)
+# Атрибуты SATA SSD с остатком ресурса записи: SMART FAILED только по ним - это износ
+_WEAR_ATTRS = {"Wear_Leveling_Count", "SSD_Life_Left", "Media_Wearout_Indicator", "Percent_Lifetime_Remain",
+               "Percent_Life_Remaining", "Remaining_Lifetime_Perc"}
 # Прогноз заполнения: за сколько часов до конца места или inode предупреждать и бить тревогу.
 # Тот же срок, с которого пункт есть в "Что сломано": раньше там он висел с 10 дней, а алерт
 # приходил за трое суток, и было непонятно, почему "сломано", а тишина.
@@ -3516,6 +3532,23 @@ def disk_health_block(rep: dict) -> dict | None:
     return block
 
 
+def _dnum(v) -> float | None:
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def nvme_crit_text(cw: int) -> str:
+    """Critical Warning NVMe словами: "запас ячеек ниже порога, перегрев"."""
+    parts = [txt for bit, txt in _NVME_CRIT_BITS if cw & bit]
+    return ", ".join(parts) or "неизвестное предупреждение"
+
+
+def wear_only_failed(d: dict) -> bool:
+    """SMART FAILED у SATA SSD только по атрибуту остатка ресурса (helper 0.5, failnow): диск
+    выработал паспортный ресурс, ошибок нет - не поломка."""
+    names = {x for x in str(d.get("failnow") or "").split(",") if x}
+    return bool(names) and names <= _WEAR_ATTRS
+
+
 def _disk_title(d: dict) -> str:
     """Имя диска с моделью и серийником: nvme1n1 (Samsung SSD 990 PRO 2TB, S7DNNU0Y719359D).
     В ЦОД диск меняют по серийнику, а имя устройства после перезагрузки может уехать на
@@ -3533,19 +3566,15 @@ def _int(v) -> int:
         return 0
 
 
-def disk_health_problems(block: dict, short: bool = False, wear_hist: dict | None = None,
-                         writers: list | None = None) -> list[tuple[int, str, str]]:
+def disk_health_problems(block: dict, short: bool = False) -> list[tuple[int, str, str]]:
     """Поломки дисков: (уровень, ключ, текст), серьезные первыми. Ключ стабилен между
     отчетами: по нему алерт понимает, что сломалось НОВОЕ (второй диск при уже
     развалившемся RAID), а не то, о чем уже сказано. Склеенные в одну строку массивы
     дают по записи на массив без текста и одну запись с текстом без ключа: досинхронизи-
     ровавшийся первым md42 не должен выглядеть новой поломкой md43. Ошибки журнала ядра
     сюда не входят, у них своя выдержка (см. _server_conditions). short - диск только по
-    имени, без модели и серийника: для сводки на главной. wear_hist - servers.disk_wear:
-    диск дойдет до 90% износа меньше чем через два месяца (app/disk_wear.py). writers -
-    disk_writers агента: к такому износу строка, кто больше всех пишет."""
+    имени, без модели и серийника: для сводки на главной. Износа здесь нет: см. ниже."""
     out: list[tuple[int, str, str]] = []
-    soon: list[str] = []
     # RAID с одинаковой бедой склеиваем: оба массива на двух дисках теряют разделы одного
     # и того же умершего диска, и "md42: 1 из 2; md43: 1 из 2" - это одна новость
     degraded: dict[str, list[str]] = {}
@@ -3593,42 +3622,50 @@ def disk_health_problems(block: dict, short: bool = False, wear_hist: dict | Non
             out.append((3, f"dead:{ser}", f"диск {name} {why}"))
             continue
         health = str(d.get("health") or "").upper()
-        wear = d.get("wear") if isinstance(d.get("wear"), (int, float)) else None
         failing = "FAIL" in health or d.get("failing") is True
-        if failing:
-            # SSD, выработавший ресурс, SMART тоже считает неисправным, но такой диск обычно
-            # еще работает: менять надо, будить ночью - нет
-            worn = wear is not None and wear >= 100
-            out.append((2 if worn else 3, f"smart:{ser}",
-                        f"диск {name}: SMART считает диск неисправным"
-                        + (f", ресурс выработан (износ {wear}%)" if worn else "")))
         crit = str(d.get("crit") or "")
         try:
             cw = int(crit, 16) if crit else 0
         except ValueError:
             cw = 0
-        if cw & ~0x02:  # запас, надежность, только чтение, резервная память
-            out.append((3, f"crit:{ser}", f"диск {name}: NVMe сообщает о деградации ({crit})"))
+        # Износ (у NVMe Percentage Used, у SATA остаток ресурса) - оценка вендора, сколько
+        # израсходовано паспортного ресурса записи, а не поломка: за 100% диск выходит из гарантии,
+        # а не из строя. Сам по себе он не алертит (заметка в карточке); тревога - по признакам:
+        # запас ячеек, ошибки носителя, журнал ошибок, предупреждения NVMe, вердикт SMART
+        if failing and not cw and not wear_only_failed(d):
+            if d.get("failnow") is None and (_dnum(d.get("wear")) or 0) >= 100:
+                # helper до 0.5 не говорит, какой атрибут провален: выработавший ресурс SATA SSD
+                # тоже FAILED, будить ночью не за что
+                out.append((2, f"smart:{ser}", f"диск {name}: SMART считает диск неисправным, "
+                                               f"ресурс выработан (износ {d['wear']}%)"))
+            else:
+                out.append((3, f"smart:{ser}", f"диск {name}: SMART считает диск неисправным"))
+        if cw & ~0x02:
+            out.append((3, f"crit:{ser}", f"диск {name}: NVMe сообщает - {nvme_crit_text(cw)} ({crit})"))
         elif cw & 0x02:
             out.append((2, f"hot:{ser}", f"диск {name}: NVMe сообщает о перегреве"))
+        spare, thr = _dnum(d.get("spare")), _dnum(d.get("spare_thr"))
+        if spare is not None and not cw & 0x01:  # ниже порога диск сам ставит бит 0 (строка выше)
+            if thr is not None and spare <= thr:
+                out.append((3, f"spare:{ser}", f"диск {name}: запас ячеек {spare:g}% при пороге {thr:g}% - менять"))
+            elif spare <= _DISK_SPARE_LOW:
+                out.append((2, f"spare:{ser}", f"диск {name}: запас ячеек {spare:g}%"
+                                               + (f" (порог {thr:g}%)" if thr is not None else "") + " - пора менять"))
         grow = d.get("grow") if isinstance(d.get("grow"), dict) else {}
         bad = [f"{lbl} +{_int(grow.get(k))}" for k, lbl in _DISK_GROW_LABEL.items() if _int(grow.get(k)) > 0]
         if bad:
             out.append((2, f"grow:{ser}", f"диск {name}: за сутки выросли ошибки - " + ", ".join(bad)))
+        elif d.get("type") == "nvme" and _int(d.get("media")) > 0:
+            # у NVMe ошибка носителя - данные однажды не прочитались, переназначения секторов он
+            # не показывает: это и есть признак, даже давний
+            out.append((2, f"media:{ser}", f"диск {name}: ошибок носителя {_int(d.get('media'))} "
+                                           "(данные не прочитались) - пора менять"))
+        if _int(grow.get("ioerr")) > 0:
+            out.append((2, f"errlog:{ser}", f"диск {name}: за сутки в журнале ошибок NVMe новые ошибки "
+                                            "чтения или записи"))
         if _int(grow.get("crc")) > 0:
             out.append((1, f"crc:{ser}", f"диск {name}: за сутки +{_int(grow.get('crc'))} ошибок "
                                          "передачи (CRC), проверьте кабель или разъем"))
-        if wear is not None and wear >= _DISK_WEAR_WARN and not failing:
-            out.append((1, f"wear:{ser}", f"диск {name}: износ {wear}%, пора планировать замену"))
-        rec = wear_hist.get(ser) if isinstance(wear_hist, dict) else None
-        if (isinstance(rec, dict) and rec.get("soon") and rec.get("d90") and not failing
-                and wear is not None and wear < _DISK_WEAR_WARN):
-            soon.append(name)
-            out.append((1, f"wearsoon:{ser}", disk_wear.soon_text(name, rec, short)))
-    if len(soon) >= 2 and not short:
-        out.append((1, "", "эти диски изнашиваются вместе: менять по одному, не дожидаясь 90% на всех"))
-    if soon and not short and (wt := disk_wear.writer_text(writers)):
-        out.append((1, "", wt))
 
     ts = _int(block.get("ts"))
     for m in block.get("missing") or []:
@@ -4190,7 +4227,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
 
     hb = disk_health_block(rep)
     if hb is not None:
-        for lvl, _key, txt in disk_health_problems(hb, short=True, wear_hist=s.disk_wear):
+        for lvl, _key, txt in disk_health_problems(hb, short=True):
             if txt:
                 add("disk_health", lvl, txt, "diskhealth", "disk_health")
         n = _int((hb.get("io") or {}).get("count"))
@@ -4452,6 +4489,13 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             add("backup_check", 2, "не прошла проверка целостности: " + ", ".join(bad[:3])
                 + (f" и еще {len(bad) - 3}" if len(bad) > 3 else ""), _BSRV_SEC["backup_check"], "backup_check",
                 section="backups", srv=True)
+    # Резервный сервер бэкапов: копия отстала, заморожена или в ней испортились файлы
+    mp = bsrv_mirror.problems(s, now)
+    if mp:
+        lvl = max(x[0] for x in mp.values())
+        txt = [t for _l, t in sorted(mp.values(), key=lambda x: -x[0])]
+        add("backup_mirror", lvl, "; ".join(txt[:2]) + (f" и еще {len(txt) - 2}" if len(txt) > 2 else ""),
+            _BSRV_SEC["backup_mirror"], "backup_mirror", section="backups", srv=True)
     # Сервер задыхается: как и у алерта, только то, что держится дольше выдержки
     pr = pressure_problems(rep)
     pr_hold = pressure_hold_s(rep, pr)
@@ -4595,8 +4639,9 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # который не укладывался во время на нодах с большим журналом, прислал алерт с каждой такой
 # ноды, и каждые 10 минут снова. kervax-agent, kervax-dumps (дампы баз для бэкапа) и kervax-relay
 # (ретранслятор, через него ходят агенты других серверов) не тут: их падение - повод для алерта.
+# kervax-mirror-pull (перекачка копий на резервном) тут: отставшую копию ловит алерт backup_mirror.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(autoban|changes|cron|db-stats|disk-health|disk-usage|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|gre|gre-sync|queues|relay-sync|sockfix|units|web-rate|web-sites|webfiles|workers"
+    r"kervax-(autoban|changes|cron|db-stats|disk-health|disk-usage|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|gre|gre-sync|mirror-pull|queues|relay-sync|sockfix|units|web-rate|web-sites|webfiles|workers"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
@@ -4843,7 +4888,18 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
         return all(k in growing or podnames.muted(muted, k) for k in sig)
     if key == "mem_limit":
         return all(podnames.muted(mem_limit.decided(s), k) for k in sig)
+    if key == "disk_health":
+        return bool(sig) and sig <= _disk_wear_keys(s, sig)
     return False
+
+
+def _disk_wear_keys(s: Server, sig: set[str]) -> set[str]:
+    """Ключи алерта о дисках, которые были только про износ: раньше износ от 90% и прогноз до
+    90% (wear:, wearsoon:) шли в алерт, SMART FAILED SATA SSD по атрибуту ресурса - тоже. Теперь
+    это не поломка, и "диски снова в порядке" на них было бы неправдой."""
+    block = disk_health_block(s.last_report or {}) or {}
+    worn = {str(d.get("serial")) for d in block.get("disks") or [] if isinstance(d, dict) and wear_only_failed(d)}
+    return {k for k in sig if k.startswith(("wear:", "wearsoon:")) or (k.startswith("smart:") and k[6:] in worn)}
 
 
 def _sig_rule_why(s: Server, key: str, sig: set[str], now: datetime) -> str:
@@ -4857,6 +4913,8 @@ def _sig_rule_why(s: Server, key: str, sig: set[str], now: datetime) -> str:
         muted = {m[len(mem_trend.MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(mem_trend.MUTE_PREFIX)}
         if any(not podnames.muted(muted, k) for k in sig):
             return "растет, но памяти сервера хватит надолго"
+    if key == "disk_health" and _disk_wear_keys(s, sig):
+        return "износ по паспорту без ошибок - не поломка, он виден в карточке сервера"
     return ""
 
 
@@ -6475,7 +6533,7 @@ def _server_conditions(s: Server, now: datetime,
     # недоступной ноды свой алерт. Выдержки нет: развалившийся массив сам не соберется.
     hb = disk_health_block(rep) if online else None
     if hb is not None:
-        probs = disk_health_problems(hb, wear_hist=s.disk_wear, writers=rep.get("disk_writers"))
+        probs = disk_health_problems(hb)
         # Ошибки ввода-вывода: окно helper'а 10 минут, сверху держим час с последней пачки
         # (since), чтобы пачки внутри часа были одной историей. Момент пачки обновляем раз
         # в 5 минут: иначе alert_state переписывался бы каждый тик, пока сыплются ошибки.
@@ -6961,6 +7019,66 @@ def _fmt_rule(template: str, s: Server, ctx: dict) -> str:
         return template  # некорректный шаблон — шлём как есть
 
 
+def mute_present(s: Server, now: datetime, cur: dict[str, str | None]) -> dict[str, dict[str, str]]:
+    """Вещи, по которым глушат поштучно и которых нет в "Что сломано" под своим ключом (поды, Job,
+    CronJob, контейнеры): {"kube_pod:": {ns/ворклоад: что с ним}}. Только нужные заглушкам и только где
+    панель это видит: нет доступа к кластеру - нет и ответа (mute_watch.judge: None)."""
+    need = {p for k in cur for p in mute_watch.PRESENT_PREFIXES if k.startswith(p) or k == p[:-1]}
+    rep, st = s.last_report or {}, s.alert_state or {}
+    out: dict[str, dict[str, str]] = {}
+    if (rep.get("kube") or {}).get("access"):
+        if "kube_pod:" in need:
+            pods: dict[str, list[dict]] = {}
+            for p in kube_bad_pods(rep):
+                pods.setdefault(pod_item(p), []).append(p)
+            out["kube_pod:"] = {k: bad_pods_text(v, 2) for k, v in pods.items()}
+        if "kube_job:" in need:
+            jobs: dict[str, list[dict]] = {}
+            for j in kube_failed_jobs(rep, now, 24):
+                jobs.setdefault(job_item(j), []).append(j)
+            out["kube_job:"] = {k: "упал Job: " + failed_jobs_text(v, 2) for k, v in jobs.items()}
+        if "kube_cron:" in need:
+            out["kube_cron:"] = {n: f"CronJob {n}: {why}" for n, why in cron_job_issues(rep, now, False, st).items()}
+    if (rep.get("docker") or {}).get("access") and need & {"docker_down:", "docker_loop:"}:
+        ds = {n: cs for n, cs in (st.get("docker") or {}).items() if isinstance(cs, dict)}
+        out["docker_down:"] = {n: f"контейнер {n} лежит" for n, cs in ds.items() if cs.get("down")}
+        out["docker_loop:"] = {n: f"контейнер {n} перезапускается в цикле" for n, cs in ds.items() if cs.get("loop")}
+    return out
+
+
+def mute_life(s: Server, now: datetime, conds: dict[str, tuple[int, dict]], talking: bool,
+              pod_names: dict[str, str] | None = None,
+              web_err: tuple[float, float, int, dict, float] | None = None) -> tuple[dict, dict, list]:
+    """Заглушки сервера за тик (app/mute_watch.py): (alert_state mute_live, mute_over, что сделать со
+    сроками). Нода молчит - про ее беды панель не знает: судить не о чем, тихие не снимаются, а
+    удержание дальше живет по своим правилам (стало хуже по "недоступен" - снимается)."""
+    cur = mute_watch.keys(s, now)
+    st = s.alert_state or {}
+    judged: dict[str, tuple[bool, str] | None] = {}
+    if talking and cur:
+        items = {k for k in cur if mute_watch.item(k)}
+        probs = server_problems(s, now, pod_names, web_err)
+        shadow = (server_problems(mute_watch.shadow(s), now, pod_names, web_err)  # type: ignore[arg-type]
+                  if any(k.startswith(mute_watch.SHADOW_PREFIXES) for k in items) else None)
+        present = mute_present(s, now, cur)
+        judged = {k: mute_watch.judge(k, conds, probs, shadow, present, items) for k in cur}
+    live = mute_watch.live_step(st.get(mute_watch.LIVE), cur, judged, now)
+    stored: dict[str, str | None] = {str(k): str(v) for k, v in (s.alert_snoozes or {}).items()}
+    stored[mute_watch.SERVER] = _aware(s.snooze_until).isoformat() if s.snooze_until else None
+    over, acts = mute_watch.plan(cur, live, st.get(mute_watch.OVER), conds, stored, now, lift=talking)
+    return live, over, acts
+
+
+def mute_watch_label(k: str) -> str:
+    """Что за заглушка, для журнала: вид словами, у вещи - ее ключ."""
+    if k == mute_watch.SERVER:
+        return "весь сервер"
+    if mute_watch.item(k):
+        return k
+    base = k.split("@", 1)[0]
+    return settings_store.SERVER_ALERT_KINDS.get(base, (base,))[0] + (" (нижние уровни)" if "@" in k else "")
+
+
 async def evaluate_servers(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings, now: datetime
 ) -> None:
@@ -7152,6 +7270,9 @@ async def evaluate_servers(
     mute_lift: list[tuple[int, str, str]] = []
     # заглушка "до нового" переходит на сузившийся набор: (sid, старый ключ, новый)
     mute_swap: list[tuple[int, str, str]] = []
+    # сроки временных заглушек (app/mute_watch.py): (sid, ключ, срок, который должен стоять, новый | None,
+    # запись в журнал)
+    snooze_put: list[tuple[int, str, str | None, str | None, str]] = []
     # отметки "не следить" у сроков кластера: секрет обновили или удалили (sid, ключ, at, новая|None)
     kexp_upd: list[tuple[int, str, str, dict | None]] = []
     # где в очередях начинается каждый сервер: у серверов на подключении после цикла
@@ -7243,6 +7364,22 @@ async def evaluate_servers(
         # "снова в норме" ровно тогда, когда нода пропала (и после каждого деплоя панели).
         talking = seen_online(s, now)
         warm = talking and boot_warmup.server_warming(s, now)
+        # Жизнь заглушек (app/mute_watch.py): есть ли сейчас то, что глушит каждая, тихие временные
+        # снимаются, кончившиеся при живой проблеме держатся. Стало хуже - заглушка снимается в этом
+        # же тике, и алерт идет как обычно
+        if s.alert_mutes or s.alert_snoozes or s.snooze_until or st.get(mute_watch.OVER) \
+                or st.get(mute_watch.LIVE) != {}:
+            m_live, m_over, m_acts = mute_life(s, now, conds, talking, pod_names, web_err.get(s.id))
+            if m_live != st.get(mute_watch.LIVE):
+                apply(s.id, mute_watch.LIVE, m_live)
+            if (m_over or None) != (st.get(mute_watch.OVER) or None):
+                apply(s.id, mute_watch.OVER, m_over or None)
+            for mk, expect, new_u, why in m_acts:
+                snooze_put.append((s.id, mk, expect, new_u, f"{mute_watch_label(mk)}: {why}" if why else ""))
+                if new_u is None and why:
+                    mutes.discard(mk)
+                    if mk == mute_watch.SERVER:
+                        quiet_srv = s.id in maint_srv
         # состояние дебаунса ведём КАЖДЫЙ тик, даже без смены уровня алерта — иначе
         # оно не накопится (при level==prev цикл ниже делает continue без записи).
         # «<тип>_since» — момент начала «жарки» (по времени); throttle — «_streak».
@@ -8148,6 +8285,30 @@ async def evaluate_servers(
                     srv_url(s, "backup_check"), recovery=True, group=s.group_name or ""))
                 rec_apply.append((s.id, "backup_checks", {}))
 
+        # Резервный сервер бэкапов: копия отстала (две суток без удачной перекачки), заморожена
+        # (на основном разом пропало многое) или в ней испортились файлы. Как с проверкой: при новой
+        # беде и раз в сутки, пока не уйдет; отбой, когда все копии снова в порядке.
+        mr = rules.get("backup_mirror")
+        if online_now and "backup_mirror" not in mutes:
+            mp = bsrv_mirror.problems(s, now)
+            prev = st.get("backup_mirror") if isinstance(st.get("backup_mirror"), dict) else {}
+            prev_keys = list(prev.get("keys") or [])
+            prev_ts = float(prev.get("ts") or 0)
+            keys = sorted(mp)
+            due = bool(set(keys) - set(prev_keys)) or now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT
+            if mp and mr and mr["enabled"] and _rule_scope_ok(mr, s) and due:
+                txt = [t for _l, t in sorted(mp.values(), key=lambda x: -x[0])]
+                fires.append(srv_fire(s, "backup_mirror", mr, {
+                    "copies": "; ".join(txt[:4]) + (f" и еще {len(txt) - 4}" if len(txt) > 4 else ""), "names": keys}))
+                fire_apply.append((s.id, "backup_mirror", {"keys": keys, "ts": now.timestamp()}))
+            elif mp and prev_keys and keys != prev_keys:
+                apply(s.id, "backup_mirror", {"keys": keys, "ts": prev_ts})
+            elif not mp and prev_keys:
+                recoveries.append(_server_alert_text(
+                    "backup_mirror", s.name, "копии на резервном снова в порядке",
+                    srv_url(s, "backup_mirror"), recovery=True, group=s.group_name or ""))
+                rec_apply.append((s.id, "backup_mirror", {}))
+
         # Чистка репозитория не работает: не открывает репозиторий, падает, пропущена или не
         # запускается. Как с локом: при новом и раз в сутки, пока не починят. Упавшую - только если
         # упал и следующий прогон (_PRUNE_FAIL_HOLD): разовый сбой проходит сам.
@@ -8311,7 +8472,8 @@ async def evaluate_servers(
         for sid, key, value in rec_apply:
             apply(sid, key, value)
 
-    if changed_ids or known_upd or known_add or onboard_closed or mute_lift or kexp_upd or quiet_closed or mute_swap:
+    if changed_ids or known_upd or known_add or onboard_closed or mute_lift or kexp_upd or quiet_closed or mute_swap \
+            or snooze_put:
         async with session_factory() as session:
             for qs, qk, why in quiet_closed:
                 if any(sid == qs.id and k == qk for sid, k, _v in rec_apply if k == qk) and int(
@@ -8355,6 +8517,25 @@ async def evaluate_servers(
                 if row is not None and mk in (row.alert_mutes or []):
                     # сняли руками раньше нас - в журнал писать нечего
                     row.alert_mutes = [m for m in row.alert_mutes if m != mk]
+                    session.add(AuditLog(username="авто", action="mute_lifted", target=row.name[:255], detail=txt))
+            for sid, mk, expect, new_u, txt in snooze_put:
+                row = await session.get(Server, sid)
+                if row is None:
+                    continue
+                if mk == mute_watch.SERVER:
+                    if mute_watch._ts(row.snooze_until) != mute_watch._ts(expect):
+                        continue  # срок успели поменять руками - их решение главнее
+                    row.snooze_until = mute_watch._ts(new_u)
+                else:
+                    snz = dict(row.alert_snoozes or {})
+                    if mute_watch._ts(snz.get(mk)) != mute_watch._ts(expect):
+                        continue
+                    if new_u is None:
+                        snz.pop(mk, None)
+                    else:
+                        snz[mk] = new_u
+                    row.alert_snoozes = snz
+                if txt:
                     session.add(AuditLog(username="авто", action="mute_lifted", target=row.name[:255], detail=txt))
             for sid, old, new in mute_swap:
                 row = await session.get(Server, sid)
@@ -8870,7 +9051,8 @@ async def _track_uncovered(session_factory, now: datetime) -> None:
     async with session_factory() as session:
         changed = False
         for srv in await session.scalars(select(Server).where(Server.enabled.is_(True))):
-            keys = {k for k, _ in gaps(srv.last_report or {}, cur, srv.alert_mutes, srv.relay_enabled, srv.gre_enabled)} if seen_online(srv, now) else set()
+            keys = {k for k, _ in gaps(srv.last_report or {}, cur, srv.alert_mutes, srv.relay_enabled, srv.gre_enabled,
+                                       srv.backup_mirror_role)} if seen_online(srv, now) else set()
             state = dict(srv.alert_state or {})
             fresh = _uncov_since(state, keys, now)
             if fresh != (state.get("uncov") or {}):
@@ -8927,7 +9109,8 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
         since = (srv.alert_state or {}).get("uncov") or {}
         g = [
             (k, txt)
-            for k, txt in gaps(srv.last_report or {}, cur, srv.alert_mutes, srv.relay_enabled, srv.gre_enabled)
+            for k, txt in gaps(srv.last_report or {}, cur, srv.alert_mutes, srv.relay_enabled, srv.gre_enabled,
+                               srv.backup_mirror_role)
             if k in since
             and (now - (_parse_iso(since[k]) or now)).total_seconds() >= _UNCOVERED_SUSTAIN
         ]

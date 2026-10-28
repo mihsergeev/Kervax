@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.56"
+const version = "2.57"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -761,6 +761,10 @@ type dockerContainer struct {
 	Caps    []string `json:"caps,omitempty"` // только из hostCaps, без префикса CAP_
 	PidHost bool     `json:"pid_host,omitempty"`
 	RO      []string `json:"ro,omitempty"`
+	// Что осталось у главного процесса (2.57), только у работающих с опасными caps: cap_add выдает
+	// права и тому, кто на старте сбрасывает их и переходит на uid приложения (setpriv, gosu,
+	// su-exec). Нет поля - не прочитали, панель судит по cap_add.
+	Proc *procPrivs `json:"proc,omitempty"`
 	// Откуда запущен (метки compose) и тома на запись: по ним панель пишет шаги "как исправить"
 	// с готовыми путями (cd в папку проекта, имя сервиса, что копировать перед обновлением), без
 	// поиска по меткам на самой ноде. Пустой объект - контейнер запущен не из compose
@@ -775,6 +779,16 @@ type dockerContainer struct {
 	imageID string // id образа: по нему дата сборки из /images/json
 	ip      string // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
 	id      string // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
+}
+
+// права процесса из /proc/<pid>/status. Uid - наименьший из real, effective, saved и fs: при
+// любом нулевом процесс может вернуть себе root. Caps - опасные (hostCaps) из CapEff, CapPrm и
+// CapAmb: из permitted процесс поднимет их в effective сам. NNP - no_new_privs, без него права
+// вернутся через setuid-бинарь или file capabilities из образа.
+type procPrivs struct {
+	Uid  int      `json:"uid"`
+	Caps []string `json:"caps,omitempty"`
+	NNP  bool     `json:"nnp"`
 }
 
 // метки com.docker.compose.* контейнера; files - через запятую, как в метке
@@ -937,6 +951,21 @@ type backupCommand struct {
 	Since int    `json:"since,omitempty"`
 	Lines int    `json:"lines,omitempty"`
 	Prio  string `json:"prio,omitempty"`
+	// mirror_allow (основной сервер бэкапов): ключ резервного и какие репозитории ему можно читать
+	PubKey string   `json:"pubkey,omitempty"`
+	Repos  []string `json:"repos,omitempty"`
+	// mirror (резервный сервер): какие репозитории с каких основных копировать
+	Sources []mirrorSource `json:"sources,omitempty"`
+}
+
+// mirrorSource - основной сервер бэкапов для резервного: адрес, порт и ключ хоста SSH и какие
+// его репозитории копировать
+type mirrorSource struct {
+	Name    string   `json:"name"`
+	Host    string   `json:"host"`
+	Port    int      `json:"port"`
+	HostKey string   `json:"hostkey"`
+	Repos   []string `json:"repos"`
 }
 
 // панель кладёт это в ответ, когда для сервера выставлена target-версия
@@ -5120,6 +5149,63 @@ func hostCapsOf(add []string) []string {
 	return out
 }
 
+// номера битов hostCaps в масках CapEff/CapPrm (linux/capability.h)
+var hostCapBits = []struct {
+	bit  uint
+	name string
+}{{2, "DAC_READ_SEARCH"}, {16, "SYS_MODULE"}, {17, "SYS_RAWIO"}, {19, "SYS_PTRACE"}, {21, "SYS_ADMIN"}, {39, "BPF"}}
+
+// parseProcPrivs разбирает /proc/<pid>/status; nil - строк Uid или CapEff нет (процесс ушел)
+func parseProcPrivs(status string) *procPrivs {
+	var p procPrivs
+	var mask uint64
+	uidOK, capOK := false, false
+	for _, ln := range strings.Split(status, "\n") {
+		k, v, ok := strings.Cut(ln, ":")
+		if !ok {
+			continue
+		}
+		f := strings.Fields(v)
+		switch k {
+		case "Uid":
+			if len(f) != 4 {
+				return nil
+			}
+			for i, x := range f {
+				n, err := strconv.Atoi(x)
+				if err != nil {
+					return nil
+				}
+				if i == 0 || n < p.Uid {
+					p.Uid = n
+				}
+			}
+			uidOK = true
+		case "CapEff", "CapPrm", "CapAmb":
+			if len(f) != 1 {
+				return nil
+			}
+			m, err := strconv.ParseUint(f[0], 16, 64)
+			if err != nil {
+				return nil
+			}
+			mask |= m
+			capOK = capOK || k == "CapEff"
+		case "NoNewPrivs":
+			p.NNP = len(f) == 1 && f[0] == "1"
+		}
+	}
+	if !uidOK || !capOK {
+		return nil
+	}
+	for _, c := range hostCapBits {
+		if mask&(1<<c.bit) != 0 {
+			p.Caps = append(p.Caps, c.name)
+		}
+	}
+	return &p
+}
+
 // Даты сборки образов меняются, только когда образ обновили, а список образов на сборочных
 // нодах большой: спрашиваем его раз в полчаса. Ошибку (старый прокси агента отвечает на
 // /images/json 403) тоже помним полчаса, чтобы не сыпать отказами в его лог каждый отчет.
@@ -5262,6 +5348,7 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 			Error     string
 			ExitCode  int
 			OOMKilled bool
+			Pid       int
 		}
 		HostConfig struct {
 			RestartPolicy struct {
@@ -5341,6 +5428,9 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 	}
 	dc.Priv = ins.HostConfig.Privileged
 	dc.Caps = hostCapsOf(ins.HostConfig.CapAdd)
+	if len(dc.Caps) > 0 && dc.State == "running" && ins.State.Pid > 0 {
+		dc.Proc = parseProcPrivs(readProcFile(ins.State.Pid, "status"))
+	}
 	dc.PidHost = ins.HostConfig.PidMode == "host"
 	// IP контейнера — только для скрейпа прикладных метрик (RabbitMQ и т.п.), в отчёт не уходит
 	for _, n := range ins.NetworkSettings.Networks {
@@ -7554,6 +7644,10 @@ const unitsReqDir = "/var/lib/kervax/units-req"
 const unitsResDir = "/var/lib/kervax/units-res"
 const duResDir = "/var/lib/kervax/du-res"
 
+// спул резервного сервера бэкапов (mirror-setup): что копировать, забрать сейчас
+const mirrorReqDir = "/var/lib/kervax/mirror-req"
+const mirrorResDir = "/var/lib/kervax/mirror-res"
+
 // спул автобана сканеров (autoban-setup): режим, разбан, белый список панели
 const autobanReqDir = "/var/lib/kervax/autoban-req"
 const autobanResDir = "/var/lib/kervax/autoban-res"
@@ -7786,7 +7880,7 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 		res, out := spoolInFor(backupReqDir, backupResDir, cmd.ID, lines, "backup-setup", 4*time.Minute)
 		postBackupResult(panelURL, token, cmd.ID, res, out)
 		return
-	case "deploy_server", "update_image", "provision_client", "deploy_tls_front", "get_cert", "get_client_creds", "allow_tls":
+	case "deploy_server", "update_image", "provision_client", "deploy_tls_front", "get_cert", "get_client_creds", "allow_tls", "mirror_allow":
 		// команды бэкап-СЕРВЕРА → отдельный спул bsrv-req
 		lines, ok := backupServerLines(cmd)
 		if !ok {
@@ -7827,6 +7921,18 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 			return
 		}
 		res, out := spoolInFor(unitsReqDir, unitsResDir, cmd.ID, lines, "units-setup", 6*time.Minute)
+		postBackupResult(panelURL, token, cmd.ID, res, out)
+		return
+	case "mirror":
+		// резервный сервер бэкапов: список того, что копировать, или забрать сейчас. Удалить
+		// копию, сменить адрес или ключ уже известного основного панель отсюда не может - это
+		// команды root на самом резервном
+		lines, ok := mirrorLines(cmd)
+		if !ok {
+			postBackupResult(panelURL, token, cmd.ID, false, "неверный список копий")
+			return
+		}
+		res, out := spoolInFor(mirrorReqDir, mirrorResDir, cmd.ID, lines, "mirror-setup", 2*time.Minute)
 		postBackupResult(panelURL, token, cmd.ID, res, out)
 		return
 	case "autoban":
@@ -7913,8 +8019,116 @@ func backupServerLines(cmd backupCommand) ([]string, bool) {
 			return nil, false
 		}
 		return []string{"action=allow_tls", "client_ip=" + cmd.ClientIP}, true
+	case "mirror_allow":
+		// резервному можно читать эти репозитории (пустой список - доступ убрать). Ключ только
+		// ed25519 одной строкой: он уходит в authorized_keys пользователя только для чтения
+		if !backupRepoNameOK(cmd.Name) || len(cmd.Repos) > 500 {
+			return nil, false
+		}
+		lines := []string{"action=mirror_allow", "name=" + cmd.Name}
+		if len(cmd.Repos) > 0 {
+			if !backupIPOK(cmd.ClientIP) || !mirrorPubKeyOK(cmd.PubKey) {
+				return nil, false
+			}
+			lines = append(lines, "client_ip="+cmd.ClientIP, "pubkey="+cmd.PubKey)
+		}
+		for _, r := range cmd.Repos {
+			if !backupRepoNameOK(r) {
+				return nil, false
+			}
+			lines = append(lines, "repo="+r)
+		}
+		return lines, true
 	}
 	return nil, false
+}
+
+// mirrorPubKeyOK - ключ резервного: "ssh-ed25519 <68 символов base64>", ничего больше (опции
+// authorized_keys или второй ключ в той же строке не пройдут)
+func mirrorPubKeyOK(s string) bool {
+	b, ok := strings.CutPrefix(s, "ssh-ed25519 ")
+	if !ok || len(b) != 68 {
+		return false
+	}
+	for _, r := range b {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '+' || r == '/') {
+			return false
+		}
+	}
+	return true
+}
+
+// mirrorHostKeyOK - ключ хоста основного сервера, который резервный запомнит: тип и base64
+func mirrorHostKeyOK(s string) bool {
+	t, b, ok := strings.Cut(s, " ")
+	if !ok || len(b) < 20 || len(b) > 2000 {
+		return false
+	}
+	switch t {
+	case "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521", "ssh-rsa":
+	default:
+		return false
+	}
+	for i, r := range b {
+		if r == '=' && i >= len(b)-3 {
+			continue
+		}
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '+' || r == '/') {
+			return false
+		}
+	}
+	return true
+}
+
+// mirrorHostOK - адрес основного: IP или имя DNS
+func mirrorHostOK(s string) bool {
+	if backupIPOK(s) {
+		return true
+	}
+	if s == "" || len(s) > 253 || s[0] == '-' || s[0] == '.' {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// mirrorLines - запрос helper'у mirror-setup. Mode set: по строке на основной сервер
+// "source=<имя> <адрес> <порт> <тип ключа> <ключ> <репо,репо|->", pull: забрать сейчас
+func mirrorLines(cmd backupCommand) ([]string, bool) {
+	switch cmd.Mode {
+	case "pull":
+		return []string{"action=pull"}, true
+	case "set":
+	default:
+		return nil, false
+	}
+	if len(cmd.Sources) > 200 {
+		return nil, false
+	}
+	lines := []string{"action=set"}
+	seen := map[string]bool{}
+	for _, src := range cmd.Sources {
+		if !backupRepoNameOK(src.Name) || seen[src.Name] || !mirrorHostOK(src.Host) ||
+			src.Port < 1 || src.Port > 65535 || !mirrorHostKeyOK(src.HostKey) || len(src.Repos) > 500 {
+			return nil, false
+		}
+		seen[src.Name] = true
+		repos := "-"
+		for _, r := range src.Repos {
+			if !backupRepoNameOK(r) {
+				return nil, false
+			}
+		}
+		if len(src.Repos) > 0 {
+			repos = strings.Join(src.Repos, ",")
+		}
+		lines = append(lines, fmt.Sprintf("source=%s %s %d %s %s", src.Name, src.Host, src.Port, src.HostKey, repos))
+	}
+	return lines, true
 }
 
 // toHTTPSLines - запрос helper'у клиента "перейти на https": порт TLS rest-server и его

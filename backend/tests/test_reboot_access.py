@@ -174,16 +174,20 @@ def _fix(rep, name, mutes=None):
 
 
 def test_disable_stale_root():
-    """root: только passwd -l (срок учетки ломает cron root и su), ключи переименовать, вернуть - обратно"""
+    """root: только passwd -l (срок учетки ломает cron root и su), ключи переименовать одной командой, вернуть - обратно"""
     rk = {**_k("root"), "f": "/root/.ssh/authorized_keys"}
     fix = _fix(_root_snap("yes", [rk]), "root")
     assert [(x["id"], x.get("cmd")) for x in fix] == [
-        ("acc_root_lock", "sudo passwd -l root"),
-        ("acc_keys", "sudo mv /root/.ssh/authorized_keys /root/.ssh/authorized_keys.disabled"),
+        ("acc_root_off", "sudo passwd -l root &&\nsudo mv /root/.ssh/authorized_keys /root/.ssh/authorized_keys.disabled"),
         ("acc_undo", "sudo passwd -u root\nsudo mv /root/.ssh/authorized_keys.disabled /root/.ssh/authorized_keys")]
     assert not any("usermod" in (x.get("cmd") or "") for x in fix)
     # пускают только по ключу: пароль root (вход в консоль) не трогаем
-    assert [x["id"] for x in _fix(_root_snap("prohibit-password", [rk]), "root")] == ["acc_keys", "acc_undo"]
+    assert [(x["id"], x["cmd"]) for x in _fix(_root_snap("prohibit-password", [rk]), "root")] == [
+        ("acc_root_keys", "sudo mv /root/.ssh/authorized_keys /root/.ssh/authorized_keys.disabled"),
+        ("acc_undo", "sudo mv /root/.ssh/authorized_keys.disabled /root/.ssh/authorized_keys")]
+    # ключей нет, пускают по паролю: только блокировка пароля
+    assert [(x["id"], x["cmd"]) for x in _fix(_root_snap("yes"), "root")] == [
+        ("acc_root_lock", "sudo passwd -l root"), ("acc_undo", "sudo passwd -u root")]
     # после этих команд доступа нет - и пункт уходит сам
     gone = _root_snap("yes", ssh_pass="yes")
     gone["extras"]["changes"]["users"][0]["pw"] = "L"
@@ -196,23 +200,32 @@ def test_disable_stale_account():
             {**_k("svc"), "f": "/srv/svc home/.ssh/authorized_keys"}]
     rep = _snap(users, keys)
     fix = _fix(rep, "olduser")
-    assert [(x["id"], x.get("alt", False)) for x in fix] == [
-        ("acc_check", False), ("acc_lock", False), ("acc_keys", False), ("acc_undo", False), ("acc_delete", True)]
+    # проверка, одно действие "отключить", потом откат и удаление - их фронт сворачивает
+    assert [(x["id"], x.get("alt", False), x.get("undo", False)) for x in fix] == [
+        ("acc_check", False, False), ("acc_off", False, False), ("acc_undo", False, True), ("acc_delete", True, False)]
     st = {x["id"]: x["cmd"] for x in fix}
-    assert next(x for x in fix if x["id"] == "acc_undo")["undo"] is True
     assert st["acc_check"].splitlines() == [
         "ps -u olduser -o pid,lstart,args", "sudo crontab -l -u olduser", "ls /var/lib/systemd/linger/",
         "grep -rlxF 'User=olduser' /etc/systemd/system /lib/systemd/system"]
-    assert st["acc_lock"] == "sudo usermod -L -e 1 olduser"
-    assert st["acc_keys"].splitlines() == [
-        "sudo mv /home/olduser/.ssh/authorized_keys /home/olduser/.ssh/authorized_keys.disabled",
+    # блокировка и ключи одной командой: ключи не трогаются, если usermod не прошел
+    assert st["acc_off"].splitlines() == [
+        "sudo usermod -L -e 1 olduser &&",
+        "sudo mv /home/olduser/.ssh/authorized_keys /home/olduser/.ssh/authorized_keys.disabled &&",
         "sudo mv /home/olduser/.ssh/authorized_keys2 /home/olduser/.ssh/authorized_keys2.disabled"]
-    assert st["acc_undo"].splitlines()[0] == "sudo usermod -U -e '' olduser"
+    assert st["acc_undo"].splitlines() == [
+        "sudo usermod -U -e '' olduser",
+        "sudo mv /home/olduser/.ssh/authorized_keys.disabled /home/olduser/.ssh/authorized_keys",
+        "sudo mv /home/olduser/.ssh/authorized_keys2.disabled /home/olduser/.ssh/authorized_keys2"]
     assert st["acc_delete"] == "sudo userdel olduser"
     # пароль и так заблокирован: без -L, иначе возврат через -U не сработает; путь с пробелом - в кавычках
     st = {x["id"]: x["cmd"] for x in _fix(rep, "svc")}
-    assert st["acc_lock"] == "sudo usermod -e 1 svc" and st["acc_undo"].splitlines()[0] == "sudo usermod -e '' svc"
-    assert st["acc_keys"] == "sudo mv '/srv/svc home/.ssh/authorized_keys' '/srv/svc home/.ssh/authorized_keys.disabled'"
+    assert st["acc_off"] == ("sudo usermod -e 1 svc &&\n"
+                             "sudo mv '/srv/svc home/.ssh/authorized_keys' '/srv/svc home/.ssh/authorized_keys.disabled'")
+    assert st["acc_undo"].splitlines()[0] == "sudo usermod -e '' svc"
+    # без ключей (вход по паролю): только блокировка, шаг со своим текстом
+    pw = _snap([_u("ops", last=TS - DAY), _u("olduser", pw="P", last=TS - 400 * DAY)], [_k("ops")], ssh_pass="yes")
+    st = {x["id"]: x["cmd"] for x in _fix(pw, "olduser")}
+    assert st["acc_off_nokeys"] == "sudo usermod -L -e 1 olduser" and st["acc_undo"] == "sudo usermod -U -e '' olduser"
     # учетка нужна - команд нет; входят только через нее - отключать нельзя
     assert _fix(rep, "olduser", mutes=["access:olduser"]) is None and _fix(rep, "ops") is None
     alone = _snap([_u("olduser", pw="P", last=TS - 400 * DAY)], [_k("olduser")])

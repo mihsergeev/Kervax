@@ -10,6 +10,8 @@
 
 Данные - из отчета агента: binds давно, priv/caps/ro с агента 2.27. У старого агента видно только
 сокет: privileged он не шлет, а без списка ro любой bind выглядел бы монтированием на запись.
+С агента 2.57 у контейнеров с опасными caps еще права главного процесса (proc): кто стартует от root
+только ради entrypoint и работает дальше без прав, тот не ключ, а заметка (start_caps).
 
 Инструментам, которым это нужно по назначению (прокси сокета, cadvisor, сборщики логов, VPN
 Amnezia, docker-in-docker), разрешено ровно то, что им нужно: promtail с docker-сокетом - норма,
@@ -105,13 +107,25 @@ def _new_agent(rep: dict) -> bool:
     return v >= (2, 27)
 
 
+def start_only(c: dict) -> bool:
+    """Опасные caps выданы, но главный процесс работает без них (proc, агент 2.57): стартует от
+    root ради entrypoint, тот делает chown и setpriv/gosu на uid приложения. Не root (ни один из
+    real/effective/saved/fs), в CapEff/CapPrm/CapAmb опасных нет и no_new_privs - вернуть права
+    через setuid-бинарь или file capabilities нельзя. Нет proc (старый агент) - судим по cap_add."""
+    p = c.get("proc")
+    if not isinstance(p, dict) or p.get("nnp") is not True or p.get("caps"):
+        return False
+    uid = p.get("uid")
+    return isinstance(uid, int) and not isinstance(uid, bool) and uid > 0
+
+
 def flags(c: dict, new_agent: bool) -> list[str]:
     """Ключи от хоста у контейнера, без учета назначения."""
     binds = [str(b) for b in c.get("binds") or [] if isinstance(b, str)]
     out = []
     if c.get("priv"):
         out.append(PRIV)
-    if c.get("caps") and not c.get("priv"):
+    if c.get("caps") and not c.get("priv") and not start_only(c):
         out.append(CAPS)
     if any(b.endswith(_SOCK_FILES) or b in _SOCK_DIRS for b in binds):
         out.append(SOCK)
@@ -165,6 +179,25 @@ def view(srv: Server, fix: bool = False) -> list[dict]:
             for x in live:
                 if x["name"] in blk["names"]:
                     x["fix"] = blk
+    return out
+
+
+def start_caps(srv: Server) -> list[dict]:
+    """Заметка вместо ключей: работающие контейнеры, у которых опасные caps только на старт
+    (start_only), сверх положенного по назначению: [{"name", "image", "caps", "uid"}]."""
+    rep = srv.last_report or {}
+    dk = rep.get("docker") or {}
+    if not dk.get("access"):
+        return []
+    out = []
+    for c in dk.get("containers") or []:
+        if not isinstance(c, dict) or c.get("state") != "running" or c.get("priv") or not c.get("caps"):
+            continue
+        name = str(c.get("name") or "")
+        if CAPS in allowed(name, str(c.get("image") or "")) or not start_only(c):
+            continue
+        out.append({"name": name, "image": str(c.get("image") or ""),
+                    "caps": [str(x) for x in c.get("caps") or []], "uid": c["proc"]["uid"]})
     return out
 
 

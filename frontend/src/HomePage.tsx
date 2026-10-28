@@ -8,6 +8,8 @@ import {
   applyLocalProbe,
   listServers,
   localProbeSuggestions,
+  muteServerKeys,
+  snoozeServer,
   snoozeServerAlert,
   updateServer,
   type Check,
@@ -23,7 +25,7 @@ import {
 import type { Section } from './App'
 import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta, tallyTile, type TallyTile } from './serverUtils'
 import { KnownDialog } from './KnownDialog'
-import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, isDecision, kindLabel, liftMute, oomCulpritLabel, type MuteItem } from './mutes'
+import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, collectMutes, isDecision, kindLabel, liftMute, muteDate, muteLiveText, muteQuiet, oomCulpritLabel, withLive, type MuteItem } from './mutes'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
@@ -71,9 +73,6 @@ type ActItem = {
   muted?: boolean
   tip?: string // всплывающая подсказка строки: полный список пакетов
 }
-
-// с какого срока до 90% износа диска звать запланировать замену (полгода)
-const WEAR_PLAN_MS = 183 * 86400 * 1000
 
 // Снуз на время понимают не все ключи: рост памяти, перезапуски и пропавший порт бэкенд берет только
 // из alert_mutes, решения "так и должно быть" - не мьют вовсе
@@ -336,17 +335,6 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
         ...hm(s, 'k-noagent'), detail: `${unmon.length} (${names})`,
         text: t('{name}: нод кластера без агента - {n} ({nodes})', { name: s.name, n: unmon.length, nodes: names }) })
     }
-    // Диски дойдут до 90% износа меньше чем через полгода (backend app/disk_wear.py). Ближе двух
-    // месяцев это уже строка в "Что сломано" и алерт, здесь не дублируем
-    const plan = (s.wear_forecast ?? []).filter((w) => !w.soon && w.d90 && Date.parse(w.d90) - Date.now() < WEAR_PLAN_MS)
-    if (plan.length > 0) {
-      const when = plan.map((w) => w.d90 as string).sort()[0]
-      const day = when.split('-').reverse().join('.')
-      const disks = plan.map((w) => w.dev).join(', ')
-      items.push({ key: `wear-${s.id}`, icon: '💽', section: 'servers', id: s.id, name: s.name, cc: s.country, sec: 'diskhealth',
-        ...hm(s, 'wear-plan'), detail: `${disks}: ${day}`,
-        text: t('{name}: диски {disks} дойдут до 90% износа примерно к {d} - запланируйте замену', { name: s.name, disks, d: day }) })
-    }
     // restic самого сервера бэкапов (prune, forget, check) старше той версии, до которой его
     // обновляет helper: обычно обновление не скачалось. Ведем в модалку сервера, там команда.
     if (s.bsrv_restic_old) {
@@ -466,11 +454,12 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
   return items
 }
 
-// Заглушено целиком: ключи, которые глушат вид у сервера разом, - голый вид (units, kube_pod, disk@1)
-// насовсем и снузом, и снуз всего сервера. Поштучные (unit:nginx.service, kube_pod:ns/web), решения
-// "так и должно быть" и заглушки "Требует действий" (home:) сюда не идут: они про одну вещь.
-// Такие мьюты остались с прежних кнопок Telegram: по ним молчат алерты о любой вещи этого вида,
-// в том числе о новых, и без этого блока это видно только в карточке сервера
+// Заглушено на время целиком: ключи, которые глушат вид у сервера разом, - голый вид (units, kube_pod,
+// disk@1) снузом, и снуз всего сервера. По ним молчат алерты о любой вещи этого вида, в том числе о новых.
+// Поштучные (unit:nginx.service, kube_pod:ns/web), решения "так и должно быть" и заглушки "Требует
+// действий" (home:) сюда не идут: они про одну вещь. Насовсем - тоже: это решение, а не забытое, оно
+// живет в карточке сервера и в "Заглушено" раздела Серверы. Кончившиеся при живой проблеме - своим
+// блоком выше (overRows). Где тихо сутки, панель снимает сама (app/mute_watch.py)
 type WideMute = MuteItem
 function wideMutes(s: Server, t: T, now = Date.now()): WideMute[] {
   const wide = (k: string) => !!k && !k.includes(':') && !isDecision(k)
@@ -483,11 +472,11 @@ function wideMutes(s: Server, t: T, now = Date.now()): WideMute[] {
   }
   const out: WideMute[] = []
   if (s.snooze_until && Date.parse(s.snooze_until) > now)
-    out.push({ label: t('весь сервер'), until: s.snooze_until, group: 'alert', key: '' })
+    out.push(withLive(s, { label: t('весь сервер'), until: s.snooze_until, group: 'alert', key: '' }))
   for (const [k, u] of Object.entries(s.alert_snoozes ?? {}))
-    if (wide(k) && Date.parse(u) > now) out.push({ label: label(k), until: u, group: 'alert', key: k })
-  for (const k of s.alert_mutes ?? []) if (wide(k)) out.push({ label: label(k), until: null, group: 'alert', key: k })
-  return out
+    if (wide(k) && Date.parse(u) > now && !(s.alert_mutes ?? []).includes(k))
+      out.push(withLive(s, { label: label(k), until: u, group: 'alert', key: k }))
+  return out.filter((i) => !i.over)
 }
 
 type Props = {
@@ -638,7 +627,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // сроки сайтов: у какой строки открыт выбор "напомнить за", раскрыта ли строка отложенных
   const [warnPick, setWarnPick] = useState<string | null>(null)
   const [warnOffOpen, setWarnOffOpen] = useState(false)
-  // блок "заглушено целиком": раскрыт ли и какой ключ сейчас снимается
+  // блок "заглушено на время": раскрыт ли и какой ключ сейчас снимается ('*' - все, где тихо); то же
+  // у блока "заглушка кончилась"
   const [wideOpen, setWideOpen] = useState(false)
   const [wideBusy, setWideBusy] = useState('')
   const oomMuteText = (k: string) =>
@@ -1001,17 +991,43 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       ),
       issues: issuesOf('backups'),
     }))
-  // заглушено целиком (wideMutes): строка на сервер, ведет в его карточку
+  // заглушено на время целиком (wideMutes): строка на сервер, ведет в его карточку
   const wideRows = canSee('servers')
     ? srvList.map((s) => ({ s, items: wideMutes(s, t) })).filter((x) => x.items.length > 0)
         .sort((a, b) => a.s.name.localeCompare(b.s.name))
     : []
-  // вернуть: снять ключ теми же ручками, что в "Заглушено" (mutes.tsx liftMute) - из alert_mutes
-  // целиком, снуз - на 0 часов. Сервер берем свежий: alert_mutes сохраняется целиком
+  // вернуть: снять ключ теми же ручками, что в "Заглушено" (mutes.tsx liftMute) - снуз на 0 часов
   const liftWide = (s: Server, i: WideMute) => {
     const id = `${s.id}|${i.key}|${i.until ?? ''}`
     setWideBusy(id)
     liftMute(s, i).then(load).catch(() => {}).finally(() => setWideBusy(''))
+  }
+  // вернуть все, где тихо: по одной, у сервера по очереди (alert_snoozes сохраняется целиком)
+  const wideQuiet = wideRows.flatMap(({ s, items }) => items.filter((i) => muteQuiet(i)).map((i) => ({ s, i })))
+  const liftQuiet = async () => {
+    setWideBusy('*')
+    for (const { s, i } of wideQuiet) await liftMute(s, i).catch(() => {})
+    setWideBusy('')
+    load()
+  }
+  // временная заглушка кончилась, а проблема есть (app/mute_watch.py): панель держит ее и спрашивает,
+  // что дальше - продлить, насовсем или вернуть алерты. Любые: и вид целиком, и одна вещь
+  const overRows = canSee('servers')
+    ? srvList.flatMap((s) => collectMutes(s, t, ['alert']).filter((i) => i.over).map((i) => ({ s, i })))
+        .sort((a, b) => a.s.name.localeCompare(b.s.name) || a.i.label.localeCompare(b.i.label))
+    : []
+  // hours > 0 - продлить, -1 - насовсем (мьют, снуз снимается), 0 - вернуть алерты
+  const overAct = async (s: Server, i: MuteItem, hours: number) => {
+    setWideBusy(`over|${s.id}|${i.key}`)
+    try {
+      if (hours < 0) await muteServerKeys(s.id, [i.key])
+      const h = Math.max(hours, 0)
+      await (i.key === '' ? snoozeServer(s.id, h) : snoozeServerAlert(s.id, i.key, h))
+    } catch {
+      // сеть или права: строка останется, повторят
+    }
+    setWideBusy('')
+    load()
   }
   const whenText = (u: string) =>
     new Date(u).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
@@ -1184,6 +1200,60 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           </div>
         </div>
       )}
+      {/* Заглушка кончилась, а проблема есть: алерты придержаны, решение за человеком */}
+      {overRows.length > 0 && (
+        <div className="chart-card net-card net-card-wide home-block home-attention-over">
+          {cap(t('Заглушка кончилась, а проблема есть'), overRows.length, 'warn')}
+          <div className="muted small home-attention-note">
+            {t('Алерты по ним панель придержала: придут, если станет хуже. Проблема уйдет - строка пропадет сама')}
+          </div>
+          <div className="home-attention-list">
+            {overRows.map(({ s, i }) => {
+              const busy = wideBusy === `over|${s.id}|${i.key}`
+              return (
+                <div key={`${s.id}|${i.key}`} role="button" tabIndex={0} className="home-attention-row"
+                  onClick={() => onOpen('servers', s.id, undefined, 'alerts')}
+                  onKeyDown={(ev) => ev.key === 'Enter' && ev.target === ev.currentTarget && onOpen('servers', s.id, undefined, 'alerts')}>
+                  <span className="lk-dot lk-dot-warn" />
+                  <span className="home-attention-ico">🔕</span>
+                  <span className="home-attention-txt">
+                    <CountryFlag code={s.country} /> <b>{s.name}</b> - {i.label}
+                    <span className="muted"> ({t('кончилась {d}', { d: muteDate(i.over!) })})</span>
+                    <span className="muted small home-over-what">{muteLiveText(i, t)}</span>
+                    {!isViewer && (
+                      <span className="home-over-acts" onClick={(e) => e.stopPropagation()}>
+                        {busy ? (
+                          <span className="muted small">...</span>
+                        ) : (
+                          <>
+                            <button className="linklike small" disabled={!!wideBusy} onClick={() => overAct(s, i, 24)}>
+                              {t('на день')}
+                            </button>
+                            <button className="linklike small" disabled={!!wideBusy} onClick={() => overAct(s, i, 24 * 7)}>
+                              {t('на неделю')}
+                            </button>
+                            {i.key !== '' && !i.key.includes('@') && (
+                              <button className="linklike small" disabled={!!wideBusy} onClick={() => overAct(s, i, -1)}>
+                                {t('насовсем')}
+                              </button>
+                            )}
+                            <button className="linklike small" disabled={!!wideBusy}
+                              title={t('Снять заглушку: алерт придет на следующей проверке')}
+                              onClick={() => overAct(s, i, 0)}>
+                              {t('вернуть алерты')}
+                            </button>
+                          </>
+                        )}
+                      </span>
+                    )}
+                  </span>
+                  <span className="home-open">→</span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
       {/* подсказка - предложение поменять мониторы, учетке только для просмотра не нужна */}
       {probeHints.length > 0 && !isViewer && (
         <div className="chart-card net-card home-block home-attention-probe">
@@ -1255,18 +1325,18 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           </div>
         </div>
       )}
-      {/* Заглушено целиком: свернуто счетчиком, внизу - это к сведению, не беда */}
+      {/* Заглушено на время целиком: свернуто, внизу - это к сведению, не беда */}
       {wideRows.length > 0 && (
         <div className="chart-card net-card net-card-wide home-block home-attention-soft">
           <div className="home-sel-foot">
             <button className="linklike muted small" onClick={() => setWideOpen(!wideOpen)}>
-              {t('заглушено целиком, серверов: {n}', { n: wideRows.length })}, {wideOpen ? t('скрыть') : t('показать')}
+              {t('заглушено на время: {list}', { list: shortList(wideRows.map((x) => x.s.name), t) })}, {wideOpen ? t('скрыть') : t('показать')}
             </button>
           </div>
           {wideOpen && (
             <>
               <div className="muted small home-attention-note">
-                {t('Алерты этого вида не приходят ни по одной вещи на сервере, в том числе по новым')}
+                {t('Алерты этого вида не приходят ни по одной вещи на сервере, в том числе по новым. Где тихо сутки, заглушка снимется сама')}
               </div>
               <div className="home-attention-list">
                 {wideRows.map(({ s, items }) => (
@@ -1280,11 +1350,12 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                       {' - '}
                       {items.map((i, n) => {
                         const id = `${s.id}|${i.key}|${i.until ?? ''}`
+                        const live = muteLiveText(i, t)
                         return (
                           <span key={id}>
                             {n > 0 && ', '}
                             {i.label}
-                            <span className="muted"> ({i.until ? t('до {d}', { d: whenText(i.until) }) : t('насовсем')})</span>
+                            <span className="muted"> ({t('до {d}', { d: whenText(i.until!) })}{live ? `, ${live}` : ''})</span>
                             {!isViewer && (
                               <>
                                 {' '}
@@ -1303,6 +1374,14 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                   </div>
                 ))}
               </div>
+              {!isViewer && wideQuiet.length > 0 && (
+                <div className="home-sel-foot">
+                  <button className="linklike small" disabled={!!wideBusy} onClick={liftQuiet}
+                    title={wideQuiet.map(({ s, i }) => `${s.name} - ${i.label}`).join('\n')}>
+                    {wideBusy === '*' ? '...' : t('вернуть все, где тихо ({n})', { n: wideQuiet.length })}
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>

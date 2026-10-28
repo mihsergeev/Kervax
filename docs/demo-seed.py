@@ -651,7 +651,7 @@ def services(rep: dict, name: str, role: str) -> None:
 
 
 def db_disks(rep: dict, ex: dict) -> None:
-    """db-01: два NVMe в RAID1 под базой, износ к 90% через полтора месяца, архивный HDD
+    """db-01: два NVMe в RAID1 под базой (износ по паспорту 85% - не поломка), архивный HDD
     начал переназначать сектора, диск заполнится за четыре дня, место съели WAL и забытый дамп"""
     nvme = {"type": "nvme", "model": "Samsung SSD 990 PRO 2TB", "size": 2000398934016, "rota": 0,
             "ok": True, "err": "", "health": "PASSED", "failing": False, "spare": 100, "spare_thr": 10,
@@ -870,7 +870,7 @@ EVENTS = {
                "shop.example.com - 52. Коды: 502 - 52, 504 - 9. Почему: web-01-app-1:9000 не принимает "
                "соединения - 52. Чаще всего падает: /checkout - 40",
         "port": "🚪 web-02 — новый порт открыт в интернет: Redis 6379 на 203.0.113.11",
-        "wear": "💾 db-01 — диск nvme0n1: износ 85%, 90% примерно к {d90} - пора заказывать замену",
+        "disk_health": "💽 db-01 — диск sda: за сутки выросли ошибки - переназначенные сектора +16",
         "units": "⚠️⚙️ ci-runner-1 — упал certbot.service: код 1",
         "down": "🔴 Тестовый стенд — HTTP 502 — плохой ответ от вышестоящего сервера (Bad Gateway)",
         "up": "✅ Тестовый стенд — снова доступен",
@@ -886,7 +886,7 @@ EVENTS = {
                "shop.example.com - 52. Codes: 502 - 52, 504 - 9. Why: web-01-app-1:9000 refuses "
                "connections - 52. Most failing: /checkout - 40",
         "port": "🚪 web-02 — new port open to the internet: Redis 6379 on 203.0.113.11",
-        "wear": "💾 db-01 — disk nvme0n1: wear 85%, 90% around {d90} - time to order a replacement",
+        "disk_health": "💽 db-01 — disk sda: errors grew in 24 h - reallocated sectors +16",
         "units": "⚠️⚙️ ci-runner-1 — certbot.service failed: code 1",
         "down": "🔴 Staging — HTTP 502 — bad response from the upstream server (Bad Gateway)",
         "up": "✅ Staging — back up",
@@ -898,7 +898,6 @@ def alert_events() -> list[AlertEvent]:
     """Неделя доставленных алертов для истории: повторяющиеся (их панель покажет как шум) и разовые"""
     tx = EVENTS[LANG]
     staging = NAME["staging"]
-    d90 = (NOW.date() + timedelta(days=40)).strftime("%d.%m")
 
     def ev(d, h, kind, target, sec, grp, key, rec=False, **fmt):
         return AlertEvent(ts=NOW - timedelta(days=d, hours=h), kind=kind, target=target, section=sec, grp=grp,
@@ -915,7 +914,7 @@ def alert_events() -> list[AlertEvent]:
         rows.append(ev(d, 8, "kube_restarts", "k8s-node-1", "kuber", "Staging", "kube"))
     rows += [ev(0, 0.2, "web_5xx", "web-01", "servers", "Production", "web"),
              ev(1, 6, "port_new", "web-02", "servers", "Production", "port"),
-             ev(1, 7, "disk_health", "db-01", "servers", "Production", "wear", d90=d90),
+             ev(1, 7, "disk_health", "db-01", "servers", "Production", "disk_health"),
              ev(2, 5, "units", "ci-runner-1", "servers", "Dev", "units"),
              ev(0, 0.9, "down", staging, "sites", "Staging", "down"),
              ev(3, 4, "down", staging, "sites", "Staging", "down"),

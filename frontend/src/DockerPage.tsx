@@ -10,6 +10,7 @@ import {
   type DockerCommand,
   type DockerContainer,
   type DockerInfo,
+  type DockerRiskStart,
   type MemLimitItem,
   type RiskStep,
   type Server,
@@ -426,6 +427,27 @@ function riskFixText(st: RiskStep, a: Record<string, string>, t: (k: string, p?:
     case 'hand_up': return t('sudo docker compose up -d <сервис> в папке проекта, откат - вернуть копию и тот же up -d')
     default: return st.id
   }
+}
+
+// Опасные caps только на старт: entrypoint от root делает chown и setpriv на uid приложения,
+// главный процесс работает без прав - не тревога, а строка серым
+function StartCapsNote({ items }: { items: DockerRiskStart[] }) {
+  const { t } = useI18n()
+  return (
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="chart-cap">{t('Права только на старт')}</div>
+      </div>
+      <div className="net-foot">
+        {items.map((x) => (
+          <div key={x.name}>
+            {t('{name} (cap {caps}): права выдаются только на старт, процесс работает без них (uid {uid}, no-new-privileges)',
+              { name: x.name, caps: x.caps.join(', '), uid: x.uid })}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
 }
 
 function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct: boolean; onChanged: () => void }) {
@@ -1232,6 +1254,7 @@ function DockerHostModal({
                         : t('Агент этой ноды еще не отдает ключи контейнеров от хоста: обновите агент.')}
                     </div>
                   )}
+                  {(s.docker_risk_start?.length ?? 0) > 0 && <StartCapsNote items={s.docker_risk_start ?? []} />}
                 </div>
               )}
 

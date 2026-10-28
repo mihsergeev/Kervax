@@ -99,7 +99,11 @@ fi
 #       * restic is installed only as RESTIC_TARGET_VER with the baked sha256;
 #       * a rest-server port published by docker past ufw is reported (docker opens it to the
 #         whole internet when ufw-docker is not set up), and ufw opens the actual port
-KERVAX_SETUP_VERSION=0.37  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.38: a mirror server may pull copies of chosen repositories (mirror-allow): a read-only user
+#       kervax-mread whose key line pins the mirror's address and forces kervax-mirror-serve, which
+#       only lists an allowed repository or sends its files as a tar; stats report the SSH port and
+#       host key the mirror pins, and which mirror may read what and when it last did
+KERVAX_SETUP_VERSION=0.38  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -519,8 +523,9 @@ cmd_stats() {
     legacy_json="{\"script\":\"$LEGACY_PRUNE\",\"repos\":${lcount:-0},\"where\":\"$(json_escape "$L_WHERE")\",\"schedule\":\"$(json_escape "$L_SCHED")\",\"log\":\"$(json_escape "$L_LOG")\",\"log_ts\":${log_ts:-0},\"missing\":[$missing]}"
   fi
   install -d -m 0755 "${REPORT_EXTRA%/*}" 2>/dev/null || true
-  if printf '{"v":1,"ts":%s,"restic":"%s","restic_target":"%s","legacy":%s,"repos":{%s}}\n' \
-      "$now_ts" "$(server_restic_min)" "$RESTIC_TARGET_VER" "$legacy_json" "$extra_json" > "$REPORT_EXTRA.tmp" 2>/dev/null; then
+  if printf '{"v":1,"ts":%s,"restic":"%s","restic_target":"%s","legacy":%s,"repos":{%s},"ssh":%s,"mirrors":%s}\n' \
+      "$now_ts" "$(server_restic_min)" "$RESTIC_TARGET_VER" "$legacy_json" "$extra_json" \
+      "$(mirror_ssh_json)" "$(mirrors_json)" > "$REPORT_EXTRA.tmp" 2>/dev/null; then
     chmod 0644 "$REPORT_EXTRA.tmp" 2>/dev/null && mv -f "$REPORT_EXTRA.tmp" "$REPORT_EXTRA" 2>/dev/null || true
   fi
   # Space on the volume WITH THE REPOSITORIES rather than on /: they often sit on a separate
@@ -1489,6 +1494,159 @@ cmd_allow_tls() {
   echo "OK :$TLS_PORT open for $client_ip"
 }
 
+# ------- mirrors (0.38): a mirror server pulls copies of chosen repositories -------
+# The mirror logs in as kervax-mread with its own key. Its line in authorized_keys pins the mirror's
+# address (from=) and forces kervax-mirror-serve, which runs as root through sudo and can do two
+# things only: list a repository allowed to that mirror, or send files of it as a tar. Nothing here
+# writes into a repository, and this server gets no key and no login to the mirror: whoever takes
+# this server cannot reach the copies there.
+MREAD_USER=kervax-mread
+MREAD_HOME=/var/lib/kervax-mread
+MIRROR_ALLOW_D=/etc/kervax/mirror-allow
+MIRROR_SERVED_D=/var/lib/kervax/mirror-served
+MIRROR_SERVE=/lib65/kervax/kervax-mirror-serve
+MIRROR_SUDOERS=/etc/sudoers.d/kervax-mread
+mirror_pubkey_ok() { [[ "$1" =~ ^ssh-ed25519\ [A-Za-z0-9+/]{68}$ ]]; }
+# sshd and ufw live in sbin, which cron's PATH leaves out
+sbin() { command -v "$1" 2>/dev/null || { [ -x "/usr/sbin/$1" ] && echo "/usr/sbin/$1"; } || true; }
+ssh_port() {
+  local b p=""; b="$(sbin sshd)"
+  [ -n "$b" ] && p="$("$b" -T 2>/dev/null | awk '$1 == "port" { print $2; exit }')"
+  [[ "$p" =~ ^[0-9]+$ ]] && echo "$p" || echo 22
+}
+# the host key the mirror pins: ed25519 when there is one
+ssh_hostkey() {
+  local f
+  for f in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub /etc/ssh/ssh_host_rsa_key.pub; do
+    [ -f "$f" ] && { cut -d' ' -f1,2 "$f" | head -n1; return 0; }
+  done
+}
+mirror_ssh_json() {
+  local hk; hk="$(ssh_hostkey)"
+  [ -n "$hk" ] || { echo null; return 0; }
+  printf '{"port":%s,"hostkey":"%s"}' "$(ssh_port)" "$(json_escape "$hk")"
+}
+# which mirrors may read here, which repositories, and when each was last read
+mirrors_json() {
+  local f m out="" ip repos served r ts
+  for f in "$MIRROR_ALLOW_D"/*.conf; do
+    [ -f "$f" ] || continue
+    m="${f##*/}"; m="${m%.conf}"
+    valid_name "$m" || continue
+    ip="$(sed -n 's/^ip=//p' "$f" | head -n1)"
+    repos=""; served=""
+    while IFS= read -r r; do
+      valid_name "$r" || continue
+      repos="${repos:+$repos,}\"$(json_escape "$r")\""
+      ts="$(stat -c %Y "$MIRROR_SERVED_D/$m--$r" 2>/dev/null || echo 0)"
+      served="${served:+$served,}\"$(json_escape "$r")\":${ts:-0}"
+    done < <(cat "$MIRROR_ALLOW_D/$m" 2>/dev/null || true)
+    out="${out:+$out,}\"$(json_escape "$m")\":{\"ip\":\"$(json_escape "$ip")\",\"repos\":[$repos],\"served\":{$served}}"
+  done
+  echo "{$out}"
+}
+ensure_mread_user() {
+  if ! id "$MREAD_USER" >/dev/null 2>&1; then
+    useradd --system --home-dir "$MREAD_HOME" --no-create-home --shell /bin/sh "$MREAD_USER" \
+      || { echo "could not create the user $MREAD_USER" >&2; return 2; }
+  fi
+  # no password, but not a locked one either: sshd turns away a locked account
+  usermod -p '*' "$MREAD_USER" >/dev/null 2>&1 || true
+  install -d -o root -g root -m 0755 "$MREAD_HOME" "$MREAD_HOME/.ssh"
+  if ! command -v sudo >/dev/null 2>&1; then
+    command -v apt-get >/dev/null 2>&1 && APT_TIMEOUT=600 apt_q install sudo || true
+    command -v sudo >/dev/null 2>&1 || { echo "sudo is required for the mirror access and is missing" >&2; return 2; }
+  fi
+  local tmp; tmp="$(mktemp)"
+  # no pty (use_pty would bend the tar stream), the request goes through as SSH_ORIGINAL_COMMAND
+  printf 'Defaults:%s !requiretty, !use_pty, env_keep += "SSH_ORIGINAL_COMMAND"\n%s ALL=(root) NOPASSWD: %s\n' \
+    "$MREAD_USER" "$MREAD_USER" "$MIRROR_SERVE" > "$tmp"
+  if ! visudo -cf "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"; echo "the sudoers rule for $MREAD_USER did not pass visudo" >&2; return 2
+  fi
+  install -m 0440 -o root -g root "$tmp" "$MIRROR_SUDOERS"; rm -f "$tmp"
+}
+rebuild_authorized_keys() {
+  local f m ip pk tmp
+  install -d -o root -g root -m 0755 "$MREAD_HOME" "$MREAD_HOME/.ssh"
+  tmp="$(mktemp "$MREAD_HOME/.ssh/.ak.XXXXXX")"
+  for f in "$MIRROR_ALLOW_D"/*.conf; do
+    [ -f "$f" ] || continue
+    m="${f##*/}"; m="${m%.conf}"
+    valid_name "$m" || continue
+    ip="$(sed -n 's/^ip=//p' "$f" | head -n1)"; pk="$(sed -n 's/^pubkey=//p' "$f" | head -n1)"
+    valid_ip "$ip" && mirror_pubkey_ok "$pk" || continue
+    printf 'restrict,from="%s",command="sudo -n %s %s" %s kervax-mirror:%s\n' "$ip" "$MIRROR_SERVE" "$m" "$pk" "$m"
+  done > "$tmp"
+  chmod 0644 "$tmp" && mv -f "$tmp" "$MREAD_HOME/.ssh/authorized_keys"
+}
+# the mirror's address to the SSH port, in ufw (when ufw is on); "" removes this mirror's rules
+mirror_ufw() {  # name ip
+  local m="$1" ip="$2" ufw n port
+  ufw="$(sbin ufw)"
+  [ -n "$ufw" ] && "$ufw" status 2>/dev/null | grep -q '^Status: active' || return 0
+  for n in $("$ufw" status numbered 2>/dev/null \
+             | awk -v c="# kervax-mirror $m" '{ sub(/[ \t]+$/, "") } length($0) >= length(c) && substr($0, length($0) - length(c) + 1) == c' \
+             | { if [ -n "$ip" ]; then grep -vF " $ip " || true; else cat; fi; } \
+             | sed -n 's/^\[ *\([0-9][0-9]*\)\].*/\1/p' | sort -rn); do
+    "$ufw" --force delete "$n" >/dev/null 2>&1 || true
+  done
+  [ -n "$ip" ] || return 0
+  port="$(ssh_port)"
+  "$ufw" allow proto tcp from "$ip" to any port "$port" comment "kervax-mirror $m" >/dev/null 2>&1 \
+    || echo "NOTE: ufw did not take the rule for $ip to port $port"
+}
+# sshd settings that would turn the mirror away; told, not changed
+sshd_notes() {  # ip
+  local b t port; b="$(sbin sshd)"; [ -n "$b" ] || { echo "NOTE: sshd is not found on this server"; return 0; }
+  port="$(ssh_port)"
+  t="$("$b" -T -C "user=$MREAD_USER,host=$1,addr=$1,laddr=0.0.0.0,lport=$port" 2>/dev/null || true)"
+  [ -n "$t" ] || return 0
+  grep -qx 'pubkeyauthentication no' <<<"$t" && echo "NOTE: sshd has PubkeyAuthentication no for $MREAD_USER"
+  if grep -q '^allowusers ' <<<"$t" && ! grep '^allowusers ' <<<"$t" | grep -qw -- "$MREAD_USER"; then
+    echo "NOTE: sshd lets in only AllowUsers: add $MREAD_USER there, otherwise the mirror is turned away"
+  fi
+  if grep -q '^allowgroups ' <<<"$t" && ! grep '^allowgroups ' <<<"$t" | grep -qw -- "$MREAD_USER"; then
+    echo "NOTE: sshd lets in only AllowGroups: add the group $MREAD_USER there, otherwise the mirror is turned away"
+  fi
+  if grep '^denyusers ' <<<"$t" | grep -qwE -- "$MREAD_USER|\\*"; then
+    echo "NOTE: sshd DenyUsers turns $MREAD_USER away"
+  fi
+  return 0
+}
+# mirror-allow <mirror> <ip> <pubkey> [repo...]: what this mirror may read. No repositories takes
+# its access away. The list replaces the previous one; the copies on the mirror are not touched
+# either way (this server cannot reach them).
+cmd_mirror_allow() {
+  local m="${1:-}" ip="${2:-}" pk="${3:-}" r ok="" skipped=""
+  [ $# -ge 3 ] && shift 3 || shift $#
+  valid_name "$m" || { echo "bad mirror name" >&2; return 2; }
+  if [ $# -eq 0 ]; then
+    rm -f "$MIRROR_ALLOW_D/$m" "$MIRROR_ALLOW_D/$m.conf"
+    [ -d "$MREAD_HOME/.ssh" ] && rebuild_authorized_keys
+    mirror_ufw "$m" ""
+    echo "OK mirror $m: no access any more"
+    return 0
+  fi
+  valid_ip "$ip" || { echo "bad mirror ip" >&2; return 2; }
+  mirror_pubkey_ok "$pk" || { echo "bad mirror key (ssh-ed25519 expected)" >&2; return 2; }
+  for r in "$@"; do
+    valid_name "$r" || continue
+    if [ -d "$DATA/$r" ] && [ ! -L "$DATA/$r" ] && [ -f "$DATA/$r/config" ]; then ok="$ok$r"$'\n'; else skipped="$skipped $r"; fi
+  done
+  [ -n "$ok" ] || { echo "none of the repositories is here:$skipped" >&2; return 2; }
+  ensure_mread_user || return 2
+  install -d -o root -g root -m 0755 "$MIRROR_ALLOW_D"
+  printf '%s' "$ok" > "$MIRROR_ALLOW_D/.$m.tmp" && chmod 0644 "$MIRROR_ALLOW_D/.$m.tmp" && mv -f "$MIRROR_ALLOW_D/.$m.tmp" "$MIRROR_ALLOW_D/$m"
+  printf 'ip=%s\npubkey=%s\n' "$ip" "$pk" > "$MIRROR_ALLOW_D/.$m.conf.tmp" && chmod 0644 "$MIRROR_ALLOW_D/.$m.conf.tmp" \
+    && mv -f "$MIRROR_ALLOW_D/.$m.conf.tmp" "$MIRROR_ALLOW_D/$m.conf"
+  rebuild_authorized_keys
+  mirror_ufw "$m" "$ip"
+  echo "OK mirror $m ($ip) may read: $(printf '%s' "$ok" | paste -sd' ' -), ssh port $(ssh_port)"
+  [ -z "$skipped" ] || echo "NOTE: not here, left out:$skipped"
+  sshd_notes "$ip"
+}
+
 # the certificate is returned as a single base64 line (it survives the spool's tr '\n'; the client decodes it into cacert)
 cmd_get_cert() { local d; d="$(tls_dir)"; [ -f "$d/cert.pem" ] && base64 -w0 "$d/cert.pem" || { echo "no cert" >&2; return 2; }; }
 
@@ -1716,7 +1874,8 @@ res_write() {  # $1 id, $2 ok, $3 output
 }
 
 cmd_process_spool() {
-  local req id action name hpass repopass client_ip kl kd kw km san_ip san_dns port out ok k v line
+  local req id action name hpass repopass client_ip kl kd kw km san_ip san_dns port out ok k v line pubkey
+  local -a repos
   find "$RES_DIR" -maxdepth 1 -type f -name '*.res' -mmin +10 -delete 2>/dev/null || true
   for req in "$REQ_DIR"/*.req; do
     [ -e "$req" ] || [ -L "$req" ] || continue
@@ -1724,6 +1883,7 @@ cmd_process_spool() {
     # the agent names requests <command id>-<nanoseconds>; a symlink or anything else is not a request
     if [ -L "$req" ] || [ ! -f "$req" ] || [[ ! "$id" =~ ^[0-9A-Za-z_-]{1,64}$ ]]; then rm -f "$req"; continue; fi
     action=""; name=""; hpass=""; repopass=""; client_ip=""; kl=3; kd=7; kw=4; km=6; san_ip=""; san_dns=""; port="$REST_PORT"
+    pubkey=""; repos=()
     # read the whole line and split on the first '=' (this keeps a trailing '=' inside values)
     while IFS= read -r line; do
       k="${line%%=*}"; v="${line#*=}"
@@ -1732,6 +1892,7 @@ cmd_process_spool() {
         client_ip) client_ip="$v";; keep_last) kl="$v";; keep_daily) kd="$v";;
         keep_weekly) kw="$v";; keep_monthly) km="$v";; san_ip) san_ip="$v";; san_dns) san_dns="$v";;
         port) port="$v";;
+        pubkey) pubkey="$v";; repo) repos+=("$v");;
       esac
     done < <(head -c 65536 "$req")
     rm -f "$req"  # secrets do not linger on disk
@@ -1744,6 +1905,7 @@ cmd_process_spool() {
       get_cert)         if out="$(cmd_get_cert 2>&1)"; then ok=true; fi ;;
       allow_tls)        if out="$(cmd_allow_tls "$client_ip" 2>&1)"; then ok=true; fi ;;
       get_client_creds) if out="$(cmd_get_client_creds "$name" 2>&1)"; then ok=true; fi ;;
+      mirror_allow)     if out="$(cmd_mirror_allow "$name" "$client_ip" "$pubkey" ${repos[@]+"${repos[@]}"} 2>&1)"; then ok=true; fi ;;
       *) out="unknown action" ;;
     esac
     res_write "$id" "$ok" "$(printf '%s' "$out" | tr '\n' '\r')" || true
@@ -1769,12 +1931,54 @@ case "${1:-}" in
   get-cert)         cmd_get_cert ;;
   allow-tls)        shift; cmd_allow_tls "$@" ;;
   get-client-creds) shift; cmd_get_client_creds "$@" ;;
+  mirror-allow)     shift; cmd_mirror_allow "$@" ;;
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|allow-tls <ip>|get-client-creds <name>|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|allow-tls <ip>|get-client-creds <name>|mirror-allow <mirror> <ip> <pubkey> [repo...]|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"; chown root:root "$HELPER"
+
+# What a mirror server may read here (0.38): the forced command of kervax-mread, run as root through
+# sudo. Harmless by itself: without mirror-allow there is no user, no key and no sudoers rule.
+cat > /lib65/kervax/kervax-mirror-serve.new <<'SERVE_EOF'
+#!/usr/bin/env bash
+# Kervax: what a mirror server may read from this backup server. The forced command of kervax-mread
+# (its key line in /var/lib/kervax-mread/.ssh/authorized_keys names the mirror), run as root through
+# sudo: list a repository allowed to that mirror, or send files of it as a tar. It writes nothing
+# but the time of the last read.
+set -uo pipefail
+export LC_ALL=C
+DATA=/app/rest-server/data
+ALLOW_D=/etc/kervax/mirror-allow
+SERVED_D=/var/lib/kervax/mirror-served
+RE_REL='^(config|keys/[0-9a-f]{64}|snapshots/[0-9a-f]{64}|index/[0-9a-f]{64}|data/[0-9a-f]{2}/[0-9a-f]{64})$'
+m="${1:-}"
+deny() { logger -t kervax-mirror-serve "mirror ${m:-?}: refused: $1" 2>/dev/null || true; echo "refused: $1" >&2; exit 2; }
+[[ "$m" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || deny "bad mirror name"
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+[[ "$cmd" =~ ^(list|get)\ ([A-Za-z0-9][A-Za-z0-9._-]{0,127})$ ]] || deny "unknown request"
+op="${BASH_REMATCH[1]}"; repo="${BASH_REMATCH[2]}"
+[ -f "$ALLOW_D/$m" ] && grep -qxF -- "$repo" "$ALLOW_D/$m" || deny "$repo is not allowed"
+dir="$DATA/$repo"
+[ -d "$dir" ] && [ ! -L "$dir" ] && cd "$dir" || deny "no repository $repo"
+mark() { install -d -m 0755 "$SERVED_D" 2>/dev/null; touch "$SERVED_D/$m--$repo" 2>/dev/null || true; }
+case "$op" in
+  list)
+    # name, size, whole seconds of mtime; the closing line tells a whole listing from a cut one
+    find config keys snapshots index data -type f -printf '%p %s %T@\n' 2>/dev/null \
+      | sed 's/\.[0-9]*$//' | grep -E "${RE_REL%\$} [0-9]+ [0-9]+\$" | awk '{ print } END { print "end " NR }'
+    mark ;;
+  get)
+    tmp="$(mktemp)" || deny "no temp file"
+    trap 'rm -f "$tmp"' EXIT
+    head -n 100000 | grep -E "$RE_REL" > "$tmp" || true
+    tar --no-recursion --ignore-failed-read -cf - -T "$tmp" 2>/dev/null
+    mark ;;
+esac
+SERVE_EOF
+chmod 0755 /lib65/kervax/kervax-mirror-serve.new && chown root:root /lib65/kervax/kervax-mirror-serve.new \
+  && mv -f /lib65/kervax/kervax-mirror-serve.new /lib65/kervax/kervax-mirror-serve
 
 # MIGRATION (0.16): repair prune-env files already created by the panel without `set -a`.
 # Reinstalling the helper does not regenerate the envs by itself (only re-provisioning a client

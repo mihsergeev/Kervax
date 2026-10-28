@@ -920,6 +920,10 @@ label.home-sel-all { display: inline-flex; flex-direction: row; align-items: cen
 .home-attention-mute .home-attention-row:hover { background: transparent; }
 .home-attention-mute .home-attention-txt { flex: 1 1 14rem; }
 .home-attention-mute .home-attention-row > button { flex-shrink: 0; }
+/* заглушка кончилась, а проблема есть: что сейчас - строкой ниже, кнопки решений - следом */
+.home-over-what { display: block; }
+.home-over-acts { display: inline-flex; flex-wrap: wrap; gap: 0.2rem 0.8rem; margin-top: 0.15rem; }
+.home-over-acts .linklike { white-space: nowrap; }
 .home-attention-mute > button { align-self: flex-start; }
 /* окна обслуживания - к сведению, строка никуда не ведет */
 .home-attention-row.maint-home-row { cursor: default; }
@@ -1204,12 +1208,15 @@ label.home-sel-all { display: inline-flex; flex-direction: row; align-items: cen
   .exp-li span.exp-act { white-space: normal; text-align: right; }
 }
 .net-card .exp-closed { margin-top: 0; }
-.loc-res.acc-row { gap: 0.7rem; }
-.acc-main { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.4rem; }
+/* чипы не уже 13rem: иначе длинный чип ("пароль заблокирован") уходил под дату входа; не влезло - дата и
+   кнопки (acc-side) переносятся строкой ниже вместе и прижаты вправо */
+.loc-res.acc-row { gap: 0.4rem 0.7rem; flex-wrap: wrap; }
+.acc-main { flex: 1 1 13rem; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.4rem; }
 .acc-name { font-weight: 600; margin-right: 0.2rem; overflow-wrap: anywhere; }
 .acc-tag { font-size: 0.74rem; color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem; white-space: nowrap; }
 .acc-tag-warn { color: var(--degraded); border-color: rgba(245, 158, 11, 0.45); }
 .acc-tag-bad { color: var(--down); border-color: rgba(239, 68, 68, 0.45); }
+.acc-side { flex: 0 1 auto; margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 0.4rem 0.7rem; }
 .acc-last { flex: 0 0 auto; font-size: 0.85rem; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .acc-act { flex: 0 0 auto; }
 .net-card .du-note, .net-card .dh-note, .net-card .dh-io { margin: 0; }
@@ -1393,7 +1400,7 @@ button.ghost.sw-tog-btn { align-self: flex-start; margin: 0; padding: 0.15rem 0.
   .loc-res.exp-row { display: grid; grid-template-columns: 9px 3rem minmax(0, 1fr); column-gap: 0.55rem; row-gap: 0.25rem; }
   .exp-state, .exp-act { grid-column: 3; justify-self: start; }
   .loc-res.acc-row { display: grid; grid-template-columns: 9px minmax(0, 1fr); column-gap: 0.55rem; row-gap: 0.25rem; }
-  .acc-last, .acc-act { grid-column: 2; justify-self: start; }
+  .acc-side { grid-column: 2; justify-self: start; justify-content: flex-start; margin-left: 0; }
   /* изменения: время над текстом */
   .ch-row { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
   .loc-res.ml-row { flex-wrap: wrap; }
@@ -2760,6 +2767,7 @@ button.mt-srv:focus-visible, button.mt-what-btn:focus-visible { outline: 2px sol
 .mt-what { width: 100%; overflow-wrap: anywhere; }
 .mt-when-c { white-space: nowrap; font-size: 0.78rem; color: var(--text-muted); }
 .mt-until::before { content: ' \00b7  '; }
+.mt-live { display: block; white-space: normal; overflow-wrap: anywhere; max-width: 18rem; }
 .mt-x-c { width: 1%; white-space: nowrap; text-align: right; }
 button.ghost.mt-x {
   padding: 0 0.3rem; font-size: 0.75rem; line-height: 1.5; border-color: transparent; background: none;
@@ -2918,7 +2926,7 @@ tr.mt-off button.mt-what-btn { color: var(--text-muted); text-decoration: line-t
 }
 
 /* Здоровье дисков: сводка вместо счетчиков, массивы строками с разделами по дискам, диски
-   плитками с картинкой по типу и полосой износа (отметка - 90%). Цвета только тонкой рамкой и
+   плитками с картинкой по типу и полосой износа (серая: износ по паспорту - не поломка). Цвета только тонкой рамкой и
    плашкой, без заливки и свечения */
 .dh-note {
   margin-bottom: 6px;
@@ -2960,10 +2968,7 @@ tr.mt-off button.mt-what-btn { color: var(--text-muted); text-decoration: line-t
 .dh-wear b.net-tone-warn { color: var(--degraded); }
 .dh-wear b.net-tone-bad { color: var(--down); }
 .dh-wbar { position: relative; flex: 1; height: 8px; background: var(--border); border-radius: 4px; }
-.dh-wbar span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--up); }
-.dh-wbar span.warn { background: var(--degraded); }
-.dh-wbar span.bad { background: var(--down); }
-.dh-wbar i { position: absolute; top: -3px; bottom: -3px; left: 90%; width: 2px; border-radius: 1px; background: var(--text-muted); opacity: 0.7; }
+.dh-wbar span { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--text-muted); opacity: 0.55; }
 .dh-fc { font-size: 0.78rem; line-height: 1.35; }
 /* ячейки по содержимому: подписи не режутся, серийник забирает остаток */
 .dh-stats { display: flex; gap: 4px; }
@@ -4838,6 +4843,118 @@ textarea:focus {
 }
 .fix-more code {
   color: var(--text);
+}
+/* "Как отключить" учетку (AccessFix): проверка тихо и с пометкой, главное действие в рамке акцентом
+   с залитой кнопкой, откат и удаление свернуты строками ниже */
+.accfix {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0.55rem 0 0.6rem;
+}
+.accfix-check,
+.accfix-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.accfix-check-head {
+  color: var(--text-muted);
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+.accfix-tag {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 0 0.3rem;
+  margin-right: 0.45rem;
+}
+.accfix-check .agent-advice-cmd pre {
+  color: var(--text-muted);
+  background: var(--bg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.accfix-main {
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-radius: 8px;
+  padding: 0.65rem 0.75rem;
+}
+.accfix-main.accfix-warn {
+  border-color: color-mix(in srgb, var(--degraded) 55%, transparent);
+  background: color-mix(in srgb, var(--degraded) 7%, transparent);
+}
+.accfix-main-head {
+  color: var(--text);
+  font-size: 0.98rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.accfix-main .agent-advice-cmd pre {
+  color: var(--text);
+  background: var(--bg);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.accfix-main .agent-advice-cmd button {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.accfix-main .agent-advice-cmd button:hover {
+  background: color-mix(in srgb, var(--accent) 85%, #fff);
+}
+.accfix-more {
+  font-size: 0.84rem;
+  color: var(--text-muted);
+}
+.accfix-more > summary {
+  cursor: pointer;
+  width: fit-content;
+  user-select: none;
+}
+.accfix-more > summary:hover {
+  color: var(--text);
+}
+.accfix-more[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.accfix-more .agent-advice-cmd pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.accfix-del > summary,
+.accfix-del > summary:hover {
+  color: var(--down);
+}
+.accfix-irrev {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid color-mix(in srgb, var(--down) 50%, transparent);
+  border-radius: 4px;
+  padding: 0 0.3rem;
+  margin-left: 0.45rem;
+}
+.accfix-del .agent-advice-cmd pre {
+  border-color: color-mix(in srgb, var(--down) 40%, var(--border));
+}
+@media (max-width: 600px) {
+  .accfix .agent-advice-cmd {
+    flex-direction: column;
+  }
+  .accfix .agent-advice-cmd button {
+    align-self: flex-end;
+  }
 }
 .osupd-adv-why {
   font-size: 0.78rem;
@@ -8282,4 +8399,18 @@ button.inv-dd-btn { font-size: 0.82rem; padding: 0.28rem 0.7rem; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* резервный сервер бэкапов (BsrvMirror.tsx): блок "Копия на резервном" у репозитория, строки и
+   окно резервного */
+.repo-mirror { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); font-size: 0.87rem; line-height: 1.5; }
+.repo-mirror-h { font-weight: 650; }
+.mirror-row { display: grid; grid-template-columns: 10px minmax(8rem, max-content) minmax(0, 1fr) auto; gap: 10px; align-items: center; cursor: pointer; }
+.mirror-make { display: flex; flex-direction: column; gap: 6px; padding: 10px 4px 2px; }
+.mirror-main { display: flex; flex-direction: column; gap: 12px; padding: 14px 18px 18px; }
+.mirror-howto-b { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.mirror-howto-b p { margin: 0; }
+@media (max-width: 760px) {
+  .mirror-row { grid-template-columns: 10px minmax(0, 1fr); }
+  .mirror-row > :nth-child(n + 3) { grid-column: 2; }
+  .mirror-main { padding: 12px; }
 }

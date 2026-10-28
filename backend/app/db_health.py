@@ -609,11 +609,25 @@ def _spl_sql(libs: list[str]) -> str:
     return f"ALTER SYSTEM SET {_SPL} = " + ", ".join(f"'{x}'" for x in libs)
 
 
-def _psql(c: str, role: str, db: str, *sql: str) -> str:
+def _pod(c: str, cf: dict) -> tuple[str, str] | None:
+    """(namespace, под) базы в поде kubernetes (dbstat-setup 0.17: rt=pod и имя ns/под); None - не под.
+    rt=pod без "/" в имени - docker-контейнер с образом под другим именем, к нему docker exec"""
+    if cf.get("rt") != "pod" or "/" not in c:
+        return None
+    ns, _, pod = c.partition("/")
+    return (ns, pod) if ns and pod else None
+
+
+def _psql(c: str, role: str, db: str, *sql: str, pod: tuple[str, str] | None = None, kc: str = "") -> str:
     """psql тем же путем, каким в базу ходит helper: в контейнере под ролью, под которой он вошел (роль
     postgres - системным пользователем postgres), на хосте - от postgres через runuser: sudo -u postgres
-    просит пароль, если sudo разрешен только как root"""
+    просит пароль, если sudo разрешен только как root. В поде - kubectl exec в контейнер базы (helper сам
+    заходит через nsenter, у человека на ноде есть kubectl)"""
     args = f"-d {shlex.quote(db)} " + " ".join(f'-c "{s}"' for s in sql)
+    if pod:
+        q = shlex.quote
+        return (f"kubectl -n {q(pod[0])} exec {q(pod[1])}" + (f" -c {q(kc)}" if kc else "")
+                + f" -- psql -U {q(role or 'postgres')} {args}")
     if not c:
         return f"sudo runuser -u postgres -- psql {args}"
     qc = shlex.quote(c)
@@ -656,14 +670,18 @@ def pgss_fix(x: dict, rep: dict) -> list[dict]:
         users = [str(u) for u in inv.get("users") or []]
         role = "postgres" if "postgres" in users else users[0] if len(users) == 1 else ""
 
+    pod = _pod(c, cf)
+
     def sql(*s: str) -> str:
-        return _psql(c, role, db, *s)
+        return _psql(c, role, db, *s, pod=pod, kc=str(cf.get("kc") or ""))
 
     create = {"id": "pgss_create", "arg": db, "cmd": sql(f"CREATE EXTENSION IF NOT EXISTS {PGSS}")}
     check = {"id": "pgss_check", "cmd": sql(f"SHOW {_SPL}", f"SELECT count(*) FROM {PGSS}")}
     if pss == "noext":
         return [create, check]
     q = shlex.quote
+    if pod:
+        return _pgss_pod(cf, pod, sql, create, check)
     unit = str(cf.get("unit") or "")
     restart = ({"id": "pgss_restart", "cmd": f"sudo docker restart -t {RESTART_WAIT} {q(c)}"} if c else
                {"id": "pgss_restart_host", "arg": unit, "cmd": f"sudo systemctl restart {q(unit or 'postgresql')}"})
@@ -711,6 +729,32 @@ def pgss_fix(x: dict, rep: dict) -> list[dict]:
         undo = "\n".join([drop, cd, up])
     return [create, edit, {"id": "pgss_compose_up", "cmd": "\n".join([cd, up])}, check,
             {"id": "pgss_undo_compose", "undo": True, "cmd": undo}]
+
+
+def _pgss_pod(cf: dict, pod: tuple[str, str], sql, create: dict, check: dict) -> list[dict]:
+    """Шаги для базы в поде. ALTER SYSTEM пишет postgresql.auto.conf в каталог данных на томе, он
+    переживает пересоздание пода; перезапуск - удалить под, контроллер (StatefulSet, Deployment)
+    создаст его заново. Параметр в args контейнера ALTER SYSTEM не перебьет: правится манифест или
+    values чарта, панель показывает текущие args"""
+    q = shlex.quote
+    ns, name = pod
+    restart = {"id": "pgss_restart_pod", "arg": f"{ns}/{name}", "cmd": f"kubectl -n {q(ns)} delete pod {q(name)}"}
+    args = (f"kubectl -n {q(ns)} get pod {q(name)} -o jsonpath='{{range .spec.containers[*]}}"
+            '{.name}{": "}{.command} {.args}{"\\n"}{end}\'')
+    spl, src = str(cf.get("spl") or ""), str(cf.get("spl_src") or "")
+    libs = _libs(spl) if src and cf.get("su") == "on" else None
+    if libs is None:
+        look = sql(f"SELECT setting, source FROM pg_settings WHERE name = '{_SPL}'") + "\n" + args
+        return [{"id": "pgss_look", "arg": "pod", "cmd": look}, create,
+                {"id": "pgss_alter_hand", "cmd": sql(_spl_sql([PGSS]))}, restart, check,
+                {"id": "pgss_undo_hand", "undo": True,
+                 "cmd": sql(f"DROP EXTENSION IF EXISTS {PGSS}", _spl_sql([])) + "\n" + restart["cmd"]}]
+    new = [*libs, PGSS] if PGSS not in libs else libs
+    if src == "command line":
+        return [create, {"id": "pgss_cmdline_pod", "arg": ",".join(new), "cmd": args}, check]
+    return [create, {"id": "pgss_alter", "arg": ", ".join(libs), "cmd": sql(_spl_sql(new))}, restart, check,
+            {"id": "pgss_undo", "undo": True, "arg": ", ".join(libs),
+             "cmd": sql(f"DROP EXTENSION IF EXISTS {PGSS}", _spl_sql(libs)) + "\n" + restart["cmd"]}]
 
 
 # Что грузит MySQL/MariaDB (dbstat-setup 0.11): разница счетчиков SHOW GLOBAL STATUS со снимком примерно
@@ -837,6 +881,26 @@ def my_advice(x: dict, lv: dict | None, *, my_count: int = 1, db_size: int = 0) 
     if cf.get("rt") == "docker" and bp >= STOP_MIN_SB and sto < STOP_OK:
         out.append({"k": "my_stop_timeout", "to": 10 if sto < 0 else sto, "bp": bp})
     return out
+
+
+# почему helper не опросил базу в поде (dbstat-setup 0.17): нет nsenter на ноде, нет клиента в образе,
+# база не пустила, не ответила вовремя, прочее
+FAIL_WHY = ("nsenter", "client", "auth", "timeout", "conn")
+
+
+def fails(rep: dict, now: datetime) -> list[dict] | None:
+    """Базы в подах, до которых helper не достучался: движок, под, почему и начало ошибки клиента"""
+    if block(rep, now) is None:
+        return None
+    b = rep["extras"]["db-health"]
+    out = []
+    for x in b.get("fails") or []:
+        if not isinstance(x, dict) or not x.get("container"):
+            continue
+        why = str(x.get("why") or "")
+        out.append({"engine": str(x.get("engine") or ""), "container": str(x["container"]),
+                    "why": why if why in FAIL_WHY else "conn", "err": str(x.get("err") or "").strip()[:200]})
+    return out or None
 
 
 def view(rep: dict, now: datetime) -> list[dict] | None:

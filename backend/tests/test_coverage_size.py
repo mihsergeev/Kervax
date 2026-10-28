@@ -118,3 +118,34 @@ def test_helper_measures_sizes():
     assert "pg_relation_size(indexrelid)" in src and "sum(index_length)" in src
     # сначала инвентарь и здоровье, потом медленный замер
     assert src.index('mv -f "$HOUT.tmp.$$" "$HOUT"') < src.index("sizes_native\n")
+
+
+def _kube_srv(pods, db_stats=(), sizes=(), hostname="node-1"):
+    rep = {"clock_unix": NOW, "db_stats": list(db_stats), "kube": {"pods": list(pods)},
+           "extras": {"db-sizes": {"v": 1, "ts": NOW, "items": list(sizes)}}}
+    return Server(name="node-1", hostname=hostname, token_hash="x", last_report=rep)
+
+
+def _pod(name, node="node-1", ns="default", image="postgres:16"):
+    return {"ns": ns, "name": name, "phase": "Running", "ready": True, "node": node, "image": image,
+            "owner": "StatefulSet"}
+
+
+def test_pod_database_size_from_inventory():
+    """dbstat-setup 0.17 снимает инвентарь баз в подах своей ноды: размер в "Покрытии" есть и у них.
+    Реплики одного StatefulSet держат одни данные - берется один под, а не сумма"""
+    inv = [{"engine": "pg", "container": f"default/pg-{i}", "dbs": [{"name": "app", "size": 4 * GB}]} for i in (0, 1)]
+    s = _kube_srv([_pod("pg-0"), _pod("pg-1")], db_stats=inv,
+                  sizes=[{"key": "pg", "container": "default/pg-0", "idx": GB, "ts": NOW - 60}])
+    a = [x for x in _backup_coverage(s) if x.subject == "PostgreSQL"][0]
+    assert a.pods == ["default/pg-0", "default/pg-1"] and a.size_bytes == 3 * GB and a.away == []
+    # без инвентаря (helper старый или под на другой ноде) - молчим, как раньше
+    s = _kube_srv([_pod("pg-0", node="node-2")])
+    a = [x for x in _backup_coverage(s) if x.subject == "PostgreSQL"][0]
+    assert a.size_bytes == 0 and a.away == ["node-2"]
+
+
+def test_pod_on_this_node_is_not_away():
+    # имя ноды в кластере - короткий hostname сервера, регистр не важен
+    s = _kube_srv([_pod("redis-0", node="Node-1", image="redis:7")], hostname="node-1.example.org")
+    assert [x for x in _backup_coverage(s) if x.subject == "Redis"][0].away == []

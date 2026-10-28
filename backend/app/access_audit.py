@@ -160,36 +160,39 @@ def _key_files(snap: dict) -> dict[str, list[str]]:
 
 
 def disable_fix(a: dict, files: list[str], root_pass: bool, alone: bool) -> list[dict]:
-    """Как отключить заброшенную учетку a (из accounts): [{"id", "arg", "cmd"?, "alt"?}]. files - ее
-    файлы ключей, root_pass - пускает ли SSH root по паролю, alone - больше входить некем."""
+    """Как отключить заброшенную учетку a (из accounts): [{"id", "arg", "cmd"?, "alt"?, "undo"?}].
+    files - ее файлы ключей, root_pass - пускает ли SSH root по паролю, alone - больше входить некем.
+    Отключение - один шаг acc_off*/acc_root_*: блокировка и ключи одной командой через &&, перед ним
+    у обычной учетки проверка acc_check; откат (undo) и удаление (alt) фронт прячет под свертку."""
     name = a["name"]
     if alone:
         return [{"id": "acc_alone", "arg": name}]
     if not ssh_audit.NAME_OK.match(name):
         return []
     # ключи переименовываются, а не удаляются: вернуть - mv обратно
-    hide = "\n".join(f"sudo mv {shlex.quote(f)} {shlex.quote(f + '.disabled')}" for f in files)
-    back = "\n".join(f"sudo mv {shlex.quote(f + '.disabled')} {shlex.quote(f)}" for f in files)
+    hide = [f"sudo mv {shlex.quote(f)} {shlex.quote(f + '.disabled')}" for f in files]
+    back = [f"sudo mv {shlex.quote(f + '.disabled')} {shlex.quote(f)}" for f in files]
     lock = a["pw"] == "P"
     steps = []
     if a["uid"] == 0:
         # пароль root для консоли не трогаем, если по SSH паролем root и так не пускают
         lock = lock and root_pass
-        if lock:
-            steps.append({"id": "acc_root_lock", "arg": name, "cmd": f"sudo passwd -l {name}"})
-        undo = [f"sudo passwd -u {name}"] if lock else []
+        off = ([f"sudo passwd -l {name}"] if lock else []) + hide
+        undo = ([f"sudo passwd -u {name}"] if lock else []) + back
+        sid = "acc_root_off" if lock and files else "acc_root_lock" if lock else "acc_root_keys"
     else:
         steps.append({"id": "acc_check", "arg": name, "cmd": (
             f"ps -u {name} -o pid,lstart,args\nsudo crontab -l -u {name}\nls /var/lib/systemd/linger/\n"
             f"grep -rlxF 'User={name}' /etc/systemd/system /lib/systemd/system")})
         # -L только у заданного пароля: у заблокированного -U потом не снимется
-        steps.append({"id": "acc_lock", "arg": name, "cmd": f"sudo usermod {'-L ' if lock else ''}-e 1 {name}"})
-        undo = [f"sudo usermod {'-U ' if lock else ''}-e '' {name}"]
-    if files:
-        steps.append({"id": "acc_keys", "arg": name, "cmd": hide})
-        undo.append(back)
-    if undo:
-        steps.append({"id": "acc_undo", "undo": True, "arg": name, "cmd": "\n".join(undo)})
+        off = [f"sudo usermod {'-L ' if lock else ''}-e 1 {name}"] + hide
+        undo = [f"sudo usermod {'-U ' if lock else ''}-e '' {name}"] + back
+        sid = "acc_off" if files else "acc_off_nokeys"
+    if not off:
+        return steps
+    # && в конце строки: shell ждет продолжения, ключи не трогаются, если блокировка не прошла
+    steps.append({"id": sid, "arg": name, "cmd": " &&\n".join(off)})
+    steps.append({"id": "acc_undo", "undo": True, "arg": name, "cmd": "\n".join(undo)})
     if a["uid"] != 0:
         steps.append({"id": "acc_delete", "alt": True, "arg": name, "cmd": f"sudo userdel {name}"})
     return steps

@@ -282,7 +282,7 @@ def test_helpers_know_the_new_actions():
     cl = (agent / "backup-setup.sh").read_text(encoding="utf-8")
     bs = (agent / "backupserver-setup.sh").read_text(encoding="utf-8")
     assert "KERVAX_SETUP_VERSION=0.47" in cl and 'to_https)     if out="$(cmd_to_https' in cl
-    assert "KERVAX_SETUP_VERSION=0.37" in bs and 'allow_tls)        if out="$(cmd_allow_tls' in bs
+    assert "KERVAX_SETUP_VERSION=0.38" in bs and 'allow_tls)        if out="$(cmd_allow_tls' in bs
     import re
 
     main = (agent / "main.go").read_text(encoding="utf-8")

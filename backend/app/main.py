@@ -17,6 +17,7 @@ from app.api import (
     checks,
     depmap,
     gre as gre_api,
+    bsrv_mirror as bsrv_mirror_api,
     health,
     locations,
     login_guard,
@@ -131,12 +132,14 @@ def create_app() -> FastAPI:
     app.include_router(maintenance.router, prefix="/api")
     app.include_router(relay_api.router, prefix="/api")
     app.include_router(gre_api.router, prefix="/api")
+    app.include_router(bsrv_mirror_api.router, prefix="/api")
     app.include_router(servers.router, prefix="/api")
     # связь между серверами и трафик за месяц (карточки сервера)
     app.include_router(netlinks_api.router, prefix="/api")
     app.include_router(servers.agent_router, prefix="/api")
     app.include_router(relay_api.agent_router, prefix="/api")
     app.include_router(gre_api.agent_router, prefix="/api")
+    app.include_router(bsrv_mirror_api.agent_router, prefix="/api")
     app.include_router(settings_api.router, prefix="/api")
     app.include_router(ansible_api.router, prefix="/api")
     app.include_router(backup_api.router, prefix="/api")

@@ -25,8 +25,9 @@ from datetime import datetime
 
 KEY = "disk_health"
 STATE = "disk_health_mute"
-# виды поломок в disk_health_problems с серийником диска после двоеточия
-_SERIAL_KIND = re.compile(r"^(?:dead|smart|crit|hot|grow|crc|wear|wearsoon|missing):(.+)$")
+# виды поломок в disk_health_problems с серийником диска после двоеточия (wear и wearsoon - были
+# раньше, с ними могли заглушить)
+_SERIAL_KIND = re.compile(r"^(?:dead|smart|crit|hot|spare|grow|media|errlog|crc|wear|wearsoon|missing):(.+)$")
 
 
 def serials_of(keys) -> set[str]:

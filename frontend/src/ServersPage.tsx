@@ -102,6 +102,8 @@ import {
   muteBrief,
   muteRows,
   mutesTileSub,
+  muteDate,
+  muteLiveText,
   muteText,
   type MuteItem,
 } from './mutes'
@@ -123,6 +125,7 @@ import { byTone, srvIssueRows } from './sectionIssues'
 import { DiskWritersBlock, NetUsersCard } from './Usage'
 import { SoftwareCard } from './Software'
 import { type FixStep, FixSteps, useFixDone } from './FixSteps'
+import { AccessFix } from './AccessFix'
 import { GpuCard, GpuChip } from './Gpu'
 import { RoleChips } from './RoleChips'
 import { KnownServerList, knownItems, knownTitle } from './KnownDialog'
@@ -1889,12 +1892,35 @@ function dhFailing(d: DiskHealthDisk): boolean {
 type DhLv = 'ok' | 'warn' | 'bad'
 const DH_LV: Record<DhTone, DhLv> = { up: 'ok', degraded: 'warn', down: 'bad' }
 
+// Износ (NVMe Percentage Used, у SATA остаток ресурса) - оценка вендора, сколько израсходовано
+// паспортного ресурса записи: за 100% диск выходит из гарантии, а не из строя. Цвет плитки он не
+// меняет, только заметка; тревога по признакам, как у алерта (collector.disk_health_problems)
+const DH_SPARE_LOW = 20
+const DH_WEAR_ATTRS = new Set(['Wear_Leveling_Count', 'SSD_Life_Left', 'Media_Wearout_Indicator', 'Percent_Lifetime_Remain',
+  'Percent_Life_Remaining', 'Remaining_Lifetime_Perc'])
+
+// SMART FAILED у SATA SSD только по атрибуту остатка ресурса (helper 0.5)
+function dhWearOnlyFail(d: DiskHealthDisk): boolean {
+  const names = (d.failnow ?? '').split(',').filter(Boolean)
+  return dhFailing(d) && names.length > 0 && names.every((n) => DH_WEAR_ATTRS.has(n))
+}
+
+// Вердикт SMART без износа: у NVMe его объясняет Critical Warning (свой пункт), helper до 0.5 не
+// говорит, какой атрибут провален - выработавший ресурс SSD тогда желтый, как раньше
+function dhSmartLv(d: DiskHealthDisk): DhLv {
+  if (!dhFailing(d) || dhCrit(d) || dhWearOnlyFail(d)) return 'ok'
+  return d.failnow == null && (d.wear ?? 0) >= 100 ? 'warn' : 'bad'
+}
+
+function dhSpareLow(d: DiskHealthDisk): boolean {
+  return d.spare != null && (d.spare <= (d.spare_thr ?? -1) || d.spare <= DH_SPARE_LOW)
+}
+
 function dhTone(d: DiskHealthDisk): DhTone {
-  const crit = parseInt(d.crit || '0', 16) || 0
-  const worn = (d.wear ?? 0) >= 100
-  if (!d.ok || (dhFailing(d) && !worn) || crit & ~0x02) return 'down'
-  if (dhFailing(d) || crit & 0x02 || DH_GROW.some(([k]) => (d.grow?.[k] ?? 0) > 0) || (d.wear ?? 0) >= 90)
-    return 'degraded'
+  if (!d.ok || dhSmartLv(d) === 'bad' || dhCrit(d) || dhSpareLow(d) || (d.type === 'nvme' && (d.media ?? 0) > 0) ||
+    (d.grow?.ioerr ?? 0) > 0)
+    return 'down'
+  if (dhSmartLv(d) === 'warn' || DH_GROW.some(([k]) => (d.grow?.[k] ?? 0) > 0)) return 'degraded'
   return 'up'
 }
 
@@ -1904,10 +1930,9 @@ function isoDay(d: string): string {
   return y && m && dd ? `${dd}.${m}.${y}` : d
 }
 
-// прогноз износа диска одной строкой: когда 90% и 100% и откуда скорость
+// прогноз износа диска одной строкой: когда 100% по паспорту и откуда скорость
 function wearForecast(w: DiskWear, t: TFn): string {
   return [
-    w.d90 ? t('90% примерно к {d}', { d: isoDay(w.d90) }) : '',
     w.d100 ? t('100% примерно к {d}', { d: isoDay(w.d100) }) : '',
     t('{r}% в сутки', { r: w.rate.toFixed(w.rate < 0.1 ? 3 : 2) }),
     w.src === 'lifetime' ? t('по средней за всю жизнь диска') : t('по замеру'),
@@ -1946,20 +1971,13 @@ function dhSync(sync: string, t: TFn): string {
 // Кто пишет на диск за последний час (агент 2.33): контейнеры, поды, юниты systemd по io.stat их
 // cgroup. Рядом со здоровьем и прогнозом износа: когда SSD изнашивается быстро, первым вопросом
 // идет, кто именно пишет. Сутки - тот же темп, растянутый на 24 часа
-// Плашка SMART - только сам статус: PASSED зеленый, даже когда плитка желтая из-за износа или
-// секторов (это видно по рамке и по полосе). Выработавший ресурс SSD SMART тоже зовет FAILED, но
-// такой диск еще работает - плашка желтая, как его строка в алерте
+// Плашка SMART - только сам статус: PASSED зеленый, даже когда плитка красная из-за секторов
+// (это видно по рамке). FAILED только по остатку ресурса - серый: это износ, а не поломка
 function dhChip(d: DiskHealthDisk): DhLv | 'mut' {
   if (d.err === 'virtual' || d.err === 'nosmart') return 'mut'
   if (!d.ok) return 'bad'
-  if (dhFailing(d)) return (d.wear ?? 0) >= 100 ? 'warn' : 'bad'
+  if (dhFailing(d)) return dhWearOnlyFail(d) ? 'mut' : dhSmartLv(d) === 'warn' ? 'warn' : 'bad'
   return 'ok'
-}
-
-// Полоса износа: от 90% красная, от 70% или при скором прогнозе желтая
-function dhWearLv(d: DiskHealthDisk, fc?: DiskWear): DhLv {
-  const w = d.wear ?? 0
-  return w >= 90 ? 'bad' : w >= 70 || fc?.soon ? 'warn' : 'ok'
 }
 
 // Раздел массива -> диск: sda2 -> sda, nvme0n1p2 -> nvme0n1, целый диск как есть
@@ -1992,7 +2010,61 @@ function dhVirtualDisk(dev: string): DiskHealthDisk {
   }
 }
 
-const dhCrit = (d: DiskHealthDisk) => parseInt(d.crit || '0', 16) || 0
+function dhCrit(d: DiskHealthDisk): number {
+  return parseInt(d.crit || '0', 16) || 0
+}
+
+// Critical Warning NVMe словами, как в алерте
+const DH_CRIT_BITS: [number, string][] = [
+  [0x01, 'запас ячеек ниже порога'],
+  [0x02, 'перегрев'],
+  [0x04, 'надежность снижена из-за ошибок носителя или внутренних'],
+  [0x08, 'диск перешел в режим только чтения'],
+  [0x10, 'отказ резервного питания кэша'],
+  [0x20, 'постоянная память только для чтения'],
+]
+function dhCritText(d: DiskHealthDisk, t: TFn): string {
+  const cw = dhCrit(d)
+  const parts = DH_CRIT_BITS.filter(([b]) => cw & b).map(([, s]) => t(s))
+  return `NVMe ${d.crit}: ${parts.join(', ') || t('неизвестное предупреждение')}`
+}
+
+// Заметки без тревоги: выработанный по паспорту ресурс, начатый запас ячеек, зеркало, где ресурс
+// выработали все диски (бэкап важнее обычного)
+function dhNotes(dh: DiskHealth, disks: DiskHealthDisk[], t: TFn): string[] {
+  const out: string[] = []
+  const worn = new Set<string>()
+  const fine: string[] = []
+  for (const d of disks) {
+    if (d.err === 'virtual' || !d.ok) continue
+    if (dhWearOnlyFail(d))
+      out.push(t('{dev}: SMART FAILED только по оценке ресурса ({a}), ошибок нет', { dev: d.dev, a: d.failnow ?? '' }))
+    if ((d.wear ?? 0) >= 100) {
+      worn.add(d.dev)
+      if (dhTone(d) === 'up') fine.push(`${d.dev} (${d.wear}%)`)
+    }
+    if (d.spare != null && d.spare < 100 && !dhSpareLow(d))
+      out.push(t('{dev}: начал расходовать запас ячеек ({n}%)', { dev: d.dev, n: d.spare }))
+  }
+  if (fine.length)
+    out.unshift(t('{list}: ресурс записи по паспорту выработан, ошибок нет - менять, когда появятся признаки: запас ячеек ниже порога, ошибки носителя, предупреждение NVMe', { list: fine.join(', ') }))
+  // массивы на одних и тех же дисках - одна строка: md0, md1 и md2 на двух NVMe - одно зеркало
+  const byDisks = new Map<string, string[]>()
+  for (const a of dh.raid ?? []) {
+    if (!/^raid(1|10)$/.test(a.level)) continue
+    const ds = [...new Set(a.members.split(/\s+/).filter(Boolean).map(dhDiskOf))].sort()
+    if (ds.length < 2 || !ds.every((x) => worn.has(x))) continue
+    const k = ds.join(' ')
+    byDisks.set(k, [...(byDisks.get(k) ?? []), a.dev])
+  }
+  for (const [k, mds] of byDisks) {
+    const md = mds.join(', ')
+    out.push(k.split(' ').length === 2
+      ? t('оба диска зеркала {md} выработали ресурс по паспорту - проверьте бэкап', { md })
+      : t('все диски зеркала {md} выработали ресурс по паспорту - проверьте бэкап', { md }))
+  }
+  return out
+}
 
 // Картинка диска по типу: планка NVMe, 2.5" SSD, HDD с пластиной; у диска ВМ контур пунктиром
 function DhIcon({ d, lv }: { d?: DiskHealthDisk; lv: string }) {
@@ -2040,7 +2112,7 @@ function DhIcon({ d, lv }: { d?: DiskHealthDisk; lv: string }) {
 type DhPill = { lv: DhLv | 'info' | 'mut'; text: string }
 
 // Сводка вместо плиток-счетчиков: что именно не так и с каким диском или массивом
-function dhSummary(dh: DiskHealth, disks: DiskHealthDisk[], wear: DiskWear[] | undefined, t: TFn): DhPill[] {
+function dhSummary(dh: DiskHealth, disks: DiskHealthDisk[], t: TFn): DhPill[] {
   const out: DhPill[] = []
   const raid = dh.raid ?? []
   const down = raid.filter(dhRaidDown)
@@ -2069,17 +2141,17 @@ function dhSummary(dh: DiskHealth, disks: DiskHealthDisk[], wear: DiskWear[] | u
     if (d.err === 'virtual') continue
     phys++
     const tn = dhTone(d)
-    const fc = (wear ?? []).find((w) => w.serial === d.serial)
     if (tn === 'up') {
-      if (fc?.soon && fc.d90) out.push({ lv: 'warn', text: `${d.dev}: ${t('90% износа примерно к {d}', { d: isoDay(fc.d90) })}` })
-      else if (d.err === 'nosmart') nosmart.push(d.dev)
+      if (d.err === 'nosmart') nosmart.push(d.dev)
       else ok++
       continue
     }
     const why = [
-      !d.ok || dhFailing(d) ? dhDiskState(d, t) : '',
-      dhCrit(d) ? t('предупреждение NVMe {c}', { c: d.crit }) : '',
-      (d.wear ?? 0) >= 90 ? t('износ {n}%', { n: d.wear ?? 0 }) : '',
+      !d.ok || dhSmartLv(d) !== 'ok' ? dhDiskState(d, t) : '',
+      dhCrit(d) ? dhCritText(d, t) : '',
+      dhSpareLow(d) && !(dhCrit(d) & 0x01) ? t('запас ячеек {n}%', { n: d.spare ?? 0 }) : '',
+      d.type === 'nvme' && (d.media ?? 0) > 0 && !(d.grow?.media ?? 0) ? t('ошибок носителя {n}', { n: d.media ?? 0 }) : '',
+      (d.grow?.ioerr ?? 0) > 0 ? t('новые ошибки чтения или записи в журнале NVMe') : '',
       ...DH_GROW.filter(([k]) => (d.grow?.[k] ?? 0) > 0).map(([k, label]) => t('за сутки: {v}', { v: `${t(label)} +${d.grow[k]}` })),
     ].filter(Boolean)
     out.push({ lv: DH_LV[tn], text: `${d.dev}: ${why.join(', ') || dhDiskState(d, t)}` })
@@ -2162,16 +2234,17 @@ function DhDiskTile({ d, fc, dev }: { d: DiskHealthDisk; fc?: DiskWear; dev?: { 
   const lv: DhLv = virtual ? 'ok' : DH_LV[dhTone(d)]
   const kind = virtual ? '' : d.type === 'nvme' ? 'NVMe' : d.rota === 1 ? 'HDD' : d.rota === 0 ? 'SSD' : ''
   const head = [d.model, kind, d.size ? fmtBytes(d.size) : ''].filter(Boolean).join(' · ')
-  const wl = dhWearLv(d, fc)
   const counters = [
     d.realloc ? t('переназначено {n}', { n: d.realloc }) : '',
     d.pending ? t('нечитаемых {n}', { n: d.pending }) : '',
     d.uncorr ? t('неисправимых {n}', { n: d.uncorr }) : '',
     d.media ? t('ошибок носителя {n}', { n: d.media }) : '',
     d.crc ? t('ошибок CRC {n}', { n: d.crc }) : '',
-    dhCrit(d) ? t('предупреждение NVMe {c}', { c: d.crit }) : '',
+    dhCrit(d) ? dhCritText(d, t) : '',
+    d.spare != null && d.spare < 100 ? t('запас ячеек {n}%', { n: d.spare }) : '',
   ].filter(Boolean)
   const grow = DH_GROW.filter(([k]) => (d.grow?.[k] ?? 0) > 0).map(([k, label]) => `${t(label)} +${d.grow[k]}`)
+  if ((d.grow?.ioerr ?? 0) > 0) grow.push(t('новые ошибки чтения или записи в журнале NVMe'))
   const stats: [string, string, boolean][] = (
     virtual
       ? [[t('загрузка'), dev ? `${Math.round(dev.util)}%` : '', false], [t('ответ'), dev ? fmtMs(dev.await) : '', false]]
@@ -2181,9 +2254,11 @@ function DhDiskTile({ d, fc, dev }: { d: DiskHealthDisk; fc?: DiskWear; dev?: { 
     d.wear == null
       ? ''
       : d.wear >= 100
-        ? t('ресурс записи исчерпан')
+        ? lv === 'ok'
+          ? t('ресурс по паспорту выработан, ошибок нет')
+          : t('ресурс по паспорту выработан')
         : [
-            d.wear >= 90 ? t('пора менять') : fc?.d90 ? t('90% примерно к {d}', { d: isoDay(fc.d90) }) : '',
+            fc?.d100 ? t('100% по паспорту примерно к {d}', { d: isoDay(fc.d100) }) : '',
             fc && fc.rate
               ? `${t('{r}% в сутки', { r: fc.rate.toFixed(fc.rate < 0.1 ? 3 : 2) })} ${fc.src === 'lifetime' ? t('по средней за жизнь') : t('по замеру')}`
               : '',
@@ -2208,13 +2283,12 @@ function DhDiskTile({ d, fc, dev }: { d: DiskHealthDisk; fc?: DiskWear; dev?: { 
             <div className="dh-wear muted">
               <span>{t('износ')}</span>
               <div className="dh-wbar">
-                <span className={wl} style={{ width: `${Math.min(d.wear, 100)}%` }} />
-                <i />
+                <span style={{ width: `${Math.min(d.wear, 100)}%` }} />
               </div>
-              <b className={wl !== 'ok' ? `net-tone-${wl}` : undefined}>{d.wear}%</b>
+              <b>{d.wear}%</b>
             </div>
             {fcText && (
-              <div className={`dh-fc ${d.wear >= 90 || fc?.soon ? 't-degraded' : 'muted'}`} title={fc ? wearForecast(fc, t) : undefined}>
+              <div className="dh-fc muted" title={fc ? wearForecast(fc, t) : undefined}>
                 {fcText}
               </div>
             )}
@@ -2255,7 +2329,8 @@ function DiskHealthBlock({ r, wear }: { r: ServerReport; wear?: DiskWear[] }) {
   // в контейнере сказать нечего: массивы и журнал ядра чужие, диски тоже
   if (!bare && !raid.length && !io.count && !disks.length) return null
   const byDev = new Map(disks.map((d) => [d.dev, d]))
-  const pills = dhSummary(dh, disks, wear, t)
+  const pills = dhSummary(dh, disks, t)
+  const notes = dhNotes(dh, disks, t)
   return (
     <div className="chart-card net-card net-card-wide" id="mcard-diskhealth">
       <div className="net-head">
@@ -2269,6 +2344,13 @@ function DiskHealthBlock({ r, wear }: { r: ServerReport; wear?: DiskWear[] }) {
           </span>
         ))}
       </div>
+      {notes.length > 0 && (
+        <div className="muted small dh-note">
+          {notes.map((n) => (
+            <div key={n}>{n}</div>
+          ))}
+        </div>
+      )}
       {bare && !dh.smart && (
         <div className="muted small dh-note">
           {t('smartmontools не установлен, SMART не читается: его ставит helper diskhealth-setup.')}
@@ -4406,8 +4488,8 @@ function useMuteToggle(s: Server, onChanged: () => void) {
   return { busy, toggle }
 }
 
-// Шаг "как исправить" у SSH (выключить пароль) и "как отключить" у заброшенной учетки: команды под
-// ноду собирает бэкенд (ssh_audit, access_audit), тексты здесь по id
+// Шаг "как исправить" у SSH (выключить пароль): команды под ноду собирает бэкенд (ssh_audit), тексты
+// здесь по id. "Как отключить" у заброшенной учетки - AccessFix.tsx
 function accessFixText(st: OsFixStep, t: (k: string, p?: Record<string, string | number>) => string): string {
   const p = { arg: st.arg ?? '', on: st.on ?? '' }
   switch (st.id) {
@@ -4420,13 +4502,6 @@ function accessFixText(st: OsFixStep, t: (k: string, p?: Record<string, string |
     case 'ssh_undo': return t('если что-то не так')
     case 'ssh_match': return t('пароль только из своих сетей, из интернета - по ключу. Вместо <cidr> - ваши адреса или сети через запятую (192.0.2.10,198.51.100.0/24), иначе пароль выключится везде. Этот файл вместо файла выше, дальше та же проверка и reload.')
     case 'ssh_guard': return t('пароль нужен отовсюду: fail2ban от перебора. Банит адрес после нескольких неудачных входов, здесь порт {arg} (на RHEL пакет из EPEL). Пункт останется, уйдет только приписка про перебор.', p)
-    case 'acc_alone': return t('Через другие учетки за 90 дней никто не входил. Если отключить {arg}, войти на сервер может стать некому: сначала проверьте вход другой учеткой с sudo или через консоль.', p)
-    case 'acc_check': return t('Убедиться, что от {arg} ничего не работает. Процессы, crontab, lingering и сервисы с User={arg}: пусто и no crontab - ничего нет.', p)
-    case 'acc_lock': return t('Отключить: пароль заблокирован, срок учетки в прошлом. SSH не пустит ни по паролю, ни по ключу, cron и su для нее тоже. Обратимо.')
-    case 'acc_root_lock': return t('Заблокировать пароль {arg}: sudo и cron root продолжат работать. Срок учетки root не ставят, истекшая root ломает cron и su. Если в консоль входите root по паролю, после блокировки не войдете.', p)
-    case 'acc_keys': return t('Убрать ключи: файл переименовывается, а не удаляется. Панель считает доступом любой ключ в authorized_keys.')
-    case 'acc_undo': return t('если учетка понадобится')
-    case 'acc_delete': return t('удалить совсем - необратимо. Домашний каталог останется без хозяина (userdel -r удалит и его). Лучше сначала поживите с отключенной.')
     default: return st.id
   }
 }
@@ -4507,27 +4582,28 @@ function AccessCard({ server: s, onChanged }: { server: Server; onChanged: () =>
                 )}
                 {a.nopasswd && <span className="acc-tag">sudo {t('без пароля')}</span>}
               </div>
-              <div className={`acc-last ${a.stale && !a.muted ? 't-degraded' : 'muted'}`}>
-                {a.last ? t('вход {d}', { d: new Date(a.last * 1000).toLocaleDateString() }) : t('не входили')}
+              <div className="acc-side">
+                <div className={`acc-last ${a.stale && !a.muted ? 't-degraded' : 'muted'}`}>
+                  {a.last ? t('вход {d}', { d: new Date(a.last * 1000).toLocaleDateString() }) : t('не входили')}
+                </div>
+                {fix.length > 0 && (
+                  <button className="ghost small row-act acc-act" onClick={() => setOpen(open === a.name ? '' : a.name)}>
+                    {open === a.name ? t('скрыть') : t('как отключить')}
+                  </button>
+                )}
+                {a.stale && !isViewer && (
+                  <button className="ghost small row-act acc-act" disabled={busy === ACCESS_MUTE + a.name}
+                    onClick={() => toggle(ACCESS_MUTE + a.name, !a.muted)}>
+                    {a.muted ? t('вернуть') : t('учетка нужна')}
+                  </button>
+                )}
               </div>
-              {fix.length > 0 && (
-                <button className="ghost small row-act acc-act" onClick={() => setOpen(open === a.name ? '' : a.name)}>
-                  {open === a.name ? t('скрыть') : t('как отключить')}
-                </button>
-              )}
-              {a.stale && !isViewer && (
-                <button className="ghost small row-act acc-act" disabled={busy === ACCESS_MUTE + a.name}
-                  onClick={() => toggle(ACCESS_MUTE + a.name, !a.muted)}>
-                  {a.muted ? t('вернуть') : t('учетка нужна')}
-                </button>
-              )}
             </div>
           )
         })}
       </div>
       {openFix.length > 0 && (
-        <FixSteps steps={openFix} text={(st) => accessFixText(st, t)}
-          foot={t('Учетка уйдет из заброшенных в течение 10 минут.')} />
+        <AccessFix steps={openFix} />
       )}
       <div className="net-foot">
         {t('Входы по журналу sshd видны с {d}.', {
@@ -6185,6 +6261,8 @@ function SnoozeBar({
   snoozeUntil,
   snoozes,
   mutes,
+  live,
+  over,
   onSnooze,
   onUnmute,
   busy,
@@ -6192,6 +6270,9 @@ function SnoozeBar({
   snoozeUntil: string | null
   snoozes: Record<string, string> | null
   mutes: string[]  // постоянные мьюты: без срока, снимаются только вручную
+  // есть ли сейчас то, что глушит заглушка, и кончившиеся, которые панель держит (app/mute_watch.py)
+  live?: Server['mute_live']
+  over?: Server['mute_over']
   onSnooze: (kind: string | null, hours: number) => void
   onUnmute: (kind: string) => void
   busy?: boolean
@@ -6207,6 +6288,13 @@ function SnoozeBar({
       hour: '2-digit',
       minute: '2-digit',
     })
+  // "тихо 2 дн" / "сейчас есть: ..." у заглушки; у кончившейся, которую держит панель, - срок вышел
+  const liveOf = (k: string, until: string | null) => {
+    const at = until ? over?.[k]?.at : undefined
+    if (at) return ` · ${t('срок вышел {d}, а проблема есть', { d: muteDate(at) })}`
+    const txt = muteLiveText({ label: '', until, group: 'alert', key: k, live: live?.[k] }, t)
+    return txt ? ` · ${txt}` : ''
+  }
   const wholeActive = !!snoozeUntil && new Date(snoozeUntil).getTime() > now
   const typeActive = Object.entries(snoozes ?? {})
     .filter(([, u]) => new Date(u).getTime() > now)
@@ -6260,7 +6348,7 @@ function SnoozeBar({
         <div className="snooze-active-list">
           {mutes.map((k) => (
             <span key={'m' + k} className="snooze-active-chip snooze-perm">
-              🔇 {t(labelOf(k))} · {muteAutoNote(k, t) ?? t('постоянно')}
+              🔇 {t(labelOf(k))} · {muteAutoNote(k, t) ?? t('постоянно')}{liveOf(k, null)}
               <button className="chip-x" disabled={busy} title={t('Снять')}
                 onClick={() => onUnmute(k)}>
                 ✕
@@ -6269,7 +6357,7 @@ function SnoozeBar({
           ))}
           {wholeActive && (
             <span className="snooze-active-chip">
-              🔕 {t('Весь сервер')} · {t('до {t}', { t: fmt(snoozeUntil!) })}
+              🔕 {t('Весь сервер')}{over?.['']?.at ? '' : ` · ${t('до {t}', { t: fmt(snoozeUntil!) })}`}{liveOf('', snoozeUntil)}
               <button
                 className="chip-x"
                 disabled={busy}
@@ -6282,7 +6370,7 @@ function SnoozeBar({
           )}
           {typeActive.map(([k, u]) => (
             <span key={k} className="snooze-active-chip">
-              🔕 {t(labelOf(k))} · {t('до {t}', { t: fmt(u) })}
+              🔕 {t(labelOf(k))}{over?.[k]?.at ? '' : ` · ${t('до {t}', { t: fmt(u) })}`}{liveOf(k, u)}
               <button
                 className="chip-x"
                 disabled={busy}
@@ -7543,6 +7631,8 @@ function ServerDetail({
                 snoozeUntil={s.snooze_until}
                 snoozes={s.alert_snoozes}
                 mutes={(s.alert_mutes ?? []).filter((k) => !isDecision(k))}
+                live={s.mute_live}
+                over={s.mute_over}
                 busy={snoozing}
                 onUnmute={async (kind) => {
                   setSnoozing(true)

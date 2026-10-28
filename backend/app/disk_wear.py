@@ -1,9 +1,7 @@
 """Износ SSD: когда диск дойдет до 90% и до 100%.
 
 Helper diskhealth-setup отдает износ в процентах (у NVMe Percentage Used, у SATA - нормализованный
-атрибут остатка ресурса) и наработку в часах. Алерт по износу был только с 90%, а это впритык,
-чтобы договориться с хостером о замене. На одной ноде оба диска RAID1 за 12 дней прошли с 75 до
-77%: при таком темпе до 90% два с половиной месяца, и дойдут они туда вместе.
+атрибут остатка ресурса) и наработку в часах.
 
 Скорость. Пока своей истории мало - средняя за всю жизнь диска (износ / наработка). Износ целый,
 поэтому замеренная скорость считается только между моментами, когда процент сменился: от первой
@@ -13,8 +11,14 @@ Helper diskhealth-setup отдает износ в процентах (у NVMe P
 Раз в час планировщик (refresh) обновляет servers.disk_wear:
 {серийник: {"dev", "wear", "poh", "t": [[дата, износ], ...], "seen", "rate", "src", "d90", "d100",
 "soon"}}. soon - до 90% меньше SOON_DAYS (снимается после SOON_OFF_DAYS, чтобы прогноз не мигал
-на границе): строка уровня 1 в алерте "диск" и в "Что сломано". До 90% меньше полугода - пункт
-"запланируйте замену" в "Требует действий" (считает главная).
+на границе).
+
+Только для карточки: износ - оценка вендора, сколько израсходовано паспортного ресурса записи, а
+не поломка (NVMe Percentage Used бывает и 255%, за 100% диск выходит из гарантии, а не из строя).
+Раньше прогноз до 90% шел строкой в алерт "диск" и в "Что сломано", а пункт "запланируйте замену"
+в "Требует действий"; диски с 212% и 137% без единой ошибки висели красными. Тревога теперь по
+признакам (collector.disk_health_problems): запас ячеек, ошибки носителя, журнал ошибок,
+предупреждения NVMe, SMART FAILED.
 """
 
 from __future__ import annotations
@@ -100,54 +104,6 @@ def update(prev: dict | None, block: dict, now: datetime) -> dict:
             if seen and (today - seen).days <= _FORGET_DAYS:
                 out[ser] = p
     return out
-
-
-def _ddmm(iso: str) -> str:
-    d = _day(iso)
-    return d.strftime("%d.%m.%Y") if d else str(iso)
-
-
-def soon_text(name: str, rec: dict, short: bool = False) -> str:
-    w = rec.get("wear")
-    base = f"диск {name}: износ {w:g}%, 90% примерно к {_ddmm(rec.get('d90') or '')}"
-    if short:
-        return base
-    how = "по средней за всю жизнь диска" if rec.get("src") == "lifetime" else "по замеру"
-    return f"{base} ({float(rec.get('rate') or 0):.2f}% в сутки, {how}) - пора заказывать замену"
-
-
-# Кто пишет на диск (агент 2.33, disk_writers): строка к прогнозу износа. Меньше 50 ГБ в сутки
-# износ не делает, называть некого
-_WRITER_MIN_DAY = 50 * 10**9
-_KIND = {"container": "контейнер", "pod": "под", "unit": "юнит"}
-
-
-def _bytes(n: float) -> str:
-    """Двоичные, как fmtBytes в карточке "Кто пишет на диск": цифры алерта и карточки совпадают"""
-    for unit, k in (("ТБ", 2**40), ("ГБ", 2**30), ("МБ", 2**20)):
-        if n >= k:
-            v = n / k
-            return f"{v:.1f} {unit}" if v < 10 else f"{v:.0f} {unit}"
-    return f"{n:.0f} Б"
-
-
-def writer_text(writers) -> str:
-    """Кто больше всех пишет на диск, в сутках, если это заметно для износа"""
-    best, day = None, 0.0
-    for w in writers or []:
-        if not isinstance(w, dict):
-            continue
-        try:
-            d = float(w.get("w") or 0) * 86400 / max(float(w.get("s") or 0), 60)
-        except (TypeError, ValueError):
-            continue
-        if d > day:
-            best, day = w, d
-    if not best or day < _WRITER_MIN_DAY:
-        return ""
-    name = str(best.get("name") or "?")
-    who = "сессии и cron (user.slice)" if name == "user.slice" else f"{_KIND.get(str(best.get('kind')), '')} {name}".strip()
-    return f"больше всех на диск пишет {who}: около {_bytes(day)} в сутки"
 
 
 def card(block: dict | None, hist: dict | None) -> list[dict]:

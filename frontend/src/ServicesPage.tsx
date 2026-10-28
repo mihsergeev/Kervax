@@ -136,7 +136,9 @@ function SitesList({ sites, t, hosts, skip, onAdopt, onOpenCheck, full = false }
 type SvcItem = {
   kind: string // ClickHouse / Grafana / RabbitMQ / nginx / Envoy / …
   where: string // «контейнер X» / «под ns/name» / «процесс на хосте»
-  inKube?: boolean // СУБД в поде — туда хелпер инвентаря не дотягивается
+  inKube?: boolean // СУБД в поде: инвентарь снимает helper ноды, где под крутится (nsenter, dbstat-setup 0.17)
+  pods?: string[] // ns/name подов СУБД
+  away?: string[] // ноды этих подов, кроме этой
   svc?: ServiceInfo // метрики (очереди RabbitMQ)
   sites?: string[] // домены/сайты веб-сервиса (из k8s Ingress или nginx -T)
   web?: boolean // это веб-сервер/прокси — если доменов нет, объясняем почему
@@ -310,6 +312,8 @@ function pgssFixText(st: OsFixStep, t: TFn): string {
   const a = st.arg ?? ''
   switch (st.id) {
     case 'pgss_look':
+      if (a === 'pod')
+        return t('Сначала посмотреть, что уже загружено и откуда задано. source = command line - параметр в command или args контейнера пода, ALTER SYSTEM его не перебьет: правится манифест или values чарта. Вторая команда показывает command и args контейнеров пода.')
       return a === 'docker'
         ? t('Сначала посмотреть, что уже загружено и откуда задано. source = command line - параметр в command контейнера, ALTER SYSTEM его не перебьет, тогда путь через compose ниже. Вторая строка - команда контейнера, каталог compose, проект и сервис.')
         : t('Сначала посмотреть, что уже загружено и откуда задано. source = command line - параметр в команде запуска сервиса, ALTER SYSTEM его не перебьет.')
@@ -323,6 +327,8 @@ function pgssFixText(st: OsFixStep, t: TFn): string {
       return t('Если source не command line: добавить в shared_preload_libraries. Если в setting уже что-то есть, перечислите все через запятую, каждую в своих кавычках: {ok}. Одной строкой {bad} нельзя: PostgreSQL примет ее за одну библиотеку и не запустится.', { ok: "= 'timescaledb', 'pg_stat_statements'", bad: "'timescaledb,pg_stat_statements'" })
     case 'pgss_restart':
       return t('Перезапустить контейнер, чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться, лучше в тихое время. -t 120 дает базе спокойно завершиться, обычно это секунды.')
+    case 'pgss_restart_pod':
+      return t('Перезапустить под {pod}, чтобы библиотека загрузилась: удалить его, контроллер (StatefulSet, Deployment) создаст под заново, postgresql.auto.conf лежит в каталоге данных на томе и сохранится. База недоступна, пока под поднимается, лучше в тихое время. Под без контроллера не удалять: заново его никто не создаст.', { pod: a })
     case 'pgss_restart_host':
       return a
         ? t('Перезапустить PostgreSQL ({unit}), чтобы библиотека загрузилась: база недоступна несколько секунд, приложения теряют соединения и должны переподключиться, лучше в тихое время.', { unit: a })
@@ -337,6 +343,8 @@ function pgssFixText(st: OsFixStep, t: TFn): string {
       return t('Если source = command line: вместо ALTER SYSTEM и перезапуска правится compose. В файле из второй строки первого шага у этого сервиса в command дописать ,pg_stat_statements к shared_preload_libraries=, файл перед правкой скопировать и пересоздать контейнер (каталог, проект и сервис оттуда же):')
     case 'pgss_cmdline':
       return t('Параметр задан в команде запуска, и ALTER SYSTEM его не перебьет. Поставьте там shared_preload_libraries={v}: контейнер не из compose пересоздается с новой командой (данные в томе остаются), у сервиса на хосте команда в юните или в pg_ctl.conf. Текущая команда:', { v: a })
+    case 'pgss_cmdline_pod':
+      return t('Параметр задан в command или args контейнера пода, и ALTER SYSTEM его не перебьет. Поставьте там shared_preload_libraries={v} в манифесте или values чарта и примените, под пересоздастся. Текущие command и args:', { v: a })
     case 'pgss_check':
       return t('Проверить: в списке есть pg_stat_statements, а запрос отвечает числом, а не ошибкой.')
     case 'pgss_undo':
@@ -804,27 +812,61 @@ function setupLt(v: string, target: string): boolean {
 // СУБД без инвентаря: объясняем, чего не хватает, чтобы увидеть базы и размеры.
 // Про бэкап здесь не пишем — это страница про сервисы.
 function noDbHint(
-  kind: string,
-  inKube: boolean,
+  it: SvcItem,
   server: Server,
   t: (s: string, v?: Record<string, string | number>) => string,
 ): string | null {
+  const kind = it.kind
   // инвентарь снимает только dbstat-setup и только для этих движков
   if (!Object.values(DB_ENGINE_LABEL).includes(kind)) return null
   const ver = server.last_report?.setup_versions?.['dbstat-setup']
-  // MySQL в подах helper видит с 0.11 (заходит в под своей ноды), остальные движки - только на хосте и в docker
-  if (inKube) {
-    if (kind !== DB_ENGINE_LABEL.mysql)
-      return t('инвентарь снимается с хостовых и docker-баз — до баз в кластере хелпер не дотягивается')
-    if (ver && setupLt(String(ver), '0.11')) return t('MySQL в подах helper видит с версии 0.11: обновите dbstat-setup')
-    if (ver) return t('под на другой ноде (helper видит поды только своей ноды) или база не ответила')
-  }
   if (!ver) {
     return t('базы и размеры не собраны: на ноде нет хелпера dbstat-setup')
+  }
+  if (it.inKube) {
+    // почему база в поде не ответила, helper пишет сам: эти строки идут отдельно (dbFails)
+    if (dbFails(kind, server).length) return null
+    // под на другой ноде: в него заходит helper той ноды, базы видны в ее карточке
+    if ((it.away ?? []).length)
+      return t('под крутится на ноде {node}: базы в нем опрашивает helper той ноды, они в ее карточке', { node: (it.away ?? []).join(', ') })
+    // в поды MySQL helper заходит с 0.11, остальных движков - с 0.17
+    const need = kind === DB_ENGINE_LABEL.mysql ? '0.11' : '0.17'
+    if (setupLt(String(ver), need)) return t('базы в подах helper видит с версии {v}: обновите dbstat-setup', { v: need })
+    return t('база в поде не ответила на опрос инвентаря')
   }
   if (kind === DB_ENGINE_LABEL.mysql)
     return t('база не ответила: helper входит как root через сокет, /etc/mysql/debian.cnf или /root/.my.cnf')
   return t('база не ответила на опрос инвентаря')
+}
+
+// базы движка в подах, до которых helper не достучался (dbstat-setup 0.17)
+type DbFail = NonNullable<Server['db_fails']>[number]
+function dbFails(kind: string, server: Server): DbFail[] {
+  return (server.db_fails ?? []).filter((f) => DB_ENGINE_LABEL[f.engine] === kind)
+}
+// клиент, которым helper ходит в базу: его нет в образе - опросить нечем
+const DB_CLIENT: Record<string, string> = { pg: 'psql', mysql: 'mysql/mariadb', clickhouse: 'clickhouse-client', redis: 'redis-cli' }
+// почему не опрошена: конкретно, с началом ошибки клиента
+function dbFailText(f: DbFail, t: (s: string, v?: Record<string, string | number>) => string): string {
+  const pod = f.container
+  let s: string
+  switch (f.why) {
+    case 'nsenter':
+      s = t('{pod}: на ноде нет nsenter (пакет util-linux), helper не может зайти в под', { pod })
+      break
+    case 'client':
+      s = t('{pod}: в образе нет {cli}, опросить базу нечем', { pod, cli: DB_CLIENT[f.engine] ?? f.engine })
+      break
+    case 'auth':
+      s = t('{pod}: база не пустила helper, нужен пароль, а в окружении пода его нет', { pod })
+      break
+    case 'timeout':
+      s = t('{pod}: база не ответила за 10 с', { pod })
+      break
+    default:
+      s = t('{pod}: не удалось опросить базу', { pod })
+  }
+  return f.err ? `${s} (${f.err})` : s
 }
 
 // сервисы ноды: собственные метрики (services[]) + движки из аудита покрытия (без метрик)
@@ -864,6 +906,8 @@ function buildByServer(
             ? t('под kubernetes: {p}', { p: pods.join(', ') })
             : t('процесс на хосте'),
         inKube: pods.length > 0,
+        pods,
+        away: a.away ?? [],
       })
     }
     // LLM-сервисы (агент 2.36): свой раздел, по строке на сервис
@@ -2214,8 +2258,11 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                       <DbInventory db={it.db} t={t}
                         health={(s.db_health ?? []).filter((h) => DB_ENGINE_LABEL[h.engine] === it.kind)} />
                     ) : (
-                      noDbHint(it.kind, !!it.inKube, s, t) && <div className="net-foot">{noDbHint(it.kind, !!it.inKube, s, t)}</div>
+                      noDbHint(it, s, t) && <div className="net-foot">{noDbHint(it, s, t)}</div>
                     )}
+                    {dbFails(it.kind, s).map((f) => (
+                      <div key={'f' + f.container} className="net-foot">{dbFailText(f, t)}</div>
+                    ))}
                   </div>
                 ))}
               </div>
