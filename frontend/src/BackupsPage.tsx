@@ -38,6 +38,8 @@ import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditName
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
+import { MirrorModal, MirrorsCard, RepoMirrorBlock } from './BsrvMirror'
+import { isMirror } from './bsrvMirrorState'
 import { CoverageAudit } from './CoverageAudit'
 import { helperText } from './helperText'
 import { bulkCleanupScript, safeRepoName } from './bulkCleanupScript'
@@ -1860,8 +1862,9 @@ type RepoIssue = { tone: RepoTone; head: string; why: string; steps: string[]; g
 
 // Выбранный репозиторий целиком: состояние крупно, что случилось и что делать с кнопками,
 // плитки с подписями, клиент и каталог, старые группы снапшотов
-function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored, dataDir, onGo }: {
+function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored, dataDir, onGo, servers }: {
   server: Server; r: RepoStat; ctx: RepoCtx; canAct: boolean; onChanged: () => void
+  servers: Server[] // все серверы: резервные для копии репозитория
   growth?: number // обычный прирост клиента за прогон (после сжатия)
   unmonitored?: boolean // клиента нет в панели
   dataDir: string
@@ -2046,6 +2049,7 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
         <dt>{t('Каталог')}</dt>
         <dd className="mono">{`${dataDir}/${r.name}`}</dd>
       </dl>
+      <RepoMirrorBlock server={s} repo={r.name} servers={servers} canAct={canAct} onChanged={onChanged} />
       <RepoGroups server={s} repo={r.name} ext={bsrvExtra(s)} canAct={canAct} onChanged={onChanged} />
     </>
   )
@@ -2793,7 +2797,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
                         ))}
                       </select>
                       {selRepo && (
-                        <RepoDetail key={selRepo.name} server={s} r={selRepo} ctx={ctx} canAct={canAct} onChanged={onChanged}
+                        <RepoDetail key={selRepo.name} server={s} r={selRepo} ctx={ctx} canAct={canAct} onChanged={onChanged} servers={servers}
                           growth={growthOf.get(selRepo.name)} unmonitored={unmon.has(selRepo.name)}
                           dataDir={info.data_dir || `${BSRV_ROOT}/data`} onGo={go} />
                       )}
@@ -3697,7 +3701,11 @@ export function BackupsPage({
     .map((s) => ({ s, d: s.last_report?.backup_server }))
     .filter((x): x is { s: Server; d: BackupServerInfo } => !!x.d?.present)
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
-  const openSrv = srvHosts.find(({ s }) => s.id === openSrvId)
+  // резервный сервер бэкапов открывается своим окном: по ссылке алерта (?backupsrv=id&sec=mirror)
+  // или по строке в карточке "Резервные серверы"
+  const openMirror = (servers ?? []).find((s) => s.id === openSrvId && isMirror(s)
+    && (linkSrvSec.sec === 'mirror' || !s.last_report?.backup_server?.present))
+  const openSrv = openMirror ? undefined : srvHosts.find(({ s }) => s.id === openSrvId)
   const covSrv = (servers ?? []).find((x) => x.id === covId) ?? null
 
   const allHosts = (servers ?? [])
@@ -3956,6 +3964,10 @@ export function BackupsPage({
         </div>
       )}
       <div className="net-cards hs-groups">
+        {servers && (
+          <MirrorsCard servers={servers} canAct={isAdmin} onChanged={load}
+            onOpen={(id) => { setOpenSrvId(id); setLinkSrvSec({ id, sec: 'mirror' }) }} />
+        )}
         {srvHostsView.length > 0 && (
           <div className="chart-card net-card net-card-wide">
             <div className="net-head">
@@ -4151,6 +4163,19 @@ export function BackupsPage({
             setLinkSec({ id: null, sec: null })
             if (d.last_report?.backup_server?.present) setOpenSrvId(d.id)
             else window.location.assign(`?server=${d.id}`)
+          }}
+        />
+      )}
+      {openMirror && (
+        <MirrorModal
+          key={openMirror.id}
+          server={openMirror}
+          servers={servers ?? []}
+          canAct={isAdmin}
+          onChanged={load}
+          onClose={() => {
+            setOpenSrvId(null)
+            setLinkSrvSec({ id: null, sec: null })
           }}
         />
       )}

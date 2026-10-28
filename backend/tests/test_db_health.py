@@ -1,5 +1,6 @@
 """Здоровье баз (helper dbstat-setup 0.5): реплика, долгие транзакции, блокировки, wraparound,
 таблицы без VACUUM."""
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -89,12 +90,12 @@ def test_alert_home_and_view():
 
 def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.16  # " in src and "health_pg()" in src and "health_mysql()" in src
+    assert "KERVAX_SETUP_VERSION=0.17  # " in src and "health_pg() {" in src and "health_mysql()" in src
     # 0.7: без роли postgres - под пользователем контейнера в явную базу, а не в базу с его именем
     assert 'psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"}' in src
     assert "backend_xmin is not null" in src and "idle_xmin" in src
     assert "report.d/db-health.json" in src and "pid <> pg_backend_pid()" in src
-    assert 'case "$v" in [0-9]*) ;; *) return 0 ;; esac' in src and 'case "$rec" in t|f)' in src
+    assert 'case "$v" in [0-9]*) ;; *) pod_fail pg "$c"; return 0 ;; esac' in src and 'case "$rec" in t|f)' in src
     assert "\r" not in src
 
 
@@ -133,7 +134,7 @@ def test_a_dump_holds_its_transaction_by_design():
 def test_helper_collects_load():
     """0.8: что грузит PostgreSQL - снимки счетчиков, тексты только для топа и из кэша"""
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "load_pg()" in src and 'ld=$(load_pg "$c")' in src and "LOAD_DIR=/var/lib/kervax/db-load" in src
+    assert "load_pg()" in src and 'ld=$(load_pg "$c" "$nm")' in src and "LOAD_DIR=/var/lib/kervax/db-load" in src
     # без текстов при снимке: файл текстов на одной ноде был 3.9 ГБ и читается целиком
     assert "from pg_stat_statements(false)" in src and "pg_stat_statements(true)" in src
     assert "QTEXT_BIG=1073741824" in src and "pgss_query_texts.stat" in src
@@ -414,7 +415,8 @@ def test_helper_watches_clickhouse_and_redis():
     assert "parts_to_throw_insert" in src and "RejectedInserts" in src and "normalizeQuery" in src
     # пароль Redis уходит в redis-cli через stdin, не в аргументах (его видно в ps)
     assert "read -r REDISCLI_AUTH; export REDISCLI_AUTH" in src and "--requirepass" in src
-    assert "REDISCLI_AUTH=" not in src.replace("read -r REDISCLI_AUTH", "")
+    # в поде (0.17) пароль ставится в окружение redis-cli уже внутри контейнера, тоже не аргументом
+    assert "REDISCLI_AUTH=" not in src.replace("read -r REDISCLI_AUTH", "").replace("REDISCLI_AUTH=$P; export REDISCLI_AUTH", "")
     assert "cmdstat_" in src and "stop-writes-on-bgsave-error" in src
 
 
@@ -478,9 +480,10 @@ def test_view_passes_clickhouse_and_redis_facts():
 # ── MySQL / MariaDB (dbstat-setup 0.11) ────────────────────────────────────────
 def test_helper_reaches_mysql_in_pods_and_behind_a_password():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    # под: клиент из образа внутри его пространств, от uid сервера, пароль из config.json среды
+    # под: клиент из образа внутри его пространств, от uid сервера, окружение контейнера из config.json среды
+    # (с 0.17 общий вход pod_run для всех движков, *_FILE читается внутри контейнера)
     assert 'nsenter -t "$p" -m -n -p -S "$u"' in src and "io.containerd.runtime.v2.task" in src
-    assert 'MYSQL_PWD="$(my_pod_pw "$p")"' in src and "MARIADB_ROOT_PASSWORD_FILE" in src
+    assert 'pod_run "${c#pid:}" "$MY_SH" $fl -e "$q"' in src and "MARIADB_ROOT_PASSWORD_FILE" in src
     # хост: файлы с учеткой раньше сокета - отказ root по сокету копит Aborted_connects
     assert 'for f in /etc/mysql/debian.cnf /root/.my.cnf ""; do' in src
     # реплика по именам полей, без \G
@@ -595,3 +598,71 @@ def test_mysql_refused_connections_not_twice_with_the_conn_alert():
     # алерт коннектов включен и горит по этому экземпляру - строка "занято 150 из 151" уже говорит о том же
     s.db_conn_alert_percent = 80
     assert collector.db_health_problems(s, rep, NOW) == []
+
+
+def test_pgss_fix_in_a_pod_gives_kubectl():
+    """База в поде (dbstat-setup 0.17): docker exec там не к чему, команды - kubectl exec в контейнер базы,
+    перезапуск - удалить под, контроллер создаст его заново"""
+    item = _pgss(container="default/postgres-0", role="app", su="on", spl_src="default", spl="", rt="pod", kc="postgres")
+    fix = _fix(item)
+    assert [x["id"] for x in fix] == ["pgss_create", "pgss_alter", "pgss_restart_pod", "pgss_check", "pgss_undo"]
+    psql = "kubectl -n default exec postgres-0 -c postgres -- psql -U app -d postgres"
+    assert fix[0]["cmd"] == f'{psql} -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"'
+    assert fix[2] == {"id": "pgss_restart_pod", "arg": "default/postgres-0", "cmd": "kubectl -n default delete pod postgres-0"}
+    assert fix[4]["cmd"].endswith("\nkubectl -n default delete pod postgres-0")
+    assert not any("docker" in x["cmd"] for x in fix)
+    # задан в args контейнера: ALTER SYSTEM не перебьет, показать текущие command и args
+    fix = _fix(_pgss(container="db/pg-0", role="postgres", su="on", spl_src="command line", spl="timescaledb", rt="pod"))
+    assert [x["id"] for x in fix] == ["pgss_create", "pgss_cmdline_pod", "pgss_check"]
+    assert fix[1]["arg"] == "timescaledb,pg_stat_statements"
+    assert fix[1]["cmd"].startswith("kubectl -n db get pod pg-0 -o jsonpath=")
+    # не суперпользователь: откуда задан список, не видно - сначала посмотреть
+    fix = _fix(_pgss(container="db/pg-0", role="app", su="off", spl_src="", rt="pod"))
+    assert fix[0]["id"] == "pgss_look" and fix[0]["arg"] == "pod" and "kubectl -n db get pod pg-0" in fix[0]["cmd"]
+    # docker-контейнер с образом под другим именем helper тоже опрашивает через nsenter (rt=pod), но имя у него
+    # docker'а - команды docker
+    fix = _fix(_pgss(container="shop-db", role="app", su="on", spl_src="default", spl="", rt="pod"))
+    assert fix[0]["cmd"].startswith("sudo docker exec shop-db psql")
+
+
+def test_fails_of_databases_in_pods():
+    """Почему helper не опросил базу в поде: панель пишет конкретно, а не общее "не дотягивается"."""
+    rep = _rep(_pg(container="default/postgres-0"))
+    rep["extras"]["db-health"]["fails"] = [
+        {"engine": "redis", "container": "default/redis-0", "why": "auth", "err": "NOAUTH Authentication required. "},
+        {"engine": "pg", "container": "db/pg-1", "why": "strange", "err": ""},
+        {"engine": "pg", "container": "", "why": "client"},
+        "junk"]
+    assert db_health.fails(rep, NOW) == [
+        {"engine": "redis", "container": "default/redis-0", "why": "auth", "err": "NOAUTH Authentication required."},
+        {"engine": "pg", "container": "db/pg-1", "why": "conn", "err": ""}]
+    # helper до 0.17 поля не пишет, старый блок не судим
+    assert db_health.fails(_rep(_pg()), NOW) is None
+    rep["extras"]["db-health"]["ts"] = T - 7200
+    assert db_health.fails(rep, NOW) is None
+
+
+def test_helper_enters_pods_of_every_engine():
+    """0.17: PostgreSQL, ClickHouse и Redis в подах - как MySQL с 0.11, через nsenter своей ноды, без доступа
+    к кластеру. Окружение контейнера идет в контейнер по трубе: в аргументах (ps) его нет, хостовые
+    timeout и nsenter его не получают (LD_PRELOAD контейнера не доходит до процесса root)"""
+    src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
+    body = src.split("HELPER_EOF")[1]
+    assert not re.search(r"^[^#\n]*\bkubectl\b", body, re.M) and "admin.conf" not in src
+    assert ("| timeout $TO nsenter -t \"$p\" -m -n -p -S \"$u\" -G \"${g:-$u}\" -- /bin/sh -c 'eval \"$(cat)\"; '\"$s\""
+            in src)
+    assert src.count("timeout $TO nsenter") == 1  # один вход в контейнер для всех движков
+    for eng in ("PG_POD", "CH_POD", "RD_POD", "MY_SH"):
+        assert f'pod_run "${{c#pid:}}" "${eng}"' in src or f'pod_run "${{1#pid:}}" "${eng}"' in src, eng
+    # uid сервера базы, не root: у клиента нет capabilities
+    assert "case \"$u\" in ''|0) u=65534; g=65534 ;; esac" in src
+    # пароль из *_FILE читается внутри контейнера, а не с хоста через /proc/<pid>/root
+    assert '"/root" + fp' not in src and "my_pod_pw" not in src
+    # обход по процессам: постмастер, а не сотни его бэкендов; docker-контейнеры, опрошенные по образу, не повторяются
+    for x in ("sweep pg pg postgres", "sweep mysql mysql mysqld mariadbd", "sweep ch clickhouse clickhouse-serv",
+              "sweep redis redis redis-server valkey-server", 'case " $DONE_IDS $SEEN " in', "c[p[x]] != c[x]"):
+        assert x in src, x
+    # причины отказа - в db-health.json
+    assert '"fails":[%s]}' in src and "why=nsenter" in src and "124) why=timeout" in src and "127) why=client" in src
+    # имя пода, а не pid: снимки нагрузки и размеры не теряются при перезапуске пода
+    assert 'n=$(inst_name "$c")' in src and 'health_pg "$c" "$n"' in src and 'idx_pg "$c" "$n"' in src

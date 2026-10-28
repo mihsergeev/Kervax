@@ -51,7 +51,7 @@ def current_setup_versions() -> dict[str, str]:
 
 
 def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bool = False,
-                 gre: bool = False) -> bool:
+                 gre: bool = False, mirror: bool = False) -> bool:
     """Нужен ли helper этой ноде; mutes - решения человека по ноде (alert_mutes сервера),
     relay - на сервере включен ретранслятор для агентов (app/relay.py), gre - GRE до панели
     (app/gre.py).
@@ -66,6 +66,10 @@ def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bo
     # gre-setup - так же только по галочке: туннель до хоста панели включает человек
     if name == "gre-setup":
         return gre
+    # mirror-setup - только на сервере, который сделали резервным для копий бэкапов (роль в разделе
+    # "Бэкапы"), или где helper уже стоит: это решение человека, а не свойство ноды
+    if name == "mirror-setup":
+        return mirror or "backup-mirror" in (rep.get("extras") or {})
     if name == "backupserver-setup":
         bsrv = rep.get("backup_server") or {}
         return bool(bsrv.get("present") and bsrv.get("repos"))
@@ -179,11 +183,12 @@ _HELPER_LABEL = {
     "gre-setup": "GRE-туннель до панели",
     "webfiles-setup": "признаки взлома в файлах сайтов",
     "autoban-setup": "автобан сканеров",
+    "mirror-setup": "резервный сервер бэкапов",
 }
 
 
 def gaps(rep: dict, cur: dict[str, str], mutes: list[str] | None = None,
-         relay: bool = False, gre: bool = False) -> list[tuple[str, str]]:
+         relay: bool = False, gre: bool = False, mirror: bool = False) -> list[tuple[str, str]]:
     """Что на ноде появилось, а покрытия под это нет: (ключ, человеческая строка).
 
     Только ПЕРВАЯ установка и доступы. Устаревшая версия helper'а сюда НЕ попадает:
@@ -207,7 +212,7 @@ def gaps(rep: dict, cur: dict[str, str], mutes: list[str] | None = None,
         out.append(("kube", _MISSING_LABEL["kube"]))
     sv = rep.get("setup_versions") or {}
     for name in sorted(cur):
-        if not setup_needed(name, rep, mutes, relay, gre) or sv.get(name) is not None:
+        if not setup_needed(name, rep, mutes, relay, gre, mirror) or sv.get(name) is not None:
             continue
         if name == "kube-setup" and ("kube", _MISSING_LABEL["kube"]) in out:
             continue  # про кластер уже сказано строкой выше — не дублируем

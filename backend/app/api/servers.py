@@ -22,6 +22,7 @@ from app import backup_unit
 from app import backup_verify
 from app import gre as gre_mod, relay as relay_mod
 from app import disk_wear
+from app import mute_watch
 from app import request_watch
 from app import install_watch
 from app import panel_errors
@@ -331,6 +332,7 @@ def _out(
     o.docker_alerts = _docker_alerts(server)
     o.docker_exposed = docker_exposure.view(server.last_report or {}, _fresh_node(server, now))
     o.docker_risk = docker_risk.view(server, fix=True)
+    o.docker_risk_start = docker_risk.start_caps(server)
     o.exposure = open_ports.view(server)
     if o.exposure is not None:
         # веб-серверы, чьи белые списки обходятся подменой CF-Connecting-IP (app/cf_realip.py)
@@ -354,6 +356,7 @@ def _out(
     o.access = access_audit.view(server, now)
     o.access_advice = access_audit.advice(server, now)
     o.db_health = db_health.view(server.last_report or {}, now)
+    o.db_fails = db_health.fails(server.last_report or {}, now)
     o.gpu = gpu_mod.view(server.last_report or {}, now)
     o.gpu_sum = gpu_mod.summary(server.last_report or {}, now)
     o.llm = gpu_mod.llm_view(server.last_report or {}, (server.alert_state or {}).get("llm_base"),
@@ -389,6 +392,7 @@ def _out(
         o.kube_cron_issues = {**cron_job_issues(server.last_report, now, True, server.alert_state),
                               **cron_job_issues(server.last_report, now, False, server.alert_state)}
     o.alert_since = alert_since(server)
+    o.mute_live, o.mute_over = mute_watch.view(server)
     o.docker_since = docker_since(server)
     o.backup_growth = backup_growth.jump(server, now)
     o.backup_state = backup_state.view(server)
@@ -756,6 +760,7 @@ _SETUP_LABEL = {
     "gre-setup": "GRE-туннель до панели",
     "webfiles-setup": "Файлы сайтов: признаки взлома",
     "autoban-setup": "Автобан сканеров",
+    "mirror-setup": "Резервный сервер бэкапов",
 }
 
 
@@ -801,7 +806,8 @@ def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
     out: list[HelperAdvice] = []
     # идём по тому, что панель РЕАЛЬНО раздаёт (cur), а не по списку в коде
     for name, c in sorted(cur.items()):
-        if not _setup_needed(name, rep, server.alert_mutes, relay=server.relay_enabled, gre=server.gre_enabled):
+        if not _setup_needed(name, rep, server.alert_mutes, relay=server.relay_enabled, gre=server.gre_enabled,
+                             mirror=server.backup_mirror_role):
             continue
         inst = sv.get(name)  # None = helper до версионирования
         # агенты < 1.63 слали версии числами — приводим к строке, чтобы не спорить о типах
@@ -811,7 +817,8 @@ def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
         # оставить kervax_outdated пустым как раз тогда, когда человек пошел гонять плейбук.
         # Кроме установки "Через GRE" из окна: GRE включен до установщика, и gre-setup он ставит сам,
         # а агент с первого отчета ходит туннелем (connect= в отчете, отчет с адреса в туннеле)
-        if inst is None and fresh and (name not in ("relay-setup", "gre-setup") or (name == "gre-setup" and via_gre)):
+        if inst is None and fresh and (name not in ("relay-setup", "gre-setup", "mirror-setup")
+                                       or (name == "gre-setup" and via_gre)):
             continue
         if inst is None or _ver_key(inst) < _ver_key(c):
             out.append(
@@ -1032,17 +1039,24 @@ class _CoverageSizes:
                 self.native[_DB_IMAGES[key]] = self.native.get(_DB_IMAGES[key], 0) + b
 
     def fill(self, a: BackupAudit) -> None:
-        # поды kubernetes helper не меряет; у CronJob-ветки instance пустой, но поды есть
-        if a.kind not in ("db", "db_ok") or a.pods or a.instance.startswith("k8s."):
+        if a.kind not in ("db", "db_ok"):
             return
+        code = _SIZE_INV.get(a.subject)
+        inst = a.instance
+        # у CronJob-ветки instance пустой, но поды есть. Каталоги подов helper не меряет, а инвентарь баз в
+        # подах своей ноды снимает с 0.17: размер по первому поду, у которого он есть (реплики одного
+        # контроллера держат одни данные, сумма соврала бы вдвое)
+        if a.pods or inst.startswith("k8s."):
+            inst = next((p for p in a.pods if code and self.inv.get((code, p))), "")
+            if not inst:
+                return
         if a.subject in _SIZE_SMALL:
             a.size_small = True
             return
-        code = _SIZE_INV.get(a.subject)
-        dbs = self.inv.get((code, a.instance)) if code else None
+        dbs = self.inv.get((code, inst)) if code else None
         if dbs:
             total = sum(s for _, s in dbs)
-            idx = self.idx.get((code, a.instance), 0) if code in _SIZE_IDX else 0
+            idx = self.idx.get((code, inst), 0) if code in _SIZE_IDX else 0
             # индексов больше базы не бывает: такой замер с другого дня, лучше без него
             a.size_bytes = total - idx if 0 < idx < total else total
             if a.size_bytes < total * 0.85:
@@ -1085,6 +1099,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
     # Живой случай - k8s-b, 23.09.2026: ClickHouse 6 часов в
     # CreateContainerConfigError (нет секрета), а панель предлагала включить ему дамп.
     down_pods: dict[str, str] = {}
+    pod_node: dict[str, str] = {}  # ns/name -> нода, на которой под крутится
     for p in ((rep.get("kube") or {}).get("pods") or []):
         # Succeeded/Failed - это отработавшие поды Job'ов, живой базой они не были
         if not p.get("image") or p.get("phase") not in ("Running", "Pending"):
@@ -1092,6 +1107,8 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
         eng = _db_engine_of(p.get("image") or "", p.get("name") or "")
         if eng:
             ref = f"{p.get('ns', '?')}/{p.get('name', '?')}"
+            if p.get("node"):
+                pod_node[ref] = str(p["node"])
             # ready is False, а не falsy: старый агент поля не шлёт вовсе, и на нём
             # «не готов» означало бы «все поды лежат» - карточка врала бы наоборот
             if p.get("phase") != "Running" or p.get("ready") is False:
@@ -1296,8 +1313,12 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                 container=inst, pods=inst_pods[:4],
             ))
     sizes = _CoverageSizes(rep)
+    # базу в поде опрашивает helper той ноды, где под крутится (nsenter, dbstat-setup 0.17): у контроллера
+    # кластера под с чужой ноды без инвентаря - не поломка, "Сервисы" так и скажут
+    me = {x.lower() for x in (server.hostname, server.name, (server.hostname or "").split(".")[0]) if x}
     for a in out:
         sizes.fill(a)
+        a.away = sorted({pod_node[x] for x in a.pods if pod_node.get(x) and pod_node[x].lower() not in me})
     # покрытие путей знаем только для нод с helper'ом (у остальных нет конфига)
     if not bk.get("manageable"):
         return out

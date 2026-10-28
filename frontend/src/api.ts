@@ -1909,7 +1909,7 @@ export type ServerReport = {
   caps?: Record<string, boolean> // возможности агента: kmsg, proc_full (полный ли /proc)
   extras?: {
     'web-rate'?: WebRate; 'disk-usage'?: DiskUsage; 'disk-health'?: DiskHealth; units?: UnitsBlock
-    'backup-runs'?: BackupRuns; 'backup-server'?: BackupServerExtra
+    'backup-runs'?: BackupRuns; 'backup-server'?: BackupServerExtra; 'backup-mirror'?: MirrorReport
   } & Record<
     string,
     unknown
@@ -2037,18 +2037,21 @@ export type DiskHealthDisk = {
   err: string // dead / no_answer / no_namespace_* / state_* / nosmart
   health: string // PASSED / OK / FAILED!
   failing: boolean
+  failnow?: string // helper 0.5: атрибуты SATA, провалившие SMART сейчас, через запятую
   temp: number | null
-  wear: number | null // износ, %
+  wear: number | null // износ, % (оценка вендора, у NVMe бывает до 255)
   spare: number | null // NVMe: запас, %
   spare_thr: number | null
   media: number | null // NVMe: ошибки носителя
+  errlog?: number | null // NVMe: записей в журнале ошибок (в основном отклоненные админ-команды)
+  ioerr?: number | null // NVMe: номер последней ошибки чтения или записи в журнале
   crit: string // NVMe Critical Warning, 0x00 - норма
   poh: number | null // наработка, часов
   realloc: number | null
   pending: number | null
   uncorr: number | null
   crc: number | null
-  grow: Partial<Record<'realloc' | 'pending' | 'uncorr' | 'media' | 'crc', number>> // прирост за сутки
+  grow: Partial<Record<'realloc' | 'pending' | 'uncorr' | 'media' | 'crc' | 'ioerr', number>> // прирост за сутки
 }
 export type DiskHealth = {
   v: number
@@ -2293,7 +2296,68 @@ export type BackupServerExtra = {
   restic_target?: string // до какой версии его обновляет helper
   legacy: BackupServerLegacy | null
   repos: Record<string, BackupServerRepoExtra>
+  // backupserver-setup 0.38: порт и ключ хоста SSH, которые запомнит резервный, и какие резервные
+  // что могут здесь читать (served - когда каждый репозиторий читали последний раз)
+  ssh?: { port: number; hostkey: string } | null
+  mirrors?: Record<string, { ip: string; repos: string[]; served: Record<string, number> }>
 }
+// Резервный сервер бэкапов: блок helper'а mirror-setup (report.d/backup-mirror.json)
+export type MirrorCopy = {
+  src: string // имя основного сервера у резервного
+  repo: string
+  enabled: boolean // false - копирование снято в панели (пауза), копия хранится как есть
+  added: number
+  frozen: boolean // на основном разом пропало многое: ничего не удаляется и не забирается
+  frozen_ts: number
+  frozen_why: string // код и подробности: "snapshots 9 of 12 snapshots gone at once"
+  bad_files: number // испорченных файлов за срок хранения (отложены в сторону)
+  last_try: number
+  last_ok: number // последняя удачная перекачка целиком
+  files: number
+  bytes: number
+  snaps: number
+  newest: number // самый свежий снапшот в копии
+  src_files: number
+  src_bytes: number
+  src_snaps: number
+  src_newest: number // самый свежий снапшот на основном
+  gone_files: number // пропали на основном, держатся в копии до keep_days
+  gone_bytes: number
+  removed: number
+  new_files: number
+  new_bytes: number
+  bad_new: number // основной отдал файлы, не совпавшие с хешем
+  check_ts: number
+  check_files: number
+  check_bad: number
+  err_code: string // ssh | list | get | space | config | run | frozen
+  err: string
+}
+export type MirrorReport = {
+  v: number
+  ts: number
+  helper: string
+  pubkey: string
+  data_dir: string
+  keep_days: number
+  freeze_pct: number
+  pull_at: string
+  check_days: number
+  min_free_pct: number
+  disk_total: number
+  disk_free: number
+  running: boolean
+  current: string // "src/repo", который забирается прямо сейчас
+  next_run: number
+  sources: Record<string, {
+    host: string; port: number; repos: string[]
+    pending: { host: string; port: number; ts: number } | null // ждет accept на резервном
+  }>
+  copies: MirrorCopy[]
+}
+// на основном: репозиторий -> на какой резервный и под каким именем основного там
+export type MirrorEntry = { mirror: number; src: string; ts: string; by: string }
+export type MirrorSyncResult = { ok: boolean; out: string; ts: string }
 export type BackupServerInfo = {
   present: boolean
   running: boolean
@@ -2335,6 +2399,9 @@ export type BackupTarget = {
 // решение "бэкап по http оставить" в alert_mutes (app/backup_target.py MUTE_KEY)
 export const BACKUP_HTTP_MUTE = 'bkhttp:repo'
 
+// on 1 - то, что глушит заглушка, сейчас есть (w - что именно), 0 - тихо; t - с какого момента так
+export type MuteLive = { on: 0 | 1; t: string; w?: string }
+
 export type Server = {
   id: number
   name: string
@@ -2360,6 +2427,8 @@ export type Server = {
   // контейнеры с ключами от хоста сверх положенного по назначению: privileged, опасные
   // capabilities, docker-сокет, корень хоста на запись; muted - заглушен точечно
   docker_risk?: DockerRisk[]
+  // опасные caps только на старт: главный процесс работает без них (агент 2.57) - заметка, не тревога
+  docker_risk_start?: DockerRiskStart[]
   // что открыто в интернет: внешняя проверка портов раз в 6 часов
   exposure?: Exposure | null
   // что сделать с ОС: конец поддержки, перезагрузка, обновления безопасности (level 2 - уже дыра)
@@ -2377,6 +2446,11 @@ export type Server = {
   // ключи заглушки до нового пунктов "Требует действий" (app/home_mute.py): {группа: home:<группа>@<отпечаток>},
   // только у пунктов, которые сейчас есть, и только в списке серверов
   home_mutes?: Record<string, string>
+  // есть ли сейчас то, что глушит заглушка (app/mute_watch.py): ключ как в alert_mutes/alert_snoozes,
+  // '' - снуз всего сервера. Нет ключа - панель этого не видит
+  mute_live?: Record<string, MuteLive>
+  // временные, которые кончились при живой проблеме: панель держит их, пока не стало хуже (at - исходный срок)
+  mute_over?: Record<string, { at: string }>
   // бэкап по http: на какой сервер бэкапов переводить на https и что мешает (только в списке серверов)
   backup_https?: { bs_id: number | null; blockers: string[] } | null
   // версии без поддержки (app/software.py): строка на продукт, 2 - без поддержки, 1 - скоро
@@ -2440,6 +2514,9 @@ export type Server = {
   // здоровье баз (helper dbstat-setup 0.5): роль, отставание реплики (сек), самая долгая
   // транзакция (сек), возраст XID, найденные проблемы
   db_health?: DbHealth[] | null
+  // базы в подах, до которых helper не достучался (dbstat-setup 0.17): nsenter - нет его на ноде, client - нет
+  // клиента в образе, auth - база не пустила, timeout - не ответила вовремя, conn - прочее (err - начало ошибки)
+  db_fails?: { engine: string; container: string; why: string; err: string }[] | null
   // проверка конфигов веб-серверов (helper webserver-setup 0.23): where - "host" или контейнер
   web_config?: { server: string; where: string; ok: boolean; err: string }[] | null
   // сертификаты nginx (helper webserver-setup 0.24): сколько дней до конца срока
@@ -2501,6 +2578,11 @@ export type Server = {
   backup_repo_mutes: string[] | null // заглушённые репо бэкап-сервера (по имени)
   // архив бэкап-сервера: репозиторий или "репозиторий|хост" (старая группа) -> кто, когда, зачем
   backup_repo_archive?: Record<string, BackupArchiveEntry> | null
+  // резервный сервер бэкапов (backend app/bsrv_mirror.py): на основном - какие репозитории куда
+  // копировать и чем кончилась рассылка настроек по id резервного, на резервном - роль
+  backup_mirror?: Record<string, MirrorEntry> | null
+  backup_mirror_sync?: Record<string, { allow?: MirrorSyncResult; set?: MirrorSyncResult }> | null
+  backup_mirror_role?: boolean
   backup_audit_mutes?: string[] | null // приглушённые находки покрытия (по ключу)
   backup_not_required: boolean // на сервере бэкап не требуется (алерт снят)
   db_dumps_ok: boolean // дампы СУБД настроены отдельно (пункт снят с главной)
@@ -2891,6 +2973,7 @@ export type BackupAudit = {
   downtime?: string // непусто = включение дампа стоит простоя (Neo4j Community)
   container?: string // имя контейнера или k8s.<ns>.<sts|deploy|ds>.<имя> ("" = нативная установка)
   pods?: string[] // ns/name подов этого экземпляра — где живёт база
+  away?: string[] // ноды, где крутятся эти поды, кроме этой: их базы опрашивает helper той ноды
   key?: string // "db:RabbitMQ:cont" — устойчивый ключ находки (для точечного приглушения)
   instance?: string // экземпляр: контейнер или контроллер пода k8s.… ("" = нативная установка)
   muted?: boolean // приглушена вручную: не считается проблемой и не идёт на главную
@@ -3063,6 +3146,8 @@ export interface DockerRisk {
   muted: boolean
   fix?: RiskFix // у незаглушенных: шаги, общие у контейнеров одного проекта
 }
+// cap_add опасный, но главный процесс сбросил права: uid не 0, CapEff пуст, no_new_privs (docker_risk.start_caps)
+export type DockerRiskStart = { name: string; image: string; caps: string[]; uid: number }
 // как исправить (docker_risk.fixes): тексты шагов во фронте по id, args - подстановки
 export type RiskStep = { id: string; cmd?: string; alt?: boolean; undo?: boolean }
 export type RiskFix = { key: string; names: string[]; args: Record<string, string>; steps: RiskStep[] }
@@ -3659,6 +3744,26 @@ export function backupRepoArchive(id: number, repo: string, host: string, note: 
     method: 'POST',
     body: JSON.stringify({ repo, host, note, archived }),
   })
+}
+
+// копия репозитория на резервном (mirrorId) или перестать копировать (null)
+export function backupRepoMirror(id: number, repo: string, mirrorId: number | null): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/backup/repo-mirror`, {
+    method: 'POST',
+    body: JSON.stringify({ repo, mirror_id: mirrorId }),
+  })
+}
+
+export function backupMirrorRole(id: number, on: boolean): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/backup/mirror-role`, { method: 'POST', body: JSON.stringify({ on }) })
+}
+
+export function backupMirrorSync(id: number): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/backup/mirror-sync`, { method: 'POST' })
+}
+
+export function backupMirrorPull(id: number): Promise<unknown> {
+  return api<unknown>(`/api/servers/${id}/backup/mirror-pull`, { method: 'POST' })
 }
 
 export function backupRepoMute(id: number, repo: string, muted: boolean): Promise<Server> {

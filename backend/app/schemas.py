@@ -1355,6 +1355,7 @@ class BackupAudit(BaseModel):
     downtime: str = ""
     container: str = ""
     pods: list[str] = []  # ns/name подов этого экземпляра — показать, где живёт база
+    away: list[str] = []  # ноды, на которых крутятся поды из pods, кроме этой (инвентарь снимает их helper)
     # ключ для точечного приглушения ("db:RabbitMQ") и признак «приглушена». Приглушённая
     # находка НЕ исчезает, а уезжает в свёрнутый список: иначе через месяц не вспомнить,
     # что спрятал её сам, и легко решить, что панель перестала проверять.
@@ -1529,6 +1530,9 @@ class ServerOut(BaseModel):
     # контейнеры с ключами от хоста сверх положенного (docker_risk.view):
     # [{"name", "image", "flags", "caps", "text", "muted", "fix"?}], fix - шаги, общие у контейнеров проекта
     docker_risk: list[dict] = Field(default_factory=list)
+    # опасные caps только на старт: главный процесс без них (docker_risk.start_caps, агент 2.57):
+    # [{"name", "image", "caps", "uid"}] - заметка, не тревога
+    docker_risk_start: list[dict] = Field(default_factory=list)
     # внешние прокси со сборкой образа старше года (docker_exposure.outdated):
     # [{"name", "image", "kind", "version", "built", "age_days"}]
     proxy_outdated: list[dict] = Field(default_factory=list)
@@ -1596,6 +1600,11 @@ class ServerOut(BaseModel):
     backup_repo_mutes: list[str] | None = None  # заглушённые репо бэкап-сервера (по имени)
     # архив бэкап-сервера: репозиторий или "репозиторий|хост" -> {note, ts, by}
     backup_repo_archive: dict | None = None
+    # резервный сервер бэкапов: на основном - репозиторий -> {mirror, src, ts, by}, на резервном -
+    # роль (app/bsrv_mirror.py)
+    backup_mirror: dict | None = None
+    backup_mirror_role: bool = False
+    backup_mirror_sync: dict | None = None
     # что открыто в интернет: последняя внешняя проверка портов (app/exposure.py)
     exposure: dict | None = None
     # что сделать с ОС ноды (os_support.advice): конец поддержки, перезагрузка, обновления
@@ -1636,6 +1645,8 @@ class ServerOut(BaseModel):
     access_advice: dict | None = None
     # здоровье баз по движкам: роль, отставание, транзакции, проблемы (db_health.view)
     db_health: list[dict] | None = None
+    # базы в подах, до которых helper не достучался, и почему (db_health.fails, dbstat-setup 0.17)
+    db_fails: list[dict] | None = None
     # GPU NVIDIA: карты, процессы, Xid, драйвер (gpu.view) и плашка списка (gpu.summary)
     gpu: dict | None = None
     gpu_sum: dict | None = None
@@ -1726,6 +1737,11 @@ class ServerOut(BaseModel):
     # ключи заглушки до нового пунктов "Требует действий" (app/home_mute.py): {группа: home:<группа>@<отпечаток>},
     # только у пунктов, которые сейчас есть; только в списке серверов
     home_mutes: dict[str, str] = Field(default_factory=dict)
+    # есть ли сейчас то, что глушит каждая заглушка (app/mute_watch.py): {ключ: {on: 1|0, t: с какого
+    # момента так, w?: что именно есть}}; ключ '' - снуз всего сервера
+    mute_live: dict[str, dict] = Field(default_factory=dict)
+    # временные заглушки, которые кончились при живой проблеме и держатся: {ключ: {at: исходный срок}}
+    mute_over: dict[str, dict] = Field(default_factory=dict)
     # CronJob кластера с проблемой (упал, давно нет успеха, у дампа - приостановлен): {ns/имя: причина}
     kube_cron_issues: dict[str, str] = Field(default_factory=dict)
     # репозитории бэкап-сервера со свежими бэкапами, чьих клиентов нет в панели (по ВСЕМ серверам)
@@ -1751,6 +1767,21 @@ class BackupRepoMuteIn(BaseModel):
 
     repo: str = Field(min_length=1, max_length=253)
     muted: bool
+
+
+class BackupRepoMirrorIn(BaseModel):
+    """Держать копию репозитория сервера бэкапов на резервном (mirror_id) или перестать (None).
+    Перестать - значит только не забирать новое: копия на резервном остается, удалить ее можно
+    лишь командой на нем самом."""
+
+    repo: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    mirror_id: int | None = None
+
+
+class BackupMirrorRoleIn(BaseModel):
+    """Сделать сервер резервным для копий бэкапов (helper mirror-setup) или снять роль."""
+
+    on: bool
 
 
 class BackupRepoArchiveIn(BaseModel):

@@ -123,6 +123,50 @@ ability to serve any files. They **cannot**:
 Worst case: it lies in the UI about metrics, changes the interval, or asks to update
 to an **already legitimately signed** version. Access to the server: zero.
 
+## 5b. Mirror backup server: a copy the main server cannot delete
+
+A mirror server keeps a second copy of chosen restic repositories from one or more
+main backup servers. The point is that the copy cannot be wiped even by someone who
+took over the main backup server, a client or the panel.
+
+- **The mirror pulls.** Once a day it logs in to the main server over SSH as
+  `kervax-mread`. The main server has no key for the mirror and no way in, so it
+  can neither push nor delete anything there.
+- **The account on the main server only reads.** The mirror key sits in
+  `authorized_keys` with `restrict`, `from="<mirror address>"` and the forced
+  command `kervax-mirror-serve mirror-<id>`. That command does two things: list
+  files and hand out files, only from the repositories allowed to this mirror.
+  No shell, no port forwarding, no writes.
+- **Files are checked and never overwritten.** restic files are encrypted and named
+  after the sha256 of their content. The transfer runs as an unprivileged account
+  in a systemd sandbox into a staging directory, then root on the mirror checks the
+  hash against the name and puts the file into the copy only if it is not there
+  yet. A forged file is refused, an existing one is never replaced.
+- **Deletions arrive late.** What is gone on the main server stays in the copy for
+  `KEEP_DAYS` days (30 by default). If one transfer sees most snapshots or data gone
+  (`FREEZE_PCT`, 50% by default), an empty repository or a changed config, the copy
+  freezes: nothing is removed from it and nothing new is taken until root on the
+  mirror runs `kervax-mirror-helper unfreeze`.
+- **Checks without keys.** Every file of a copy is reread and checked against its
+  hash once in `CHECK_DAYS` days (7 by default). A damaged one is moved aside and
+  pulled again. The mirror never needs or stores repository passwords.
+
+What the panel can do: mark a server as a mirror, tell a main server what a mirror
+may read, tell the mirror where to pull from and what, pause a copy and ask for a
+pull now. What it **cannot** do: delete a copy or its files, change the address,
+port or host key of a main server the mirror already knows (the new value waits for
+`kervax-mirror-helper accept` on the mirror), unfreeze a copy, change retention.
+Retention and the data directory live only in `/etc/kervax/mirror.conf` on the
+mirror.
+
+Worst case with a compromised panel: new data stops arriving (a pause, or a foreign
+address the mirror does not take without confirmation), and the `backup_mirror`
+alert on the mirror shows it. The existing copies stay.
+
+Restore: `restic -r <copy directory> snapshots` with the repository password from
+your vault. Leave the copy itself alone: if restic asks to repair the index, run
+`restic repair index` on a separate copy of the directory.
+
 ## 6. The real trust boundary
 
 - **The private key** is the root of trust. Keep it offline, passphrase-protected,

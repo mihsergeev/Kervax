@@ -6,19 +6,36 @@ import { Fragment, useCallback, useEffect, useId, useRef, useState, type Keyboar
 import { ApiError, type Server } from './api'
 import { useI18n } from './i18n'
 import { useEscape } from './useEscape'
-import { liftMute, muteAutoNote, muteLeft, mutesByServer, muteSoon, restoreMute, type MuteRow, type TFn } from './mutes'
+import { liftMute, muteAutoNote, muteDate, muteLeft, muteLiveText, muteQuiet, mutesByServer, muteSoon, restoreMute, type MuteRow, type TFn } from './mutes'
 
 const rowId = (r: MuteRow) => `${r.sid}|${r.group}|${r.until ? 's' : 'p'}|${r.key}`
 
 const fmtUntil = (u: string) =>
   new Date(u).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 
+// срок и под ним - есть ли сейчас то, что заглушено (app/mute_watch.py): "тихо 2 дн" или "сейчас есть: ..."
 function When({ r, t }: { r: MuteRow; t: TFn }) {
-  if (!r.until) return <span className="muted">{(r.group === 'alert' && muteAutoNote(r.key, t)) || t('бессрочно')}</span>
+  const live = muteLiveText(r, t)
+  const liveRow = live ? <span className={`mt-live${r.live?.on ? ' t-warn' : ' muted'}`}>{live}</span> : null
+  if (r.over)
+    return (
+      <>
+        <span className="t-warn">{t('срок вышел {d}, а проблема есть', { d: muteDate(r.over) })}</span>
+        {liveRow}
+      </>
+    )
+  if (!r.until)
+    return (
+      <>
+        <span className="muted">{(r.group === 'alert' && muteAutoNote(r.key, t)) || t('бессрочно')}</span>
+        {liveRow}
+      </>
+    )
   return (
     <>
       <span>{t('ещё {d}', { d: muteLeft(r.until, t) })}</span>
       <span className="muted mt-until">{t('до {t}', { t: fmtUntil(r.until) })}</span>
+      {liveRow}
     </>
   )
 }
@@ -49,7 +66,7 @@ export function MutesPanel({
   const { t } = useI18n()
   const titleId = useId()
   const [q, setQ] = useState('')
-  const [only, setOnly] = useState<'all' | 'perm' | 'timed'>('all')
+  const [only, setOnly] = useState<'all' | 'perm' | 'timed' | 'quiet'>('all')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   // снятые за время, пока панель открыта: их можно вернуть
@@ -101,6 +118,10 @@ export function MutesPanel({
     }
   }
   const lift = (r: MuteRow) => run(r, liftMute, () => setLifted((xs) => [...xs, r]))
+  // снять все, где тихо: по одной, снятые остаются в списке с "вернуть"
+  const liftQuiet = async () => {
+    for (const r of rows.filter((x) => muteQuiet(x))) await lift(r)
+  }
   const restore = (r: MuteRow) =>
     run(r, restoreMute, () => setLifted((xs) => xs.filter((x) => rowId(x) !== rowId(r))))
 
@@ -111,9 +132,10 @@ export function MutesPanel({
   const perm = rows.filter((r) => !r.until).length
   const timed = rows.length - perm
   const soon = rows.filter((r) => muteSoon(r)).length
+  const quiet = rows.filter((r) => muteQuiet(r)).length
   const found = all
     .filter((r) => !qq || r.server.toLowerCase().includes(qq) || r.label.toLowerCase().includes(qq))
-    .filter((r) => (only === 'all' ? true : only === 'perm' ? !r.until : !!r.until))
+    .filter((r) => (only === 'all' ? true : only === 'perm' ? !r.until : only === 'quiet' ? muteQuiet(r) : !!r.until))
   const groups = mutesByServer(found)
   const nSrv = new Set(rows.map((r) => r.sid)).size
   return (
@@ -141,6 +163,13 @@ export function MutesPanel({
             {perm > 0 && <span>{t('бессрочно {n}', { n: perm })}</span>}
             {soon > 0 && <span>{t('истекут за сутки {n}', { n: soon })}</span>}
             {!canEdit && <span>{t('снять может оператор или админ')}</span>}
+            {canEdit && quiet > 0 && (
+              <span>
+                <button className="linklike small" disabled={busy} onClick={liftQuiet}>
+                  {t('вернуть все, где тихо ({n})', { n: quiet })}
+                </button>
+              </span>
+            )}
           </div>
         )}
         {err && <div className="small t-down">{err}</div>}
@@ -157,13 +186,15 @@ export function MutesPanel({
               onChange={(e) => setQ(e.target.value)}
             />
             {/* отбор есть, только когда есть из чего выбирать: у бэкапов все бессрочные */}
-            {perm > 0 && timed > 0 && (
+            {((perm > 0 && timed > 0) || quiet > 0) && (
               <div className="win-switch mt-switch" role="group" aria-label={t('Срок')}>
                 {(
                   [
                     ['all', t('Все')],
-                    ['perm', t('Бессрочно {n}', { n: perm })],
-                    ['timed', t('Со сроком {n}', { n: timed })],
+                    ...(perm > 0 && timed > 0
+                      ? ([['perm', t('Бессрочно {n}', { n: perm })], ['timed', t('Со сроком {n}', { n: timed })]] as const)
+                      : []),
+                    ...(quiet > 0 ? ([['quiet', t('Тихо {n}', { n: quiet })]] as const) : []),
                   ] as const
                 ).map(([k, l]) => (
                   <button

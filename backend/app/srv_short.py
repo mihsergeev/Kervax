@@ -33,7 +33,7 @@ TOPIC = {
     "backup_failed": "💾", "backup_stale": "💾", "backup_growth": "💾", "backup_dump": "💾",
     "backup_dump_space": "💾", "backup_cron": "💾", "backup_custom": "💾", "backup_restore": "💾",
     "backup_repo": "💾", "backup_unmonitored": "💾", "backup_check": "💾", "backup_lock": "🔒",
-    "backup_prune": "🧹", "backup_rotation": "🧹", "known": "📌", "uncovered": "🧩",
+    "backup_prune": "🧹", "backup_rotation": "🧹", "backup_mirror": "🪞", "known": "📌", "uncovered": "🧩",
     "bogus_requests": "🧟", "maint": "🚧",
 }
 
@@ -47,7 +47,7 @@ BASE = {
     "listen_gone": 2, "link": 2, "unit_loop": 2, "db_conn": 2, "dns": 2,
     # смена доступа - событие безопасности; висячий лок, сломанная чистка и проблемные репозитории
     # бэкап-сервера - поломка, а не напоминание. Главная красит их так же (level ниже)
-    "access_change": 2, "backup_lock": 2, "backup_prune": 2, "backup_repo": 2,
+    "access_change": 2, "backup_lock": 2, "backup_prune": 2, "backup_repo": 2, "backup_mirror": 2,
 }
 # эти виды знаками уровня не помечаются: событие, а не поломка
 NO_LEVEL = frozenset({"known", "uncovered"})
@@ -103,6 +103,7 @@ RECOVERY = {
     "backup_custom": "свои бэкапы снова отрабатывают", "backup_repo": "репозитории снова в норме",
     "backup_rotation": "ротация снова чистит", "backup_lock": "локов больше нет",
     "backup_check": "проверка репозиториев снова проходит", "backup_prune": "чистка снова работает",
+    "backup_mirror": "копии на резервном снова в порядке",
     "queue": "очередь разобрана", "unit_loop": "больше не перезапускается",
     "docker_loop": "больше не перезапускается", "docker_down": "контейнер снова работает",
 }
@@ -580,6 +581,9 @@ def _short(key: str, ctx: dict, s, level: int):
     if key == "backup_cron":
         names = _split_names(ctx.get("jobs") or "")
         return ("Упал дамп-CronJob" if len(names) == 1 else "Упали дамп-CronJob"), [tg_fmt.names(names)]
+    if key == "backup_mirror":
+        names = [str(x) for x in ctx.get("names") or []]
+        return ("Копия на резервном требует внимания" if len(names) == 1 else "Копии на резервном требуют внимания"),             [tg_fmt.names(names)]
     if key in ("backup_repo", "backup_unmonitored", "backup_prune", "backup_rotation", "backup_lock",
                "backup_check"):
         names = ctx.get("names") or _split_names(ctx.get("repos") or "")

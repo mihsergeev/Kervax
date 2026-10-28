@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 )
@@ -103,5 +105,73 @@ func TestDockerInspectHostAccess(t *testing.T) {
 		if strings.Contains(string(b), k) {
 			t.Fatalf("app json carries %s: %s", k, b)
 		}
+	}
+}
+
+// Права главного процесса: cap_add DAC_READ_SEARCH у контейнера, который на старте делает
+// setpriv --reuid и работает без прав, и у того, кто остался root или держит cap в permitted.
+func TestParseProcPrivs(t *testing.T) {
+	st := func(uid, eff, prm, nnp string) string {
+		return strings.Join([]string{"Name:\tapp", "Uid:\t" + uid, "Gid:\t10001\t10001\t10001\t10001",
+			"CapInh:\t0000000000000000", "CapPrm:\t" + prm, "CapEff:\t" + eff, "CapBnd:\t00000000000000c5",
+			"CapAmb:\t0000000000000000", "NoNewPrivs:\t" + nnp, "Seccomp:\t2", ""}, "\n")
+	}
+	dropped := parseProcPrivs(st("10001\t10001\t10001\t10001", "0000000000000000", "0000000000000000", "1"))
+	if dropped == nil || dropped.Uid != 10001 || len(dropped.Caps) != 0 || !dropped.NNP {
+		t.Fatalf("dropped: %+v", dropped)
+	}
+	// saved uid 0: процесс вернет себе root, значит root
+	saved := parseProcPrivs(st("10001\t10001\t0\t10001", "0000000000000000", "0000000000000000", "1"))
+	if saved == nil || saved.Uid != 0 {
+		t.Fatalf("saved: %+v", saved)
+	}
+	// DAC_READ_SEARCH (бит 2) только в permitted - поднимет в effective сам; CHOWN (бит 0) не опасен
+	prm := parseProcPrivs(st("10001\t10001\t10001\t10001", "0000000000000001", "0000000000000005", "0"))
+	if prm == nil || strings.Join(prm.Caps, ",") != "DAC_READ_SEARCH" || prm.NNP {
+		t.Fatalf("permitted: %+v", prm)
+	}
+	all := parseProcPrivs(st("0\t0\t0\t0", "000001ffffffffff", "000001ffffffffff", "0"))
+	if all == nil || strings.Join(all.Caps, ",") != "DAC_READ_SEARCH,SYS_MODULE,SYS_RAWIO,SYS_PTRACE,SYS_ADMIN,BPF" {
+		t.Fatalf("root: %+v", all)
+	}
+	for _, bad := range []string{"", "Name:\tapp\n", st("x\t1\t1\t1", "0", "0", "1"), st("1\t1\t1\t1", "zz", "0", "1")} {
+		if p := parseProcPrivs(bad); p != nil {
+			t.Fatalf("%q: %+v", bad, p)
+		}
+	}
+	b, _ := json.Marshal(dropped)
+	if string(b) != `{"uid":10001,"nnp":true}` {
+		t.Fatalf("json: %s", b)
+	}
+}
+
+// proc шлем только работающему контейнеру с опасными caps: pid берется из State.Pid inspect
+func TestDockerInspectProcPrivs(t *testing.T) {
+	pid := os.Getpid()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/containers/shocker/json":
+			fmt.Fprintf(w, `{"State":{"Pid":%d},"HostConfig":{"CapAdd":["DAC_READ_SEARCH","CHOWN"]}}`, pid)
+		case "/containers/net/json":
+			fmt.Fprintf(w, `{"State":{"Pid":%d},"HostConfig":{"CapAdd":["NET_ADMIN"]}}`, pid)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	base, _ := url.Parse(srv.URL)
+	cl := &http.Client{Transport: dockerRT{base}}
+
+	sh := dockerContainer{Name: "shocker", State: "running"}
+	dockerInspect(cl, "shocker", &sh)
+	if sh.Proc == nil || sh.Proc.Uid > os.Getuid() {
+		t.Fatalf("shocker: %+v", sh.Proc)
+	}
+	stopped := dockerContainer{Name: "shocker", State: "exited"}
+	dockerInspect(cl, "shocker", &stopped)
+	n := dockerContainer{Name: "net", State: "running"}
+	dockerInspect(cl, "net", &n)
+	if stopped.Proc != nil || n.Proc != nil {
+		t.Fatalf("proc without danger caps: %+v %+v", stopped.Proc, n.Proc)
 	}
 }

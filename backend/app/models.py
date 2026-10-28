@@ -860,6 +860,14 @@ class Server(Base):
     gre_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     gre_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     gre_agent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Резервный сервер бэкапов (app/bsrv_mirror.py). На основном: {"<репо>": {"mirror": id резервного,
+    # "src": имя основного у резервного, "ts", "by"}} - репозитории, копия которых должна быть на
+    # резервном. На резервном - галочка роли: helper mirror-setup ставится только туда
+    backup_mirror: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    backup_mirror_role: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    # на основном: чем кончилась последняя рассылка настроек копий, {"<id резервного>": {"allow":
+    # {ok, out, ts}, "set": {...}}} - ответ helper'а основного (заметки про sshd) и резервного
+    backup_mirror_sync: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

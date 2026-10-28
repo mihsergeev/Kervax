@@ -68,9 +68,17 @@
 # COMMENT, DDL): their string literals went to the panel as they were. Every string literal of a
 # PostgreSQL text is '?' now, and a text that names credentials, an access, API or private key is
 # dropped like one with a password. The list of containers is kept in a mktemp file, not /tmp by pid.
+#
+# 0.17: PostgreSQL, ClickHouse and Redis in Kubernetes pods (and in containers docker did not match by
+# image) are reached the way MySQL is since 0.11: the client of the container's own image runs inside
+# its namespaces (nsenter) under the uid of the server process, with the container's own environment, as
+# docker exec or kubectl exec would. No access to the cluster is needed, the kubeconfig of the node is not
+# used. Only pods of this node are visible here: a pod on another node is the job of that node's helper.
+# When a database in a pod does not answer, the reason goes to the panel ("fails" in db-health.json): no
+# nsenter, no client in the image, the login was refused, no answer in time.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.16  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.17  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -144,12 +152,141 @@ add_entry() { # engine container version dbs_json users_json conn_used conn_max
   ENTRIES="$ENTRIES${ENTRIES:+,}{\"engine\":\"$(esc "$e")\",\"container\":\"$(esc "$c")\",\"version\":\"$(esc "$v")\",\"dbs\":$d,\"users\":$u,\"conn_used\":${cu:-0},\"conn_max\":${cm:-0}}"
 }
 
+# ── Containers of other runtimes: Kubernetes pods (0.17) ──────────────────────
+# An instance "pid:<pid>" is a container docker does not know (a pod under containerd, k0s, k3s, cri-o)
+# or did not match by image. Its client runs inside its mount, network and PID namespaces under the uid
+# of the server process (no capabilities: it reaches only what the database itself does), with the
+# environment of the container: what docker exec and kubectl exec give, so POSTGRES_USER, PGHOST,
+# CLICKHOUSE_PASSWORD and the like work the same. The environment goes in through a pipe, not as
+# arguments (`ps` would show them), and only into the container: the host's timeout and nsenter run with
+# the helper's own environment, a container's LD_PRELOAD never reaches a root process.
+PERR=$(mktemp)
+trap 'rm -f "$PERR" "$PERR.rc"' EXIT
+POD_ADD=""  # extra "export NAME='value'" lines after the container's environment (a Redis password)
+FAILS=""
+# a value in single quotes for sh
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+# the container's settings kept by the runtime (config.json), by the container id in the cgroup
+pod_cfg() { # pid
+  local id f
+  id=$(grep -o '[0-9a-f]\{64\}' "/proc/$1/cgroup" 2>/dev/null | tail -1)
+  [ -n "$id" ] || return 0
+  for f in /run/containerd/io.containerd.runtime.v2.task/*/"$id"/config.json \
+           /run/*/containerd/io.containerd.runtime.v2.task/*/"$id"/config.json \
+           /run/docker/containerd/daemon/io.containerd.runtime.v2.task/*/"$id"/config.json \
+           /run/containers/storage/overlay-containers/"$id"/userdata/config.json; do
+    [ -r "$f" ] && { printf '%s' "$f"; return 0; }
+  done
+}
+# the container's environment as "export NAME='value'" lines: from config.json (the official images
+# remove passwords from the server process), else from the process itself
+pod_env() { # pid
+  local f kv k
+  f=$(pod_cfg "$1")
+  if [ -n "$f" ] && have python3 && python3 -c 'import json, re, shlex, sys
+for x in (json.load(open(sys.argv[1])).get("process") or {}).get("env") or []:
+    k, _, v = x.partition("=")
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+        print("export %s=%s" % (k, shlex.quote(v)))' "$f" 2>/dev/null; then
+    return 0
+  fi
+  while IFS= read -r -d '' kv; do
+    k=${kv%%=*}
+    case "$k" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+    printf 'export %s=%s\n' "$k" "$(sq "${kv#*=}")"
+  done < "/proc/$1/environ" 2>/dev/null
+}
+# the arguments the container was started with, one per line: redis-server rewrites its own command line
+pod_args() { # pid
+  local f
+  f=$(pod_cfg "$1")
+  if [ -n "$f" ] && have python3; then
+    python3 -c 'import json, sys
+for a in (json.load(open(sys.argv[1])).get("process") or {}).get("args") or []:
+    print(str(a).replace("\n", " "))' "$f" 2>/dev/null && return 0
+  fi
+  tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null
+}
+# runs `sh -c script` inside the container; stderr of the last call stays in PERR and its exit in
+# PERR.rc (124 - no answer in time, 127 - no client in the image): the calls run in $(...) subshells
+pod_run() { # pid script args...
+  local p="$1" s="$2" u g
+  shift 2
+  u=$(awk '/^Uid:/ {print $2}' "/proc/$p/status" 2>/dev/null); g=$(awk '/^Gid:/ {print $2}' "/proc/$p/status" 2>/dev/null)
+  case "$u" in ''|0) u=65534; g=65534 ;; esac
+  { pod_env "$p"; [ -z "$POD_ADD" ] || printf '%s\n' "$POD_ADD"; } \
+    | timeout $TO nsenter -t "$p" -m -n -p -S "$u" -G "${g:-$u}" -- /bin/sh -c 'eval "$(cat)"; '"$s" sh "$@" 2>"$PERR"
+  set -- $?
+  echo "$1" > "$PERR.rc"
+  return "$1"
+}
+# a readable name: namespace/pod from the runtime's annotations, a docker container by its name, else
+# the HOSTNAME of the container
+pod_name() { # pid
+  local id f ns="" pod=""
+  id=$(grep -o '[0-9a-f]\{64\}' "/proc/$1/cgroup" 2>/dev/null | tail -1)
+  if [ -n "$id" ] && have docker; then
+    pod=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')
+    [ -n "$pod" ] && { printf '%s' "$pod"; return 0; }
+  fi
+  f=$(pod_cfg "$1")
+  if [ -n "$f" ]; then
+    ns=$(grep -o '"io.kubernetes.\(cri.sandbox-namespace\|pod.namespace\)":"[^"]*"' "$f" | head -1 | sed 's/.*:"//; s/"$//')
+    pod=$(grep -o '"io.kubernetes.\(cri.sandbox-name\|pod.name\)":"[^"]*"' "$f" | head -1 | sed 's/.*:"//; s/"$//')
+  fi
+  [ -n "$pod" ] || pod=$(tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | sed -n 's/^HOSTNAME=//p' | head -1)
+  if [ -n "$pod" ]; then printf '%s%s' "${ns:+$ns/}" "$pod"; else printf 'pid %s' "$1"; fi
+}
+# the name an instance is shown under: a pod by its name, the rest by the container
+inst_name() { case "$1" in pid:*) pod_name "${1#pid:}" ;; *) printf '%s' "$1" ;; esac; }
+# why a database in a pod did not answer: the panel says it instead of "the helper cannot reach it".
+# The first lines of the client's error go along (no password is ever in them)
+pod_fail() { # engine instance [client output]
+  case "$2" in pid:*) ;; *) return 0 ;; esac
+  local e why
+  e=$({ cat "$PERR"; printf '%s\n' "${3:-}"; } 2>/dev/null | tr -d '\r' | grep -v '^[[:space:]]*$' | head -3 | tr '\n' ' ' | cut -c1-200)
+  if ! have nsenter; then why=nsenter
+  else
+    case "$(cat "$PERR.rc" 2>/dev/null)" in
+      124) why=timeout ;;
+      127) why=client ;;
+      *) case "$(printf '%s' "$e" | tr 'A-Z' 'a-z')" in
+           *password*|*authenticat*|*noauth*|*wrongpass*|*"access denied"*|*"does not exist"*|*"auth failed"*|*"not authorized"*) why=auth ;;
+           *) why=conn ;;
+         esac ;;
+    esac
+  fi
+  FAILS="$FAILS${FAILS:+,}{\"engine\":\"$1\",\"container\":\"$(esc "$(inst_name "$2")")\",\"why\":\"$why\",\"err\":\"$(esc "$e")\"}"
+}
+
 # ── PostgreSQL ─────────────────────────────────────────────────────────────────
 # psql runs as the postgres service user (peer authentication over the socket), so no
 # password is needed; falls back to the container's POSTGRES_USER for non-standard images.
+#
+# In a pod (0.17) the same order: the role from POSTGRES_USER (POSTGRESQL_USERNAME in bitnami images)
+# in its database, then postgres, the second only when the first could not connect. Over the socket the
+# images trust local logins or check the OS user (the server's uid is "postgres" there); a password, where
+# the image asks for one, is the container's own (POSTGRES_PASSWORD, bitnami POSTGRESQL_PASSWORD and
+# POSTGRESQL_POSTGRES_PASSWORD, or their *_FILE read inside the container).
+PG_POD='command -v psql >/dev/null 2>&1 || exit 127
+pw() { [ -n "$1" ] && { printf "%s" "$1"; return; }; [ -n "$2" ] && cat "$2" 2>/dev/null; }
+U=${POSTGRES_USER:-${POSTGRESQL_USERNAME:-}}
+if [ -n "$U" ] && [ "$U" != postgres ]; then
+  P=$(pw "${POSTGRES_PASSWORD:-${POSTGRESQL_PASSWORD:-}}" "${POSTGRES_PASSWORD_FILE:-${POSTGRESQL_PASSWORD_FILE:-}}")
+  if [ -n "$P" ]; then PGPASSWORD=$P; export PGPASSWORD; fi
+  psql -X -d "${2:-${POSTGRES_DB:-${POSTGRESQL_DATABASE:-postgres}}}" -U "$U" -Atqc "$1"; r=$?
+  [ "$r" = 2 ] || exit "$r"
+  P=$(pw "${POSTGRESQL_POSTGRES_PASSWORD:-}" "${POSTGRESQL_POSTGRES_PASSWORD_FILE:-}")
+else
+  P=$(pw "${POSTGRESQL_POSTGRES_PASSWORD:-${POSTGRES_PASSWORD:-${POSTGRESQL_PASSWORD:-}}}" "${POSTGRESQL_POSTGRES_PASSWORD_FILE:-${POSTGRES_PASSWORD_FILE:-${POSTGRESQL_PASSWORD_FILE:-}}}")
+fi
+if [ -n "$P" ]; then PGPASSWORD=$P; export PGPASSWORD; fi
+exec psql -X -d "${2:-postgres}" -U postgres -Atqc "$1"'
 pg_q() { # container query
   local c="$1" q="$2" u d
-  if [ -n "$c" ]; then
+  if [ "${c#pid:}" != "$c" ]; then
+    pod_run "${c#pid:}" "$PG_POD" "$q" ""
+  elif [ -n "$c" ]; then
     u=$(docker exec "$c" printenv POSTGRES_USER 2>/dev/null || true)
     d=$(docker exec "$c" printenv POSTGRES_DB 2>/dev/null || true)
     # the superuser named by POSTGRES_USER first: such an image has no role "postgres", and asking
@@ -168,11 +305,12 @@ pg_q() { # container query
   fi
 }
 collect_pg() {
-  local c="$1" v d u cu cm
+  local c="$1" n v d u cu cm
   v=$(pg_q "$c" "show server_version" | head -1 | awk '{print $1}')
   # a version starts with a digit; anything else is docker's own error printed to stdout (a
   # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed")
-  case "$v" in [0-9]*) ;; *) return 0 ;; esac
+  case "$v" in [0-9]*) ;; *) pod_fail pg "$c"; return 0 ;; esac
+  n=$(inst_name "$c")
   d=$(pg_q "$c" "select datname||'|'||pg_database_size(datname) from pg_database where not datistemplate order by pg_database_size(datname) desc" | dbs_json)
   u=$(pg_q "$c" "select rolname from pg_roles where rolcanlogin order by 1" | list_json)
   # Connection slots. Only client backends are counted: pg_stat_activity also lists the
@@ -184,16 +322,18 @@ collect_pg() {
   # the wall a few slots earlier, and the threshold covers exactly that gap.
   cu=$(pg_q "$c" "select count(*) from pg_stat_activity where backend_type = 'client backend'" | head -1)
   cm=$(pg_q "$c" "select current_setting('max_connections')::int" | head -1)
-  add_entry pg "$c" "$v" "$d" "$u" "$cu" "$cm"
-  [ "$d" = "[]" ] || INV="$INV|postgres:$c|"
-  idx_pg "$c"
-  health_pg "$c"
+  add_entry pg "$n" "$v" "$d" "$u" "$cu" "$cm"
+  [ "$d" = "[]" ] || INV="$INV|postgres:$n|"
+  idx_pg "$c" "$n"
+  health_pg "$c" "$n"
 }
 
 # the same as pg_q, in a given database (table statistics live per database)
 pg_q_db() { # container db query
   local c="$1" db="$2" q="$3" u
-  if [ -n "$c" ]; then
+  if [ "${c#pid:}" != "$c" ]; then
+    pod_run "${c#pid:}" "$PG_POD" "$q" "$db"
+  elif [ -n "$c" ]; then
     u=$(docker exec "$c" printenv POSTGRES_USER 2>/dev/null || true)
     if [ -n "$u" ] && [ "$u" != postgres ]; then
       timeout $TO docker exec "$c" psql -d "$db" -U "$u" -Atqc "$q" 2>/dev/null
@@ -212,8 +352,8 @@ pg_oldest() { # container state-condition
   pg_q "$1" "select extract(epoch from now()-xact_start)::int||'|'||coalesce(datname,'')||'|'||coalesce(application_name,'') from pg_stat_activity where backend_type='client backend' and pid <> pg_backend_pid() and $2 and xact_start is not null order by xact_start limit 1" | head -1
 }
 
-health_pg() {
-  local c="$1" rec r role n lag st xa xi lw xid dead db t dn ln va ld cf
+health_pg() { # container name
+  local c="$1" nm="${2-$1}" rec r role n lag st xa xi lw xid dead db t dn ln va ld cf
   rec=$(pg_q "$c" "select pg_is_in_recovery()" | head -1)
   case "$rec" in t|f) ;; *) return 0 ;; esac
   if [ "$rec" = t ]; then
@@ -242,13 +382,13 @@ health_pg() {
       dead="$dead${dead:+,}{\"db\":\"$(esc "$db")\",\"table\":\"$(esc "$t")\",\"dead\":$(num "$dn"),\"live\":$(num "$ln"),\"vac\":$(num "$va")}"
     done < <(pg_q_db "$c" "$db" "select relname||'|'||n_dead_tup||'|'||n_live_tup||'|'||coalesce(extract(epoch from now()-greatest(last_vacuum,last_autovacuum))::bigint,-1) from pg_stat_user_tables where n_dead_tup > 1000000 and n_dead_tup > n_live_tup * 0.2 order by n_dead_tup desc limit 3")
   done < <(pg_q "$c" "select datname from pg_database where not datistemplate and datallowconn order by pg_database_size(datname) desc limit 3")
-  ld=$(load_pg "$c")
+  ld=$(load_pg "$c" "$nm")
   # the agent drops a report.d file over 256 KB whole, health and all: past LOAD_BUDGET the
   # statements are left out (a node can hold dozens of instances)
   case "$ld" in *',"top":['*) [ $((LOAD_BYTES + ${#ld})) -gt "$LOAD_BUDGET" ] && ld="${ld%%,\"top\":*},\"top\":[],\"cut\":1}" ;; esac
   LOAD_BYTES=$((LOAD_BYTES + ${#ld}))
   cf=$(cfg_pg "$c")
-  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"pg\",\"container\":\"$(esc "$c")\",\"role\":\"$role\",\"replicas\":$n,\"lag\":$lag,\"receiver\":\"$(esc "$st")\",\"xact\":$(num "${xa%%|*}"),\"xact_db\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f2)")\",\"xact_app\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f3)")\",\"idle_xact\":$(num "${xi%%|*}"),\"idle_db\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f2)")\",\"idle_app\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f3)")\",\"idle_xmin\":$(num "${xm%%|*}"),\"idle_xmin_db\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f2)")\",\"idle_xmin_app\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f3)")\",\"lock_waits\":$(num "${lw%%|*}"),\"lock_wait\":$(num "${lw#*|}"),\"xid\":$(num "${xid%%|*}"),\"xid_db\":\"$(esc "${xid#*|}")\",\"dead\":[$dead]${ld:+,\"load\":$ld}${cf:+,\"cfg\":$cf}}"
+  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"pg\",\"container\":\"$(esc "$nm")\",\"role\":\"$role\",\"replicas\":$n,\"lag\":$lag,\"receiver\":\"$(esc "$st")\",\"xact\":$(num "${xa%%|*}"),\"xact_db\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f2)")\",\"xact_app\":\"$(esc "$(printf '%s' "$xa" | cut -d'|' -f3)")\",\"idle_xact\":$(num "${xi%%|*}"),\"idle_db\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f2)")\",\"idle_app\":\"$(esc "$(printf '%s' "$xi" | cut -d'|' -f3)")\",\"idle_xmin\":$(num "${xm%%|*}"),\"idle_xmin_db\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f2)")\",\"idle_xmin_app\":\"$(esc "$(printf '%s' "$xm" | cut -d'|' -f3)")\",\"lock_waits\":$(num "${lw%%|*}"),\"lock_wait\":$(num "${lw#*|}"),\"xid\":$(num "${xid%%|*}"),\"xid_db\":\"$(esc "${xid#*|}")\",\"dead\":[$dead]${ld:+,\"load\":$ld}${cf:+,\"cfg\":$cf}}"
 }
 
 # ── What loads PostgreSQL (0.8) ────────────────────────────────────────────────
@@ -277,10 +417,10 @@ LOAD_BYTES=0
 # numbers separated by "|" (a negative one means "this version does not count it")
 nums() { printf '%s' "$1" | grep -Eq '^-?[0-9]+(\|-?[0-9]+)*$'; }
 
-load_pg() { # container -> a JSON object on stdout, nothing when the engine does not answer
-  local c="$1" dir now vn bs cnt wal ck pre pss=off db="" at tcol topq="" snap ts age base="" fb="" win=0
+load_pg() { # container name -> a JSON object on stdout, nothing when the engine does not answer
+  local c="$1" nm="${2-$1}" dir now vn bs cnt wal ck pre pss=off db="" at tcol topq="" snap ts age base="" fb="" win=0
   local qtext miss line reset pb tb tf xa rd wr fp wb wf kt kr msall top
-  dir="$LOAD_DIR/$(printf '%s' "${c:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
+  dir="$LOAD_DIR/$(printf '%s' "${nm:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
   install -d -m 0700 "$LOAD_DIR" "$dir" 2>/dev/null || return 0
   now=$(date +%s)
   vn=$(num "$(pg_q "$c" "show server_version_num" | head -1)")
@@ -420,7 +560,7 @@ flt() { case "${1:-}" in ''|*[!0-9.]*|.) echo 0 ;; *) echo "$1" ;; esac; }
 
 cfg_pg() { # container -> a JSON object, nothing when the engine does not answer
   local c="$1" r sb wb mws wm mwm ecs ckt mc walc hp hps hpn rpc cct vn mem hpt hpsz pt lim="0" sto="-1" sig=""
-  local role="" su="" src="" spl="" cp="" cs="" cfs="" cdir="" unit="" pid
+  local role="" su="" src="" spl="" cp="" cs="" cfs="" cdir="" unit="" pid rt=docker kc=""
   r=$(pg_q "$c" "select concat_ws('|', pg_size_bytes(current_setting('shared_buffers')), pg_size_bytes(current_setting('wal_buffers')), pg_size_bytes(current_setting('max_wal_size')), pg_size_bytes(current_setting('work_mem')), pg_size_bytes(current_setting('maintenance_work_mem')), pg_size_bytes(current_setting('effective_cache_size')), extract(epoch from current_setting('checkpoint_timeout')::interval)::int, current_setting('max_connections'), current_setting('wal_compression'), current_setting('huge_pages'), coalesce(current_setting('huge_pages_status', true), ''), coalesce(current_setting('shared_memory_size_in_huge_pages', true), ''), current_setting('random_page_cost'), current_setting('checkpoint_completion_target'), current_setting('server_version_num'))" | head -1)
   IFS='|' read -r sb wb mws wm mwm ecs ckt mc walc hp hps hpn rpc cct vn <<< "$r"
   [ "$(num "${sb:-}")" -gt 0 ] || return 0
@@ -431,20 +571,26 @@ cfg_pg() { # container -> a JSON object, nothing when the engine does not answer
   # its own: shared_preload_libraries is readable by superusers only, and an error must not cost the
   # settings above. pg_settings hides the row from others, then the source is empty (= unknown)
   IFS='|' read -r role su src spl < <(pg_q "$c" "select concat_ws('|', current_user, current_setting('is_superuser'), coalesce((select source from pg_settings where name = 'shared_preload_libraries'), ''), coalesce((select setting from pg_settings where name = 'shared_preload_libraries'), ''))" | head -1)
-  if [ -n "$c" ]; then
+  if [ "${c#pid:}" != "$c" ]; then
+    # a pod: the memory limit of its cgroup. "rt" and the container name in the pod ("kc") let the panel
+    # give kubectl commands instead of docker ones; no "kc" - a docker container of another image name
+    rt=pod; lim=$(my_cg_limit "${c#pid:}")
+    kc=$(grep -o '"io.kubernetes.\(cri.container-name\|container.name\)":"[^"]*"' "$(pod_cfg "${c#pid:}")" 2>/dev/null | head -1 | sed 's/.*:"//; s/"$//')
+  elif [ -n "$c" ]; then
     IFS='|' read -r sto sig lim cp cs cfs cdir < <(docker inspect -f '{{if .Config.StopTimeout}}{{.Config.StopTimeout}}{{else}}-1{{end}}|{{.Config.StopSignal}}|{{.HostConfig.Memory}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.project.config_files"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}' "$c" 2>/dev/null)
   else
+    rt=host
     # the systemd unit of a host instance (postgresql@16-main on Debian and Ubuntu): the postmaster's cgroup
     pid=$(num "$(head -1 "$(pg_q "" "show data_directory" | head -1)/postmaster.pid" 2>/dev/null)")
     [ "$pid" -gt 0 ] && unit=$(sed -n 's#.*/\([^/]*\.service\)$#\1#p' "/proc/$pid/cgroup" 2>/dev/null | head -1)
   fi
   [ "$(num "${lim:-0}")" -gt 0 ] && mem=$lim
-  printf '{"v":%s,"sb":%s,"wb":%s,"mws":%s,"wm":%s,"mwm":%s,"ecs":%s,"ckt":%s,"cct":%s,"mc":%s,"walc":"%s","hp":"%s","hps":"%s","hpn":%s,"rpc":%s,"mem":%s,"mem_lim":%s,"hpt":%s,"hpsz":%s,"pt":%s,"stop_to":%s,"stop_sig":"%s","role":"%s","su":"%s","spl_src":"%s","spl":"%s","cproj":"%s","csvc":"%s","cfiles":"%s","cdir":"%s","unit":"%s"}' \
+  printf '{"v":%s,"sb":%s,"wb":%s,"mws":%s,"wm":%s,"mwm":%s,"ecs":%s,"ckt":%s,"cct":%s,"mc":%s,"walc":"%s","hp":"%s","hps":"%s","hpn":%s,"rpc":%s,"mem":%s,"mem_lim":%s,"hpt":%s,"hpsz":%s,"pt":%s,"stop_to":%s,"stop_sig":"%s","role":"%s","su":"%s","spl_src":"%s","spl":"%s","cproj":"%s","csvc":"%s","cfiles":"%s","cdir":"%s","unit":"%s","rt":"%s","kc":"%s"}' \
     "$(num "${vn:-}")" "$(num "$sb")" "$(num "${wb:-}")" "$(num "${mws:-}")" "$(num "${wm:-}")" "$(num "${mwm:-}")" "$(num "${ecs:-}")" \
     "$(num "${ckt:-}")" "$(flt "${cct:-}")" "$(num "${mc:-}")" "$(esc "${walc:-}")" "$(esc "${hp:-}")" "$(esc "${hps:-}")" "$(num "${hpn:-}")" \
     "$(flt "${rpc:-}")" "$(num "${mem:-}")" "$( [ "$(num "${lim:-0}")" -gt 0 ] && echo true || echo false)" "$(num "${hpt:-}")" "$(num "${hpsz:-}")" "$(num "${pt:-}")" \
     "$(num "${sto:--1}")" "$(esc "${sig:-}")" "$(esc "${role:-}")" "$(esc "${su:-}")" "$(esc "${src:-}")" "$(esc "${spl:-}")" \
-    "$(esc "${cp:-}")" "$(esc "${cs:-}")" "$(esc "${cfs:-}")" "$(esc "${cdir:-}")" "$(esc "${unit:-}")"
+    "$(esc "${cp:-}")" "$(esc "${cs:-}")" "$(esc "${cfs:-}")" "$(esc "${cdir:-}")" "$(esc "${unit:-}")" "$rt" "$(esc "$kc")"
 }
 
 # ── MySQL / MariaDB ────────────────────────────────────────────────────────────
@@ -482,94 +628,41 @@ my_host_auth() {
   done
   MYAUTH=""
 }
-# the root password of a container of another runtime, from its config.json; *_FILE is read inside it
-my_pod_pw() { # pid
-  local id f
-  id=$(grep -o '[0-9a-f]\{64\}' "/proc/$1/cgroup" 2>/dev/null | tail -1)
-  [ -n "$id" ] || return 0
-  for f in /run/containerd/io.containerd.runtime.v2.task/*/"$id"/config.json \
-           /run/*/containerd/io.containerd.runtime.v2.task/*/"$id"/config.json \
-           /run/docker/containerd/daemon/io.containerd.runtime.v2.task/*/"$id"/config.json \
-           /run/containers/storage/overlay-containers/"$id"/userdata/config.json; do
-    [ -r "$f" ] || continue
-    if have python3; then
-      python3 -c 'import json, sys
-e = (json.load(open(sys.argv[1])).get("process") or {}).get("env") or []
-d = dict(x.split("=", 1) for x in e if "=" in x)
-p = d.get("MARIADB_ROOT_PASSWORD") or d.get("MYSQL_ROOT_PASSWORD") or ""
-fp = d.get("MARIADB_ROOT_PASSWORD_FILE") or d.get("MYSQL_ROOT_PASSWORD_FILE") or ""
-if not p and fp.startswith("/"):
-    try:
-        p = open("/proc/" + sys.argv[2] + "/root" + fp).read().strip()
-    except OSError:
-        pass
-sys.stdout.write(p)' "$f" "$1" 2>/dev/null
-    else
-      # without python only a value with no JSON escapes: a wrong password is worse than none
-      grep -o '"\(MARIADB\|MYSQL\)_ROOT_PASSWORD=[^"\\]*"' "$f" | head -1 | sed 's/^"[A-Z_]*=//; s/"$//'
-    fi
-    return 0
-  done
-}
-# a readable name: namespace/pod from the runtime's annotations, a docker container by its name, else
-# the HOSTNAME of the container
-my_pod_name() { # pid
-  local id f ns pod
-  id=$(grep -o '[0-9a-f]\{64\}' "/proc/$1/cgroup" 2>/dev/null | tail -1)
-  if [ -n "$id" ] && have docker; then
-    pod=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | sed 's#^/##')
-    [ -n "$pod" ] && { printf '%s' "$pod"; return 0; }
-  fi
-  for f in /run/containerd/io.containerd.runtime.v2.task/*/"$id"/config.json \
-           /run/*/containerd/io.containerd.runtime.v2.task/*/"$id"/config.json \
-           /run/docker/containerd/daemon/io.containerd.runtime.v2.task/*/"$id"/config.json \
-           /run/containers/storage/overlay-containers/"$id"/userdata/config.json; do
-    [ -n "$id" ] && [ -r "$f" ] || continue
-    ns=$(grep -o '"io.kubernetes.\(cri.sandbox-namespace\|pod.namespace\)":"[^"]*"' "$f" | head -1 | sed 's/.*:"//; s/"$//')
-    pod=$(grep -o '"io.kubernetes.\(cri.sandbox-name\|pod.name\)":"[^"]*"' "$f" | head -1 | sed 's/.*:"//; s/"$//')
-    break
-  done
-  [ -n "${pod:-}" ] || pod=$(tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | sed -n 's/^HOSTNAME=//p' | head -1)
-  if [ -n "${pod:-}" ]; then printf '%s%s' "${ns:+$ns/}" "$pod"; else printf 'pid %s' "$1"; fi
-}
+# the client by what exists, the root password from the container's environment, a *_FILE read inside it.
+# mariadb:11 no longer ships a `mysql` command, only `mariadb`, and the query failed silently into
+# /dev/null: the engine appeared in the report while not a single database, size or login did. MYSQL_PWD
+# is a command PREFIX: a separate assignment without export would never reach the client
+MY_SH='if command -v mysql >/dev/null 2>&1; then CLI=mysql; else CLI=mariadb; fi
+  PW="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"
+  F="${MARIADB_ROOT_PASSWORD_FILE:-${MYSQL_ROOT_PASSWORD_FILE:-}}"
+  [ -z "$PW" ] && [ -n "$F" ] && PW=$(cat "$F" 2>/dev/null)
+  MYSQL_PWD="$PW" exec "$CLI" -u root "$@"'
 my_run() { # container flags query; flags "-N -B" (values only) or "-B" (with the header line)
-  local c="$1" fl="$2" q="$3" p u g
+  local c="$1" fl="$2" q="$3"
   case "$c" in
     pid:*)
-      p=${c#pid:}
-      u=$(awk '/^Uid:/ {print $2}' "/proc/$p/status" 2>/dev/null); g=$(awk '/^Gid:/ {print $2}' "/proc/$p/status" 2>/dev/null)
-      case "$u" in ''|0) u=65534; g=65534 ;; esac
-      MYSQL_PWD="$(my_pod_pw "$p")" timeout $TO nsenter -t "$p" -m -n -p -S "$u" -G "${g:-$u}" -- \
-        sh -c 'if command -v mysql >/dev/null 2>&1; then exec mysql "$@"; else exec mariadb "$@"; fi' sh -u root $fl -e "$q" 2>/dev/null
+      # since 0.17 with the container's whole environment, as docker exec does. Until then the password
+      # was taken on the host, and a *_FILE was read through /proc/<pid>/root
+      pod_run "${c#pid:}" "$MY_SH" $fl -e "$q"
       ;;
     "")
       my_host_auth
       my_host "$fl" "$q"
       ;;
     *)
-      # The client is chosen by what actually exists. mariadb:11 no longer ships a `mysql` command,
-      # only `mariadb`, and the query failed silently into /dev/null: the engine appeared in the
-      # report while not a single database, size or login did. MYSQL_PWD is a command PREFIX: a
-      # separate assignment without export would never reach the client ("using password: NO")
-      timeout $TO docker exec "$c" sh -c 'if command -v mysql >/dev/null 2>&1; then CLI=mysql; else CLI=mariadb; fi
-        PW="${MYSQL_ROOT_PASSWORD:-${MARIADB_ROOT_PASSWORD:-}}"
-        F="${MARIADB_ROOT_PASSWORD_FILE:-${MYSQL_ROOT_PASSWORD_FILE:-}}"
-        [ -z "$PW" ] && [ -n "$F" ] && PW=$(cat "$F" 2>/dev/null)
-        MYSQL_PWD="$PW" exec "$CLI" -u root "$@"' sh $fl -e "$q" 2>/dev/null
+      timeout $TO docker exec "$c" sh -c "$MY_SH" sh $fl -e "$q" 2>/dev/null
       ;;
   esac
 }
 my_q() { my_run "$1" "-N -B" "$2"; }
-# the name an instance is shown under: a pod by its name, the rest by the container
-my_name() { case "$1" in pid:*) my_pod_name "${1#pid:}" ;; *) printf '%s' "$1" ;; esac; }
 
 collect_mysql() {
   local c="$1" n v d u cu cm
   v=$(my_q "$c" "select version()" | head -1)
   # a version starts with a digit; anything else is docker's own error printed to stdout (a
   # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed")
-  case "$v" in [0-9]*) ;; *) return 0 ;; esac
-  n=$(my_name "$c")
+  case "$v" in [0-9]*) ;; *) pod_fail mysql "$c"; return 0 ;; esac
+  n=$(inst_name "$c")
   d=$(my_q "$c" "select table_schema, ifnull(sum(data_length+index_length),0) from information_schema.tables where table_schema not in ('information_schema','performance_schema','sys') group by table_schema order by 2 desc" \
       | awk -F'\t' '{print $1"|"$2}' | dbs_json)
   u=$(my_q "$c" "select distinct user from mysql.user order by user" | list_json)
@@ -754,21 +847,28 @@ cfg_my() { # container -> a JSON object, nothing when the engine does not answer
 }
 
 # ── ClickHouse ─────────────────────────────────────────────────────────────────
-ch_q() { local c="$1" q="$2"; [ -n "$c" ] \
+# in a pod the client of its image with the container's environment: CLICKHOUSE_USER and
+# CLICKHOUSE_PASSWORD there are read by the client itself, as with docker exec
+CH_POD='command -v clickhouse-client >/dev/null 2>&1 || exit 127
+exec clickhouse-client "$@"'
+ch_q() { local c="$1" q="$2"
+  case "$c" in pid:*) pod_run "${c#pid:}" "$CH_POD" --query "$q"; return ;; esac
+  [ -n "$c" ] \
   && timeout $TO docker exec "$c" clickhouse-client --query "$q" 2>/dev/null \
   || timeout $TO clickhouse-client --query "$q" 2>/dev/null; }
 collect_ch() {
-  local c="$1" v d u
+  local c="$1" n v d u
   v=$(ch_q "$c" "select version()" | head -1)
   # a version starts with a digit; anything else is docker's own error printed to stdout (a
   # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed")
-  case "$v" in [0-9]*) ;; *) return 0 ;; esac
+  case "$v" in [0-9]*) ;; *) pod_fail clickhouse "$c"; return 0 ;; esac
+  n=$(inst_name "$c")
   d=$(ch_q "$c" "select database, sum(bytes_on_disk) from system.parts where active group by database order by 2 desc format TabSeparated" \
       | awk -F'\t' '{print $1"|"$2}' | dbs_json)
   u=$(ch_q "$c" "select name from system.users order by name format TabSeparated" | list_json)
-  add_entry clickhouse "$c" "$v" "$d" "$u"
-  [ "$d" = "[]" ] || INV="$INV|clickhouse:$c|"
-  health_ch "$c"
+  add_entry clickhouse "$n" "$v" "$d" "$u"
+  [ "$d" = "[]" ] || INV="$INV|clickhouse:$n|"
+  health_ch "$c" "$n"
 }
 
 # ── ClickHouse health (0.10) ───────────────────────────────────────────────────
@@ -784,14 +884,15 @@ TOP_CH=5
 # exec per query took longer than the queries. Every query returns exactly one row, so the answer
 # is read by line number
 ch_mq() { # container queries
+  case "$1" in pid:*) pod_run "${1#pid:}" "$CH_POD" -n --format TSV --query "$2"; return ;; esac
   if [ -n "$1" ]; then timeout $TO docker exec "$1" clickhouse-client -n --format TSV --query "$2" 2>/dev/null
   else timeout $TO clickhouse-client -n --format TSV --query "$2" 2>/dev/null; fi
 }
 ch_f() { printf '%s' "$1" | cut -f"$2"; }
-health_ch() {
-  local c="$1" f now out up pm lim mu rp rq det mg ev ci cf cr cd pt pu pi pf pr pd
+health_ch() { # container name
+  local c="$1" nm="${2-$1}" f now out up pm lim mu rp rq det mg ev ci cf cr cd pt pu pi pf pr pd
   local win=0 ins=0 fail=0 rej=0 del=0 ql=false qe=0 top="" cut=0 entry
-  f="$LOAD_DIR/ch-$(printf '%s' "${c:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
+  f="$LOAD_DIR/ch-$(printf '%s' "${nm:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
   install -d -m 0700 "$LOAD_DIR" 2>/dev/null || return 0
   now=$(date +%s)
   out=$(ch_mq "$c" "select uptime();
@@ -837,7 +938,7 @@ select count(), sum(query_duration_ms), sum(read_bytes), max(memory_usage), repl
     if [ $((LOAD_BYTES + ${#top})) -gt "$LOAD_BUDGET" ]; then top=""; cut=1; fi
     LOAD_BYTES=$((LOAD_BYTES + ${#top}))
   fi
-  entry="{\"engine\":\"clickhouse\",\"container\":\"$(esc "$c")\",\"role\":\"\",\"replicas\":0,\"lag\":0"
+  entry="{\"engine\":\"clickhouse\",\"container\":\"$(esc "$nm")\",\"role\":\"\",\"replicas\":0,\"lag\":0"
   entry="$entry,\"parts\":{\"max\":$(num "$(ch_f "$pm" 1)"),\"tbl\":\"$(esc "$(ch_f "$pm" 2)")\",\"part\":\"$(esc "$(ch_f "$pm" 3)")\",\"delay\":$(num "$(ch_f "$lim" 1)"),\"throw\":$(num "$(ch_f "$lim" 2)")}"
   entry="$entry,\"mut\":{\"n\":$(num "$(ch_f "$mu" 1)"),\"age\":$(num "$(ch_f "$mu" 2)"),\"tbl\":\"$(esc "$(ch_f "$mu" 3)")\",\"err\":\"$(esc "$(ch_f "$mu" 4)")\"}"
   entry="$entry,\"rep\":{\"n\":$(num "$(ch_f "$rp" 1)"),\"ro\":$(num "$(ch_f "$rp" 2)"),\"delay\":$(num "$(ch_f "$rp" 3)"),\"queue\":$(num "$(ch_f "$rp" 4)"),\"ro_tbl\":\"$(esc "$(ch_f "$rp" 5)")\",\"q_n\":$(num "$(ch_f "$rq" 1)"),\"q_age\":$(num "$(ch_f "$rq" 2)"),\"q_err\":\"$(esc "$(ch_f "$rq" 3)")\"}"
@@ -870,8 +971,34 @@ rd_pw() { # container -> the password or nothing
   fi
   printf '%s' "$pw"
 }
+# in a pod (0.17) the password is found inside it: the value of --requirepass among the arguments the
+# container was started with (KERVAX_RDPW; "$VAR" there is taken from its environment), REDIS_PASSWORD or
+# its *_FILE, requirepass in the config file it starts with (KERVAX_RDCONF). It reaches redis-cli as
+# REDISCLI_AUTH in the environment
+RD_POD='CLI=redis-cli; command -v redis-cli >/dev/null 2>&1 || CLI=valkey-cli
+command -v "$CLI" >/dev/null 2>&1 || exit 127
+P=${KERVAX_RDPW:-}
+case "$P" in
+  \$*) V=${P#?}; V=${V#\{}; V=${V%\}}
+       case "$V" in ""|[0-9]*|*[!A-Za-z0-9_]*) P="" ;; *) eval "P=\${$V:-}" ;; esac ;;
+esac
+[ -n "$P" ] || P=${REDIS_PASSWORD:-}
+[ -n "$P" ] || [ -z "${REDIS_PASSWORD_FILE:-}" ] || P=$(cat "$REDIS_PASSWORD_FILE" 2>/dev/null)
+[ -n "$P" ] || [ -z "${KERVAX_RDCONF:-}" ] || P=$(awk "\$1 == \"requirepass\" {print \$2; exit}" "$KERVAX_RDCONF" 2>/dev/null | tr -d "\042\047")
+unset KERVAX_RDPW
+if [ -n "$P" ]; then REDISCLI_AUTH=$P; export REDISCLI_AUTH; fi
+exec "$CLI" "$@"'
+rd_pod_add() { # pid -> POD_ADD with what the container was started with
+  local a pw conf
+  a=$(pod_args "$1")
+  pw=$(printf '%s\n' "$a" | awk 'p { print; exit } $0 == "--requirepass" { p = 1; next } /^--requirepass=/ { sub(/^--requirepass=/, ""); print; exit }' | tr -d "\"'")
+  conf=$(printf '%s\n' "$a" | grep -m1 '\.conf$')
+  POD_ADD="export KERVAX_RDPW=$(sq "$pw")
+export KERVAX_RDCONF=$(sq "$conf")"
+}
 rd_cli() { # container args... -> redis-cli output; the password (RDPW) goes on stdin
   local c="$1"; shift
+  case "$c" in pid:*) pod_run "${c#pid:}" "$RD_POD" "$@"; return ;; esac
   if [ -z "$RDPW" ]; then
     if [ -n "$c" ]; then timeout $TO docker exec "$c" redis-cli "$@" 2>/dev/null
     else timeout $TO redis-cli "$@" 2>/dev/null; fi
@@ -883,18 +1010,22 @@ rd_cli() { # container args... -> redis-cli output; the password (RDPW) goes on 
 }
 rd_q() { rd_cli "$1" info "$2"; }
 collect_redis() {
-  local c="$1" v d cl
-  RDPW=$(rd_pw "$c")
-  v=$(rd_q "$c" server | awk -F: '/^redis_version:/{print $2}' | tr -d '\r' | head -1)
+  local c="$1" n v d cl out
+  case "$c" in pid:*) rd_pod_add "${c#pid:}" ;; *) RDPW=$(rd_pw "$c") ;; esac
+  out=$(rd_q "$c" server)
+  v=$(printf '%s\n' "$out" | awk -F: '/^redis_version:/{print $2}' | tr -d '\r' | head -1)
   # a version starts with a digit; anything else is docker's own error printed to stdout (a
-  # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed")
-  case "$v" in [0-9]*) ;; *) RDPW=""; return 0 ;; esac
+  # postgres-exporter matches the image pattern but has no psql: "OCI runtime exec failed").
+  # redis-cli prints a refused login (NOAUTH, WRONGPASS) to stdout
+  case "$v" in [0-9]*) ;; *) pod_fail redis "$c" "$out"; RDPW=""; POD_ADD=""; return 0 ;; esac
+  n=$(inst_name "$c")
   d=$(rd_q "$c" keyspace | tr -d '\r' | awk -F'[:,=]' '/^db[0-9]+:/{print $1"|"$3}' | dbs_json)
   cl=$(rd_q "$c" clients | tr -d '\r')
-  add_entry redis "$c" "$v" "$d" "[]" "$(num "$(printf '%s\n' "$cl" | awk -F: '$1 == "connected_clients" {print $2}')")" \
+  add_entry redis "$n" "$v" "$d" "[]" "$(num "$(printf '%s\n' "$cl" | awk -F: '$1 == "connected_clients" {print $2}')")" \
     "$(num "$(printf '%s\n' "$cl" | awk -F: '$1 == "maxclients" {print $2}')")"
-  health_redis "$c"
+  health_redis "$c" "$n"
   RDPW=""
+  POD_ADD=""
 }
 
 # ── Redis health (0.10) ────────────────────────────────────────────────────────
@@ -904,10 +1035,10 @@ collect_redis() {
 # refused at maxclients. Plus the heaviest commands since the last run, from INFO commandstats: only
 # command names and time, no keys or values
 TOP_RD=5
-health_redis() {
-  local c="$1" f now inf up role link down rep mem maxm pol rdb chg last aof aofs evk rjc sw cs
+health_redis() { # container name
+  local c="$1" nm="${2-$1}" f now inf up role link down rep mem maxm pol rdb chg last aof aofs evk rjc sw cs
   local pt pu pe pr win=0 ev=0 rj=0 cmds="" age=-1
-  f="$LOAD_DIR/rd-$(printf '%s' "${c:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
+  f="$LOAD_DIR/rd-$(printf '%s' "${nm:-host}" | tr -c 'A-Za-z0-9_.-' '_')"
   install -d -m 0700 "$LOAD_DIR" 2>/dev/null || return 0
   now=$(date +%s)
   inf=$(rd_cli "$c" info all | tr -d '\r')
@@ -938,7 +1069,7 @@ health_redis() {
   fi
   { printf '%s %s %s %s\n' "$now" "$up" "$evk" "$rjc"; printf '%s\n' "$cs"; } > "$f"
   case "$role" in master) role=primary ;; slave) role=replica ;; esac
-  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"redis\",\"container\":\"$(esc "$c")\",\"role\":\"$(esc "$role")\",\"replicas\":$rep,\"lag\":0,\"link\":\"$(esc "$link")\",\"down\":$down,\"mem\":$mem,\"maxmem\":$maxm,\"policy\":\"$(esc "$pol")\",\"rdb\":\"$(esc "$rdb")\",\"rdb_changes\":$chg,\"rdb_age\":$age,\"aof\":$aof,\"aof_status\":\"$(esc "$aofs")\",\"stop_writes\":\"$sw\",\"win\":$win,\"evicted\":$ev,\"rejected\":$rj,\"cmds\":[$cmds]}"
+  HEALTH="$HEALTH${HEALTH:+,}{\"engine\":\"redis\",\"container\":\"$(esc "$nm")\",\"role\":\"$(esc "$role")\",\"replicas\":$rep,\"lag\":0,\"link\":\"$(esc "$link")\",\"down\":$down,\"mem\":$mem,\"maxmem\":$maxm,\"policy\":\"$(esc "$pol")\",\"rdb\":\"$(esc "$rdb")\",\"rdb_changes\":$chg,\"rdb_age\":$age,\"aof\":$aof,\"aof_status\":\"$(esc "$aofs")\",\"stop_writes\":\"$sw\",\"win\":$win,\"evicted\":$ev,\"rejected\":$rj,\"cmds\":[$cmds]}"
 }
 
 # ── How much there is to back up (0.15) ────────────────────────────────────────
@@ -964,16 +1095,16 @@ skey() { printf '%s.%s' "$1" "$2" | tr -c 'A-Za-z0-9._-' '_'; }
 stale() { [ ! -s "$1" ] || [ $(( $(date +%s) - $(stat -c %Y -- "$1" 2>/dev/null || echo 0) )) -ge "$SIZE_EVERY" ]; }
 put() { printf '%s\n%s\n' "$2" "${3-}" > "$1.tmp" && mv -f "$1.tmp" "$1"; }  # file value [instance]
 
-idx_pg() {
-  local c="$1" f db s t=0
-  f="$SIZE_DIR/idx.$(skey pg "$c")"
+idx_pg() { # container name
+  local c="$1" nm="${2-$1}" f db s t=0
+  f="$SIZE_DIR/idx.$(skey pg "$nm")"
   stale "$f" || return 0
   while IFS= read -r db; do
     [ -n "$db" ] || continue
     s=$(pg_q_db "$c" "$db" "select coalesce(sum(pg_relation_size(indexrelid)),0) from pg_index" | head -1)
     t=$((t + $(num "$s")))
   done < <(pg_q "$c" "select datname from pg_database where not datistemplate and datallowconn order by pg_database_size(datname) desc limit $MAXDB")
-  put "$f" "$t" "$c"
+  put "$f" "$t" "$nm"
 }
 idx_mysql() { # container name
   local f s
@@ -1074,40 +1205,56 @@ sizes_native() {
 }
 
 # -- sweep: containers by image plus host processes --------------------------------
-MY_NS=""  # mount namespaces of the MySQL containers docker already went through
+DONE_IDS=""  # full ids of the containers docker already went through
 if have docker && DBS=$(mktemp); then
-  docker ps --format '{{.Names}}|{{.Image}}' 2>/dev/null | while IFS='|' read -r name img; do
-    echo "$name|$img"
-  done > "$DBS" 2>/dev/null || : > "$DBS"
-  while IFS='|' read -r name img; do
+  docker ps --no-trunc --format '{{.ID}}|{{.Names}}|{{.Image}}' 2>/dev/null > "$DBS" || : > "$DBS"
+  while IFS='|' read -r id name img; do
     [ -n "$name" ] || continue
     case "$(printf '%s' "$img" | tr 'A-Z' 'a-z')" in
       *postgres*|*timescale*|*pgvector*) collect_pg "$name" ;;
-      *mariadb*|*mysql*|*percona*)       collect_mysql "$name"
-                                         MY_NS="$MY_NS $(readlink "/proc/$(docker inspect -f '{{.State.Pid}}' "$name" 2>/dev/null)/ns/mnt" 2>/dev/null)" ;;
+      *mariadb*|*mysql*|*percona*)       collect_mysql "$name" ;;
       *clickhouse*)                      collect_ch "$name" ;;
       *redis*|*valkey*)                  collect_redis "$name" ;;
+      *) continue ;;
     esac
+    DONE_IDS="$DONE_IDS $id"
   done < "$DBS"
   rm -f "$DBS"
 fi
-# host engines (not in docker) - only if one is actually listening locally
-pgrep -x postgres        >/dev/null 2>&1 && have psql             && collect_pg ""
-# MySQL/MariaDB by the server process: one in the host's own mount namespace is a host engine, one in
-# a container docker did not go through (a Kubernetes pod, an image named otherwise) is reached inside
-# its namespaces. Pods on other nodes are not visible from here
+# Then by the server process. One outside containers (no container id in its cgroup; a systemd unit
+# with PrivateTmp has a mount namespace of its own, but it is the host's engine) is queried on the host.
+# One in a container docker did not go through (a Kubernetes pod, an image named otherwise) is reached
+# inside its namespaces, once per container (0.17; MySQL since 0.11). Pods on other nodes are not
+# visible from here: they are the job of the helper on their node
 HOSTMNT=$(readlink /proc/1/ns/mnt)
-MYHOST=""
-for p in $(pgrep -x mysqld; pgrep -x mariadbd); do
-  pns=$(readlink "/proc/$p/ns/mnt" 2>/dev/null) || continue
-  if [ "$pns" = "$HOSTMNT" ]; then MYHOST=1; continue; fi
-  case " $MY_NS " in *" $pns "*) continue ;; esac
-  MY_NS="$MY_NS $pns"
-  have nsenter && collect_mysql "pid:$p"
-done
-[ -n "$MYHOST" ] && { have mysql || have mariadb; } && collect_mysql ""
-pgrep -x redis-server    >/dev/null 2>&1 && have redis-cli        && collect_redis ""
-pgrep -x clickhouse-serv >/dev/null 2>&1 && have clickhouse-client && collect_ch ""
+HOSTENG=""
+SEEN=""
+PROCS=$(ps -e -o pid=,ppid=,comm= 2>/dev/null)
+# pids of the given process names whose parent has another name: a postmaster, not its hundreds of backends
+roots() { # name...
+  printf '%s\n' "$PROCS" | awk -v names=" $* " '{ c[$1] = $3; p[$1] = $2; n[NR] = $1 }
+    END { for (i = 1; i <= NR; i++) { x = n[i]; if (index(names, " " c[x] " ") && c[p[x]] != c[x]) print x } }'
+}
+sweep() { # collector engine process-name...
+  local f="$1" e="$2" p pns id
+  shift 2
+  for p in $(roots "$@"); do
+    pns=$(readlink "/proc/$p/ns/mnt" 2>/dev/null) || continue
+    id=$(grep -o '[0-9a-f]\{64\}' "/proc/$p/cgroup" 2>/dev/null | tail -1)
+    if [ "$pns" = "$HOSTMNT" ] || [ -z "$id" ]; then HOSTENG="$HOSTENG $e"; continue; fi
+    case " $DONE_IDS $SEEN " in *" $id "*|*" $e:$pns "*) continue ;; esac
+    SEEN="$SEEN $e:$pns"
+    if have nsenter; then "collect_$f" "pid:$p"; else pod_fail "$e" "pid:$p"; fi
+  done
+}
+sweep pg pg postgres
+sweep mysql mysql mysqld mariadbd
+sweep ch clickhouse clickhouse-serv
+sweep redis redis redis-server valkey-server
+case " $HOSTENG " in *" pg "*) have psql && collect_pg "" ;; esac
+case " $HOSTENG " in *" mysql "*) { have mysql || have mariadb; } && collect_mysql "" ;; esac
+case " $HOSTENG " in *" redis "*) have redis-cli && collect_redis "" ;; esac
+case " $HOSTENG " in *" clickhouse "*) have clickhouse-client && collect_ch "" ;; esac
 
 # snapshots of instances that are gone (a pod got a new name, a container was removed)
 find "$LOAD_DIR" -mindepth 1 -maxdepth 1 -mtime +2 -exec rm -rf {} + 2>/dev/null
@@ -1116,7 +1263,7 @@ printf '{"ts":%s,"items":[%s]}\n' "$(date +%s)" "$ENTRIES" > "$TMP"
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 mkdir -p "${HOUT%/*}"
-printf '{"v":1,"ts":%s,"items":[%s]}\n' "$(date +%s)" "$HEALTH" > "$HOUT.tmp.$$"
+printf '{"v":1,"ts":%s,"items":[%s],"fails":[%s]}\n' "$(date +%s)" "$HEALTH" "$FAILS" > "$HOUT.tmp.$$"
 chmod 0644 "$HOUT.tmp.$$"
 mv -f "$HOUT.tmp.$$" "$HOUT"
 

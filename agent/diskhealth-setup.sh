@@ -10,7 +10,7 @@
 # can tell a VM from a dedicated server and show what the VM has.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without RAID or SMART it reports an empty block
 
 HELPER_DIR=/lib65/kervax
@@ -121,17 +121,18 @@ add_disk() {    # dev model serial type size rota ok err [smart fields as k=v...
   local dev=$1 model=$2 serial=$3 tran=$4 size=$5 rota=$6 ok=$7 err=$8
   shift 8
   local health="" failing=0 temp="" wear="" spare="" sparethr="" media="" crit="" poh=""
-  local realloc="" pending="" uncorr="" crc="" grow="" kv
+  local realloc="" pending="" uncorr="" crc="" errlog="" ioerr="" failnow="" grow="" kv
   for kv in "$@"; do
     case "$kv" in
       health=*) health=${kv#*=} ;; failing=*) failing=${kv#*=} ;; temp=*) temp=${kv#*=} ;;
       wear=*) wear=${kv#*=} ;; spare=*) spare=${kv#*=} ;; sparethr=*) sparethr=${kv#*=} ;;
       media=*) media=${kv#*=} ;; crit=*) crit=${kv#*=} ;; poh=*) poh=${kv#*=} ;;
       realloc=*) realloc=${kv#*=} ;; pending=*) pending=${kv#*=} ;; uncorr=*) uncorr=${kv#*=} ;;
-      crc=*) crc=${kv#*=} ;; grow=*) grow=${kv#*=} ;;
+      crc=*) crc=${kv#*=} ;; errlog=*) errlog=${kv#*=} ;; ioerr=*) ioerr=${kv#*=} ;;
+      failnow=*) failnow=${kv#*=} ;; grow=*) grow=${kv#*=} ;;
     esac
   done
-  DISKS="$DISKS${DISKS:+,}{\"dev\":\"$(esc "$dev")\",\"model\":\"$(esc "$model")\",\"serial\":\"$(esc "$serial")\",\"type\":\"$(esc "$tran")\",\"size\":$(num "$size"),\"rota\":$(num "$rota"),\"ok\":$ok,\"err\":\"$(esc "$err")\",\"health\":\"$(esc "$health")\",\"failing\":$( [ "$failing" = 1 ] && echo true || echo false),\"temp\":$(num "$temp"),\"wear\":$(num "$wear"),\"spare\":$(num "$spare"),\"spare_thr\":$(num "$sparethr"),\"media\":$(num "$media"),\"crit\":\"$(esc "$crit")\",\"poh\":$(num "$poh"),\"realloc\":$(num "$realloc"),\"pending\":$(num "$pending"),\"uncorr\":$(num "$uncorr"),\"crc\":$(num "$crc"),\"grow\":{$grow}}"
+  DISKS="$DISKS${DISKS:+,}{\"dev\":\"$(esc "$dev")\",\"model\":\"$(esc "$model")\",\"serial\":\"$(esc "$serial")\",\"type\":\"$(esc "$tran")\",\"size\":$(num "$size"),\"rota\":$(num "$rota"),\"ok\":$ok,\"err\":\"$(esc "$err")\",\"health\":\"$(esc "$health")\",\"failing\":$( [ "$failing" = 1 ] && echo true || echo false),\"failnow\":\"$(esc "$failnow")\",\"temp\":$(num "$temp"),\"wear\":$(num "$wear"),\"spare\":$(num "$spare"),\"spare_thr\":$(num "$sparethr"),\"media\":$(num "$media"),\"errlog\":$(num "$errlog"),\"ioerr\":$(num "$ioerr"),\"crit\":\"$(esc "$crit")\",\"poh\":$(num "$poh"),\"realloc\":$(num "$realloc"),\"pending\":$(num "$pending"),\"uncorr\":$(num "$uncorr"),\"crc\":$(num "$crc"),\"grow\":{$grow}}"
 }
 
 # lsblk -P (KEY="value") turned into "|"-separated lines: with spaces or tabs read would collapse
@@ -176,7 +177,12 @@ if [ "$virt" = none ]; then
       # sleeping hard disk asleep (then the previous reading stays).
       if [ ! -s "$cache" ] || [ -n "$(find "$cache" -mmin +"$SMART_MIN" 2>/dev/null)" ] \
          || grep -q '^ok=false' "$cache" 2>/dev/null || [ "$(sed -n 's/^serial=//p' "$cache" 2>/dev/null)" != "$serial" ]; then
-        out=$(timeout 40 smartctl -H -A -n standby "/dev/$name" 2>&1); rc=$?
+        # NVMe: and its error log page. Most of its entries are admin commands the disk rejected
+        # (a log page it does not support: "Invalid Field in Command"), not data errors
+        elog=""; nvme=0
+        case "$name" in nvme*) elog="-l error"; nvme=1 ;; esac
+        # shellcheck disable=SC2086
+        out=$(timeout 40 smartctl -H -A $elog -n standby "/dev/$name" 2>&1); rc=$?
         if printf '%s' "$out" | grep -E -q -i 'device is in [a-z_ ]+ mode'; then
           :   # asleep: keep the previous reading
         else
@@ -195,7 +201,16 @@ if [ "$virt" = none ]; then
             fi
             # bit 3: the disk itself reports it is failing
             [ $((rc & 8)) -ne 0 ] && echo "failing=1"
-            printf '%s\n' "$out" | awk '
+            printf '%s\n' "$out" | awk -v nvme="$nvme" '
+              # NVMe error log: Num ErrCount SQId CmdId Status ... Queue 0 is the admin queue;
+              # an entry from an I/O queue is a read or write that failed. ioerr - the newest such
+              # entry (ErrCount only grows), so its growth means new I/O errors
+              /^Error Information \(NVMe Log/ { elsec = 1; next }
+              elsec && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {
+                if ($3 ~ /^[0-9]+$/ && $3 + 0 > 0 && $2 + 0 > ioerr) ioerr = $2 + 0
+                next
+              }
+              /^No Errors Logged/ { elsec = 1; next }
               /self-assessment test result:/ { sub(/.*: */, ""); print "health=" $0 }
               /^SMART Health Status:/ { sub(/.*: */, ""); print "health=" $0 }
               /^Critical Warning:/ { print "crit=" $NF }
@@ -205,6 +220,7 @@ if [ "$virt" = none ]; then
               /^Available Spare Threshold:/ { v = $NF; sub(/%/, "", v); print "sparethr=" v }
               /^Percentage Used:/ { v = $NF; sub(/%/, "", v); print "wear=" v }
               /^Media and Data Integrity Errors:/ { v = $NF; gsub(/,/, "", v); print "media=" v }
+              /^Error Information Log Entries:/ { v = $NF; gsub(/,/, "", v); print "errlog=" v }
               /^Power On Hours:/ { v = $NF; gsub(/,/, "", v); print "poh=" v }
               /^Elements in grown defect list:/ { print "realloc=" $NF }
               /^Accumulated power on time, hours:minutes/ { v = $NF; sub(/:.*/, "", v); print "poh=" v }
@@ -216,12 +232,19 @@ if [ "$virt" = none ]; then
                 else if ($1 == 199) print "crc=" raw
                 else if ($1 == 9) print "poh=" raw
                 else if ($1 == 194 || $1 == 190) print "temp=" raw
+                # the attributes below their threshold now: the panel tells a SATA SSD that is
+                # FAILED only by its "life left" from one that is failing for real
+                if ($9 == "FAILING_NOW") failnow = failnow (failnow != "" ? "," : "") $2
                 # wear of a SATA SSD: the normalized value of its "life left" attribute
                 if ($2 ~ /^(Wear_Leveling_Count|SSD_Life_Left|Media_Wearout_Indicator|Percent_Lifetime_Remain|Percent_Life_Remaining|Remaining_Lifetime_Perc)$/ && $4 ~ /^[0-9]+$/ && $4 + 0 <= 100) {
                   w = 100 - $4; if (w > wmax) wmax = w; haswear = 1
                 }
               }
-              END { if (haswear) print "wear=" wmax }'
+              END {
+                if (haswear) print "wear=" wmax
+                print "failnow=" failnow
+                if (nvme && elsec) print "ioerr=" ioerr + 0
+              }'
           } > "$cache.tmp"
           mv -f "$cache.tmp" "$cache"
           refreshed=1
@@ -242,7 +265,7 @@ if [ "$virt" = none ]; then
       hist="$STATE/hist-$name"
       if [ "$refreshed" = 1 ] && [ "$ok" = true ] && [ "$err" != nosmart ]; then
         cv() { sed -n "s/^$1=//p" "$cache" | tail -1; }
-        printf '%s|%s|%s|%s|%s|%s|%s\n' "$now" "$(clean "$serial")" "$(cv realloc)" "$(cv pending)" "$(cv uncorr)" "$(cv media)" "$(cv crc)" >> "$hist"
+        printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$now" "$(clean "$serial")" "$(cv realloc)" "$(cv pending)" "$(cv uncorr)" "$(cv media)" "$(cv crc)" "$(cv ioerr)" >> "$hist"
         awk -F'|' -v old=$((now - 2 * 86400)) '$1 >= old' "$hist" > "$hist.tmp" && mv -f "$hist.tmp" "$hist"
       fi
       # A real error counter never goes down. One that does is not a counter: Kingston SA400 keeps
@@ -254,7 +277,7 @@ if [ "$virt" = none ]; then
       if [ -s "$hist" ]; then
         growout=$(awk -F'|' -v since=$((now - 86400)) -v ser="$(clean "$serial")" '
           $2 == ser {
-            for (i = 3; i <= 7; i++) if ($i ~ /^[0-9]+$/) {
+            for (i = 3; i <= 8; i++) if ($i ~ /^[0-9]+$/) {
               v = $i + 0
               if (i != 4 && (i in prev) && v < prev[i]) down[i] = 1
               prev[i] = v
@@ -262,10 +285,10 @@ if [ "$virt" = none ]; then
             }
           }
           END {
-            split("realloc pending uncorr media crc", nm, " ")
-            for (i = 3; i <= 7; i++) if (!(i in down) && (i in first) && last[i] > first[i]) printf "%s\"%s\":%.0f", (n++ ? "," : ""), nm[i - 2], last[i] - first[i]
+            split("realloc pending uncorr media crc ioerr", nm, " ")
+            for (i = 3; i <= 8; i++) if (!(i in down) && (i in first) && last[i] > first[i]) printf "%s\"%s\":%.0f", (n++ ? "," : ""), nm[i - 2], last[i] - first[i]
             printf "\n"
-            for (i = 3; i <= 7; i++) if (i in down) print nm[i - 2]
+            for (i = 3; i <= 8; i++) if (i in down) print nm[i - 2]
           }' "$hist")
         grow=$(printf '%s\n' "$growout" | head -n 1)
         set -- "$@" "grow=$grow"

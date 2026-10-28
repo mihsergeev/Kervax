@@ -55,23 +55,13 @@ def test_soon_with_hysteresis_and_forget():
     assert "A" not in disk_wear.update(h, _block(), day(40))
 
 
-def test_alert_line_and_twin_hint():
+def test_forecast_is_not_an_alert():
+    """Прогноз до 90% и сам износ - только для карточки: ни в алерт, ни в "Что сломано"."""
     hist = {ser: {"wear": 80, "rate": 0.2, "src": "measured", "d90": "2026-12-06", "soon": True}
             for ser in ("A", "B")}
-    hist["C"] = {"wear": 92, "rate": 0.2, "src": "measured", "d90": None, "soon": True}
-    block = _block(_disk("A", 80), _disk("B", 80, dev="nvme1n1"), _disk("C", 92, dev="sda"))
-    probs = collector.disk_health_problems(block, wear_hist=hist)
-    soon = [p for p in probs if p[1].startswith("wearsoon:")]
-    assert [p[0] for p in soon] == [1, 1]
-    assert "90% примерно к 06.12.2026 (0.20% в сутки, по замеру)" in soon[0][2]
-    assert any(p[1] == "" and "менять по одному" in p[2] for p in probs)
-    # 92%: уже своя строка "износ ... пора планировать замену", прогноз до 90 не нужен
-    assert not any(p[1] == "wearsoon:C" for p in probs) and any(p[1] == "wear:C" for p in probs)
-    short = collector.disk_health_problems(block, short=True, wear_hist=hist)
-    assert not any("менять по одному" in p[2] for p in short)
-    assert any(p[2] == "диск nvme0n1: износ 80%, 90% примерно к 06.12.2026" for p in short)
-    # без истории - как раньше
-    assert not any(p[1].startswith("wearsoon:") for p in collector.disk_health_problems(block))
+    block = _block(_disk("A", 80), _disk("B", 80, dev="nvme1n1"), _disk("C", 212, dev="sda"))
+    assert collector.disk_health_problems(block) == []
+    assert [w["serial"] for w in disk_wear.card(block, hist)] == ["A", "B"]
 
 
 async def test_refresh_writes_history(tmp_path):
@@ -109,21 +99,3 @@ async def test_servers_api_with_wear_history(client, auth_headers):
     srv = [x for x in r.json() if x["name"] == "web-a"][0]
     assert [w["dev"] for w in srv["wear_forecast"]] == ["nvme0n1", "nvme1n1"]
     assert "disk_wear" not in srv
-
-
-def test_writer_line_next_to_wear():
-    # кто больше всех пишет: темп за окно растягивается на сутки, меньше 50 ГБ в сутки - не повод
-    big = {"kind": "container", "name": "pg", "w": 40 * 10**9, "r": 0, "s": 3600}
-    assert disk_wear.writer_text([{"kind": "unit", "name": "x.service", "w": 10**9, "r": 0, "s": 3600}, big]) == (
-        "больше всех на диск пишет контейнер pg: около 894 ГБ в сутки")
-    assert disk_wear.writer_text([{"kind": "unit", "name": "user.slice", "w": 3 * 10**9, "r": 0, "s": 1800}]) == (
-        "больше всех на диск пишет сессии и cron (user.slice): около 134 ГБ в сутки")
-    assert disk_wear.writer_text([{"kind": "pod", "name": "a/b", "w": 10**9, "r": 0, "s": 3600}]) == ""
-    assert disk_wear.writer_text(None) == "" and disk_wear.writer_text(["x", {"w": "?"}]) == ""
-    hist = {"A": {"wear": 80, "rate": 0.2, "src": "measured", "d90": "2026-12-06", "soon": True}}
-    block = _block(_disk("A", 80))
-    probs = collector.disk_health_problems(block, wear_hist=hist, writers=[big])
-    assert (1, "", "больше всех на диск пишет контейнер pg: около 894 ГБ в сутки") in probs
-    # в сводку на главной не идет, без скорого износа тоже
-    assert not any("пишет" in p[2] for p in collector.disk_health_problems(block, short=True, wear_hist=hist, writers=[big]))
-    assert not any("пишет" in p[2] for p in collector.disk_health_problems(block, writers=[big]))

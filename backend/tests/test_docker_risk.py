@@ -94,3 +94,31 @@ def test_image_keys():
     assert docker_risk._image_keys("registry:5000/agent:1") == ("agent", "registry:5000/agent")
     assert docker_risk.allowed("x", "datadog/agent:7") == {"sock", "caps"}
     assert docker_risk.allowed("x", "shop/agent:7") == frozenset()
+
+
+def test_caps_only_for_startup_are_a_note():
+    """cap_add DAC_READ_SEARCH (+CHOWN, SETUID, SETGID при cap_drop ALL): entrypoint от root делает
+    chown и setpriv --reuid, главный процесс работает без прав. Тревога - только если права остались."""
+    dropped = {"uid": 10001, "nnp": True}
+    rep = _rep(
+        _c("backend", "shop/backend:1", caps=["DAC_READ_SEARCH"], proc=dropped),
+        _c("root", "shop/root:1", caps=["DAC_READ_SEARCH"], proc={"uid": 0, "nnp": True}),
+        _c("eff", "shop/eff:1", caps=["DAC_READ_SEARCH"], proc={"uid": 10001, "caps": ["DAC_READ_SEARCH"], "nnp": True}),
+        _c("nonnp", "shop/nonnp:1", caps=["DAC_READ_SEARCH"], proc={"uid": 10001, "nnp": False}),
+        _c("old", "shop/old:1", caps=["DAC_READ_SEARCH"]),  # агент до 2.57: proc нет - как раньше
+        _c("bad", "shop/bad:1", caps=["DAC_READ_SEARCH"], proc={"uid": True, "nnp": True}),
+        _c("sock", "shop/sock:1", caps=["SYS_PTRACE"], proc=dropped, binds=["/var/run/docker.sock"]),
+        _c("exporter", "prom/node-exporter:v1.9.1", caps=["SYS_PTRACE"], proc=dropped),  # caps по назначению
+        _c("down", "shop/backend:1", caps=["DAC_READ_SEARCH"], proc=dropped, state="exited"),
+    )
+    s = _srv(rep)
+    assert _names(rep) == {"root": ["caps"], "eff": ["caps"], "nonnp": ["caps"], "old": ["caps"], "bad": ["caps"],
+                           "sock": ["sock"]}
+    assert docker_risk.start_caps(s) == [
+        {"name": "backend", "image": "shop/backend:1", "caps": ["DAC_READ_SEARCH"], "uid": 10001},
+        {"name": "sock", "image": "shop/sock:1", "caps": ["SYS_PTRACE"], "uid": 10001}]
+    # только такой контейнер - ни пункта, ни алерта
+    only = _rep(_c("backend", "shop/backend:1", caps=["DAC_READ_SEARCH"], proc=dropped))
+    assert docker_risk.advice(_srv(only)) == [] and collector._server_conditions(_srv(only), NOW)["docker_risk"][0] == 0
+    rep["docker"]["access"] = False
+    assert docker_risk.start_caps(_srv(rep)) == []

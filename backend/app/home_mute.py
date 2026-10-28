@@ -17,16 +17,14 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Callable
 
 from app import access_audit, docker_exposure, docker_risk, onboard, reboot_survive, ssh_audit
-from app import backup_target, disk_wear, gre, kube_coverage, software as software_mod
+from app import backup_target, gre, kube_coverage, software as software_mod
 from app.models import Server
 
 PREFIX = "home:"
-# износ дисков: в "Требует действий" то, что дойдет до 90% за полгода (фронт WEAR_PLAN_MS)
-WEAR_PLAN = timedelta(days=183)
 
 # что за пункт, для записи в журнал о снятой заглушке
 LABELS = {
@@ -34,7 +32,6 @@ LABELS = {
     "k-acc": "Kubernetes без доступа",
     "d-old": "устарел образ внешнего прокси",
     "k-noagent": "ноды кластера без агента",
-    "wear-plan": "износ дисков",
     "bs-restic": "старый restic на сервере бэкапов",
     "onb": "идет подключение",
     "bs-setup": "бэкап-сервер без статистики",
@@ -100,22 +97,6 @@ def _k_noagent(s: Server, now: datetime, ctx: dict) -> str | None:
     if idx is None or k is None:
         return None
     return _h(n["name"] for n in kube_coverage.unmonitored(s, idx))
-
-
-def _wear(s: Server, now: datetime, ctx: dict) -> str | None:
-    from app.collector import disk_health_block
-    block = disk_health_block(s.last_report or {})
-    if block is None:
-        return None
-    out = []
-    for w in disk_wear.card(block, s.disk_wear):
-        try:
-            d90 = datetime.fromisoformat(str(w.get("d90") or "")).replace(tzinfo=now.tzinfo)
-        except ValueError:
-            continue
-        if not w.get("soon") and d90 - now < WEAR_PLAN:
-            out.append(w.get("serial") or w.get("dev"))
-    return _h(out)
 
 
 def _bs_restic(s: Server, now: datetime, ctx: dict) -> str | None:
@@ -203,7 +184,7 @@ def _gre_need(s: Server, now: datetime, ctx: dict) -> str | None:
 
 
 SIGS: dict[str, Sig] = {
-    "d-acc": _d_acc, "k-acc": _k_acc, "d-old": _d_old, "k-noagent": _k_noagent, "wear-plan": _wear,
+    "d-acc": _d_acc, "k-acc": _k_acc, "d-old": _d_old, "k-noagent": _k_noagent,
     "bs-restic": _bs_restic, "onb": _onb, "bs-setup": _bs_setup, "dbdump": _dbdump, "bk-http": _bk_http,
     "sw-eol": _sw(2), "sw-soon": _sw(1), "dockrisk": _dockrisk, "noboot-d": _noboot("docker"),
     "noboot-u": _noboot("units"), "access-s": _access("stale"), "access-w": _access("weak"),
