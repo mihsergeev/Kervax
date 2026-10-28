@@ -26,6 +26,7 @@ import {
   type Uptime,
 } from './api'
 import { AddMonitor } from './AddMonitor'
+import { CertEdit } from './CheckEdit'
 import { CheckWhere, phaseSeries } from './CheckPhases'
 import { SnoozeControl } from './SnoozeControl'
 import { ExpirySnoozePick, ExpirySnoozeState, expEntry, expHidden, type ExpKind } from './ExpirySnooze'
@@ -195,14 +196,38 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
   const [saveErr, setSaveErr] = useState<string | null>(null)
   const [saveErrFields, setSaveErrFields] = useState<string[]>([])
 
-  const startEdit = () => {
+  // раздел окна правки, с которого открыть: заметку - со значка заметки, алерты - из раздела алертов
+  const [editSec, setEditSec] = useState<string | undefined>()
+  const startEdit = (sec?: string) => {
     setForm(checkToForm(check))
     setSaveErr(null)
     setSaveErrFields([])
+    setEditSec(sec)
     setEditing(true)
   }
   // старый монитор сертификата формы не имеет: его заводят и меняют только через API
   const certOnly = check.type === 'cert'
+  const noteBar = (
+    <NoteBar
+      note={check.note}
+      by={check.note_by}
+      at={check.note_at}
+      canEdit={!isViewer}
+      onSave={async (text) => {
+        try {
+          await setCheckNote(check.id, text)
+          onSaved?.()
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 401) onUnauthorized()
+          throw e
+        }
+      }}
+    />
+  )
+  const removeCheck = async () => {
+    const m = await onDelete?.()
+    if (m) setSaveErr(m)
+  }
 
   const submitEdit = async (next?: CheckForm) => {
     const body = next ?? form
@@ -611,7 +636,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
               <button
                 className="srv-head-chip srv-head-note"
                 title={check.note}
-                onClick={isViewer ? undefined : startEdit}
+                onClick={isViewer ? undefined : () => startEdit('note')}
               >
                 📝
               </button>
@@ -629,7 +654,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
               </button>
             )}
             {!editing && !isViewer && (
-              <button className="ghost icon-btn" onClick={startEdit} title={t('Изменить')}>
+              <button className="ghost icon-btn" onClick={() => startEdit()} title={t('Изменить')}>
                 ✎
               </button>
             )}
@@ -681,64 +706,6 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
         </div>
         {!editing && <MaintBanner kind="check" id={check.id} />}
 
-        {editing && form ? (
-          <>
-            <NoteBar
-              note={check.note}
-              by={check.note_by}
-              at={check.note_at}
-              canEdit={!isViewer}
-              onSave={async (text) => {
-                try {
-                  await setCheckNote(check.id, text)
-                  onSaved?.()
-                } catch (e) {
-                  if (e instanceof ApiError && e.status === 401) onUnauthorized()
-                  throw e
-                }
-              }}
-            />
-            {/* удаление - сверху и отдельно, чтобы не нажать случайно рядом с "Сохранить" */}
-            {onDelete && (
-              <div className="edit-danger-top">
-                <button className="ghost danger-btn" disabled={saving} onClick={async () => {
-                  const m = await onDelete()
-                  if (m) setSaveErr(m)
-                }}>
-                  🗑 {t('Удалить монитор')}
-                </button>
-              </div>
-            )}
-            {/* правка - той же формой, что и новый монитор, с пробной проверкой; заметка и
-                удаление выше есть у всех, включая старый монитор сертификата */}
-            {certOnly ? (
-              <div className="card">
-                <p className="muted small">
-                  {t('Это монитор сертификата старого типа: его настройки меняются только через API. Удалить его можно кнопкой выше, а за сертификатом следит и обычный монитор сайта.')}
-                </p>
-                <div className="modal-actions">
-                  <button className="ghost" onClick={() => setEditing(false)}>
-                    {t('Закрыть')}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <AddMonitor
-                editing
-                checkId={check.id}
-                base={form}
-                groups={groups ?? []}
-                busy={saving}
-                error={saveErr}
-                errorFields={saveErrFields}
-                onSubmit={submitEdit}
-                onCancel={() => setEditing(false)}
-                onUnauthorized={onUnauthorized}
-              />
-            )}
-          </>
-        ) : (
-          <>
         {err && <p className="form-error">{err}</p>}
         <div className="srv-layout" ref={layoutRef}>
           <CardNav secs={secs} active={cur.id} info={info} onGo={go} />
@@ -1128,7 +1095,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                       {!isViewer && (
                         <>
                           {' '}
-                          <button className="ghost small" onClick={startEdit}>
+                          <button className="ghost small" onClick={() => startEdit('alerts')}>
                             {t('изменить')}
                           </button>
                         </>
@@ -1164,10 +1131,37 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
             )}
           </div>
         </div>
-          </>
-        )}
       </div>
     </div>
+    {editing && form && (
+      // правка - окном поверх карточки, с меню слева; заметка и удаление - его разделы
+      certOnly ? (
+        <CertEdit
+          title={check.name}
+          note={noteBar}
+          initialSec={editSec}
+          err={saveErr}
+          onDelete={onDelete && removeCheck}
+          onClose={() => setEditing(false)}
+        />
+      ) : (
+        <AddMonitor
+          editing
+          checkId={check.id}
+          base={form}
+          groups={groups ?? []}
+          busy={saving}
+          error={saveErr}
+          errorFields={saveErrFields}
+          note={noteBar}
+          initialSec={editSec}
+          onDelete={onDelete && removeCheck}
+          onSubmit={submitEdit}
+          onCancel={() => setEditing(false)}
+          onUnauthorized={onUnauthorized}
+        />
+      )
+    )}
     {knownOpen && (
       <KnownDialog
         title={check.name}

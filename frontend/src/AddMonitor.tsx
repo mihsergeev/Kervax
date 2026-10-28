@@ -15,6 +15,8 @@ import {
   type TryPanel,
   type TryResult,
 } from './api'
+import { type SecDef } from './cardLayout'
+import { CheckDeleteSec, CheckEditWindow } from './CheckEdit'
 import { useI18n } from './i18n'
 import { EXPIRY_WARN_DAYS, MON_ALERT_KINDS, expiryTone } from './checkUtils'
 
@@ -28,9 +30,11 @@ import { EXPIRY_WARN_DAYS, MON_ALERT_KINDS, expiryTone } from './checkUtils'
 // монитор с этим сделает - запомнит ответ или сравнит с ожидаемым. Push никуда не ходит, у него
 // проверять нечего: только как часто ждать сигнал.
 //
-// Правка монитора - та же форма (editing): адрес и настройки берутся из монитора, проверка
-// запускается сама при открытии, но сохранить можно и без нее. По итогам проверки форма в
-// правке ничего не меняет сама, только подсказывает: человек открыл ее поменять что-то свое.
+// Правка монитора - те же куски формы (editing), но в окне с меню слева (CheckEditWindow):
+// проверка, что еще, алерты, тонкая настройка, заметка, удаление. Адрес и настройки берутся из
+// монитора, проверка запускается сама при открытии, но сохранить можно и без нее. По итогам
+// проверки форма в правке ничего не меняет сама, только подсказывает: человек открыл ее
+// поменять что-то свое.
 
 type Kind = 'addr' | 'dns' | 'push'
 type Where = 'panel' | 'local' | 'locations'
@@ -61,6 +65,10 @@ type Props = {
   onCancel: () => void
   onOpenCheck?: (id: number) => void
   onUnauthorized: () => void
+  // только в правке: заметка (сохраняется сама, отдельно от формы), удаление и раздел, с которого открыть
+  note?: ReactNode
+  onDelete?: () => void
+  initialSec?: string
 }
 
 const WAIT = { st: 'wait' } as const
@@ -94,6 +102,9 @@ const ADV_FIELDS = [
   'expected_status', 'keyword_up', 'keyword_down', 'ssl_warn_days', 'domain_warn_days', 'extra_paths',
   'http_headers', 'location_ids', 'alert_mutes',
 ]
+
+// алерты, которые шлет только монитор сайта
+const HTTP_KINDS = ['ssl', 'domain', 'locpart', 'tamper']
 
 // "если лежит 5 минут": столько сбоев подряд, но не больше 20 - больше бэкенд не принимает
 // (при интервале 10 с это около 3 минут)
@@ -163,30 +174,6 @@ function addrOf(f: CheckForm): string {
   return f.target.includes(':') ? `[${f.target}]:${f.port}` : `${f.target}:${f.port}`
 }
 
-// тонкую настройку в правке раскрываем сразу, если в ней уже что-то свое
-function advTouched(f: CheckForm, authShown: boolean): boolean {
-  const days = (v: number[] | undefined, d: number[]) => (v ?? d).join(',') !== d.join(',')
-  if (f.type === 'push') return !!f.push_grace || (f.alert_mutes ?? []).length > 0
-  if (f.type === 'dns')
-    return (f.interval_seconds ?? 300) !== 300 || !!f.dns_server || (f.alert_mutes ?? []).length > 0
-  return (
-    (f.interval_seconds ?? 60) !== 60 ||
-    (f.degraded_ms ?? 2000) !== 2000 ||
-    !['', '200-399', '200-399,401'].includes(f.expected_status ?? '') ||
-    !!f.keyword_up ||
-    !!f.keyword_down ||
-    (f.extra_paths ?? []).length > 0 ||
-    (!!f.http_headers && !authShown) ||
-    !!f.ignore_tls ||
-    (f.retries ?? 3) !== 3 ||
-    (f.degraded_after_failures ?? 10) !== 10 ||
-    days(f.ssl_warn_days, EXPIRY_WARN_DAYS) ||
-    days(f.domain_warn_days, EXPIRY_WARN_DAYS) ||
-    (f.alert_mutes ?? []).length > 0 ||
-    f.location_ids != null
-  )
-}
-
 // что из формы меняет ответ сайта на вход: код-норма, логин, заголовки
 const authKey = (f: CheckForm) =>
   JSON.stringify([f.expected_status ?? '', f.auth_method ?? '', f.auth_user ?? '', f.auth_pass ?? '', f.http_headers ?? ''])
@@ -205,6 +192,9 @@ export function AddMonitor({
   onCancel,
   onOpenCheck,
   onUnauthorized,
+  note,
+  onDelete,
+  initialSec,
 }: Props) {
   const { t } = useI18n()
   const [kind, setKind] = useState<Kind>(base.type === 'push' ? 'push' : base.type === 'dns' ? 'dns' : 'addr')
@@ -229,16 +219,11 @@ export function AddMonitor({
     return ownFails === 1 ? 'n1' : ownFails === 3 ? 'n3' : ownFails === m5Fails(every) ? 'm5' : 'own'
   })
   const hasCreds = base.auth_method === 'basic' || !!base.http_headers
-  const [adv, setAdv] = useState(() => editing && advTouched(base, hasCreds))
+  // тонкая настройка нового монитора свернута; в правке она - свой раздел окна
+  const [adv, setAdv] = useState(false)
+  const [sec, setSec] = useState(initialSec || 'probe')
   const bad = (f: string) => (errorFields?.includes(f) ? ' field-bad' : '')
-  // поле, которое бэкенд не принял, может сидеть в свернутой тонкой настройке: раскрываем и
-  // показываем первое такое поле
   const rootRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!errorFields?.length) return
-    if (errorFields.some((f) => ADV_FIELDS.includes(f))) setAdv(true)
-    requestAnimationFrame(() => rootRef.current?.querySelector('.field-bad')?.scrollIntoView({ block: 'center' }))
-  }, [errorFields])
   const [addOff, setAddOff] = useState(false)
   // '' - в правке: сайт просит вход, а что с этим делать, монитор еще не решил
   const [auth, setAuth] = useState<'ok401' | 'give' | ''>(() =>
@@ -625,7 +610,8 @@ export function AddMonitor({
       : fresh && !panelPending && tried.panel.st !== 'err' && shownName.trim() !== '' && !busy
   const hdr = headersJson(hdrText)
 
-  const submit = () => {
+  // что уйдет на сохранение; в правке по нему же видно, поменялось ли что-то
+  const build = (): CheckForm => {
     const out: CheckForm = {
       ...form,
       type: cur.type,
@@ -643,8 +629,35 @@ export function AddMonitor({
     if (isDns) out.dns_type = dnsType
     // у push адреса нет: панель выдаст свой; алерт - с первого же пропуска
     if (isPush) Object.assign(out, { target: 'push', push_period: period, alert_after_failures: 1 })
-    onSubmit(out)
+    return out
   }
+  const submit = () => onSubmit(build())
+  // снимок при открытии правки: настройки берутся из монитора, сами по итогам проверки не меняются
+  const now = editing ? JSON.stringify(build()) : ''
+  const snapRef = useRef(now)
+  const dirty = editing && now !== snapRef.current
+
+  // поле, которое бэкенд не принял: в правке открываем его раздел, у нового монитора раскрываем
+  // свернутую тонкую настройку; потом показываем первое такое поле
+  const authBox = (has401 || authSeen) && http
+  const secOfField = (f: string) =>
+    ['name', 'group_name', 'alert_after_failures', 'alert_mutes'].includes(f)
+      ? 'alerts'
+      : ['check_ssl', 'check_domain', 'check_all_ips', 'enabled'].includes(f)
+        ? http ? 'extra' : 'probe'
+        : f === 'http_headers'
+          ? authBox && auth === 'give' ? 'probe' : 'adv'
+          : ADV_FIELDS.includes(f) && f !== 'location_ids'
+            ? 'adv'
+            : 'probe'
+  useEffect(() => {
+    if (!errorFields?.length) return
+    if (editing) setSec(secOfField(errorFields[0]))
+    else if (errorFields.some((f) => ADV_FIELDS.includes(f))) setAdv(true)
+    const h = window.setTimeout(() => rootRef.current?.querySelector('.field-bad')?.scrollIntoView({ block: 'center' }), 0)
+    return () => window.clearTimeout(h)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [errorFields])
 
   const switchKind = (k: Kind) => {
     runRef.current++
@@ -986,9 +999,9 @@ export function AddMonitor({
     </div>
   )
 
-  return (
-    <div ref={rootRef} className={editing ? 'am am-edit' : 'card am'}>
-      {!editing && <h3 className="am-h">{t('Новый монитор')}</h3>}
+  // ---- куски формы: новый монитор собирает их одной колонкой, правка - по разделам окна ----
+  const addrPart = (
+    <>
       <span className="am-lab">{t('Что проверять')}</span>
       {!isPush && (
         <div className="am-addr">
@@ -1058,7 +1071,6 @@ export function AddMonitor({
           )}
         </span>
       </div>
-
       {!isPush && !fresh && (!editing || stale) && (
         <div className="am-note">
           {tried
@@ -1070,171 +1082,523 @@ export function AddMonitor({
               : t('Нажмите "Проверить": панель откроет адрес с панели, изнутри сервера, где нашелся домен, и из локаций. Так видно, работает ли он, еще до сохранения.')}
         </div>
       )}
+    </>
+  )
 
-      {(fresh || editing || isPush) && (
+  // выбор локаций: у нового монитора в тонкой настройке, в правке - рядом с "откуда проверять"
+  const locPick = http && where === 'locations' && proxyLocs.length > 0 && (
+    <div className="am-locs">
+      <span className="am-lab">{t('Из каких локаций проверять:')}</span>
+      {proxyLocs.map((l) => (
+        <label className="am-ck" key={l.id}>
+          <input type="checkbox" checked={locOn(l.id)} onChange={() => toggleLoc(l.id)} />
+          <span>
+            {l.name}
+            {!l.url && <span className="type-chip">{t('напрямую')}</span>}
+          </span>
+        </label>
+      ))}
+    </div>
+  )
+
+  const whereSec = kind === 'addr' && (
+    <div className="am-sec">
+      <h4>{t('Откуда проверять')}</h4>
+      <div className="am-opts">
+        {opts.map((o) => (
+          <button
+            type="button"
+            key={o.k}
+            disabled={o.off && where !== o.k}
+            className={`am-opt${where === o.k ? ' on' : ''}${o.off && where !== o.k ? ' off' : ''}`}
+            onClick={() => {
+              setWhere(o.k)
+              setWhereTouched(true)
+            }}
+          >
+            <span className="am-opt-t">
+              <span className="am-rad" />
+              {o.title}
+              {verdict.rec === o.k && <span className="am-rec">{t('лучше так')}</span>}
+            </span>
+            <span className="am-opt-d">{o.desc}</span>
+            {o.sub && <span className="am-opt-d">{o.sub}</span>}
+            <span className="am-opt-r">{o.line}</span>
+          </button>
+        ))}
+      </div>
+      {verdict.text && <div className={`am-note ${verdict.tone}`}>{verdict.text}</div>}
+      {existingNote}
+      {authBox && (
+        <div className="am-box">
+          <div className="am-row">
+            <b className="small">{has401 ? t('Сайт просит вход') : t('Вход и заголовки')}</b>
+            <div className="win-switch">
+              <button type="button" className={`win-btn${auth === 'ok401' ? ' win-btn-active' : ''}`} onClick={() => chooseAuth('ok401')}>
+                {t('401 - норма')}
+              </button>
+              <button type="button" className={`win-btn${auth === 'give' ? ' win-btn-active' : ''}`} onClick={() => chooseAuth('give')}>
+                {t('дать доступ')}
+              </button>
+            </div>
+          </div>
+          {auth === 'give' && (
+            <>
+              <div className="am-grid2">
+                <label className={'field' + bad('http_headers')}>
+                  <span>{t('Заголовок, по строке')}</span>
+                  <textarea
+                    className="mono"
+                    rows={2}
+                    value={hdrText}
+                    placeholder="Authorization: Bearer ..."
+                    spellCheck={false}
+                    onChange={(e) => {
+                      setHdrText(e.target.value)
+                      set({ http_headers: headersJson(e.target.value).json })
+                    }}
+                  />
+                </label>
+                <div className="am-grid2 am-tight">
+                  <label className={'field' + bad('auth_user')}>
+                    <span>{t('или логин (HTTP Basic)')}</span>
+                    <input
+                      value={form.auth_user ?? ''}
+                      autoComplete="off"
+                      onChange={(e) => set({ auth_user: e.target.value, auth_method: e.target.value || form.auth_pass ? 'basic' : '' })}
+                    />
+                  </label>
+                  <label className={'field' + bad('auth_pass')}>
+                    <span>{t('Пароль')}</span>
+                    <input
+                      type="password"
+                      value={form.auth_pass ?? ''}
+                      autoComplete="new-password"
+                      onChange={(e) => set({ auth_pass: e.target.value, auth_method: e.target.value || form.auth_user ? 'basic' : '' })}
+                    />
+                  </label>
+                </div>
+              </div>
+              {hdr.bad.length > 0 && (
+                <div className="form-error small">{t('Заголовок пишется как "Имя: значение": {list}', { list: hdr.bad.join(', ') })}</div>
+              )}
+              <div className="am-row">
+                <button type="button" className="ghost" disabled={panelPending} onClick={() => probe()}>
+                  {t('проверить снова')}
+                </button>
+                <span className="muted small">{t('в алерты не попадает, наблюдатели его не видят')}</span>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {ips && ipBad.length > 0 && ipBad.length < ips.length && (
+        <div className="am-ips">
+          {ips.map((x) => (
+            <div key={x.ip} className="am-res">
+              {dot(ipWorks(x) ? (x.status === 'down' ? 'degraded' : x.status) : 'down')}
+              <span className="mono">{x.ip}</span>
+              <span className="muted">{x.message}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {editing && locPick}
+    </div>
+  )
+
+  // ---- что еще проверить: галки ----
+  const ckSsl = http && (
+    <label className="am-ck">
+      <input type="checkbox" checked={form.check_ssl ?? true} onChange={(e) => set({ check_ssl: e.target.checked })} />
+      <span>
+        {t('Следить за сертификатом')}{' '}
+        {fresh && tried.exp?.st === 'wait' ? (
+          <span className="run-spin" />
+        ) : exp?.ssl_days != null ? (
+          <span className={expiryTone(exp.ssl_days, form.ssl_warn_days ?? EXPIRY_WARN_DAYS) || 'muted'}>{t('сейчас {n} дн.', { n: exp.ssl_days })}</span>
+        ) : (
+          exp?.ssl_message && <span className="muted">{exp.ssl_message}</span>
+        )}
+        <small>{t('напомню за {days} дн.', { days: (form.ssl_warn_days ?? EXPIRY_WARN_DAYS).join(', ') })}</small>
+      </span>
+    </label>
+  )
+  const ckDomain = http && (
+    <label className="am-ck">
+      <input type="checkbox" checked={form.check_domain ?? true} onChange={(e) => set({ check_domain: e.target.checked })} />
+      <span>
+        {t('Следить за сроком домена')}{' '}
+        {fresh && tried.exp?.st === 'wait' ? (
+          <span className="run-spin" />
+        ) : exp?.domain_days != null ? (
+          <span className={expiryTone(exp.domain_days, form.domain_warn_days ?? EXPIRY_WARN_DAYS) || 'muted'}>{t('сейчас {n} дн.', { n: exp.domain_days })}</span>
+        ) : (
+          exp?.domain_message && <span className="muted">{exp.domain_message}</span>
+        )}
+        <small>{t('напомню за {days} дн.', { days: (form.domain_warn_days ?? EXPIRY_WARN_DAYS).join(', ') })}</small>
+      </span>
+    </label>
+  )
+  const ckIps = (ips || (editing && http && form.check_all_ips)) && (
+    <label className="am-ck">
+      <input type="checkbox" checked={form.check_all_ips ?? false} onChange={(e) => set({ check_all_ips: e.target.checked })} />
+      <span>
+        {ips ? t('Проверять все адреса домена ({n})', { n: ips.length }) : t('Проверять все адреса домена')}
+        <small>{t('иначе мертвый адрес за балансировщиком не видно')}</small>
+      </span>
+    </label>
+  )
+  const ckEnabled = (
+    <label className="am-ck">
+      <input type="checkbox" checked={form.enabled ?? true} onChange={(e) => set({ enabled: e.target.checked })} />
+      <span>
+        {t('Монитор включен')}
+        <small>{t('выключенный не проверяется и не шлет алертов')}</small>
+      </span>
+    </label>
+  )
+
+  // ---- алерты: когда слать, название и группа, как придет ----
+  const presetPart = !isPush && (
+    <div className="am-sec">
+      <span className="am-lab">{t('Слать алерт')}</span>
+      <div className="win-switch">
+        {presets.map((p) => (
+          <button
+            type="button"
+            key={p}
+            className={`win-btn${preset === p ? ' win-btn-active' : ''}`}
+            onClick={() => setPreset(p)}
+          >
+            {presetLabel[p]}
+          </button>
+        ))}
+      </div>
+      <div className="muted small am-hint">{presetHint[preset]}</div>
+    </div>
+  )
+  const namePart = (
+    <div className="am-sec am-grid2">
+      <label className={'field' + bad('name')}>
+        <span>{t('Название')}</span>
+        <input
+          value={shownName}
+          autoFocus={isPush && !editing}
+          placeholder={isPush ? t('напр. ночной бэкап') : undefined}
+          onChange={(e) => setName(e.target.value)}
+        />
+        <span className="field-hint muted small">
+          {t('Название попадает в текст алерта: @упоминания в нём тегнут людей в Telegram.')}
+        </span>
+      </label>
+      <label className={'field' + bad('group_name')}>
+        <span>{t('Группа')}</span>
+        <input
+          value={shownGroup}
+          placeholder={t('без группы')}
+          list="kervax-am-groups"
+          onChange={(e) => setGroup(e.target.value)}
+        />
+        <datalist id="kervax-am-groups">
+          {groups.map((g) => (
+            <option key={g} value={g} />
+          ))}
+        </datalist>
+      </label>
+    </div>
+  )
+  const mutesPart = (
+    <div className={'am-sec' + bad('alert_mutes')}>
+      <span className="am-lab">{t('Не слать алерты этого монитора:')}</span>
+      <div className="mute-chips">
+        {MON_ALERT_KINDS.map(({ k, label }) => {
+          const mutes = form.alert_mutes ?? []
+          const muted = mutes.includes(k)
+          // сертификат, домен, локации и признаки взлома бывают только у сайта; заглушенное видно всегда
+          if (!http && HTTP_KINDS.includes(k) && !muted) return null
+          return (
+            <button
+              key={k}
+              type="button"
+              className={`mute-chip${muted ? ' mute-chip-on' : ''}`}
+              onClick={() => set({ alert_mutes: muted ? mutes.filter((x) => x !== k) : [...mutes, k] })}
+            >
+              {muted ? '🔕 ' : ''}
+              {t(label)}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+  const bubblePart = (
+    <div className="am-sec">
+      <h4>{t('Так придет алерт')}</h4>
+      <div className="am-bubble">
+        <div className="am-who">Kervax</div>
+        {bubble}
+      </div>
+      <div className="muted small am-hint">{bubbleNote}</div>
+    </div>
+  )
+
+  // ---- тонкая настройка ----
+  const advFields = (
+    <>
+      {isPush && (
+        <label className={'field' + bad('push_grace')}>
+          <span>{t('Допуск, минут (0 = десятая часть периода)')}</span>
+          <input
+            type="number"
+            min={0}
+            value={Math.round((form.push_grace || 0) / 60)}
+            onChange={(e) => set({ push_grace: Math.max(0, Number(e.target.value) || 0) * 60 })}
+          />
+          <span className="field-hint muted small">
+            {t('сейчас {dur}: крон стартует не в нулевую секунду, а скрипт идет не мгновенно', { dur: dur(grace) })}
+          </span>
+        </label>
+      )}
+      {isDns && (
+        <div className="form-grid">
+          <label className={'field' + bad('interval_seconds')}>
+            <span>{t('Интервал, сек')}</span>
+            <input
+              type="number"
+              value={interval}
+              onChange={(e) => set({ interval_seconds: Number(e.target.value) || 0 })}
+            />
+          </label>
+          <label className={'field' + bad('dns_server')}>
+            <span>{t('DNS-сервер (IP)')}</span>
+            <input
+              className="mono"
+              value={form.dns_server ?? ''}
+              placeholder={t('системный')}
+              spellCheck={false}
+              onChange={(e) => set({ dns_server: e.target.value })}
+            />
+          </label>
+        </div>
+      )}
+      {kind === 'addr' && (
+        <div className="form-grid">
+          <label className={'field' + bad('interval_seconds')}>
+            <span>{t('Интервал, сек')}</span>
+            <input
+              type="number"
+              value={interval}
+              onChange={(e) => set({ interval_seconds: Number(e.target.value) || 0 })}
+            />
+          </label>
+          <label className={'field' + bad('degraded_ms')}>
+            <span>{t('Порог «медленно», мс')}</span>
+            <input
+              type="number"
+              value={form.degraded_ms ?? 2000}
+              onChange={(e) => set({ degraded_ms: Number(e.target.value) || 0 })}
+            />
+          </label>
+          <label className={'field' + bad('retries')}>
+            <span>{t('Повторы при сбое')}</span>
+            <input
+              type="number"
+              value={form.retries ?? 3}
+              onChange={(e) => set({ retries: Number(e.target.value) || 0 })}
+              title={t('Считать «упавшим» и слать алерт, только если провалятся все попытки подряд.')}
+            />
+          </label>
+          <label className={'field' + bad('degraded_after_failures')}>
+            <span>{t('Алерт «медленно» после N подряд')}</span>
+            <input
+              type="number"
+              value={form.degraded_after_failures ?? 10}
+              onChange={(e) => set({ degraded_after_failures: Number(e.target.value) || 0 })}
+              title={t('Отдельный, обычно больший порог для деградации (медленных ответов) — она шумнее падения.')}
+            />
+          </label>
+          {http && (
+            <>
+              <label className={'field' + bad('expected_status')}>
+                <span>{t('Ожидаемый статус')}</span>
+                <input
+                  value={form.expected_status ?? ''}
+                  placeholder="200-399"
+                  onChange={(e) => set({ expected_status: e.target.value })}
+                />
+              </label>
+              <label className={'field' + bad('keyword_up')}>
+                <span>{t('Слово в ответе (должно быть)')}</span>
+                <input value={form.keyword_up ?? ''} onChange={(e) => set({ keyword_up: e.target.value })} />
+              </label>
+              <label className={'field' + bad('keyword_down')}>
+                <span>{t('Слово-стоп (не должно быть)')}</span>
+                <input value={form.keyword_down ?? ''} onChange={(e) => set({ keyword_down: e.target.value })} />
+              </label>
+              <label className={'field' + bad('ssl_warn_days')}>
+                <span>{t('Сертификат: напоминать за, дн.')}</span>
+                <input
+                  value={sslTxt}
+                  placeholder="14, 7, 1"
+                  onChange={(e) => {
+                    setSslTxt(e.target.value)
+                    set({ ssl_warn_days: parseDays(e.target.value) })
+                  }}
+                />
+              </label>
+              <label className={'field' + bad('domain_warn_days')}>
+                <span>{t('Домен: напоминать за, дн.')}</span>
+                <input
+                  value={domTxt}
+                  placeholder="30, 7, 1"
+                  onChange={(e) => {
+                    setDomTxt(e.target.value)
+                    set({ domain_warn_days: parseDays(e.target.value) })
+                  }}
+                />
+              </label>
+            </>
+          )}
+        </div>
+      )}
+      {!editing && locPick}
+      {http && (
+        <div className="am-grid2">
+          <label className={'field' + bad('extra_paths')}>
+            <span>{t('Дополнительные пути')}</span>
+            <textarea
+              className="mono"
+              rows={2}
+              value={pathsText}
+              placeholder="/health"
+              spellCheck={false}
+              onChange={(e) => {
+                setPathsText(e.target.value)
+                set({ extra_paths: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })
+              }}
+            />
+          </label>
+          {!(authBox && auth === 'give') && (
+            <label className={'field' + bad('http_headers')}>
+              <span>{t('Заголовок, по строке')}</span>
+              <textarea
+                className="mono"
+                rows={2}
+                value={hdrText}
+                placeholder="X-Token: ..."
+                spellCheck={false}
+                onChange={(e) => {
+                  setHdrText(e.target.value)
+                  set({ http_headers: headersJson(e.target.value).json })
+                }}
+              />
+            </label>
+          )}
+        </div>
+      )}
+      {http && (
+        <label className="am-ck">
+          <input type="checkbox" checked={form.ignore_tls ?? false} onChange={(e) => set({ ignore_tls: e.target.checked })} />
+          <span>
+            {t('Не проверять сертификат')}
+            <small>{t('самоподписанный или выпущен на другое имя')}</small>
+          </span>
+        </label>
+      )}
+      {!isPush && (
+        <div className="muted small">
+          {editing
+            ? t('После правок нажмите "Проверить снова" в разделе "Проверка": проверка пойдет уже с ними.')
+            : t('После правок нажмите "Проверить снова": проверка пойдет уже с ними.')}
+        </div>
+      )}
+    </>
+  )
+
+  if (editing) {
+    const secs: SecDef[] = [
+      { id: 'probe', label: isPush ? 'Сигнал' : 'Проверка', group: '' },
+      ...(http ? [{ id: 'extra', label: 'Что еще', group: '' }] : []),
+      { id: 'alerts', label: 'Алерты', group: '' },
+      { id: 'adv', label: 'Тонкая настройка', group: '' },
+      ...(note ? [{ id: 'note', label: 'Заметка', group: '' }] : []),
+      ...(onDelete ? [{ id: 'del', label: 'Удаление', group: 'Другое' }] : []),
+    ]
+    // адрес поменяли с сайта на порт - раздела "Что еще" больше нет
+    const at = secs.some((x) => x.id === sec) ? sec : 'probe'
+    const side: Record<string, string> = {}
+    if (form.enabled === false) side[http ? 'extra' : 'probe'] = t('выкл')
+    if (MON_ALERT_KINDS.some(({ k }) => form.alert_mutes?.includes(k))) side.alerts = '🔕'
+    return (
+      <CheckEditWindow
+        title={shownName.trim() || t('Монитор')}
+        secs={secs}
+        sec={at}
+        side={side}
+        dirty={dirty}
+        busy={busy}
+        err={error}
+        canSave={canAdd}
+        onGo={setSec}
+        onSave={submit}
+        onClose={onCancel}
+      >
+        <div ref={rootRef} className="am am-edit">
+          {at === 'probe' ? (
+            <>
+              {addrPart}
+              {isPush && pushSec}
+              {isDns && dnsSec}
+              {whereSec}
+              {/* у порта, DNS и push галка одна - здесь же, своего раздела ей не надо */}
+              {!http && <div className="am-sec am-cks">{ckEnabled}</div>}
+            </>
+          ) : at === 'extra' ? (
+            <div className="am-cks">
+              {ckSsl}
+              {ckDomain}
+              {ckIps}
+              {ckEnabled}
+            </div>
+          ) : at === 'alerts' ? (
+            <>
+              {presetPart}
+              {mutesPart}
+              {namePart}
+              {bubblePart}
+            </>
+          ) : at === 'adv' ? (
+            advFields
+          ) : at === 'note' ? (
+            note
+          ) : onDelete ? (
+            <CheckDeleteSec busy={busy} canOff onDelete={onDelete} />
+          ) : null}
+        </div>
+      </CheckEditWindow>
+    )
+  }
+
+  return (
+    <div ref={rootRef} className="card am">
+      <h3 className="am-h">{t('Новый монитор')}</h3>
+      {addrPart}
+
+      {(fresh || isPush) && (
         <>
           {isPush && pushSec}
           {isDns && dnsSec}
-          {kind === 'addr' && (
-          <div className="am-sec">
-            <h4>{t('Откуда проверять')}</h4>
-            <div className="am-opts">
-              {opts.map((o) => (
-                <button
-                  type="button"
-                  key={o.k}
-                  disabled={o.off && where !== o.k}
-                  className={`am-opt${where === o.k ? ' on' : ''}${o.off && where !== o.k ? ' off' : ''}`}
-                  onClick={() => {
-                    setWhere(o.k)
-                    setWhereTouched(true)
-                  }}
-                >
-                  <span className="am-opt-t">
-                    <span className="am-rad" />
-                    {o.title}
-                    {verdict.rec === o.k && <span className="am-rec">{t('лучше так')}</span>}
-                  </span>
-                  <span className="am-opt-d">{o.desc}</span>
-                  {o.sub && <span className="am-opt-d">{o.sub}</span>}
-                  <span className="am-opt-r">{o.line}</span>
-                </button>
-              ))}
-            </div>
-            {verdict.text && <div className={`am-note ${verdict.tone}`}>{verdict.text}</div>}
-            {existingNote}
-            {(has401 || authSeen) && http && (
-              <div className="am-box">
-                <div className="am-row">
-                  <b className="small">{has401 ? t('Сайт просит вход') : t('Вход и заголовки')}</b>
-                  <div className="win-switch">
-                    <button type="button" className={`win-btn${auth === 'ok401' ? ' win-btn-active' : ''}`} onClick={() => chooseAuth('ok401')}>
-                      {t('401 - норма')}
-                    </button>
-                    <button type="button" className={`win-btn${auth === 'give' ? ' win-btn-active' : ''}`} onClick={() => chooseAuth('give')}>
-                      {t('дать доступ')}
-                    </button>
-                  </div>
-                </div>
-                {auth === 'give' && (
-                  <>
-                    <div className="am-grid2">
-                      <label className={'field' + bad('http_headers')}>
-                        <span>{t('Заголовок, по строке')}</span>
-                        <textarea
-                          className="mono"
-                          rows={2}
-                          value={hdrText}
-                          placeholder="Authorization: Bearer ..."
-                          spellCheck={false}
-                          onChange={(e) => {
-                            setHdrText(e.target.value)
-                            set({ http_headers: headersJson(e.target.value).json })
-                          }}
-                        />
-                      </label>
-                      <div className="am-grid2 am-tight">
-                        <label className={'field' + bad('auth_user')}>
-                          <span>{t('или логин (HTTP Basic)')}</span>
-                          <input
-                            value={form.auth_user ?? ''}
-                            autoComplete="off"
-                            onChange={(e) => set({ auth_user: e.target.value, auth_method: e.target.value || form.auth_pass ? 'basic' : '' })}
-                          />
-                        </label>
-                        <label className={'field' + bad('auth_pass')}>
-                          <span>{t('Пароль')}</span>
-                          <input
-                            type="password"
-                            value={form.auth_pass ?? ''}
-                            autoComplete="new-password"
-                            onChange={(e) => set({ auth_pass: e.target.value, auth_method: e.target.value || form.auth_user ? 'basic' : '' })}
-                          />
-                        </label>
-                      </div>
-                    </div>
-                    {hdr.bad.length > 0 && (
-                      <div className="form-error small">{t('Заголовок пишется как "Имя: значение": {list}', { list: hdr.bad.join(', ') })}</div>
-                    )}
-                    <div className="am-row">
-                      <button type="button" className="ghost" disabled={panelPending} onClick={() => probe()}>
-                        {t('проверить снова')}
-                      </button>
-                      <span className="muted small">{t('в алерты не попадает, наблюдатели его не видят')}</span>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-            {ips && ipBad.length > 0 && ipBad.length < ips.length && (
-              <div className="am-ips">
-                {ips.map((x) => (
-                  <div key={x.ip} className="am-res">
-                    {dot(ipWorks(x) ? (x.status === 'down' ? 'degraded' : x.status) : 'down')}
-                    <span className="mono">{x.ip}</span>
-                    <span className="muted">{x.message}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          )}
+          {whereSec}
 
-          {(http || verdict.dead || editing) && (
+          {(http || verdict.dead) && (
             <div className="am-sec">
               <h4>{t('Что еще проверить')}</h4>
               <div className="am-cks">
-                {http && (
-                  <label className="am-ck">
-                    <input type="checkbox" checked={form.check_ssl ?? true} onChange={(e) => set({ check_ssl: e.target.checked })} />
-                    <span>
-                      {t('Следить за сертификатом')}{' '}
-                      {fresh && tried.exp?.st === 'wait' ? (
-                        <span className="run-spin" />
-                      ) : exp?.ssl_days != null ? (
-                        <span className={expiryTone(exp.ssl_days, form.ssl_warn_days ?? EXPIRY_WARN_DAYS) || 'muted'}>{t('сейчас {n} дн.', { n: exp.ssl_days })}</span>
-                      ) : (
-                        exp?.ssl_message && <span className="muted">{exp.ssl_message}</span>
-                      )}
-                      <small>{t('напомню за {days} дн.', { days: (form.ssl_warn_days ?? EXPIRY_WARN_DAYS).join(', ') })}</small>
-                    </span>
-                  </label>
-                )}
-                {http && (
-                  <label className="am-ck">
-                    <input type="checkbox" checked={form.check_domain ?? true} onChange={(e) => set({ check_domain: e.target.checked })} />
-                    <span>
-                      {t('Следить за сроком домена')}{' '}
-                      {fresh && tried.exp?.st === 'wait' ? (
-                        <span className="run-spin" />
-                      ) : exp?.domain_days != null ? (
-                        <span className={expiryTone(exp.domain_days, form.domain_warn_days ?? EXPIRY_WARN_DAYS) || 'muted'}>{t('сейчас {n} дн.', { n: exp.domain_days })}</span>
-                      ) : (
-                        exp?.domain_message && <span className="muted">{exp.domain_message}</span>
-                      )}
-                      <small>{t('напомню за {days} дн.', { days: (form.domain_warn_days ?? EXPIRY_WARN_DAYS).join(', ') })}</small>
-                    </span>
-                  </label>
-                )}
-                {(ips || (editing && http && form.check_all_ips)) && (
-                  <label className="am-ck">
-                    <input type="checkbox" checked={form.check_all_ips ?? false} onChange={(e) => set({ check_all_ips: e.target.checked })} />
-                    <span>
-                      {ips ? t('Проверять все адреса домена ({n})', { n: ips.length }) : t('Проверять все адреса домена')}
-                      <small>{t('иначе мертвый адрес за балансировщиком не видно')}</small>
-                    </span>
-                  </label>
-                )}
-                {editing && (
-                  <label className="am-ck">
-                    <input type="checkbox" checked={form.enabled ?? true} onChange={(e) => set({ enabled: e.target.checked })} />
-                    <span>
-                      {t('Монитор включен')}
-                      <small>{t('выключенный не проверяется и не шлет алертов')}</small>
-                    </span>
-                  </label>
-                )}
-                {verdict.dead && !editing && (
+                {ckSsl}
+                {ckDomain}
+                {ckIps}
+                {verdict.dead && (
                   <label className="am-ck">
                     <input type="checkbox" checked={addOff} onChange={(e) => setAddOff(e.target.checked)} />
                     <span>
@@ -1247,53 +1611,8 @@ export function AddMonitor({
             </div>
           )}
 
-          <div className="am-sec am-grid2">
-            <label className={'field' + bad('name')}>
-              <span>{t('Название')}</span>
-              <input
-                value={shownName}
-                autoFocus={isPush && !editing}
-                placeholder={isPush ? t('напр. ночной бэкап') : undefined}
-                onChange={(e) => setName(e.target.value)}
-              />
-              <span className="field-hint muted small">
-                {t('Название попадает в текст алерта: @упоминания в нём тегнут людей в Telegram.')}
-              </span>
-            </label>
-            <label className={'field' + bad('group_name')}>
-              <span>{t('Группа')}</span>
-              <input
-                value={shownGroup}
-                placeholder={t('без группы')}
-                list="kervax-am-groups"
-                onChange={(e) => setGroup(e.target.value)}
-              />
-              <datalist id="kervax-am-groups">
-                {groups.map((g) => (
-                  <option key={g} value={g} />
-                ))}
-              </datalist>
-            </label>
-          </div>
-
-          {!isPush && (
-          <div className="am-sec">
-            <span className="am-lab">{t('Слать алерт')}</span>
-            <div className="win-switch">
-              {presets.map((p) => (
-                <button
-                  type="button"
-                  key={p}
-                  className={`win-btn${preset === p ? ' win-btn-active' : ''}`}
-                  onClick={() => setPreset(p)}
-                >
-                  {presetLabel[p]}
-                </button>
-              ))}
-            </div>
-            <div className="muted small am-hint">{presetHint[preset]}</div>
-          </div>
-          )}
+          {namePart}
+          {presetPart}
 
           {!adv ? (
             <div className="am-sec">
@@ -1302,20 +1621,12 @@ export function AddMonitor({
               </button>{' '}
               <span className="muted small">
                 {isPush
-                  ? editing
-                    ? t('- допуск по времени, заглушенные алерты.')
-                    : t('- допуск по времени. Можно поменять и потом в карточке монитора.')
+                  ? t('- допуск по времени. Можно поменять и потом в карточке монитора.')
                   : isDns
-                    ? editing
-                      ? t('- интервал, DNS-сервер, заглушенные алерты.')
-                      : t('- интервал и DNS-сервер. Можно поменять и потом в карточке монитора.')
-                    : editing
-                      ? http
-                        ? t('- интервал, ожидаемый ответ, пути, заголовки, повторы, локации, заглушенные алерты.')
-                        : t('- интервал, порог "медленно", повторы, заглушенные алерты.')
-                      : http
-                        ? t('- интервал, ожидаемый ответ, пути, заголовки. Все это можно поменять и потом в карточке монитора.')
-                        : t('- интервал и порог "медленно". Можно поменять и потом в карточке монитора.')}
+                    ? t('- интервал и DNS-сервер. Можно поменять и потом в карточке монитора.')
+                    : http
+                      ? t('- интервал, ожидаемый ответ, пути, заголовки. Все это можно поменять и потом в карточке монитора.')
+                      : t('- интервал и порог "медленно". Можно поменять и потом в карточке монитора.')}
               </span>
             </div>
           ) : (
@@ -1326,215 +1637,11 @@ export function AddMonitor({
                   {t('свернуть')}
                 </button>
               </div>
-              {isPush && (
-                <label className={'field' + bad('push_grace')}>
-                  <span>{t('Допуск, минут (0 = десятая часть периода)')}</span>
-                  <input
-                    type="number"
-                    min={0}
-                    value={Math.round((form.push_grace || 0) / 60)}
-                    onChange={(e) => set({ push_grace: Math.max(0, Number(e.target.value) || 0) * 60 })}
-                  />
-                  <span className="field-hint muted small">
-                    {t('сейчас {dur}: крон стартует не в нулевую секунду, а скрипт идет не мгновенно', { dur: dur(grace) })}
-                  </span>
-                </label>
-              )}
-              {isDns && (
-                <div className="form-grid">
-                  <label className={'field' + bad('interval_seconds')}>
-                    <span>{t('Интервал, сек')}</span>
-                    <input
-                      type="number"
-                      value={interval}
-                      onChange={(e) => set({ interval_seconds: Number(e.target.value) || 0 })}
-                    />
-                  </label>
-                  <label className={'field' + bad('dns_server')}>
-                    <span>{t('DNS-сервер (IP)')}</span>
-                    <input
-                      className="mono"
-                      value={form.dns_server ?? ''}
-                      placeholder={t('системный')}
-                      spellCheck={false}
-                      onChange={(e) => set({ dns_server: e.target.value })}
-                    />
-                  </label>
-                </div>
-              )}
-              {kind === 'addr' && (
-              <div className="form-grid">
-                <label className={'field' + bad('interval_seconds')}>
-                  <span>{t('Интервал, сек')}</span>
-                  <input
-                    type="number"
-                    value={interval}
-                    onChange={(e) => set({ interval_seconds: Number(e.target.value) || 0 })}
-                  />
-                </label>
-                <label className={'field' + bad('degraded_ms')}>
-                  <span>{t('Порог «медленно», мс')}</span>
-                  <input
-                    type="number"
-                    value={form.degraded_ms ?? 2000}
-                    onChange={(e) => set({ degraded_ms: Number(e.target.value) || 0 })}
-                  />
-                </label>
-                <label className={'field' + bad('retries')}>
-                  <span>{t('Повторы при сбое')}</span>
-                  <input
-                    type="number"
-                    value={form.retries ?? 3}
-                    onChange={(e) => set({ retries: Number(e.target.value) || 0 })}
-                    title={t('Считать «упавшим» и слать алерт, только если провалятся все попытки подряд.')}
-                  />
-                </label>
-                <label className={'field' + bad('degraded_after_failures')}>
-                  <span>{t('Алерт «медленно» после N подряд')}</span>
-                  <input
-                    type="number"
-                    value={form.degraded_after_failures ?? 10}
-                    onChange={(e) => set({ degraded_after_failures: Number(e.target.value) || 0 })}
-                    title={t('Отдельный, обычно больший порог для деградации (медленных ответов) — она шумнее падения.')}
-                  />
-                </label>
-                {http && (
-                  <>
-                    <label className={'field' + bad('expected_status')}>
-                      <span>{t('Ожидаемый статус')}</span>
-                      <input
-                        value={form.expected_status ?? ''}
-                        placeholder="200-399"
-                        onChange={(e) => set({ expected_status: e.target.value })}
-                      />
-                    </label>
-                    <label className={'field' + bad('keyword_up')}>
-                      <span>{t('Слово в ответе (должно быть)')}</span>
-                      <input value={form.keyword_up ?? ''} onChange={(e) => set({ keyword_up: e.target.value })} />
-                    </label>
-                    <label className={'field' + bad('keyword_down')}>
-                      <span>{t('Слово-стоп (не должно быть)')}</span>
-                      <input value={form.keyword_down ?? ''} onChange={(e) => set({ keyword_down: e.target.value })} />
-                    </label>
-                    <label className={'field' + bad('ssl_warn_days')}>
-                      <span>{t('Сертификат: напоминать за, дн.')}</span>
-                      <input
-                        value={sslTxt}
-                        placeholder="14, 7, 1"
-                        onChange={(e) => {
-                          setSslTxt(e.target.value)
-                          set({ ssl_warn_days: parseDays(e.target.value) })
-                        }}
-                      />
-                    </label>
-                    <label className={'field' + bad('domain_warn_days')}>
-                      <span>{t('Домен: напоминать за, дн.')}</span>
-                      <input
-                        value={domTxt}
-                        placeholder="30, 7, 1"
-                        onChange={(e) => {
-                          setDomTxt(e.target.value)
-                          set({ domain_warn_days: parseDays(e.target.value) })
-                        }}
-                      />
-                    </label>
-                  </>
-                )}
-              </div>
-              )}
-              {http && where === 'locations' && proxyLocs.length > 0 && (
-                <div className="am-locs">
-                  <span className="am-lab">{t('Из каких локаций проверять:')}</span>
-                  {proxyLocs.map((l) => (
-                    <label className="am-ck" key={l.id}>
-                      <input type="checkbox" checked={locOn(l.id)} onChange={() => toggleLoc(l.id)} />
-                      <span>
-                        {l.name}
-                        {!l.url && <span className="type-chip">{t('напрямую')}</span>}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-              )}
-              {http && (
-                <div className="am-grid2">
-                  <label className={'field' + bad('extra_paths')}>
-                    <span>{t('Дополнительные пути')}</span>
-                    <textarea
-                      className="mono"
-                      rows={2}
-                      value={pathsText}
-                      placeholder="/health"
-                      spellCheck={false}
-                      onChange={(e) => {
-                        setPathsText(e.target.value)
-                        set({ extra_paths: e.target.value.split('\n').map((x) => x.trim()).filter(Boolean) })
-                      }}
-                    />
-                  </label>
-                  {!((has401 || authSeen) && auth === 'give') && (
-                    <label className={'field' + bad('http_headers')}>
-                      <span>{t('Заголовок, по строке')}</span>
-                      <textarea
-                        className="mono"
-                        rows={2}
-                        value={hdrText}
-                        placeholder="X-Token: ..."
-                        spellCheck={false}
-                        onChange={(e) => {
-                          setHdrText(e.target.value)
-                          set({ http_headers: headersJson(e.target.value).json })
-                        }}
-                      />
-                    </label>
-                  )}
-                </div>
-              )}
-              {http && (
-                <label className="am-ck">
-                  <input type="checkbox" checked={form.ignore_tls ?? false} onChange={(e) => set({ ignore_tls: e.target.checked })} />
-                  <span>
-                    {t('Не проверять сертификат')}
-                    <small>{t('самоподписанный или выпущен на другое имя')}</small>
-                  </span>
-                </label>
-              )}
-              {editing && (
-                <div className="am-mutes">
-                  <span className="muted small">{t('Не слать алерты этого монитора:')}</span>
-                  <div className="mute-chips">
-                    {MON_ALERT_KINDS.map(({ k, label }) => {
-                      const mutes = form.alert_mutes ?? []
-                      const muted = mutes.includes(k)
-                      return (
-                        <button
-                          key={k}
-                          type="button"
-                          className={`mute-chip${muted ? ' mute-chip-on' : ''}`}
-                          onClick={() => set({ alert_mutes: muted ? mutes.filter((x) => x !== k) : [...mutes, k] })}
-                        >
-                          {muted ? '🔕 ' : ''}
-                          {t(label)}
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-              {!isPush && (
-                <div className="muted small">{t('После правок нажмите "Проверить снова": проверка пойдет уже с ними.')}</div>
-              )}
+              {advFields}
             </div>
           )}
 
-          <div className="am-sec">
-            <h4>{t('Так придет алерт')}</h4>
-            <div className="am-bubble">
-              <div className="am-who">Kervax</div>
-              {bubble}
-            </div>
-            <div className="muted small am-hint">{bubbleNote}</div>
-          </div>
+          {bubblePart}
         </>
       )}
 
@@ -1566,7 +1673,7 @@ export function AddMonitor({
           {t('Отмена')}
         </button>
         <button type="button" disabled={!canAdd} onClick={submit}>
-          {busy ? t('Сохраняю...') : editing ? t('Сохранить') : t('Добавить монитор')}
+          {busy ? t('Сохраняю...') : t('Добавить монитор')}
         </button>
       </div>
     </div>

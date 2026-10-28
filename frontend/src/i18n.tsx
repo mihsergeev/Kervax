@@ -5059,8 +5059,6 @@ const EN: Record<string, string> = {
   'Снять ограничения':
     'Remove the limits',
   // --- новый монитор: пробная проверка (AddMonitor) ---
-  'Это монитор сертификата старого типа: его настройки меняются только через API. Удалить его можно кнопкой выше, а за сертификатом следит и обычный монитор сайта.':
-    'This is an old-style certificate monitor: its settings can only be changed through the API. You can delete it with the button above, and a regular site monitor watches the certificate too.',
   'Настройки поменялись - нажмите "проверить снова": ответ сравнится уже с ними.':
     'The settings changed - press "check again": the answer will be compared with them.',
   'Ответ совпадает с ожидаемым. Станет другим - придет алерт.':
@@ -5125,12 +5123,8 @@ const EN: Record<string, string> = {
     'Press "Check": the panel asks DNS for the record and shows the answer before saving.',
   'напр. ночной бэкап':
     'e.g. nightly backup',
-  '- допуск по времени, заглушенные алерты.':
-    '- time allowance, muted alerts.',
   '- допуск по времени. Можно поменять и потом в карточке монитора.':
     '- time allowance. It can also be changed later in the monitor card.',
-  '- интервал, DNS-сервер, заглушенные алерты.':
-    '- interval, DNS server, muted alerts.',
   '- интервал и DNS-сервер. Можно поменять и потом в карточке монитора.':
     '- interval and DNS server. They can also be changed later in the monitor card.',
   'сейчас {dur}: крон стартует не в нулевую секунду, а скрипт идет не мгновенно':
@@ -5173,10 +5167,6 @@ const EN: Record<string, string> = {
     'Monitor enabled',
   'выключенный не проверяется и не шлет алертов':
     'a disabled monitor is not checked and sends no alerts',
-  '- интервал, ожидаемый ответ, пути, заголовки, повторы, локации, заглушенные алерты.':
-    '- interval, expected answer, paths, headers, retries, locations, muted alerts.',
-  '- интервал, порог "медленно", повторы, заглушенные алерты.':
-    '- interval, the "slow" threshold, retries, muted alerts.',
   'Сертификат: напоминать за, дн.':
     'Certificate: remind, days before',
   'Порт открыт с панели.':
@@ -7040,6 +7030,15 @@ const EN: Record<string, string> = {
   'СУБД и бэкап': 'Databases and backup',
   'GPU и LLM': 'GPU and LLM',
   'Другое': 'Other',
+  // --- окно правки монитора (CheckEdit.tsx, AddMonitor.tsx в editing) ---
+  'Что еще': 'More checks',
+  'Вместе с ним удалятся история проверок и инциденты. Если монитор не нужен на время, лучше его выключить.':
+    'Its check history and incidents are deleted with it. If the monitor is not needed for a while, better turn it off.',
+  'Вместе с ним удалятся история проверок и инциденты.': 'Its check history and incidents are deleted with it.',
+  'После правок нажмите "Проверить снова" в разделе "Проверка": проверка пойдет уже с ними.':
+    'After editing, press "Check again" in the "Check" section: the check will use the new settings.',
+  'Это монитор сертификата старого типа: его настройки меняются только через API. Удалить его можно в разделе "Удаление", а за сертификатом следит и обычный монитор сайта.':
+    'This is an old-style certificate monitor: its settings can only be changed through the API. You can delete it in the "Deletion" section, and a regular site monitor watches the certificate too.',
 }
 
 type Ctx = {
