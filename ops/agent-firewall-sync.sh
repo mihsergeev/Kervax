@@ -40,10 +40,11 @@ IPS_FILE="${KERVAX_AGENT_IPS:-/app/kervax/data/agent_allow_ips}"
 APPLIED="${KERVAX_FW_APPLIED:-$IPS_FILE.applied}"
 STATE="${KERVAX_FW_STATE:-/var/lib/kervax/agent-fw-opened}"
 PRUNE="${KERVAX_FW_PRUNE:-1}"
+LOCK="${KERVAX_FW_LOCK:-/run/kervax-agent-fw.lock}"
 [ -r "$IPS_FILE" ] || exit 0
 # cron and the path unit may fire together: one run at a time
 if command -v flock >/dev/null 2>&1; then
-  exec 9>/run/kervax-agent-fw.lock && flock -w 60 9 || exit 0
+  exec 9>"$LOCK" && flock -w 60 9 || exit 0
 fi
 
 CHANGED=0
