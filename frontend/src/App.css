@@ -4338,16 +4338,6 @@ button.ov-area-bad .ov-area-s { color: color-mix(in srgb, var(--down) 75%, var(-
   flex-wrap: wrap;
 }
 
-/* «Удалить сервер» вынесено наверх и вправо, чтобы не нажать рядом с «Сохранить» */
-.edit-danger-top {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 0.35rem;
-}
-.edit-danger-top .danger-btn {
-  font-size: 0.82rem;
-  padding: 0.28rem 0.6rem;
-}
 .danger-btn {
   color: #f87171;
 }
@@ -7650,8 +7640,9 @@ label.am-ck small { display: block; color: var(--text-muted); font-size: 0.78rem
 button.am-link.small { font-size: 0.82rem; }
 /* правка монитора той же формой: внутри модалки карточка уже есть */
 .am-edit { margin: 0; }
+/* правка в окне: у первого куска раздела отступ сверху дает шапка раздела */
+.am-edit > :first-child { margin-top: 0; }
 .am-locs { margin-top: 0.7rem; display: flex; flex-direction: column; gap: 0.35rem; }
-.am-mutes { margin-top: 0.7rem; }
 /* push: свой период минутами под пресетами */
 .am-period { max-width: 12rem; margin-top: 0.6rem; }
 .am-box .field + .am-row { margin-top: 0.4rem; }
