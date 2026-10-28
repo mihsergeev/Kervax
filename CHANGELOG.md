@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.52] - 2026-10-28
+
+### Fixed
+- diskhealth-setup 0.4: счетчик ошибок SMART, который уменьшается, больше не считается счетчиком. У Kingston SA400 в raw
+  атрибута 199 лежит упакованное значение (720918, 786455, 851990 туда-обратно с шагом 65536), и "последнее минус
+  первое" давало ложные +65533 ошибок CRC, после чего через полчаса приходило "диски снова в порядке". Такое поле
+  отбрасывается целиком на двое суток истории: нет ни роста, ни значения в плитке. Правило действует на realloc,
+  uncorr, media и crc. pending-секторы законно уменьшаются, их значение остается, а рост считается от минимума за сутки.
+
+### Upgrading
+- Обновить helper на нодах до diskhealth-setup 0.4, до этого нода ведет себя по-старому.
+
 ## [1.8.51] - 2026-10-28
 
 ### Added
