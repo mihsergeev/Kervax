@@ -242,7 +242,8 @@ esac
     ips = tmp_path / "agent_allow_ips"
     ips.write_text("203.0.113.30\n")
     env = dict(os.environ, PATH=f"{bin_dir.as_posix()}{os.pathsep}{os.environ['PATH']}",
-               KERVAX_AGENT_IPS=ips.as_posix(), KERVAX_FW_STATE=(tmp_path / "state").as_posix())
+               KERVAX_AGENT_IPS=ips.as_posix(), KERVAX_FW_STATE=(tmp_path / "state").as_posix(),
+               KERVAX_FW_LOCK=(tmp_path / "fw.lock").as_posix())
     r = subprocess.run(["sh", SYNC.as_posix()], capture_output=True, text=True, encoding="utf-8", timeout=60, env=env)
     assert r.returncode == 0, r.stderr
     applied = (tmp_path / "agent_allow_ips.applied").read_text().splitlines()
