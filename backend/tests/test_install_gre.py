@@ -94,13 +94,51 @@ async def test_window_switches_gre_on_and_gives_the_command_only_when_the_host_i
     _applied(f"kvxg{sid} 198.51.100.30 203.0.113.5 ok")
     assert (await get()).json()["cmd"].endswith(" 198.51.100.30")
 
-    # ушли на другой путь - GRE выключается (иначе helper все равно увел бы агента в туннель)
+    # другой путь сам GRE не трогает: включенный в окне выключает окно (PUT /gre), включенный
+    # раньше - только кнопка
     r = await _via(client, auth_headers, sid, mode="direct")
     assert r.status_code == 200 and r.json()["gre"] is None
+    assert f"kvxg{sid} 198.51.100.30 10.254.0.1/30 10.254.0.2" in _tunnels()
+    assert (await get()).json()["state"] == "ready"
+    r = await client.put(f"/api/servers/{sid}/gre", json={"enabled": False}, headers=auth_headers)
+    assert r.status_code == 200 and r.json()["gre_enabled"] is False
     assert not any(x.startswith(f"kvxg{sid} ") for x in _tunnels())
     assert (await get()).json()["state"] == "off"
     acts = [e["action"] for e in (await client.get("/api/audit", headers=auth_headers)).json()]
     assert "gre_on" in acts and "gre_off" in acts
+
+
+async def test_window_only_looks_until_gre_is_switched_on(client: httpx.AsyncClient, auth_headers):
+    # выбор карточки "Через GRE" спрашивает только gre-install: ничего не включается
+    sid = await _new(client, auth_headers, "dpi-look")
+    g = (await client.get(f"/api/servers/{sid}/gre-install", headers=auth_headers)).json()
+    assert (g["state"], g["net"]) == ("off", "")
+    assert not (_data() / "gre_tunnels").exists()
+    s = next(x for x in (await client.get("/api/servers", headers=auth_headers)).json() if x["id"] == sid)
+    assert s["gre_enabled"] is False and s["gre"] is None
+    # кнопка "Включить GRE": сеть туннеля в ответе, ее окно показывает в первом шаге
+    g = (await _via(client, auth_headers, sid, mode="gre", ip="198.51.100.11")).json()["gre"]
+    assert g["net"] == "10.254.0.0/30" and g["state"] == "host_missing"
+
+
+async def test_host_ran_after_the_list_but_did_not_take_the_tunnel(client: httpx.AsyncClient, auth_headers):
+    sid = await _new(client, auth_headers, "dpi-skip")
+    await _via(client, auth_headers, sid, mode="gre", ip="198.51.100.12")
+    listed = (_data() / "gre_tunnels").stat().st_mtime
+    get = lambda: client.get(f"/api/servers/{sid}/gre-install", headers=auth_headers)  # noqa: E731
+    # прогон еще мог идти, пока панель писала список: ждем
+    os.utime(_data() / "gre_tunnels", (listed - 30, listed - 30))
+    _applied()
+    assert (await get()).json()["state"] == "host_wait"
+    # прогон точно после записи списка, а строки этого сервера в ответе нет: не ждать вечно
+    os.utime(_data() / "gre_tunnels", (listed - 600, listed - 600))
+    g = (await get()).json()
+    assert g["state"] == "host_skip" and g["age"] >= 600 and not g["cmd"]
+    # хост ответил строкой с другим адресом ноды - тоже не взял нужный
+    _applied(f"kvxg{sid} 198.51.100.99 203.0.113.5 ok")
+    assert (await get()).json()["state"] == "host_skip"
+    _applied(f"kvxg{sid} 198.51.100.12 203.0.113.5 ok")
+    assert (await get()).json()["state"] == "ready"
 
 
 async def test_window_takes_the_address_the_agent_came_from(client: httpx.AsyncClient, auth_headers):

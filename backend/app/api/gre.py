@@ -56,7 +56,8 @@ async def set_gre(server_id: int, body: GreUpdate, user: CurrentUser, session: S
 @router.get("/{server_id}/gre-install", response_model=GreInstallOut)
 async def gre_install(server_id: int, user: CurrentUser, session: SessionDep) -> GreInstallOut:
     """Окно установки, путь "Через GRE": пока хост панели не поднял свою сторону, окно спрашивает
-    раз в несколько секунд и команду не выдает (включает GRE само окно, через install-via)."""
+    раз в несколько секунд и команду не выдает. Выбор пути в окне тоже спрашивает только это:
+    включает GRE кнопка в окне (install-via), выключает PUT /gre."""
     server = await _get_or_404(server_id, session, user)
     return GreInstallOut(**gre_mod.install_view(server))
 

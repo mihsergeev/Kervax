@@ -5943,16 +5943,15 @@ export function InstallModal({
   mode?: InstallMode // с чего открыть выбор пути (подсказка "агент не достает до панели")
 }) {
   const { t } = useI18n()
-  useEscape(onClose)
   const [copied, setCopied] = useState('')
   // путь до панели (InstallPath): прокси ретранслятора, локации или свой - в команду; GRE - начало
   // команды, которое поднимает туннель. Серверу с GRE до панели окно сразу предлагает GRE
   const start: InstallMode = mode ?? (enroll.server.gre_enabled ? 'gre' : 'direct')
   const [path, setPath] = useState<InstallMode>(start)
   const [proxy, setProxy] = useState('')
-  const [gre, setGre] = useState<{ cmd: string; connect: string } | null>(null)
+  const [greCmd, setGreCmd] = useState<{ cmd: string; connect: string } | null>(null)
   const base = localizeInstallCmd(enroll.install_cmd, t)
-  const cmd = path === 'gre' ? localizeInstallCmd(withGre(enroll.install_cmd, gre), t) : withProxy(base, proxy)
+  const cmd = path === 'gre' ? localizeInstallCmd(withGre(enroll.install_cmd, greCmd), t) : withProxy(base, proxy)
   // путь через прокси выбран, а прокси в команде еще нет: копировать рано
   const pending = path !== 'direct' && cmd === base
   // живая проверка: поллим сервер, пока агент не пришлёт первый отчёт
@@ -5975,6 +5974,33 @@ export function InstallModal({
     const id = window.setInterval(poll, 4000)
     return () => window.clearInterval(id)
   }, [enroll.server.id, connected])
+  // GRE, включенный кнопкой в этом окне, не остается включенным молча: закрыли окно, а агент так и
+  // не пришел и нода даже установщик не скачала - выключаем, иначе обычная установка потом увела бы
+  // агента в туннель. Включенный до окна не трогаем. Закрытая вкладка - тем же запросом с keepalive
+  const greOwn = useRef(false)
+  const unused = useRef(true)
+  unused.current = !connected && !st?.script_at && !st?.agent_at
+  const greDrop = (leaving: boolean) => {
+    if (!greOwn.current || !unused.current) return
+    greOwn.current = false
+    void setGre(enroll.server.id, false, leaving).catch(() => {})
+  }
+  useEffect(() => {
+    const away = () => greDrop(true)
+    window.addEventListener('pagehide', away)
+    return () => {
+      window.removeEventListener('pagehide', away)
+      // окно ушло без "Закрыть" (назад в истории браузера)
+      greDrop(false)
+    }
+    // greDrop читает только ref'ы
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enroll.server.id])
+  const close = () => {
+    greDrop(false)
+    onClose()
+  }
+  useEscape(close)
   const copy = (text: string, what: string) => {
     navigator.clipboard?.writeText(text)
     setCopied(what)
@@ -5985,7 +6011,7 @@ export function InstallModal({
         <div className="al-head">
           <h3>{title ?? t('Сервер создан')}</h3>
           <span className="ic-name mono">{enroll.server.name}</span>
-          <button className="ghost" onClick={onClose}>
+          <button className="ghost" onClick={close}>
             {t('Закрыть')}
           </button>
         </div>
@@ -6004,8 +6030,11 @@ export function InstallModal({
               setCopied('')
             }}
             onGre={(g) => {
-              setGre(g)
+              setGreCmd(g)
               setCopied('')
+            }}
+            onGreOwn={(own) => {
+              greOwn.current = own
             }}
           />
         </section>
@@ -6019,7 +6048,7 @@ export function InstallModal({
           <div className="ic-cmd-row">
             {pending && path === 'gre' ? (
               // команда без туннеля на такой ноде висела бы часами: до готовности хоста ее нет вовсе
-              <pre className="install-cmd ic-cmd ic-cmd-wait muted">{t('Команда появится, когда хост панели поднимет свою сторону туннеля')}</pre>
+              <pre className="install-cmd ic-cmd ic-cmd-wait muted">{t('Команда появится здесь, когда GRE будет готов: шаги выше')}</pre>
             ) : (
               <InstallCmd cmd={cmd} token={enroll.token} />
             )}
@@ -6043,7 +6072,7 @@ export function InstallModal({
             </p>
             <div className="ic-cmd-row">
               {pending && path === 'gre' ? (
-                <pre className="install-cmd ic-cmd ic-cmd-wait muted">{t('Команда появится, когда хост панели поднимет свою сторону туннеля')}</pre>
+                <pre className="install-cmd ic-cmd ic-cmd-wait muted">{t('Команда появится здесь, когда GRE будет готов: шаги выше')}</pre>
               ) : (
                 <InstallCmd cmd={cmd} token={enroll.token} add="main" />
               )}
@@ -6069,7 +6098,7 @@ export function InstallModal({
                   })}
                 </span>
               </span>
-              <button className="ic-done" onClick={onClose}>
+              <button className="ic-done" onClick={close}>
                 {t('Готово')}
               </button>
             </>
@@ -7070,7 +7099,7 @@ function ServerDetail({
             {/* команда показывается один раз при добавлении; потеряли - новая с новым токеном */}
             {!isViewer && !s.first_report_at && agentLate(s) && (
               <div className="install-late">
-                <span>{t('Агент не достает до панели? Поставьте его через ретранслятор или локацию.')}</span>
+                <span>{t('Агент не достает до панели? Поставьте его через ретранслятор, локацию или GRE.')}</span>
                 <button className="small-btn" onClick={() => reissue('relay')}>{t('Выбрать путь')}</button>
               </div>
             )}

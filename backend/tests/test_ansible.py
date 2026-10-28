@@ -161,6 +161,33 @@ def test_relay_helper_is_asked_for_on_a_fresh_node():
     assert _helper_advice(s, cur) == []
 
 
+def test_gre_helper_waits_for_the_installer_after_install_through_gre():
+    """Ставили "Через GRE" из окна установки: GRE включен до установщика, gre-setup он ставит
+    сам, а агент с первого отчета ходит туннелем. Пока идет окно установки helper'ов, карточка
+    не зовет "выполните curl | sudo bash" с версией "?" - его поставит установщик. Не встал
+    за окно - зовет. GRE включили галочкой на уже живой ноде - зовет сразу, как relay-setup."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.api.servers import _helper_advice
+    from app.models import Server
+
+    now = datetime.now(timezone.utc)
+    rep = {"agent_version": "2.56", "setup_versions": {"timesync-setup": "0.2"}, "connect": "10.254.0.1"}
+    s = Server(id=8, name="dpi-new", token_hash="x", enabled=True, last_report=rep, last_seen=now,
+               first_report_at=now - timedelta(minutes=2), gre_enabled=True)
+    cur = {"timesync-setup": "0.2", "gre-setup": "0.2"}
+    assert _helper_advice(s, cur) == []
+    # отчет с туннельного адреса без connect= в нем - тоже установка через туннель
+    s.last_report, s.gre_agent_at = {**rep, "connect": ""}, now
+    assert _helper_advice(s, cur) == []
+    # окно установки прошло, а helper так и не встал
+    s.first_report_at = now - timedelta(minutes=30)
+    assert [a.name for a in _helper_advice(s, cur)] == ["gre-setup"]
+    # галочку включили на живой ноде, агент ходит напрямую: установщик gre-setup не принесет
+    s.first_report_at, s.gre_agent_at = now - timedelta(minutes=2), None
+    assert [a.name for a in _helper_advice(s, cur)] == ["gre-setup"]
+
+
 async def test_first_report_marks_the_node_fresh(client, auth_headers):
     r = await client.post("/api/servers", json={"name": "fresh-one"}, headers=auth_headers)
     token = r.json()["token"]

@@ -368,8 +368,14 @@ inside it goes the same TLS connection to the panel, only to an inner address. S
 
 A new server behind such DPI cannot wait for the helper: the agent itself (~10 MB) is downloaded
 before any helper, and directly it takes hours. Choose **"Through GRE"** in step 1 of the install
-window instead. It switches GRE on for the server (asking for its public IPv4 if the panel does
-not know it yet) and shows the command only once the panel host holds its side of the tunnel.
+window instead and press **"Switch on GRE"** there (choosing the card alone changes nothing). The
+window asks for the server's public IPv4 if the panel does not know it yet, shows the steps with
+the time waited so far (GRE on, the panel host bringing up its side, the command ready) and gives
+the command only once the panel host holds its side of the tunnel; when the host script is
+missing, silent or skipped the tunnel, it says which and what to check. GRE switched on in this
+window is switched off again if you pick another path or close the window before the server
+fetched the installer; GRE that was on before the window opened stays on until you press
+**"Switch off GRE"**.
 The command first brings up `kervax-gre` on the server with the same parameters the helper uses
 and allows GRE from the panel host in ufw or firewalld; then the installer and every request it
 makes go to the panel's inner address (`KERVAX_CONNECT`, `curl --resolve` with the panel's name),

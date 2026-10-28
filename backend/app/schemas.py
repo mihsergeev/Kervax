@@ -1306,12 +1306,14 @@ class InstallViaIn(BaseModel):
 
 class GreInstallOut(BaseModel):
     """Путь "Через GRE" в окне установки (app/gre.install_view): готов ли хост панели и чем начать команду."""
-    # ready | off | no_ip | host_missing | host_stale | host_wait | host_error
+    # ready | off | no_ip | host_missing | host_stale | host_wait | host_skip | host_error
     state: str = "off"
     cmd: str = ""  # начало команды: поднять kervax-gre на ноде (только при ready)
     connect: str = ""  # адрес панели в туннеле: KERVAX_CONNECT для установщика
     error: str = ""
-    age: int | None = None  # host_stale: секунд с последнего ответа хостового скрипта
+    # host_stale: секунд с последнего ответа хостового скрипта; host_skip: с записи списка туннелей
+    age: int | None = None
+    net: str = ""  # сеть туннеля сервера /30, когда GRE включен
 
 
 class InstallViaOut(BaseModel):

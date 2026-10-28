@@ -3577,11 +3577,12 @@ export type GreView = {
 }
 // замеры агента: из последних big_n попыток кусок big_kb КБ одним соединением дошел big_ok раз
 export type GreNeed = { big_ok: number; big_n: number; small_ok: number; small_n: number; kb: number }
-export function setGre(id: number, enabled: boolean): Promise<Server> {
-  return api<Server>(`/api/servers/${id}/gre`, { method: 'PUT', body: JSON.stringify({ enabled }) })
+// keepalive - запрос из закрываемой вкладки (окно установки выключает свой GRE): браузер дошлет его сам
+export function setGre(id: number, enabled: boolean, keepalive = false): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/gre`, { method: 'PUT', body: JSON.stringify({ enabled }), keepalive })
 }
 // путь агента в панель для команды установки: proxy - адрес прокси с логином (ретранслятор, локация),
-// gre - для пути через GRE (он же включает серверу GRE до панели)
+// gre - для пути через GRE (mode gre включает серверу GRE до панели: кнопка "Включить GRE" в окне)
 export type InstallVia = { mode: 'direct' | 'relay' | 'location' | 'custom' | 'gre'; relay_id?: number; location_id?: number; ip?: string }
 export function installVia(id: number, body: InstallVia): Promise<{ proxy: string; ip: string; gre: GreInstall | null }> {
   return api<{ proxy: string; ip: string; gre: GreInstall | null }>(`/api/servers/${id}/install-via`, { method: 'POST', body: JSON.stringify(body) })
@@ -3589,11 +3590,12 @@ export function installVia(id: number, body: InstallVia): Promise<{ proxy: strin
 // путь через GRE в окне установки (app/gre.install_view): команду можно выдать только при ready,
 // cmd - начало команды (поднять туннель на ноде), connect - адрес панели в туннеле
 export type GreInstall = {
-  state: 'ready' | 'off' | 'no_ip' | 'host_missing' | 'host_stale' | 'host_wait' | 'host_error'
+  state: 'ready' | 'off' | 'no_ip' | 'host_missing' | 'host_stale' | 'host_wait' | 'host_skip' | 'host_error'
   cmd: string
   connect: string
   error: string
-  age: number | null
+  age: number | null // host_stale - секунд с ответа хостового скрипта, host_skip - с записи списка туннелей
+  net: string // сеть туннеля сервера /30, когда GRE включен
 }
 export function greInstall(id: number): Promise<GreInstall> {
   return api<GreInstall>(`/api/servers/${id}/gre-install`)
