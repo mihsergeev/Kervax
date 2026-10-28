@@ -215,7 +215,7 @@ def test_virtual_disks_of_a_vm_are_listed_and_quiet():
              "disks": [vd, dict(vd, dev="sdb", ok=False)], "missing": [], "io": {"count": 0, "last": []}}
     assert disk_health_problems(block) == []
     src = (Path(__file__).resolve().parents[2] / "agent" / "diskhealth-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.3" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.4" in src and "\r" not in src
     body = src[src.index("elif ! $container; then"):src.index("EOF_VLSBLK\nfi")]
     assert 'add_disk "$name" "$model" "$serial" "$tran" "$size" "$rota" true virtual' in body
     assert "SEEN_NOW" not in body and "PRESENT" not in body and "smartctl" not in body

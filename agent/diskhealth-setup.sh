@@ -10,7 +10,7 @@
 # can tell a VM from a dedicated server and show what the VM has.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without RAID or SMART it reports an empty block
 
 HELPER_DIR=/lib65/kervax
@@ -245,16 +245,31 @@ if [ "$virt" = none ]; then
         printf '%s|%s|%s|%s|%s|%s|%s\n' "$now" "$(clean "$serial")" "$(cv realloc)" "$(cv pending)" "$(cv uncorr)" "$(cv media)" "$(cv crc)" >> "$hist"
         awk -F'|' -v old=$((now - 2 * 86400)) '$1 >= old' "$hist" > "$hist.tmp" && mv -f "$hist.tmp" "$hist"
       fi
+      # A real error counter never goes down. One that does is not a counter: Kingston SA400 keeps
+      # something else in the raw of 199 (720918, 786455, 851990 back and forth, steps of 65536),
+      # and "last minus first" made +65533 CRC errors of it every few hours, then "disks fine
+      # again". Such a field is dropped for the whole two days of history, growth and value both.
+      # Pending sectors (197) are the exception: they do go down when a sector is rewritten or
+      # remapped, so their growth is counted from the lowest point of the day, not from the first
       if [ -s "$hist" ]; then
-        grow=$(awk -F'|' -v since=$((now - 86400)) -v ser="$(clean "$serial")" '
-          $2 == ser && $1 >= since {
-            for (i = 3; i <= 7; i++) if ($i ~ /^[0-9]+$/) { if (!(i in first)) first[i] = $i + 0; last[i] = $i + 0 }
+        growout=$(awk -F'|' -v since=$((now - 86400)) -v ser="$(clean "$serial")" '
+          $2 == ser {
+            for (i = 3; i <= 7; i++) if ($i ~ /^[0-9]+$/) {
+              v = $i + 0
+              if (i != 4 && (i in prev) && v < prev[i]) down[i] = 1
+              prev[i] = v
+              if ($1 >= since) { if (!(i in first) || (i == 4 && v < first[i])) first[i] = v; last[i] = v }
+            }
           }
           END {
             split("realloc pending uncorr media crc", nm, " ")
-            for (i = 3; i <= 7; i++) if ((i in first) && last[i] > first[i]) printf "%s\"%s\":%.0f", (n++ ? "," : ""), nm[i - 2], last[i] - first[i]
+            for (i = 3; i <= 7; i++) if (!(i in down) && (i in first) && last[i] > first[i]) printf "%s\"%s\":%.0f", (n++ ? "," : ""), nm[i - 2], last[i] - first[i]
+            printf "\n"
+            for (i = 3; i <= 7; i++) if (i in down) print nm[i - 2]
           }' "$hist")
+        grow=$(printf '%s\n' "$growout" | head -n 1)
         set -- "$@" "grow=$grow"
+        for f in $(printf '%s\n' "$growout" | tail -n +2); do set -- "$@" "$f="; done
       fi
     fi
     if [ "$ok" = true ] && [ -n "$serial" ]; then
