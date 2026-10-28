@@ -64,6 +64,7 @@ from app import dump_reason
 from app import fleet_rollout
 from app import oom as oom_mod
 from app import software as software_mod
+from app.collector import _ver_tuple
 from app.collector import (
     _OFFLINE_ALERT_EXTRA, _backup_problem_repos, alert_since, awaiting_after_pause, backup_cadence, backup_rotation_items, backup_unmonitored,
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
@@ -219,9 +220,17 @@ def agent_update_note(rep: dict) -> str:
 
 def agent_update_error(rep: dict) -> str:
     """Причина, по которой агент отверг обновление; пусто, если отказа нет. Докачка на
-    медленном канале - не отказ (это agent_update_note)."""
+    медленном канале - не отказ (это agent_update_note). Отказ от версии не новее той, что
+    уже стоит ("2.55: панель просит 2.55, а подписан 2.56"), - тоже не отказ: агент помнит
+    текст до перезапуска, а обновлять уже нечего."""
     err = str(rep.get("update_error") or "").strip()
-    return "" if _UPD_RESUME in err else err
+    if _UPD_RESUME in err:
+        return ""
+    want = err.split(":", 1)[0].strip()
+    have = str(rep.get("agent_version") or "")
+    if want and have and re.fullmatch(r"\d+(\.\d+)*", want) and _ver_tuple(have) >= _ver_tuple(want):
+        return ""
+    return err
 
 
 def _agent_advice(server: Server) -> tuple[list[str], str | None]:
@@ -3680,7 +3689,13 @@ async def agent_report(
 
     # Сигнал обновления: только если админ выставил target и агент ещё не на ней.
     # Агент сам проверит подпись/хеш/анти-откат — панель лишь просит.
+    # Агент уже новее цели (поставили руками или helper'ом, пока шла раскатка старой версии) -
+    # цель снимается: иначе панель вечно просила откат, агент отказывал, и в "Обновлениях"
+    # висело "обновление агента отклонено" при всех агентах на свежей версии.
     upd = None
+    if (server.target_agent_version and server.agent_version
+            and _ver_tuple(server.agent_version) >= _ver_tuple(server.target_agent_version)):
+        server.target_agent_version = ""
     if (
         server.target_agent_version
         and server.target_agent_version != server.agent_version
