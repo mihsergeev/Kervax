@@ -12,7 +12,7 @@ from app import audit, gre as gre_mod
 from app.api.relay import _by_token
 from app.api.servers import _get_or_404, _out
 from app.deps import CurrentUser, SessionDep
-from app.schemas import GreUpdate, ServerOut
+from app.schemas import GreInstallOut, GreUpdate, ServerOut
 
 router = APIRouter(prefix="/servers", tags=["gre"])
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
@@ -51,6 +51,14 @@ async def set_gre(server_id: int, body: GreUpdate, user: CurrentUser, session: S
         await audit.record(session, user.username, "gre_on" if body.enabled else "gre_off", server.name,
                            server.gre_net or "")
     return _out(server, now)
+
+
+@router.get("/{server_id}/gre-install", response_model=GreInstallOut)
+async def gre_install(server_id: int, user: CurrentUser, session: SessionDep) -> GreInstallOut:
+    """Окно установки, путь "Через GRE": пока хост панели не поднял свою сторону, окно спрашивает
+    раз в несколько секунд и команду не выдает (включает GRE само окно, через install-via)."""
+    server = await _get_or_404(server_id, session, user)
+    return GreInstallOut(**gre_mod.install_view(server))
 
 
 @agent_router.post("/gre")

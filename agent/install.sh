@@ -23,6 +23,13 @@
 # (also https:// or socks5://). The installer downloads through it, and the agent gets
 # proxy= in its config and sends everything to the panel through it as well.
 #
+# A node whose TCP connection to the panel is frozen after ~16 KB by a DPI goes through a bare GRE
+# tunnel to the panel host ("Through GRE" in the panel's install window): the command brings the
+# tunnel up first and passes the panel's inner address in KERVAX_CONNECT (or --connect <addr>).
+# Every request of the installer then dials that address with TLS and SNI on the panel's name
+# (curl --resolve), and the agent gets connect= in its config. The gre-setup helper takes the
+# tunnel over within a minute.
+#
 # Russian version of this installer: agent/install-ru.sh
 #
 # The whole script is one { ... } block: sh reads a compound command to its end before
@@ -42,14 +49,19 @@ set -eu
 URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0
 # KERVAX_PROXY in the environment is the same as --proxy: the panel's install command passes it so
 PROXY="${KERVAX_PROXY:-}"; WANT_PROXY=0
+# KERVAX_CONNECT (or --connect): the panel's address inside the GRE tunnel, see the header
+CONNECT="${KERVAX_CONNECT:-}"; WANT_CONNECT=0
 for a in "$@"; do
   if [ "$WANT_CA" = 1 ]; then CA_FILE="$a"; WANT_CA=0; continue; fi
   if [ "$WANT_PROXY" = 1 ]; then PROXY="$a"; WANT_PROXY=0; continue; fi
+  if [ "$WANT_CONNECT" = 1 ]; then CONNECT="$a"; WANT_CONNECT=0; continue; fi
   case "$a" in
     --ca-file) WANT_CA=1 ;;
     --ca-file=*) CA_FILE="${a#--ca-file=}" ;;
     --proxy) WANT_PROXY=1 ;;
     --proxy=*) PROXY="${a#--proxy=}" ;;
+    --connect) WANT_CONNECT=1 ;;
+    --connect=*) CONNECT="${a#--connect=}" ;;
     --docker) WANT_DOCKER=1 ;;
     --no-auto) NO_AUTO=1 ;;
     --uninstall) UNINSTALL=1 ;;
@@ -202,12 +214,35 @@ if [ "$PROXY_OK" = 0 ]; then
   echo "--proxy must look like http://user:pass@host:port (https:// and socks5:// work too)." >&2
   exit 1
 fi
+if [ -n "$CONNECT" ] && [ -n "$PROXY" ]; then
+  echo "--connect (GRE to the panel) and --proxy do not go together: choose one." >&2
+  exit 1
+fi
+case "$CONNECT" in
+  "" | [0-9]*.[0-9]*.[0-9]*.[0-9]*) case "$CONNECT" in *[!0-9.]*) CONNECT_OK=0 ;; *) CONNECT_OK=1 ;; esac ;;
+  *) CONNECT_OK=0 ;;
+esac
+if [ "$CONNECT_OK" = 0 ]; then
+  echo "--connect must be the panel's IPv4 address inside the GRE tunnel." >&2
+  exit 1
+fi
 # Every request to the panel goes through pcurl: with --proxy it adds the proxy, and
 # only to these requests. Helpers piped from the panel run without it (their own
 # downloads, the local Kubernetes API) and are not affected.
 pcurl() {
   if [ -n "$PROXY" ]; then curl --proxy "$PROXY" "$@"; else curl "$@"; fi
 }
+# Through GRE every curl of this installer goes to the panel's inner address, the helper
+# conditions it evaluates included (the one of gre-setup asks the panel too): the name stays
+# in TLS and SNI, only the address is replaced, and only for the panel's host and port
+if [ -n "$CONNECT" ]; then
+  PANEL_HP=${URL#*://}; PANEL_HP=${PANEL_HP%%/*}; PANEL_HP=${PANEL_HP##*@}
+  case "$PANEL_HP" in
+    *:*) ;;
+    *) case "$URL" in http://*) PANEL_HP="$PANEL_HP:80" ;; *) PANEL_HP="$PANEL_HP:443" ;; esac ;;
+  esac
+  curl() { command curl --resolve "$PANEL_HP:$CONNECT" "$@"; }
+fi
 
 if [ "$(id -u)" != "0" ]; then
   echo "Root required (sudo)." >&2
@@ -283,6 +318,7 @@ if [ -n "$CA_FILE" ]; then
 fi
 
 echo "→ Downloading the agent ($ARCH)..."
+[ -n "$CONNECT" ] && echo "  through the GRE tunnel: the panel at $CONNECT"
 # The agent directory is /opt/kervax-agent, NOT /opt/kervax. The panel installs into
 # /opt/kervax by default (that is what quickstart.sh does), and the agent used to
 # settle inside it and then run chown -R kervax across the whole directory. On a
@@ -364,6 +400,9 @@ url=$URL
 token=$TOKEN
 EOF
 [ -n "$PROXY" ] && printf 'proxy=%s\n' "$PROXY" >> "$CONF"
+# the agent (2.56+) dials the panel's inner address in the GRE tunnel; the gre-setup helper
+# keeps it from now on and removes it when the tunnel stops answering
+[ -n "$CONNECT" ] && printf 'connect=%s\n' "$CONNECT" >> "$CONF"
 chown kervax "$CONF" 2>/dev/null || true
 chmod 0600 "$CONF"
 umask 022

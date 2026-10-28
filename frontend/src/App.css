@@ -2628,11 +2628,13 @@ select:focus {
 .ic-noip { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
 .ic-noip input { width: 11rem; max-width: 100%; padding: 0.2rem 0.45rem; }
 .ic-noip button { padding: 0.2rem 0.7rem; }
-/* путь агента в панель (InstallPath): карточки 2x2, под ними поля выбранного пути */
+/* путь агента в панель (InstallPath): карточки по две в ряд (пятая, GRE, на всю ширину), под ними поля выбранного пути */
 .install-path { display: flex; flex-direction: column; gap: 0.5rem; }
 .ip-modes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
 button.ip-mode { display: flex; align-items: center; gap: 0.7rem; padding: 0.6rem 0.8rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); box-shadow: none; color: var(--text); font-weight: 400; text-align: left; }
 button.ip-mode:hover { background: var(--hover); border-color: var(--border-strong); }
+button.ip-mode:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.ic-cmd-wait { white-space: normal; font-family: inherit; }
 button.ip-mode.ip-mode-on,
 button.ip-mode.ip-mode-on:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, var(--bg)); box-shadow: 0 0 0 1px var(--accent) inset; }
 .ip-ico { flex: none; width: 1.35rem; height: 1.35rem; fill: none; stroke: var(--text-muted); stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }

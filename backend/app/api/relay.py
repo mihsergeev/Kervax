@@ -6,13 +6,15 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Body, Header, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-from app import audit, install_watch, relay as relay_mod
+from app import audit, gre as gre_mod, install_watch, relay as relay_mod
 from app.api.servers import _get_or_404, _is_online, _out, _write_agent_allowlist
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep
 from app.models import Location, Server
-from app.schemas import InstallStatusOut, InstallViaIn, InstallViaOut, RelayUpdate, ServerOut, agent_ip_valid
+from app.schemas import (GreInstallOut, InstallStatusOut, InstallViaIn, InstallViaOut, RelayUpdate, ServerOut,
+                         agent_ip_valid)
 from app.security import hash_agent_token
 
 router = APIRouter(prefix="/servers", tags=["relay"])
@@ -48,13 +50,21 @@ async def install_via(server_id: int, body: InstallViaIn, user: CurrentUser, ses
     """Путь агента в панель для команды установки. Ретранслятор - сервер сразу попадает в список
     пропускаемых им адресов (helper откроет порт в течение минуты), в ответе адрес прокси с
     логином и паролем. Локация - ее адрес прокси. Напрямую и свой прокси - ретранслятор снимается,
-    свой прокси панель не видит вовсе: браузер дописывает его в команду сам."""
+    свой прокси панель не видит вовсе: браузер дописывает его в команду сам.
+
+    GRE - включает серверу GRE до панели, как галочка в настройках (своя /30, строка хосту панели),
+    в ответе готов ли хост панели и чем начать команду (gre). Любой другой путь GRE выключает:
+    иначе helper gre-setup все равно поставился бы и увел агента в туннель."""
     server = await _get_or_404(server_id, session, user)
     ip = body.ip.strip()
     if ip and not agent_ip_valid(ip):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "IP сервера указан неверно")
+    if body.mode == "gre" and ip and not gre_mod.is_public(ip):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Для GRE нужен публичный IPv4 сервера: туннель ведется на этот адрес")
     if ip:
         server.agent_ip = ip
+    peer_was, gre_was = gre_mod.peer_of(server), server.gre_enabled
     proxy = ""
     via: int | None = None
     if body.mode == "relay":
@@ -73,16 +83,39 @@ async def install_via(server_id: int, body: InstallViaIn, user: CurrentUser, ses
         if loc is None or not loc.enabled or not loc.url.strip():
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Выберите локацию с адресом прокси")
         proxy = loc.url.strip()
+    elif body.mode == "gre":
+        # адрес из окна главнее названного helper'ом раньше: ставят заново, и человек знает лучше
+        if ip:
+            server.gre_peer = ip
+        if not gre_mod.peer_of(server):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                "Укажите внешний IP сервера: GRE-туннель ведется на его адрес")
+        try:
+            await gre_mod.allocate(session, server)
+        except ValueError as e:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
+    server.gre_enabled = body.mode == "gre"
     changed = via != server.relay_via_id
     server.relay_via_id = via
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as e:
+        # ту же /30 только что взял другой сервер: повторный запрос выделит следующую
+        await session.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Сеть туннеля только что занял другой сервер, повторите") from e
+    if gre_was != server.gre_enabled or (server.gre_enabled and gre_mod.peer_of(server) != peer_was):
+        await gre_mod.write_tunnels(session)
+    if gre_was != server.gre_enabled:
+        await audit.record(session, user.username, "gre_on" if server.gre_enabled else "gre_off", server.name,
+                           server.gre_net or "")
     if via is not None and (changed or ip):
         install_watch.via_relay(server.id)
     if ip:
         await _write_agent_allowlist(session)
     if changed or ip:
         await audit.record(session, user.username, "server_install_via", server.name, body.mode)
-    return InstallViaOut(proxy=proxy, ip=relay_mod.address_of(server))
+    gre = GreInstallOut(**gre_mod.install_view(server)) if body.mode == "gre" else None
+    return InstallViaOut(proxy=proxy, ip=relay_mod.address_of(server), gre=gre)
 
 
 def _ts(dt: datetime | None) -> float | None:
@@ -106,7 +139,13 @@ async def install_status(server_id: int, user: CurrentUser, session: SessionDep)
         # ни фаервол, ни скачанное ей не приписать
         out.firewall, out.fw_age = "", None
         return out
-    for what, ts in install_watch.seen(relay_mod.address_of(server), _ts(server.created_at) or 0).items():
+    since = _ts(server.created_at) or 0
+    seen = install_watch.seen(relay_mod.address_of(server), since)
+    if server.gre_enabled:
+        # через туннель нода приходит со своего адреса в нем
+        for what, ts in install_watch.seen(gre_mod.addrs(server.gre_net or "")[1], since).items():
+            seen[what] = max(ts, seen.get(what, 0))
+    for what, ts in seen.items():
         setattr(out, f"{what}_at", datetime.fromtimestamp(ts, timezone.utc))
     return out
 

@@ -19,7 +19,7 @@
 # brings nothing up. Switched off in the panel (or the server deleted there) - the sync removes
 # connect=, the tunnel, its firewall rules and the helper itself, version marker included.
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 # Only where GRE is switched on in the panel: asked with this node's agent token, which goes as the
 # request body straight from the agent config (no quotes, braces or backslashes here: the condition
 # travels through the playbook and the panel's helper index as is). Assigned before set -e: the
@@ -316,8 +316,15 @@ def sync():
     }
     body = json.dumps(status).encode()
     # through the tunnel first when it works (that is what it is for), then direct: a small
-    # request passes even where big ones are cut
+    # request passes even where big ones are cut. Right after the install the tunnel is the one
+    # the install command brought up ("Through GRE"): nothing is held here yet, but the installer
+    # already wrote connect= and the panel answers there, maybe only there
     vias = [cur["peer"]] if cur.get("peer") and state.get("up") else []
+    try:
+        if ac.get("connect") and ac["connect"] not in vias and ipaddress.IPv4Address(ac["connect"]):
+            vias.append(ac["connect"])
+    except ValueError:
+        pass
     got = None
     for via in vias + [None]:
         try:

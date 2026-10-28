@@ -366,6 +366,18 @@ inside it goes the same TLS connection to the panel, only to an inner address. S
 * switched off (or the server deleted) - the helper removes `connect=`, the tunnel, its
   firewall rules and itself.
 
+A new server behind such DPI cannot wait for the helper: the agent itself (~10 MB) is downloaded
+before any helper, and directly it takes hours. Choose **"Through GRE"** in step 1 of the install
+window instead. It switches GRE on for the server (asking for its public IPv4 if the panel does
+not know it yet) and shows the command only once the panel host holds its side of the tunnel.
+The command first brings up `kervax-gre` on the server with the same parameters the helper uses
+and allows GRE from the panel host in ufw or firewalld; then the installer and every request it
+makes go to the panel's inner address (`KERVAX_CONNECT`, `curl --resolve` with the panel's name),
+and the agent config gets `connect=` from the start. No `/etc/hosts` editing. The `gre-setup`
+helper is installed by the same run and takes the tunnel over within a minute, recreating the
+interface with the same addresses. If the server sends to the panel host from another address
+(NAT, a second address), the command stops right away and says so.
+
 The panel host needs its side too: `ops/gre-sync.sh` runs outside docker, reads
 `<data>/gre_tunnels` written by the panel, brings up a `kvxg<N>` interface per server and opens
 GRE from the server's address and 80/443 coming in on that interface (ufw, including

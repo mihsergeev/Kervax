@@ -311,6 +311,78 @@ def view(server: Server, now: datetime, host: dict | None = None) -> dict | None
     }
 
 
+# Окно команды установки, путь "Через GRE". Бинарь агента (~10 МБ) напрямую через такой DPI
+# качается часами, а helper gre-setup ставится только после агента. Поэтому туннель поднимает
+# сама команда, до первого запроса в панель: те же параметры, что у helper'а (gre-setup.sh,
+# tunnel_up), а helper потом пересоздает интерфейс с теми же адресами. Сообщения - для ноды,
+# фронт подменяет их в английском интерфейсе по точному тексту (installProxy.ts): без одинарных
+# кавычек и фигурных скобок
+INSTALL_NO_IP_MSG = "Для GRE нужна команда ip (пакет iproute2)"
+INSTALL_SRC_MSG = ("GRE: к хосту панели сервер ходит с адреса $l, а в панели его IP $3. За NAT GRE не работает,"
+                   " другой адрес - укажите его в окне установки")
+INSTALL_FAIL_MSG = "GRE: интерфейс kervax-gre не поднялся, нет модуля ядра ip_gre?"
+NODE_IFACE = "kervax-gre"
+
+
+def install_cmd(remote: str, node_net: str, peer: str) -> str:
+    """Начало команды установки: поднять kervax-gre на ноде и открыть GRE от хоста панели.
+
+    Аргументы: адрес хоста панели, адрес ноды в туннеле /30 и ее публичный адрес, на который хост
+    панели ведет свою сторону. Нода шлет к хосту с другого адреса (за NAT, второй адрес) - хост
+    такой GRE не примет, и команда честно останавливается, а не ждет панель минутами. Свой адрес
+    берется из маршрута до хоста, как у helper'а (route_src)."""
+    script = (
+        f'command -v ip >/dev/null || {{ echo "{INSTALL_NO_IP_MSG}" >&2; exit 1; }};'
+        ' l=; p=; for w in $(ip -o route get "$1"); do [ "$p" = src ] && l=$w; p=$w; done;'
+        f' [ "$l" = "$3" ] || {{ echo "{INSTALL_SRC_MSG}" >&2; exit 1; }};'
+        f" ip link del {NODE_IFACE} 2>/dev/null;"
+        f' ip tunnel add {NODE_IFACE} mode gre local "$l" remote "$1" ttl 64'
+        f' && ip addr add "$2" dev {NODE_IFACE} && ip link set {NODE_IFACE} mtu {MTU} up'
+        f' || {{ echo "{INSTALL_FAIL_MSG}" >&2; exit 1; }};'
+        ' if command -v ufw >/dev/null && ufw status | grep -q "Status: active";'
+        f' then ufw allow proto gre from "$1" to any comment {NODE_IFACE} >/dev/null; fi;'
+        ' if [ "$(firewall-cmd --state 2>/dev/null)" = running ];'
+        ' then firewall-cmd -q --permanent --add-rich-rule="rule family=ipv4 source address=$1 protocol value=gre accept"'
+        " && firewall-cmd -q --reload; fi; exit 0"
+    )
+    return f"sh -c '{script}' - {remote} {node_net} {peer}"
+
+
+def install_view(server: Server, host: dict | None = None, now: float | None = None) -> dict:
+    """Можно ли выдавать команду установки через GRE: хост панели должен уже держать свою сторону
+    туннеля к этому адресу ноды, иначе команда поднимет туннель в пустоту и будет ждать панель.
+
+    state: ready - cmd и connect для команды; off - GRE не включен; no_ip - не известен публичный
+    адрес ноды; host_missing - хостовый ops/gre-sync.sh не отвечает вовсе (не стоит); host_stale -
+    отвечал, но давно (age - секунд); host_wait - еще не поднял туннель к этому адресу (path-юнит
+    или крон раз в 2 минуты); host_error - поднять не смог (error)."""
+    out = {"state": "off", "cmd": "", "connect": "", "error": "", "age": None}
+    if not server.gre_enabled:
+        return out
+    mine, node = addrs(server.gre_net or "")
+    peer = peer_of(server)
+    if not mine or not peer:
+        return {**out, "state": "no_ip"}
+    host = host if host is not None else host_state()
+    now = time.time() if now is None else now
+    fixed = get_settings().gre_host_ip.strip()
+    hi = (host.get("ifaces") or {}).get(iface_of(server))
+    if not host:
+        # хост панели настроен руками (KERVAX_GRE_HOST_IP): ответа скрипта не будет, верим настройке
+        if not is_public(fixed):
+            return {**out, "state": "host_missing"}
+    elif now - (host.get("ts") or 0) > HOST_STALE:
+        return {**out, "state": "host_stale", "age": int(now - (host.get("ts") or 0))}
+    elif hi is None or hi.get("peer") != peer:
+        return {**out, "state": "host_wait"}
+    elif not hi.get("ok"):
+        return {**out, "state": "host_error", "error": str(hi.get("error") or "")[:300]}
+    remote = panel_ip(server, host)
+    if not remote:
+        return {**out, "state": "host_wait"}
+    return {**out, "state": "ready", "cmd": install_cmd(remote, f"{node}/30", peer), "connect": mine}
+
+
 def helper_status(body: dict) -> dict:
     """Что helper сообщил о себе - только известные поля и в разумных размерах."""
     fw = str(body.get("firewall") or "")

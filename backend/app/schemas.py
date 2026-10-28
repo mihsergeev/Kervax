@@ -1298,15 +1298,26 @@ class GreUpdate(BaseModel):
 
 class InstallViaIn(BaseModel):
     """Как агент этого сервера пойдет в панель: окно команды установки."""
-    mode: str = Field(pattern=r"^(direct|relay|location|custom)$")
+    mode: str = Field(pattern=r"^(direct|relay|location|custom|gre)$")
     relay_id: int | None = None
     location_id: int | None = None
     ip: str = Field(default="", max_length=64)  # внешний IP сервера: страна, проверки, фаервол ретранслятора
 
 
+class GreInstallOut(BaseModel):
+    """Путь "Через GRE" в окне установки (app/gre.install_view): готов ли хост панели и чем начать команду."""
+    # ready | off | no_ip | host_missing | host_stale | host_wait | host_error
+    state: str = "off"
+    cmd: str = ""  # начало команды: поднять kervax-gre на ноде (только при ready)
+    connect: str = ""  # адрес панели в туннеле: KERVAX_CONNECT для установщика
+    error: str = ""
+    age: int | None = None  # host_stale: секунд с последнего ответа хостового скрипта
+
+
 class InstallViaOut(BaseModel):
     proxy: str = ""  # для команды установки; пусто - напрямую или свой прокси (его знает только браузер)
     ip: str = ""
+    gre: GreInstallOut | None = None  # только для пути "Через GRE"
 
 
 class InstallStatusOut(BaseModel):

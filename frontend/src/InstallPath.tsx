@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { installVia, listLocations, listServers, type Location, type Server } from './api'
+import { greInstall, installVia, listLocations, listServers, type GreInstall, type Location, type Server } from './api'
 import { useI18n } from './i18n'
 import { isProxyUrl } from './installProxy'
 
-// Как агент пойдет в панель: напрямую, через сервер-ретранслятор, через локацию или через свой
-// прокси. Ретранслятор и локацию знает панель: адрес прокси с логином приходит от нее
+// Как агент пойдет в панель: напрямую, через сервер-ретранслятор, через локацию, через свой
+// прокси или через GRE. Ретранслятор и локацию знает панель: адрес прокси с логином приходит от нее
 // (install-via), и сервер сразу попадает в список адресов, которые ретранслятор пускает. Свой
-// прокси панель не видит вовсе: он дописывается в команду здесь же (installProxy).
-export type InstallMode = 'direct' | 'relay' | 'location' | 'custom'
+// прокси панель не видит вовсе: он дописывается в команду здесь же (installProxy). GRE включает
+// серверу GRE до панели, а команду окно выдает, только когда хост панели поднял свою сторону
+// туннеля: начало команды поднимает туннель на ноде, установщик идет в панель через него.
+export type InstallMode = 'direct' | 'relay' | 'location' | 'custom' | 'gre'
 
 // карточки выбора пути: значок, название и одна строка, когда какой нужен
 const MODES: { k: InstallMode; label: string; hint: string; icon: ReactNode }[] = [
@@ -46,6 +48,17 @@ const MODES: { k: InstallMode; label: string; hint: string; icon: ReactNode }[] 
       </>
     ),
   },
+  {
+    k: 'gre',
+    label: 'Через GRE',
+    hint: 'Связь с панелью замерзает на ~16 КБ',
+    icon: (
+      <>
+        <path d="M3 19v-7a9 9 0 0 1 18 0v7" />
+        <path d="M7.5 19v-6.5a4.5 4.5 0 0 1 9 0V19" />
+      </>
+    ),
+  },
 ]
 
 const RELAY_STATE: Record<string, string> = {
@@ -61,11 +74,14 @@ export function InstallPath({
   initial = 'direct',
   onProxy,
   onMode,
+  onGre,
 }: {
   server: Server
   initial?: InstallMode
   onProxy: (proxy: string) => void
   onMode?: (mode: InstallMode) => void
+  // путь через GRE: начало команды и адрес панели в туннеле, null - команду выдавать рано
+  onGre?: (gre: { cmd: string; connect: string } | null) => void
 }) {
   const { t } = useI18n()
   const [mode, setMode] = useState<InstallMode>(initial)
@@ -80,6 +96,10 @@ export function InstallPath({
   const [busy, setBusy] = useState(false)
   // через ретранслятор уже ходил (до окна или выбран в нем): уход с него снимает адрес из его списка
   const viaRelay = useRef(!!server.relay_via_id)
+  // GRE включен (до окна или в нем): уход на другой путь выключает его, иначе helper gre-setup
+  // все равно увел бы агента в туннель
+  const viaGre = useRef(!!server.gre_enabled)
+  const [gre, setGre] = useState<GreInstall | null>(null)
 
   useEffect(() => {
     listServers()
@@ -113,8 +133,12 @@ export function InstallPath({
       setBusy(true)
       try {
         const res = await installVia(server.id, body)
-        if (!gone) onProxy(use(res.proxy))
+        if (!gone) {
+          onProxy(use(res.proxy))
+          setGre(res.gre)
+        }
         viaRelay.current = body.mode === 'relay'
+        viaGre.current = body.mode === 'gre'
       } catch (e) {
         if (!gone) {
           onProxy(use(''))
@@ -125,13 +149,17 @@ export function InstallPath({
       }
     }
     const ipOk = ipApplied.trim() !== '' && !ipBad
+    setGre(null)
     if (mode === 'relay') {
       if (relayId == null || !ipOk) onProxy('')
       else ask({ mode: 'relay', relay_id: relayId, ip: ipApplied.trim() }, (p) => p)
     } else if (mode === 'location') {
       if (locId == null || ipBad) onProxy('')
       else ask({ mode: 'location', location_id: locId, ip: ipApplied.trim() }, (p) => p)
-    } else if (viaRelay.current || (mode === 'custom' && ipOk)) {
+    } else if (mode === 'gre') {
+      onProxy('')
+      if (ipOk) ask({ mode: 'gre', ip: ipApplied.trim() }, () => '')
+    } else if (viaRelay.current || viaGre.current || (mode === 'custom' && ipOk)) {
       // уход с ретранслятора снимает адрес из его списка; IP для своего прокси тоже запоминаем
       ask({ mode, ip: mode === 'custom' && ipOk ? ipApplied.trim() : '' }, () => ownProxy.current)
     } else {
@@ -145,13 +173,33 @@ export function InstallPath({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, relayId, locId, ipApplied, ipBad, server.id])
 
+  // GRE: команду - только когда хост панели держит свою сторону туннеля; до тех пор спрашиваем
+  // панель раз в несколько секунд (хостовый скрипт поднимает туннель по path-юниту или крону)
+  useEffect(() => {
+    onGre?.(mode === 'gre' && gre?.state === 'ready' ? { cmd: gre.cmd, connect: gre.connect } : null)
+    if (mode !== 'gre' || !gre || gre.state === 'ready' || gre.state === 'off') return
+    let gone = false
+    const id = window.setTimeout(() => {
+      greInstall(server.id)
+        .then((g) => !gone && setGre(g))
+        .catch(() => !gone && setGre({ ...gre }))
+    }, 4000)
+    return () => {
+      gone = true
+      window.clearTimeout(id)
+    }
+    // onGre стабильный по смыслу; повтор - по каждому новому ответу панели
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, gre, server.id])
+
   useEffect(() => {
     // свой прокси: по мере ввода, без панели
     if (mode === 'custom') onProxy(ownProxy.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [custom, customBad, mode])
 
-  const needIp = mode === 'relay' || mode === 'location'
+  const needIp = mode === 'relay' || mode === 'location' || mode === 'gre'
+  const minutes = (sec: number | null) => Math.max(1, Math.round((sec ?? 0) / 60))
   return (
     <div className="install-path">
       <div className="ip-modes" role="radiogroup">
@@ -241,7 +289,7 @@ export function InstallPath({
             <label className="field">
               <span>
                 {t('Внешний IP сервера')}
-                {mode === 'relay' ? '' : ` (${t('опционально')})`}
+                {mode === 'relay' || mode === 'gre' ? '' : ` (${t('опционально')})`}
               </span>
               <input
                 value={ip}
@@ -254,9 +302,26 @@ export function InstallPath({
               <span className={`field-hint small ${ipBad ? 'form-error' : 'muted'}`}>
                 {ipBad
                   ? t('IP сервера указан неверно')
-                  : t('Через прокси панель видит адрес прокси, а не сервера: страна и проверки снаружи идут по этому адресу.')}
+                  : mode === 'gre'
+                    ? t('Публичный IPv4 сервера: на него хост панели ведет свою сторону туннеля. Сервер должен ходить в панель с этого адреса, за NAT GRE не работает.')
+                    : t('Через прокси панель видит адрес прокси, а не сервера: страна и проверки снаружи идут по этому адресу.')}
               </span>
             </label>
+          )}
+          {mode === 'gre' && gre && (
+            <p className={`small ${gre.state === 'ready' || gre.state === 'host_wait' ? 'muted' : 't-degraded'}`}>
+              {gre.state === 'ready'
+                ? t('Хост панели держит туннель. Команда сначала поднимет на сервере интерфейс kervax-gre, потом скачает агента через него.')
+                : gre.state === 'host_wait'
+                  ? t('Хост панели поднимает свою сторону туннеля, обычно до 2 минут. Команда появится здесь сама.')
+                  : gre.state === 'host_missing'
+                    ? t('Хост панели не отвечает про туннели: на нем не стоит ops/gre-sync.sh (docs/install.md, раздел про GRE). Без него туннелю не к чему подключиться.')
+                    : gre.state === 'host_stale'
+                      ? t('ops/gre-sync.sh на хосте панели не отвечал {n} мин: проверьте kervax-gre-host.path и крон на хосте.', { n: minutes(gre.age) })
+                      : gre.state === 'host_error'
+                        ? t('Хост панели не смог поднять туннель: {e}', { e: gre.error || '?' })
+                        : t('Укажите внешний IP сервера: GRE-туннель ведется на его адрес')}
+            </p>
           )}
           {busy && <p className="muted small">{t('Подставляю в команду…')}</p>}
           {err && <p className="form-error small">{t(err)}</p>}
