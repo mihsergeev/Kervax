@@ -33,8 +33,9 @@
 set -eu
 
 # cron provides a trimmed PATH (/usr/bin:/bin) while ufw and firewall-cmd live in sbin;
-# without this the script silently concluded "no firewall" and opened nothing
-PATH=/usr/local/sbin:/usr/sbin:/sbin:$PATH
+# without this the script silently concluded "no firewall" and opened nothing.
+# Appended, not prepended: a PATH that already has ufw first (tests with a stub) keeps it
+PATH=$PATH:/usr/local/sbin:/usr/sbin:/sbin
 
 IPS_FILE="${KERVAX_AGENT_IPS:-/app/kervax/data/agent_allow_ips}"
 APPLIED="${KERVAX_FW_APPLIED:-$IPS_FILE.applied}"
