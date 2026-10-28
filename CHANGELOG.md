@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.49] - 2026-10-28
+
+### Fixed
+- Бэкап: одно зависание соединения до сервера бэкапов ("request timeout", "connection timed out") больше не дает
+  красный алерт и пропуск суток. restic backup повторяется до 3 попыток с паузой 5 минут, только при коде 1 и
+  сетевой ошибке в выводе (timeout, connection reset/refused, broken pipe, unexpected EOF, no route, TLS
+  handshake, 502/503/504). Коды 10/11/12 и прочие ошибки выходят сразу, unlock между попытками не делается,
+  метрики пишутся один раз по итогу, длительность - по всем попыткам. helper backup-setup 0.47: так генерируется
+  новый раннер, а старые скрипты от ansible-роли и прошлых версий helper'а правятся на обновлении (пометка
+  kervax-net-retry, проверка bash -n, копия .kervax-pre-netretry.bak); вставленный руками блок не трогается.
+- CI: тест синхронизации фаервола агентов больше не пишет лок в /run (путь через KERVAX_FW_LOCK).
+
 ## [1.8.48] - 2026-10-28
 
 ### Changed
