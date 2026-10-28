@@ -3175,12 +3175,6 @@ tr.mt-off button.mt-what-btn { color: var(--text-muted); text-decoration: line-t
   border-color: var(--down);
 }
 /* точечное заглушение типов алертов (чипы в форме сервера/монитора) */
-.mute-group {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin: 0.2rem 0;
-}
 .mute-chips {
   display: flex;
   flex-wrap: wrap;
@@ -4344,9 +4338,6 @@ button.ov-area-bad .ov-area-s { color: color-mix(in srgb, var(--down) 75%, var(-
   flex-wrap: wrap;
 }
 
-.edit-actions {
-  align-items: center;
-}
 /* «Удалить сервер» вынесено наверх и вправо, чтобы не нажать рядом с «Сохранить» */
 .edit-danger-top {
   display: flex;
@@ -7681,6 +7672,48 @@ button.am-link.small { font-size: 0.82rem; }
 .al-foot-btns { display: flex; gap: 0.6rem; margin-left: auto; }
 .al-dirty { display: inline-flex; align-items: center; gap: 0.4rem; color: var(--degraded); }
 .al-narrow { max-width: 22rem; }
+/* окно настроек сервера (ServerEdit.tsx): раскладка al-*, в разделе области строки "алерт - порог - слать" */
+.se-sec { display: flex; flex-direction: column; gap: 0.2rem; max-width: 46rem; }
+.se-sec > .field { margin: 0.3rem 0; }
+.se-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0 0.9rem; }
+.se-pair > .field { margin: 0.3rem 0; }
+.se-note { margin: 0.3rem 0 0.8rem; }
+.se-q { display: inline-flex; width: 15px; height: 15px; border-radius: 50%; border: 1px solid var(--border-strong); align-items: center; justify-content: center; font-size: 0.66rem; cursor: help; vertical-align: 1px; }
+.se-rows { display: flex; flex-direction: column; margin-top: 0.4rem; }
+.se-rows-head { display: flex; justify-content: space-between; padding: 0 0.5rem 0.2rem; color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; }
+.se-row { display: flex; align-items: center; gap: 0.7rem; min-height: 2.5rem; padding: 0.3rem 0.5rem; border-radius: 8px; }
+.se-row:hover { background: var(--hover); }
+.se-label { flex: 1 1 auto; min-width: 0; font-size: 0.88rem; }
+.se-row-off .se-label,
+.se-not { color: var(--down); }
+.se-not { white-space: nowrap; }
+.se-row-thr { display: inline-flex; align-items: center; gap: 0.45rem; }
+.se-thr { display: inline-flex; align-items: center; gap: 0.35rem; }
+.se-thr input { width: 5.2rem; padding: 0.3rem 0.5rem; text-align: right; }
+.se-thr input.se-days { text-align: left; }
+.se-unit { min-width: 1.9rem; color: var(--text-muted); font-size: 0.78rem; }
+.se-unit-off { cursor: help; }
+.se-tag { padding: 0 0.45rem; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--text-muted); white-space: nowrap; cursor: help; }
+/* переключатель "слать": включен - алерт приходит */
+button.se-sw { position: relative; flex: 0 0 auto; width: 34px; height: 20px; padding: 0; border: 0; border-radius: 999px; background: var(--border-strong); box-shadow: none; cursor: pointer; }
+button.se-sw::after { content: ''; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left 0.12s; }
+button.se-sw:hover { background: color-mix(in srgb, var(--border-strong) 80%, var(--text)); }
+button.se-sw.se-sw-on,
+button.se-sw.se-sw-on:hover { background: var(--accent); }
+button.se-sw.se-sw-on::after { left: 17px; }
+.se-levels { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.2rem; }
+.se-levels-row { display: flex; flex-wrap: wrap; gap: 0.5rem 1.2rem; }
+.se-level { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.8rem; color: var(--text-muted); }
+.se-check { margin: 0.6rem 0 0; }
+.se-hint { margin: 0.15rem 0 0.4rem; }
+.se-port { max-width: 12rem; }
+.se-danger { display: flex; align-items: center; flex-wrap: wrap; gap: 0.8rem; padding: 0.8rem 1rem; border: 1px solid color-mix(in srgb, var(--down) 40%, var(--border)); border-radius: 10px; }
+.se-danger > span { display: flex; flex-direction: column; gap: 0.2rem; flex: 1 1 16rem; }
+@media (max-width: 560px) {
+  .se-row { flex-wrap: wrap; gap: 0.3rem 0.6rem; }
+  .se-label { flex-basis: calc(100% - 3rem); }
+  .se-row-thr { margin-left: auto; }
+}
 .al-note { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem 0.8rem; padding: 0.55rem 0.8rem; border: 1px solid; border-radius: 9px; font-size: 0.85rem; line-height: 1.4; }
 .al-note > span { flex: 1 1 18rem; }
 .al-note-warn { color: var(--degraded); border-color: color-mix(in srgb, var(--degraded) 40%, var(--border)); background: color-mix(in srgb, var(--degraded) 7%, transparent); }

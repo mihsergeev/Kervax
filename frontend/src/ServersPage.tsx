@@ -25,7 +25,6 @@ import {
   type InstallStatus,
   rotateServerToken,
   setRelay,
-  type RelayView,
   serverMetrics,
   serverOom,
   serverOomEvents,
@@ -126,8 +125,9 @@ import { type FixStep, FixSteps, useFixDone } from './FixSteps'
 import { GpuCard, GpuChip } from './Gpu'
 import { RoleChips } from './RoleChips'
 import { KnownServerList, knownItems, knownTitle } from './KnownDialog'
-import { AgentUpdRow, UpdCmd, agentBehind, helperCmd, hostOf, useFleetRollout } from './FleetUpdate'
+import { AgentUpdRow, agentBehind, hostOf, useFleetRollout } from './FleetUpdate'
 import { MaintBanner, MaintChip } from './MaintModal'
+import { ServerEditModal, type ServerEditForm } from './ServerEdit'
 import { AutobanSection } from './AutobanSection'
 
 type MetricKey =
@@ -6126,82 +6126,11 @@ function InstallProgress({ st, path, serverId }: { st: InstallStatus | null; pat
   )
 }
 
-const RELAY_DEFAULT_PORT = 8790
-
 // Сервер заведен, а агент так и не вышел на связь за 10 минут: скорее всего не достает до панели
 function agentLate(s: Server): boolean {
   if (s.last_seen || !s.created_at) return false
   return Date.now() - new Date(s.created_at).getTime() > 10 * 60_000
 }
-
-// Как дела у ретранслятора: что сказал helper relay-setup и когда
-function RelayStatus({ relay, host }: { relay: RelayView; host: string }) {
-  const { t } = useI18n()
-  const [copied, setCopied] = useState(false)
-  const fw = relay.firewall === 'none' ? t('без фаервола: адреса проверяет сам прокси') : relay.firewall
-  const line =
-    relay.state === 'ok'
-      ? t('Работает: порт {port}, серверов {n}, фаервол {fw}, соединений {c}', {
-          port: relay.port,
-          n: relay.clients,
-          fw: fw || '?',
-          c: relay.conns,
-        })
-      : relay.state === 'no_helper'
-        ? t('Helper relay-setup еще не поставлен: он в "Требует действий", ставится плейбуком kervax_helpers.yml.')
-        : relay.state === 'waiting'
-          ? t('Helper поставлен, ждем его первого обращения к панели (раз в минуту).')
-          : relay.state === 'stale'
-            ? t('Helper давно не обращался к панели: сервер не на связи или не достает до нее.')
-            : t('Ошибка ретранслятора: {err}', { err: relay.error })
-  if (relay.state !== 'no_helper') {
-    return <p className={`small ${relay.state === 'ok' ? 'muted' : 'form-error'}`}>📡 {line}</p>
-  }
-  // helper ставит человек плейбуком: готовая команда на одну эту ноду, без поиска в "Требует действий"
-  const cmd = helperCmd([host])
-  return (
-    <div className="small form-error">
-      📡 {line}
-      <UpdCmd cmd={cmd} />
-      <button
-        type="button"
-        className="ghost small"
-        onClick={() => {
-          try { navigator.clipboard?.writeText(cmd)?.catch(() => {}) } catch { /* команда видна в строке */ }
-          setCopied(true)
-          window.setTimeout(() => setCopied(false), 1500)
-        }}
-      >
-        {copied ? t('Скопировано ✓') : t('Скопировать команду')}
-      </button>
-    </div>
-  )
-}
-
-type ServerEditForm = {
-  name: string
-  group_name: string
-  agent_ip: string
-  cpu_alert_percent: number
-  mem_alert_percent: number
-  disk_alert_percent: number
-  disk_warn_percent: number
-  disk_crit_percent: number
-  disk_autofix: boolean
-  temp_alert_c: number
-  conntrack_alert_percent: number
-  db_conn_alert_percent: number
-  web_5xx_alert_percent: number
-  kube_expiry_warn_days: string // "7, 1": по сообщению на каждый порог, пусто - выключено
-  disk_temp_alert_c: number
-  alert_mutes: string[]
-  offline_after_seconds: number
-  alert_sustain_min: number // «жарит дольше N минут» → алерт (хранится в сек)
-  relay_enabled: boolean // ретранслятор для агентов (app/relay.py), сохраняется отдельно (setRelay)
-  relay_port: number // 0 - по умолчанию
-}
-
-// типы серверных алертов, которые можно точечно заглушить для сервера (метки = SERVER_ALERT_KINDS)
 
 // Единый контрол приглушения алертов сервера: один дропдаун «что заглушить»
 // (весь сервер ИЛИ конкретный тип) + 1ч/1д/1нед. Активные снузы — чипами ниже
@@ -6391,299 +6320,6 @@ function ServerFixBanner({
   )
 }
 
-function ServerEditCard({
-  form,
-  set,
-  busy,
-  err,
-  groups,
-  isVm,
-  relay,
-  host,
-  onSubmit,
-  onCancel,
-  onDelete,
-}: {
-  form: ServerEditForm
-  set: (patch: Partial<ServerEditForm>) => void
-  busy: boolean
-  err: string | null
-  groups: string[]
-  isVm?: boolean
-  relay?: RelayView | null
-  host: string // имя ноды для ansible -l (как в "Требует действий")
-  onSubmit: () => void
-  onCancel: () => void
-  onDelete: () => void
-}) {
-  const { t } = useI18n()
-  const { isAdmin } = useAuth()
-  // пустое поле - NaN: при сохранении оно не уходит (раньше уходил 0 и бэкенд отвечал 422)
-  const num = (v: string) => (v === '' ? NaN : Number(v))
-  const nv = (x: number) => (Number.isFinite(x) ? x : '')
-  // на VM нет датчиков температуры → скрываем температурные алерты (CPU/диск)
-  const kinds = SRV_ALERT_KINDS.filter(
-    ({ k }) => !isVm || (k !== 'temp' && k !== 'disktemp'),
-  )
-  return (
-    <div className="settings-group">
-      {err && <p className="form-error">{err}</p>}
-      {/* удаление — сверху и отдельно, чтобы не нажать случайно рядом с «Сохранить» */}
-      <div className="edit-danger-top">
-        <button className="ghost danger-btn" onClick={onDelete} disabled={busy}>
-          🗑 {t('Удалить сервер')}
-        </button>
-      </div>
-      <label className="field">
-        <span>{t('Название')}</span>
-        <input value={form.name} onChange={(e) => set({ name: e.target.value })} autoFocus />
-      </label>
-      <label className="field">
-        <span>{t('Группа')}</span>
-        <input
-          value={form.group_name}
-          onChange={(e) => set({ group_name: e.target.value })}
-          placeholder={t('напр. Прод / БД')}
-          list="kervax-server-groups"
-        />
-        <datalist id="kervax-server-groups">
-          {groups.map((g) => (
-            <option key={g} value={g} />
-          ))}
-        </datalist>
-      </label>
-      <label className="field">
-        <span>{t('IP сервера (опционально)')}</span>
-        <input
-          value={form.agent_ip}
-          onChange={(e) => set({ agent_ip: e.target.value })}
-          placeholder="203.0.113.10"
-        />
-        <span className="field-hint muted small">
-          {t('Адрес, с которого агент ходит в панель — для разрешения в фаерволе хоста панели (ufw/firewalld).')}
-        </span>
-      </label>
-      <h4>{t('Пороги алертов, %')}</h4>
-      <div className="form-row">
-        <label className="field">
-          <span>CPU</span>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={nv(form.cpu_alert_percent)}
-            onChange={(e) => set({ cpu_alert_percent: num(e.target.value) })}
-          />
-        </label>
-        <label className="field">
-          <span>RAM</span>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={nv(form.mem_alert_percent)}
-            onChange={(e) => set({ mem_alert_percent: num(e.target.value) })}
-          />
-        </label>
-      </div>
-      <p className="muted small">{t('Диск — три уровня (0 = выключить уровень):')}</p>
-      <div className="form-row">
-        <label className="field">
-          <span>⚠️ {t('предупр.')}</span>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={nv(form.disk_warn_percent)}
-            onChange={(e) => set({ disk_warn_percent: num(e.target.value) })}
-          />
-        </label>
-        <label className="field">
-          <span>🔴 {t('проблема')}</span>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={nv(form.disk_alert_percent)}
-            onChange={(e) => set({ disk_alert_percent: num(e.target.value) })}
-          />
-        </label>
-        <label className="field">
-          <span>🚨 {t('критично')}</span>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={nv(form.disk_crit_percent)}
-            onChange={(e) => set({ disk_crit_percent: num(e.target.value) })}
-          />
-        </label>
-      </div>
-      {/* Панель начнет сама запускать удаление на ноде - решение админа (сервер проверяет) */}
-      <label className="checkbox">
-        <input
-          type="checkbox"
-          checked={form.disk_autofix}
-          disabled={!isAdmin}
-          onChange={(e) => set({ disk_autofix: e.target.checked })}
-        />
-        <span>🧹 {t('Автоочистка диска')}</span>
-      </label>
-      <p className="muted small">
-        {t('Когда раздел дошел до порога предупреждения, панель сама освобождает безопасное: журнал, старые логи, кэши пакетов, мусор docker. Каждое действие не чаще раза в 6 часов, о каждом запуске пишет в канал алертов. Включает только админ, нужны агент 2.13 и helper diskusage-setup 0.3.')}
-      </p>
-      {!isVm && (
-        <label className="field">
-          <span>🌡 {t('Алерт по температуре CPU, °C (0 = выкл)')}</span>
-          <input
-            type="number"
-            min={0}
-            max={120}
-            value={nv(form.temp_alert_c)}
-            onChange={(e) => set({ temp_alert_c: num(e.target.value) })}
-          />
-        </label>
-      )}
-      <div className="form-row">
-        <label className="field">
-          <span>🔗 {t('Алерт conntrack, % (0 = выкл)')}</span>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={nv(form.conntrack_alert_percent)}
-            onChange={(e) => set({ conntrack_alert_percent: num(e.target.value) })}
-          />
-        </label>
-        <label className="field">
-          <span>🔌 {t('Алерт по коннектам СУБД, % (0 = выкл)')}</span>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            value={nv(form.db_conn_alert_percent)}
-            onChange={(e) => set({ db_conn_alert_percent: num(e.target.value) })}
-          />
-        </label>
-        <label className="field">
-          <span>🌐 {t('Алерт по ошибкам 5xx, % за 15 минут (0 = выкл)')}</span>
-          <input
-            type="number"
-            min={0}
-            max={100}
-            step={0.01}
-            value={nv(form.web_5xx_alert_percent)}
-            onChange={(e) => set({ web_5xx_alert_percent: num(e.target.value) })}
-          />
-        </label>
-        <label className="field">
-          <span>⏳ {t('Предупреждать о сроках Kubernetes за, дн. (через запятую, пусто = выкл)')}</span>
-          <input
-            type="text"
-            placeholder="7, 1"
-            value={form.kube_expiry_warn_days}
-            onChange={(e) => set({ kube_expiry_warn_days: e.target.value })}
-          />
-        </label>
-        {!isVm && (
-          <label className="field">
-            <span>🌡 {t('Алерт по температуре диска, °C (0 = выкл)')}</span>
-            <input
-              type="number"
-              min={0}
-              max={120}
-              value={nv(form.disk_temp_alert_c)}
-              onChange={(e) => set({ disk_temp_alert_c: num(e.target.value) })}
-            />
-          </label>
-        )}
-      </div>
-      <label className="field">
-        <span>{t('Считать оффлайн после, сек')}</span>
-        <input
-          type="number"
-          min={30}
-          max={86400}
-          value={nv(form.offline_after_seconds)}
-          onChange={(e) => set({ offline_after_seconds: num(e.target.value) })}
-        />
-      </label>
-      <label className="field">
-        <span>{t('Алертить, только если держится дольше, мин')}</span>
-        <input
-          type="number"
-          min={0}
-          max={1440}
-          value={nv(form.alert_sustain_min)}
-          onChange={(e) => set({ alert_sustain_min: num(e.target.value) })}
-        />
-        <span className="muted small">
-          {t('Гасит кратковременные спайки CPU/RAM/температуры/conntrack. 0 = слать сразу.')}
-        </span>
-      </label>
-      <div className="mute-group">
-        <span className="muted small">{t('Не слать алерты этого сервера:')}</span>
-        <div className="mute-chips">
-          {kinds.map(({ k, label }) => {
-            const muted = form.alert_mutes.includes(k)
-            return (
-              <button
-                key={k}
-                type="button"
-                className={`mute-chip${muted ? ' mute-chip-on' : ''}`}
-                onClick={() =>
-                  set({
-                    alert_mutes: muted
-                      ? form.alert_mutes.filter((x) => x !== k)
-                      : [...form.alert_mutes, k],
-                  })
-                }
-              >
-                {muted ? '🔕 ' : ''}
-                {t(label)}
-              </button>
-            )
-          })}
-        </div>
-      </div>
-      {/* ретранслятор: прокси до панели для агентов, чей адрес режут на пути к ней */}
-      <label className="checkbox" id="edit-relay">
-        <input
-          type="checkbox"
-          checked={form.relay_enabled}
-          onChange={(e) => set({ relay_enabled: e.target.checked })}
-        />
-        <span>📡 {t('Ретранслятор для агентов')}</span>
-      </label>
-      <p className="muted small">
-        {t('Сервер станет прокси до панели для агентов, чей адрес режут на пути к ней. Пускает только до панели, только с адресов серверов, выбравших его в окне команды установки, и только с логином. Ставит helper relay-setup (появится в "Требует действий"), нужен python3. Включить можно, только если сервер сам ходит в панель напрямую.')}
-      </p>
-      {form.relay_enabled && (
-        <label className="field">
-          <span>{t('Порт ретранслятора')}</span>
-          <input
-            type="number"
-            min={1024}
-            max={65535}
-            value={form.relay_port || ''}
-            placeholder={String(RELAY_DEFAULT_PORT)}
-            onChange={(e) => set({ relay_port: num(e.target.value) })}
-          />
-        </label>
-      )}
-      {form.relay_enabled && relay && <RelayStatus relay={relay} host={host} />}
-      <div className="modal-actions edit-actions">
-        <button className="ghost" onClick={onCancel} disabled={busy}>
-          {t('Отмена')}
-        </button>
-        <button onClick={onSubmit} disabled={busy || !form.name.trim()}>
-          {busy ? t('…') : t('Сохранить')}
-        </button>
-      </div>
-    </div>
-  )
-}
-
 // Полноэкранный график одной метрики: пресеты периода + зум мышью (как в Grafana).
 function ServerChartModal({
   server,
@@ -6865,6 +6501,7 @@ function ServerDetail({
   const [zoomKey, setZoomKey] = useState<MetricKey | null>(null)
   const [editing, setEditing] = useState(false)
   const [form, setForm] = useState<ServerEditForm | null>(null)
+  const [editSec, setEditSec] = useState('srv') // раздел, с которого открыть окно настроек
   // Esc закрывает карточку, но не во время правки: там он стер бы набранное
   useEscape(onClose, !editing)
   const [saving, setSaving] = useState(false)
@@ -7012,13 +6649,13 @@ function ServerDetail({
     }
   }
 
-  // бэйдж "ретранслятор" в шапке: настройки сразу на галочке ретранслятора и его состоянии
+  // бэйдж "ретранслятор" в шапке: окно настроек сразу на разделе ретранслятора
   function editRelay() {
-    startEdit()
-    window.setTimeout(() => document.getElementById('edit-relay')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 100)
+    startEdit('relay')
   }
 
-  function startEdit() {
+  function startEdit(sec = 'srv') {
+    setEditSec(sec)
     setForm({
       name: s.name,
       group_name: s.group_name,
@@ -7264,22 +6901,22 @@ function ServerDetail({
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
             {s.onboard && <span className="type-chip onb-chip">{t('подключается')}</span>}
             {/* роли как в списке; состояние ретранслятора живет в настройках сервера: клик туда */}
-            {!editing && <RoleChips s={s} servers={servers} t={t} onRelay={isViewer ? undefined : editRelay} />}
-            {!editing && s.gpu_sum && (
+            <RoleChips s={s} servers={servers} t={t} onRelay={isViewer ? undefined : editRelay} />
+            {s.gpu_sum && (
               <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
             )}
             {/* что заглушено - значком, сами заглушки в разделе "Алерты" */}
-            {muteItems.length > 0 && !editing && (
+            {muteItems.length > 0 && (
               <button className="srv-head-chip" onClick={() => go('alerts')}>
                 <MuteChip items={muteItems} t={t} />
               </button>
             )}
             {/* заметка живет в редактировании сервера, здесь - значком с текстом в подсказке */}
-            {s.note && !editing && (
+            {s.note && (
               <button
                 className="srv-head-chip srv-head-note"
                 title={s.note}
-                onClick={isViewer ? undefined : startEdit}
+                onClick={isViewer ? undefined : () => startEdit()}
               >
                 📝
               </button>
@@ -7289,8 +6926,8 @@ function ServerDetail({
             <button className="ghost icon-btn" onClick={() => setHistOpen(true)} title={t('История алертов')}>
               🔔
             </button>
-            {!editing && !isViewer && (
-              <button className="ghost icon-btn" onClick={startEdit} title={t('Изменить')}>
+            {!isViewer && (
+              <button className="ghost icon-btn" onClick={() => startEdit()} title={t('Изменить')}>
                 ✎
               </button>
             )}
@@ -7299,11 +6936,11 @@ function ServerDetail({
             </button>
           </div>
         </div>
-        {!editing && <MaintBanner kind="server" id={s.id} />}
+        <MaintBanner kind="server" id={s.id} />
         {/* Карточка молчащей ноды показывала свежие на вид проценты и «обновлено N
             назад» мелким шрифтом среди прочей меты — выглядело как рабочий сервер.
             Говорим прямо, и сразу под именем: цифры ниже historical, а не текущие. */}
-        {!editing && s.last_report && !s.online && (
+        {s.last_report && !s.online && (
           <div className="srv-offline-note">
             <span className="srv-offline-ic">🔴</span>
             <span>
@@ -7382,38 +7019,7 @@ function ServerDetail({
           </div>
         )}
 
-        {editing && form ? (
-          <>
-            <NoteBar
-              note={s.note}
-              by={s.note_by}
-              at={s.note_at}
-              canEdit={!isViewer}
-              onSave={async (text) => {
-                try {
-                  await setServerNote(s.id, text)
-                  onChanged()
-                } catch (e) {
-                  if (e instanceof ApiError && e.status === 401) onUnauthorized()
-                  throw e
-                }
-              }}
-            />
-            <ServerEditCard
-              form={form}
-              set={(patch) => setForm({ ...form, ...patch })}
-              busy={saving}
-              err={saveErr}
-              groups={groups}
-              isVm={r.is_vm === true}
-              relay={s.relay}
-              host={hostOf(s)}
-              onSubmit={submitEdit}
-              onCancel={() => setEditing(false)}
-              onDelete={del}
-            />
-          </>
-        ) : !s.last_report ? (
+        {!s.last_report ? (
           <div className="srv-nodata">
             <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
             <div className="srv-nodata-title">{t('Сервер недоступен')}</div>
@@ -7948,6 +7554,39 @@ function ServerDetail({
     )}
     {enroll && (
       <InstallModal enroll={enroll} title={t('Команда установки')} mode={enrollMode} onClose={() => { setEnroll(null); onChanged() }} />
+    )}
+    {editing && form && (
+      <ServerEditModal
+        form={form}
+        set={(patch) => setForm({ ...form, ...patch })}
+        busy={saving}
+        err={saveErr}
+        groups={groups}
+        isVm={r.is_vm === true}
+        relay={s.relay}
+        host={hostOf(s)}
+        initialSec={editSec}
+        note={
+          <NoteBar
+            note={s.note}
+            by={s.note_by}
+            at={s.note_at}
+            canEdit={!isViewer}
+            onSave={async (text) => {
+              try {
+                await setServerNote(s.id, text)
+                onChanged()
+              } catch (e) {
+                if (e instanceof ApiError && e.status === 401) onUnauthorized()
+                throw e
+              }
+            }}
+          />
+        }
+        onSubmit={submitEdit}
+        onCancel={() => setEditing(false)}
+        onDelete={del}
+      />
     )}
     </>
   )
