@@ -105,7 +105,15 @@ function RestartRow({
           </div>
         </div>
         <div className={`docker-c-status mono small ${tone}`}>
-          {hot ? t('повод для алерта') : p.alert ? t('заглушен') : p.kind === 'exit0' ? t('плановый') : t('реже порога')}
+          {hot
+            ? t('повод для алерта')
+            : p.alert
+              ? t('заглушен')
+              : p.kind === 'exit0'
+                ? t('плановый')
+                : p.wait
+                  ? t(p.rollout ? 'выкатка, ждем до {t}' : 'новый под, ждем до {t}', { t: hhmm(new Date(p.wait)) })
+                  : t('реже порога')}
         </div>
       </div>
       <div className="job-log">
@@ -185,7 +193,8 @@ export function KubeRestartsSec({
   return (
     <div className="srv-sec">
       <p className="muted small kube-hint">
-        {t('Поды, которые перезапускались за сутки. В Telegram: OOMKilled от 3 раз, падения и убийства по пробе от 5, пачки от {n}. Выход с кодом 0 - плановый, только здесь.', { n: data.burst_min })}
+        {t('Поды, которые перезапускались за сутки. В Telegram: OOMKilled от 3 раз, падения и убийства по пробе от 5, пачки от {n}. Выход с кодом 0 - плановый, только здесь.', { n: data.burst_min })}{' '}
+        {t('Новый под первые полчаса не алертит, а пока рядом работает прошлая ревизия - час: так идет выкатка. Падает и после - алерт.')}
       </p>
       {bursts.length > 0 && (
         <div className={burstsHot && !burstsMuted ? 'net-prob' : 'net-note'}>

@@ -1731,6 +1731,8 @@ export type KubeRestartPod = {
   alert: boolean // повод для алерта
   muted: boolean
   mute: string // ключ мьюта: restarts:pod:<ns>/<ворклоад>
+  wait?: string | null // новый под: перезапуски выкатки не алертят до этого момента
+  rollout?: boolean // рядом работает прошлая ревизия деплоймента
 }
 export type KubeRestarts = {
   pods: KubeRestartPod[]

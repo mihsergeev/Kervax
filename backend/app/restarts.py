@@ -42,10 +42,11 @@ def targets(rep: dict) -> dict[str, int]:
     return out
 
 
-def step(prev: dict | None, rc: int, now: datetime, last: dict | None = None) -> dict:
+def step(prev: dict | None, rc: int, now: datetime, last: dict | None = None, pod: bool = False) -> dict:
     """Новое состояние счетчика: прирост RestartCount с прошлого раза - событие [время, сколько].
     Счетчик уменьшился - контейнер пересоздали (деплой), это не падение, а новая точка отсчета.
-    last - как кончился прошлый запуск пода (агент 2.43); его нет в отчете - держим известный."""
+    last - как кончился прошлый запуск пода (агент 2.43); его нет в отчете - держим известный.
+    pod - у пода помним, с какого момента он такой ("seen", см. YOUNG_S)."""
     p = prev if isinstance(prev, dict) else {}
     ev = []
     for e in p.get("ev") or []:
@@ -56,6 +57,13 @@ def step(prev: dict | None, rc: int, now: datetime, last: dict | None = None) ->
     if isinstance(was, int) and rc > was:
         ev.append([now.isoformat(), rc - was])
     out = {"rc": rc, "ev": ev[-_KEEP:]}
+    if pod:
+        # новый под или пересозданный под тем же именем (счетчик сбросился, так у StatefulSet и
+        # DaemonSet) - с сейчас. У подов, которые панель видела раньше без отметки, ее нет: старые
+        if not isinstance(prev, dict) or (isinstance(was, int) and rc < was):
+            out["seen"] = now.isoformat()
+        elif p.get("seen"):
+            out["seen"] = p["seen"]
     known = last or (p.get("last") if isinstance(p.get("last"), dict) else None)
     if known and rc:
         out["last"] = known
@@ -83,7 +91,7 @@ def update(state: dict | None, rep: dict, now: datetime) -> dict:
     счетчики держим как были: иначе прошлые сутки перезапусков потерялись бы."""
     old = state if isinstance(state, dict) else {}
     pods = _pods(rep)
-    new = {k: step(old.get(k), rc, now, _last_of(pods.get(k))) for k, rc in targets(rep).items()}
+    new = {k: step(old.get(k), rc, now, _last_of(pods.get(k)), k.startswith("pod:")) for k, rc in targets(rep).items()}
     has_docker = bool(((rep or {}).get("docker") or {}).get("access"))
     has_pods = "pods" in (((rep or {}).get("kube") or {}))
     for k, v in old.items():
@@ -271,9 +279,78 @@ def bursts(rs: dict, ctrl: dict[str, str], now: datetime, skip: set[str] | None 
     return out
 
 
+# Выкатка: новый под не встает, падает, его чинят следующей выкаткой, и он уходит. По порогу это
+# был алерт через пять минут, а через час "поды больше не перезапускаются" - пара сообщений о
+# том, что разработчики и так видят в своем CI. Поэтому перезапуски пода в первые YOUNG_S его
+# жизни (с "seen", когда панель его впервые увидела или он пересоздан) не алертят. Пока рядом
+# работает и готов под прошлой ревизии того же деплоймента, сервис жив, и ждем ROLLOUT_S.
+# Под и после выдержки падает дальше (перезапуск в первые CONT_S после нее) - выкатка зависла:
+# алерт со всеми перезапусками. Затих - ранние перезапуски в счет не идут ни сейчас, ни потом.
+YOUNG_S = 1800
+ROLLOUT_S = 3600
+CONT_S = 600
+
+
+def _old_revision_alive(pods: dict[str, dict]) -> set[str]:
+    """Поды деплойментов, рядом с которыми работает и готов под другой ревизии того же
+    деплоймента: идет выкатка, старая ревизия держит сервис. Ревизия - хеш ReplicaSet в имени."""
+    revs: dict[str, list[tuple[str, str, bool]]] = {}
+    for k, p in pods.items():
+        if p.get("owner") != "ReplicaSet":
+            continue
+        rev = podnames.revision(str(p.get("name") or ""))
+        if rev:
+            up = p.get("phase") == "Running" and bool(p.get("ready"))
+            revs.setdefault(podnames.pod_key(k, str(p.get("ctrl") or "")), []).append((k, rev, up))
+    out = set()
+    for items in revs.values():
+        for k, rev, _up in items:
+            if any(up and r != rev for _k, r, up in items):
+                out.add(k)
+    return out
+
+
+def _young(cs: dict | None, evs: list[tuple[datetime, int]], rollout: bool, gone: bool,
+           now: datetime) -> tuple[datetime | None, set[datetime]]:
+    """Выдержка нового пода (см. YOUNG_S): (до какого момента ждем или None, ранние перезапуски,
+    которые не в счет)."""
+    seen = _ts((cs or {}).get("seen"))
+    if seen is None:
+        return None, set()
+    if gone:
+        # под ушел из отчета (его убрала следующая выкатка), а состояние помнит его до конца тика:
+        # прошлой ревизии рядом уже не видно, и выдержка сжималась бы до получаса - алерт в минуту
+        # починки. Ушедший под - не новость
+        return None, {t for t, _c in evs}
+    until = seen + timedelta(seconds=ROLLOUT_S if rollout else YOUNG_S)
+    early = {t for t, _c in evs if t < until}
+    if now < until:
+        return until, early
+    late = [t for t, _c in evs if t >= until]
+    if late and min(late) <= until + timedelta(seconds=CONT_S):
+        return None, set()  # падал и после выдержки без передышки: выкатка зависла
+    return None, early
+
+
+def rollout_hold(s: Server, now: datetime) -> set[str]:
+    """Поды новой ревизии в первые ROLLOUT_S, пока рядом работает прошлая: "под не работает"
+    (kube_pod) про них ждет, как и перезапуски (_young). Под, которого панель еще не запомнила
+    (первый отчет с ним), - новый; запомненный без "seen" - старый."""
+    rs = (s.alert_state or {}).get("restarts")
+    rs = rs if isinstance(rs, dict) else {}
+    out = set()
+    for k in _old_revision_alive(_pods(s.last_report)):
+        cs = rs.get(k)
+        seen = _ts(cs.get("seen")) if isinstance(cs, dict) else now
+        if seen is not None and (now - seen).total_seconds() < ROLLOUT_S:
+            out.add(k)
+    return out
+
+
 def _pod_rows(s: Server, now: datetime) -> tuple[list[dict], list[dict]]:
     """Поды с перезапусками за сутки и пачки. У пода: n - всего, solo - не в пачках, cause, alert -
-    повод для алерта: OOMKilled от MIN_OOM, остальное (кроме выхода с кодом 0) - от MIN не в пачках"""
+    повод для алерта: OOMKilled от MIN_OOM, остальное (кроме выхода с кодом 0) - от MIN не в пачках;
+    перезапуски выкатки (_young) не в счет, wait - до какого момента ждем нового пода"""
     st = s.alert_state or {}
     rs = st.get("restarts") if isinstance(st.get("restarts"), dict) else {}
     ctrl = podnames.ctrls(s.last_report)
@@ -286,6 +363,7 @@ def _pod_rows(s: Server, now: datetime) -> tuple[list[dict], list[dict]]:
     bl = bursts(rs, ctrl, now, skip, lasts)
     # в счет пода не идут только перезапуски из пачек, где подтверждено подвисание ноды
     in_burst = set().union(*(b["ev"] for b in bl if b["node"])) if bl else set()
+    rollout = _old_revision_alive(pods)
     rows = []
     for key in sorted(rs):
         if not key.startswith("pod:"):
@@ -297,10 +375,13 @@ def _pod_rows(s: Server, now: datetime) -> tuple[list[dict], list[dict]]:
         solo = sum(c for t, c in evs if (key, t) not in in_burst)
         p = pods.get(key) or {}
         ck, ctext = cause(lasts.get(key))
-        alert = ck != "exit0" and (n >= MIN_OOM if ck == "oom" else solo >= MIN)
+        wait, early = _young(rs[key], evs, key in rollout, key not in pods, now)
+        n_a = sum(c for t, c in evs if t not in early)
+        solo_a = sum(c for t, c in evs if (key, t) not in in_burst and t not in early)
+        alert = wait is None and ck != "exit0" and (n_a >= MIN_OOM if ck == "oom" else solo_a >= MIN)
         rows.append({"key": key, "n": n, "solo": solo, "last": max(t for t, _c in evs), "times": sorted(t for t, _c in evs),
                      "ck": ck, "cause": ctext, "alert": alert, "ctrl": ctrl.get(key, ""), "pod": p,
-                     "lastinfo": lasts.get(key)})
+                     "lastinfo": lasts.get(key), "wait": wait, "rollout": key in rollout})
     return rows, bl
 
 
@@ -401,6 +482,8 @@ def kube_view(s: Server, now: datetime) -> dict | None:
         "why": r["cause"], "last": r["lastinfo"], "alert": r["alert"],
         "mute": MUTE_PREFIX + podnames.pod_key(r["key"], r["ctrl"]),
         "muted": podnames.muted(muted, r["key"], r["ctrl"]),
+        # новый под: перезапуски выкатки до этого момента не алертят (rollout - рядом жива прошлая ревизия)
+        "wait": r["wait"].isoformat() if r["wait"] else None, "rollout": r["rollout"],
     } for r in sorted(rows, key=lambda r: (not r["alert"], -r["n"], r["key"]))]
     return {
         "pods": pods,
