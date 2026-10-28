@@ -1,10 +1,11 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react'
-import { errorFields, reportFront } from './errorLog'
+import { errorFields, reloadToFresh, reportFront, staleBuild } from './errorLog'
 import { useI18n } from './i18n'
 
 // Экран, который упал при отрисовке, раньше превращался в белую страницу без единого слова.
 // Теперь ошибка уходит в журнал ошибок панели, а человек видит, что случилось, и может
 // сообщить о проблеме или перезагрузить страницу. resetKey - смена раздела снимает поломку.
+// Вкладку от прошлой версии панели (после выкладки) перезагружает сама, один раз на сборку.
 type Props = { children: ReactNode; resetKey: string; onReport: () => void }
 type State = { error: Error | null; key: string }
 
@@ -24,6 +25,11 @@ export class ErrorBoundary extends Component<Props, State> {
   componentDidCatch(error: Error, info: ErrorInfo): void {
     const { message, stack } = errorFields(error)
     reportFront('render', message, stack, info.componentStack || '')
+    // вкладка осталась от прошлой версии, а данные уже от новой: экран перезагружаем на новую
+    // сборку (в журнал reportFront такое сам не пишет)
+    void staleBuild().then((fresh) => {
+      if (fresh) reloadToFresh(fresh)
+    })
   }
 
   render(): ReactNode {

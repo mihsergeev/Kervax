@@ -12,10 +12,12 @@
 
 import base64
 import binascii
+import contextlib
 import hashlib
 import json
 import os
 import re
+import tempfile
 
 from fastapi import APIRouter, HTTPException, Response, status
 
@@ -139,11 +141,18 @@ def _write_meta(meta: dict) -> None:
     os.makedirs(_dir(), exist_ok=True)
     path = os.path.join(_dir(), _META)
     # пишем через временный файл: оборванная запись не должна оставить обрубок,
-    # из-за которого панель решит, что логотипа нет
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False)
-    os.replace(tmp, path)
+    # из-за которого панель решит, что логотипа нет. Файл свой у каждой записи: у воркеров
+    # uvicorn общее имя meta.json.tmp давало гонку, как у agent_allow_ips
+    fd, tmp = tempfile.mkstemp(dir=_dir(), prefix=_META + ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 @router.get("", response_model=BrandingOut)

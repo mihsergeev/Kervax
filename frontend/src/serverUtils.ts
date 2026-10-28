@@ -45,8 +45,9 @@ export function unitsBlock(r?: ServerReport | null): UnitsBlock | null {
 // Подпись лога - как у панели (web_log_label): под kubernetes, "контейнер (домены +N)",
 // домены, имя или файл. Несколько доменов в одной строке - это один nginx: все свои
 // сайты он пишет в общий access-лог, и разделить их можно, только если в формате лога
-// есть $host. По этой подписи строки под графиком находят цвет своей полосы.
-export function webLogLabel(l: { log: string; name?: string; sites?: string[] }): string {
+// есть $host. По этой подписи строки под графиком находят цвет своей полосы. Пути лога нет у
+// учетки только для просмотра без галки "может читать логи" (бэкенд его вырезает).
+export function webLogLabel(l: { log?: string; name?: string; sites?: string[] }): string {
   let name = l.name ?? ''
   const sites = (l.sites ?? []).filter(Boolean)
   if (name.includes('/')) {
@@ -58,7 +59,7 @@ export function webLogLabel(l: { log: string; name?: string; sites?: string[] })
     const doms = sites.slice(0, 2).join(', ') + (sites.length > 2 ? ` +${sites.length - 2}` : '')
     return (name ? `${name} (${doms})` : doms).slice(0, 120)
   }
-  return (name || l.log.split('/').pop() || l.log).slice(0, 120)
+  return (name || (l.log ?? '').split('/').pop() || l.log || '?').slice(0, 120)
 }
 
 // Под какой полосой графика идет лог: поды одного деплоймента - одна полоса (как

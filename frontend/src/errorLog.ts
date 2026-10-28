@@ -49,6 +49,58 @@ export function recentClientLog(): ClientLogItem[] {
   return log.filter((x) => Date.parse(x.ts) >= edge)
 }
 
+// --- вкладка со старой сборкой ---------------------------------------------------------------
+// После выкладки открытая вкладка живет со старым JS, а данные приходят уже от нового бэкенда:
+// поле, которое новый бэкенд больше не отдает, роняет старый экран (24.10 файлы сайтов читали
+// r.edit.length, а 1.8.28 перестал отдавать edit). Это не ошибка текущей версии: в журнал такое не
+// пишем, а упавший экран перезагружаем на новую сборку.
+
+const STALE_MS = 60_000
+const RELOAD_KEY = 'kervax_stale_reload'
+
+// путь бандла из index.html сборки vite; у dev-сервера его нет
+export function bundleOf(html: string): string | null {
+  const m = html.match(/<script\b[^>]*\bsrc="([^"]*\/assets\/index-[^"/]+\.js)"/)
+  return m ? m[1] : null
+}
+
+// свежая сборка (путь бандла), если вкладка живет со старой; null - та же или не понять
+export function staleOf(loaded: string | null, freshHtml: string): string | null {
+  const fresh = bundleOf(freshHtml)
+  if (!loaded || !fresh) return null
+  const path = (u: string) => new URL(u, 'http://x').pathname
+  return path(fresh) !== path(loaded) ? path(fresh) : null
+}
+
+let staleCheck: { at: number; p: Promise<string | null> } | null = null
+export function staleBuild(): Promise<string | null> {
+  const now = Date.now()
+  if (staleCheck && now - staleCheck.at < STALE_MS) return staleCheck.p
+  const el = document.querySelector<HTMLScriptElement>('script[type="module"][src*="/assets/index-"]')
+  const loaded = el?.getAttribute('src') ?? null
+  const p = !loaded
+    ? Promise.resolve(null)
+    : fetch('/', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.text() : ''))
+      .then((html) => staleOf(loaded, html))
+      .catch(() => null)
+  staleCheck = { at: now, p }
+  return p
+}
+
+// перезагрузить на свежую сборку - один раз на сборку: если и после перезагрузки ошибка,
+// значит это ошибка новой версии, и она идет в журнал как обычно
+export function reloadToFresh(fresh: string): boolean {
+  try {
+    if (sessionStorage.getItem(RELOAD_KEY) === fresh) return false
+    sessionStorage.setItem(RELOAD_KEY, fresh)
+  } catch {
+    return false
+  }
+  window.location.reload()
+  return true
+}
+
 // --- ошибки интерфейса -----------------------------------------------------------------------
 
 const seen = new Map<string, number>()
@@ -77,18 +129,19 @@ export function reportFront(kind: 'error' | 'rejection' | 'render', message: str
   seen.set(key, now)
   if (seen.size > 200) seen.clear()
   burst.push(now)
-  void fetch('/api/panel-errors/front', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...uiHeaders() },
-    body: JSON.stringify({
-      kind,
-      message: msg,
-      stack: (stack || '').slice(0, 8000),
-      component: (component || '').slice(0, 4000),
-      page: uiPage(),
-      section: ctx.section,
-    }),
-    keepalive: true,
+  const body = JSON.stringify({
+    kind,
+    message: msg,
+    stack: (stack || '').slice(0, 8000),
+    component: (component || '').slice(0, 4000),
+    page: uiPage(),
+    section: ctx.section,
+  })
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...uiHeaders() }
+  // вкладка со старой сборкой: ошибка не про текущую версию (см. staleBuild)
+  void staleBuild().then((fresh) => {
+    if (fresh) return
+    return fetch('/api/panel-errors/front', { method: 'POST', headers, body, keepalive: true })
   }).catch(() => undefined)
   return true
 }

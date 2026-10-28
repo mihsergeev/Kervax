@@ -9,7 +9,7 @@ import html
 import logging
 import re
 
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import datetime, timezone
 
 import httpx
@@ -325,6 +325,40 @@ def _tg_why(r) -> str:
         return "без описания"
 
 
+# Отказы Telegram, которые человек чинит сам: голое "HTTP 400: Bad Request: chat not found" не говорит,
+# что делать (типично после смены токена: новый бот еще не в чатах). Подстрока описания -> что сказать
+_TG_HINTS = (
+    ("chat not found", "бот не состоит в чате {chat}: добавьте его в группу, а в личке откройте бота и нажмите Start"),
+    ("bot was blocked by the user", "в чате {chat} бота заблокировали: разблокируйте его и нажмите Start"),
+    ("bot can't initiate conversation", "бот не может писать первым в {chat}: откройте бота и нажмите Start"),
+    ("bot was kicked", "бота удалили из чата {chat}: добавьте его обратно"),
+    ("bot is not a member", "бот не участник чата {chat}: добавьте его туда"),
+    ("need administrator rights", "в канале {chat} бот должен быть админом с правом публиковать"),
+    ("not enough rights", "в чате {chat} боту запрещено писать: разрешите ему отправку сообщений"),
+    ("upgraded to a supergroup", "группа {chat} стала супергруппой, у нее новый id{new}: впишите его в чаты"),
+    ("unauthorized", "токен бота неверный или отозван: возьмите текущий у @BotFather"),
+    ("not found", "Telegram не узнал бота: проверьте токен и адрес API"),
+)
+
+
+def _tg_hint(r, chat: str) -> str:
+    """Что не так и что делать по отказу Telegram, '' - отказ незнакомый."""
+    why = _tg_why(r).lower()
+    new = ""
+    with suppress(Exception):
+        new = str((r.json().get("parameters") or {}).get("migrate_to_chat_id") or "")
+    for part, hint in _TG_HINTS:
+        if part in why:
+            return hint.format(chat=chat, new=f" {new}" if new else "")
+    return ""
+
+
+def _tg_error(r, code: int, chat: str) -> str:
+    raw = f"HTTP {code}: {_tg_why(r)}"
+    hint = _tg_hint(r, chat)
+    return f"{hint} ({raw})" if hint else raw
+
+
 async def _post(http, url: str, payload: dict):
     if http is not None:
         return await http.post(url, json=payload)
@@ -361,7 +395,7 @@ async def tg_send(
         r = await _post(http, url, payload)
         code = _status(r)
     if 400 <= code < 500 and code != 429:
-        raise TgRejected(f"HTTP {code}: {_tg_why(r)}")
+        raise TgRejected(_tg_error(r, code, str(chat)))
     if code >= 400:
         raise RuntimeError(f"HTTP {code}: {_tg_why(r)}")
     r.raise_for_status()

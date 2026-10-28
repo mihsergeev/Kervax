@@ -272,6 +272,27 @@ async def test_viewer_without_logs_gets_no_log_lines(client, auth_headers):
     assert "fakepass" in (await client.get(f"/api/servers/{sid}", headers=auth_headers)).text
 
 
+async def test_viewer_without_logs_gets_5xx_summary_without_lines(client, auth_headers):
+    """Сводка 5xx отдавала наблюдателю без галки логов последние строки access-лога, хотя
+    /web-errors/lines для него закрыт: в URL бывают токены."""
+    from datetime import datetime, timezone
+
+    from app.models import WebErrorSample
+
+    sid, _ah = await _server(client, auth_headers, "node-a")
+    async with client._transport.app.state.session_factory() as s:
+        s.add(WebErrorSample(server_id=sid, ts=datetime.now(timezone.utc), src_ts=1, e5=3, rpm=100,
+                             log="/var/log/nginx/access.log", label="web-a", codes={"502": 3},
+                             paths=[{"p": "/api", "n": 3}], lines=["GET /api?token=fakepass 502"]))
+        await s.commit()
+    vh = await _user(client, auth_headers, "watcher", role="viewer")
+    got = (await client.get(f"/api/servers/{sid}/web-errors", headers=vh)).json()
+    assert got[0]["errors"] == 3 and got[0]["lines"] == [] and "fakepass" not in str(got)
+    lv = await _user(client, auth_headers, "reader", role="viewer", can_read_logs=True)
+    assert (await client.get(f"/api/servers/{sid}/web-errors", headers=lv)).json()[0]["lines"]
+    assert (await client.get(f"/api/servers/{sid}/web-errors", headers=auth_headers)).json()[0]["lines"]
+
+
 async def test_viewer_sees_monitor_address_without_secrets(client, auth_headers):
     r = await client.post("/api/checks", json={"name": "a", "type": "http", "auth_user": "bob",
                                                "target": "https://bob:fakepass@a.example/x?token=fake-token-example&p=1"},
