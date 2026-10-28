@@ -360,6 +360,13 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
       items.push({ key: `onb-${s.id}`, icon: '🆕', section: 'servers', id: s.id, name: s.name, cc: s.country, ...hm(s, 'onb'),
         text: t('{name}: идет подключение - посмотрите, что нашлось, и закройте его в карточке', { name: s.name }) })
     }
+    // Соединение до панели режут по объему (замеры агента 2.56, backend app/gre.need): отчеты
+    // проходят, а обновления агента и большие ответы - нет. Ведем в карточку: там кнопка включить GRE
+    if (s.gre_need && !s.gre_enabled) {
+      items.push({ key: `gre-need-${s.id}`, icon: '🚇', section: 'servers', id: s.id, name: s.name, cc: s.country,
+        ...hm(s, 'gre-need'),
+        text: t('{name}: соединение до панели режут после ~16кб - включите GRE до панели', { name: s.name }) })
+    }
     // бэкап-сервер найден (по docker), но статистики репо нет → нужен backupserver-setup
     const bs = rep?.backup_server
     if (bs?.present && (!bs.repos || bs.repos.length === 0)) {

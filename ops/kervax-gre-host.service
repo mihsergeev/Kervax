@@ -1,0 +1,13 @@
+# Also enabled on its own: the tunnels are not persistent, after a reboot they come back from here.
+[Unit]
+Description=Kervax: GRE tunnels from nodes to the panel host
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=KERVAX_GRE_LIST=/app/kervax/data/gre_tunnels
+ExecStart=/lib65/kervax/gre-sync.sh
+
+[Install]
+WantedBy=multi-user.target

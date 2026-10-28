@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KERVAX_", env_file=".env")
 
     app_name: str = "Kervax"
-    version: str = "1.8.50"
+    version: str = "1.8.51"
     debug: bool = False
     # Внешний URL панели — если задан, в алерты добавляется ссылка на монитор
     # (напр. https://kervax.example.com). Пусто = ссылку не добавляем.
@@ -15,6 +15,10 @@ class Settings(BaseSettings):
 
     db_url: str = "sqlite+aiosqlite:///./data/kervax.db"
     data_dir: str = "./data"
+    # GRE до панели (app/gre.py): из какого пула выделять /30 туннелей и с какого публичного адреса
+    # хост панели принимает GRE. Пусто - адрес берется из ответа ops/gre-sync.sh
+    gre_pool: str = "10.254.0.0/16"
+    gre_host_ip: str = ""
 
     # --- Мониторы сайтов/сервисов (основной сценарий) ---
     # Тик планировщика: как часто фоновый цикл проверяет, каким мониторам пора

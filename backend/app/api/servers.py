@@ -19,7 +19,7 @@ from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 
 from app import backup_unit
 from app import backup_verify
-from app import relay as relay_mod
+from app import gre as gre_mod, relay as relay_mod
 from app import disk_wear
 from app import request_watch
 from app import install_watch
@@ -309,6 +309,8 @@ def _out(
         server, cur_versions if cur_versions is not None else _current_setup_versions()
     )
     o.relay = relay_mod.view(server, now)
+    o.gre = gre_mod.view(server, now)
+    o.gre_need = gre_mod.need(server.last_report or {})
     o.helper_rollout = helper_rollout(server, o.helper_advice)
     o.backup_audit = _backup_coverage(server)
     o.custom_backups = custom_backups.views(server, now)
@@ -736,6 +738,7 @@ _SETUP_LABEL = {
     "gitlab-setup": "GitLab: версия, бэкап, миграции",
     "sockfix-setup": "Compose внешнего прокси: сокет и образ",
     "relay-setup": "Ретранслятор для агентов",
+    "gre-setup": "GRE-туннель до панели",
     "webfiles-setup": "Файлы сайтов: признаки взлома",
     "autoban-setup": "Автобан сканеров",
 }
@@ -782,15 +785,15 @@ def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
     out: list[HelperAdvice] = []
     # идём по тому, что панель РЕАЛЬНО раздаёт (cur), а не по списку в коде
     for name, c in sorted(cur.items()):
-        if not _setup_needed(name, rep, server.alert_mutes, relay=server.relay_enabled):
+        if not _setup_needed(name, rep, server.alert_mutes, relay=server.relay_enabled, gre=server.gre_enabled):
             continue
         inst = sv.get(name)  # None = helper до версионирования
         # агенты < 1.63 слали версии числами — приводим к строке, чтобы не спорить о типах
         inst = None if inst is None else str(inst)
-        # relay-setup - не про установщик: галочку ретранслятора ставят уже на живой ноде, и
+        # relay-setup и gre-setup - не про установщик: галочку ставят уже на живой ноде, и
         # установщик, прошедший раньше, его не принесет. Спрятать его на 20 минут значило
         # оставить kervax_outdated пустым как раз тогда, когда человек пошел гонять плейбук
-        if inst is None and fresh and name != "relay-setup":
+        if inst is None and fresh and name not in ("relay-setup", "gre-setup"):
             continue
         if inst is None or _ver_key(inst) < _ver_key(c):
             out.append(
@@ -1782,7 +1785,7 @@ async def delete_server(
     server_id: int, user: CurrentUser, session: SessionDep
 ) -> None:
     server = await _get_or_404(server_id, session, user)
-    name = server.name
+    name, had_gre = server.name, server.gre_enabled
     await session.execute(
         sa_delete(ServerMetric).where(ServerMetric.server_id == server_id)
     )
@@ -1801,6 +1804,8 @@ async def delete_server(
     await session.delete(server)
     await session.commit()
     await _write_agent_allowlist(session)
+    if had_gre:  # хост панели снимает его туннель
+        await gre_mod.write_tunnels(session)
     await audit.record(session, user.username, "server_delete", name)
 
 
@@ -3579,6 +3584,9 @@ async def agent_report(
         # страна и проверки снаружи, и у всех нод за одним прокси он был бы один. Адрес ноды
         # тогда только тот, что задан руками ("IP сервера"); не задан - прежний не трогаем.
         ext = (server.agent_ip or "").strip()
+    # через GRE до панели (app/gre.py) запрос приходит с адреса ноды в туннеле: в карточку идет
+    # ее настоящий публичный адрес, а не 10.254.x.x
+    ext = gre_mod.real_ip(server, ext, now)
     if ext:
         server.external_ip = ext
     server.agent_version = body.agent_version[:32]

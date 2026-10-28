@@ -1291,6 +1291,11 @@ class RelayUpdate(BaseModel):
         return v
 
 
+class GreUpdate(BaseModel):
+    """Галочка "GRE до панели" в настройках сервера (app/gre.py)."""
+    enabled: bool
+
+
 class InstallViaIn(BaseModel):
     """Как агент этого сервера пойдет в панель: окно команды установки."""
     mode: str = Field(pattern=r"^(direct|relay|location|custom)$")
@@ -1550,6 +1555,11 @@ class ServerOut(BaseModel):
     relay_port: int = 0
     relay: dict | None = None
     relay_via_id: int | None = None
+    # GRE до панели (app/gre.py): галочка, состояние туннеля и подсказка "соединение до панели
+    # режут по объему, нужен GRE" по замерам агента
+    gre_enabled: bool = False
+    gre: dict | None = None
+    gre_need: dict | None = None
     created_at: datetime | None = None
     online: bool = False  # вычисляется (last_seen в пределах offline_after)
     cpu_alert_percent: int
@@ -1868,6 +1878,13 @@ class AgentReportIn(BaseModel):
     local_ip: str = Field(default="", max_length=64)
     # агент 2.44+ за прокси: хост:порт прокси (без логина), адрес соединения - это прокси
     proxy: str = Field(default="", max_length=255)
+    # агент 2.56: адрес подключения к панели (connect= в конфиге, туннель GRE) и откатился ли он
+    # на прямое соединение, потому что туннель не отвечает
+    connect: str = Field(default="", max_length=64)
+    connect_down: bool = False
+    # замеры агента 2.56: сколько мелких и больших (~100 КБ одним соединением) кусков с панели
+    # дошло из последних попыток - по ним панель подсказывает GRE (app/gre.need)
+    net_probe: dict | None = None
     uptime_seconds: int = 0
     cpu_percent: float = 0.0
     mem_used: int = 0

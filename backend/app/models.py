@@ -851,6 +851,15 @@ class Server(Base):
     relay_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # через какой ретранслятор ходит агент ЭТОГО сервера: его адрес в списке пропускаемых
     relay_via_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # GRE до панели (app/gre.py): галочка, своя /30 из пула (остается и после выключения),
+    # публичный адрес ноды, с которого она шлет GRE (его называет helper gre-setup), что helper
+    # сообщил последним и когда, когда отчет агента пришел через туннель
+    gre_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    gre_net: Mapped[str | None] = mapped_column(String(18), nullable=True, unique=True, index=True)
+    gre_peer: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    gre_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    gre_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    gre_agent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from typing import Callable
 
 from app import access_audit, docker_exposure, docker_risk, onboard, reboot_survive, ssh_audit
-from app import backup_target, disk_wear, kube_coverage, software as software_mod
+from app import backup_target, disk_wear, gre, kube_coverage, software as software_mod
 from app.models import Server
 
 PREFIX = "home:"
@@ -48,9 +48,10 @@ LABELS = {
     "access-s": "давно не входят в учетки",
     "access-w": "слабые SSH-ключи",
     "ssh-ssh_password": "SSH пускает по паролю",
+    "gre-need": "соединение до панели режут по объему",
 }
 # без отпечатка: у пункта нет состояния, кроме "есть"
-PLAIN = {"d-acc", "k-acc", "onb", "bs-setup"}
+PLAIN = {"d-acc", "k-acc", "onb", "bs-setup", "gre-need"}
 
 # Отпечаток группы: None - данных нет (helper не прислал блок, старый агент), такую заглушку не
 # трогаем; "" - пункта нет; иначе - строка, из которой хеш отпечатка
@@ -194,12 +195,19 @@ def _ssh(s: Server, now: datetime, ctx: dict) -> str | None:
     return _h(f"{a['kind']}:{a['level']}" for a in ssh_audit.advice(s, now) if not a["muted"])
 
 
+def _gre_need(s: Server, now: datetime, ctx: dict) -> str | None:
+    rep = s.last_report or {}
+    if not isinstance(rep.get("net_probe"), dict):
+        return None
+    return "1" if gre.need(rep) and not s.gre_enabled else ""
+
+
 SIGS: dict[str, Sig] = {
     "d-acc": _d_acc, "k-acc": _k_acc, "d-old": _d_old, "k-noagent": _k_noagent, "wear-plan": _wear,
     "bs-restic": _bs_restic, "onb": _onb, "bs-setup": _bs_setup, "dbdump": _dbdump, "bk-http": _bk_http,
     "sw-eol": _sw(2), "sw-soon": _sw(1), "dockrisk": _dockrisk, "noboot-d": _noboot("docker"),
     "noboot-u": _noboot("units"), "access-s": _access("stale"), "access-w": _access("weak"),
-    "ssh-ssh_password": _ssh,
+    "ssh-ssh_password": _ssh, "gre-need": _gre_need,
 }
 
 

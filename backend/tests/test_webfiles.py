@@ -223,6 +223,8 @@ async def test_postponed_site_files_stay_on_server_and_new_ones_show(client, aut
 
 async def test_track_loose_root_is_server_problem(client, auth_headers, monkeypatch):
     monkeypatch.setattr(webfiles, "STALE", 10 ** 9)
+    # данные засеяны на NOW, а карточка сверяет с настоящим временем: без этого тест протухает через неделю
+    monkeypatch.setattr(webfiles, "WP_SHOW", timedelta(days=10 ** 5))
     f, sid, a, _b = await _seed(client, [])
     await webfiles.track(f, datetime.now(timezone.utc))
     async with f() as s:

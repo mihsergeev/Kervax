@@ -1,0 +1,11 @@
+# Runs gre-sync.sh as soon as the panel rewrites the list of GRE tunnels, so a node switched to GRE
+# gets the host's side within seconds instead of on the next cron run. See the script header.
+[Unit]
+Description=Kervax: bring GRE tunnels to the panel up right away
+
+[Path]
+PathChanged=/app/kervax/data/gre_tunnels
+Unit=kervax-gre-host.service
+
+[Install]
+WantedBy=multi-user.target

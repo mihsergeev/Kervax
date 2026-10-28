@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.55"
+const version = "2.56"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -246,6 +246,12 @@ type report struct {
 	ClockUnix int64      `json:"clock_unix,omitempty"`
 	// DNS ноды: резолверы и время их ответа (фоновый замер, последний снимок; nil - еще не мерили)
 	DNS *dnsInfo `json:"dns,omitempty"`
+	// 2.56: сколько мелких и больших кусков с панели дошло из последних замеров (netProbeLoop),
+	// адрес подключения к панели (connect=, туннель GRE до хоста панели) и откатился ли агент на
+	// прямое соединение, потому что по этому адресу панель не ответила
+	NetProbe    *netProbe `json:"net_probe,omitempty"`
+	Connect     string    `json:"connect,omitempty"`
+	ConnectDown bool      `json:"connect_down,omitempty"`
 	// Агент 2.26: что слушает нода и по каким публичным адресам её видно (панель проверяет
 	// порты снаружи), давление на ресурсы, процессы, зависшие на диске, файловые дескрипторы,
 	// TCP и обновления ОС. Пусто или nil - источника нет (старое ядро) или еще не мерили.
@@ -4047,6 +4053,7 @@ func collect(prev sample) (report, sample) {
 	dk := collectDocker() // один раз: нужен и для Docker, и для детекта бэкап-сервера
 	r := report{
 		Hostname: host, OS: osName(), AgentVersion: version, LocalIP: localIP(), Proxy: agentProxy,
+		Connect: connectAddr(), ConnectDown: connectDown(), NetProbe: netProbeLatest.Load(),
 		CPUModel: hostCPUModel, IsVM: hostIsVM, Virt: hostVirt,
 		Uptime: uptime(), CPUPercent: cpuBusy,
 		MemUsed: memUsed, MemTotal: memTotal,
@@ -8338,6 +8345,8 @@ func readConfig(path string) (url, token string) {
 			}
 		case "proxy": // прокси до панели (см. panelProxy)
 			panelProxyRaw = strings.TrimSpace(v)
+		case "connect": // адрес подключения к панели (см. panelDial)
+			panelConnect.Store(parseConnect(v))
 		case "kube_config": // путь к kube.json выделенного SA
 			if h := strings.TrimSpace(v); h != "" {
 				kubeConfigPath = h
@@ -8556,11 +8565,205 @@ func postGoingDown(panelURL, token, kind string) error {
 func panelTransport(keepAlive bool) *http.Transport {
 	return &http.Transport{
 		Proxy:                 panelProxy,
+		DialContext:           panelDial,
 		ForceAttemptHTTP2:     false,
 		DisableKeepAlives:     !keepAlive,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 12 * time.Second,
 		IdleConnTimeout:       60 * time.Second,
+	}
+}
+
+// ---- Агент 2.56: адрес подключения к панели (GRE до панели) и замер "режут ли по объему" ----
+
+// Адрес подключения к панели - connect= в конфиге, как у curl --resolve: TLS, SNI и проверка
+// сертификата остаются на имени панели из url=, а TCP идет на этот адрес. Его пишет helper
+// gre-setup, когда туннель до хоста панели поднят и панель через него отвечает: на канале, где
+// DPI замораживает соединение после ~16 КБ, голый GRE проходит. Конфиг перечитывается раз в
+// connectReread, так что helper ставит и снимает адрес без перезапуска агента. Панель по адресу
+// не отвечает - агент идет напрямую, как раньше, и пробует адрес снова через connectRetry.
+var (
+	panelConnect     atomic.Value // string: адрес из connect=, "" - напрямую
+	connectDownUntil atomic.Int64 // unix: до этого момента адрес считаем неотвечающим
+	connectWarned    atomic.Bool
+)
+
+const (
+	connectDialTimeout = 4 * time.Second
+	connectRetry       = 2 * time.Minute
+	connectReread      = 30 * time.Second
+)
+
+func connectAddr() string {
+	v, _ := panelConnect.Load().(string)
+	return v
+}
+
+// connectDown - адрес подключения задан, но сейчас агент ходит мимо него: не ответил
+func connectDown() bool {
+	return connectAddr() != "" && time.Now().Unix() < connectDownUntil.Load()
+}
+
+// parseConnect - адрес из connect=: только IP без порта. Имя резолвилось бы мимо туннеля, а
+// порт всегда тот же, что у панели в url=
+func parseConnect(raw string) string {
+	ip := net.ParseIP(strings.Trim(strings.TrimSpace(raw), "[]"))
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+// readConnect - только строка connect= из конфига: остальное агент перечитывает лишь при старте
+func readConnect(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return connectAddr() // не прочитался - оставляем как было
+	}
+	defer f.Close()
+	out := ""
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		k, v, ok := strings.Cut(strings.TrimSpace(sc.Text()), "=")
+		if ok && strings.TrimSpace(k) == "connect" {
+			out = parseConnect(v)
+		}
+	}
+	return out
+}
+
+// panelDial - соединение до панели. Задан адрес подключения и он не помечен неотвечающим - на
+// него, не вышло - как раньше, по имени. Только для самой панели: с proxy= транспорт звонит
+// прокси, и адрес подключения тут ни при чем.
+func panelDial(ctx context.Context, network, addr string) (net.Conn, error) {
+	var d net.Dialer
+	if c := connectAddr(); c != "" && addr == dialTarget && time.Now().Unix() >= connectDownUntil.Load() {
+		_, port, _ := net.SplitHostPort(addr)
+		cd := net.Dialer{Timeout: connectDialTimeout}
+		conn, err := cd.DialContext(ctx, network, net.JoinHostPort(c, port))
+		if err == nil {
+			connectWarned.Store(false)
+			return conn, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err // запрос отменили, адрес тут ни при чем
+		}
+		connectDownUntil.Store(time.Now().Add(connectRetry).Unix())
+		if !connectWarned.Swap(true) {
+			fmt.Fprintf(os.Stderr, "kervax-agent: панель не отвечает по адресу подключения %s (%v), иду напрямую\n", c, err)
+		}
+	}
+	return d.DialContext(ctx, network, addr)
+}
+
+// connectWatch - helper gre-setup поставил или снял connect=: подхватываем без перезапуска
+func connectWatch(cfgPath string) {
+	for range time.Tick(connectReread) {
+		c := readConnect(cfgPath)
+		if c == connectAddr() {
+			continue
+		}
+		panelConnect.Store(c)
+		connectDownUntil.Store(0)
+		connectWarned.Store(false)
+		if c != "" {
+			fmt.Printf("kervax-agent: в панель по адресу подключения %s\n", c)
+		} else {
+			fmt.Println("kervax-agent: в панель напрямую")
+		}
+	}
+}
+
+// Замер "режут ли соединение до панели по объему". На канале с DPI, который замораживает TCP
+// после ~16 КБ, мелкое проходит, а большой ответ одним соединением не доходит никогда - ни ping,
+// ни скорость скачивания с других адресов этого не показывают. Раз в netProbeEvery агент тянет с
+// панели кусок netProbeSmall и кусок netProbeBig, каждый своим соединением, и шлет, сколько из последних
+// netProbeKeep дошло: панель по этому подсказывает включить GRE до панели (backend app/gre.need).
+// Замер идет тем же путем, что и все остальное, - через туннель, если он есть, и показывает, помог
+// ли он; сменился путь - прежние замеры не в счет.
+type netProbe struct {
+	SmallOK int   `json:"small_ok"`
+	SmallN  int   `json:"small_n"`
+	BigOK   int   `json:"big_ok"`
+	BigN    int   `json:"big_n"`
+	BigKB   int   `json:"big_kb"`
+	At      int64 `json:"at"`
+}
+
+const (
+	netProbeSmall   = 8 << 10
+	netProbeBig     = 100 << 10
+	netProbeKeep    = 6
+	netProbeEvery   = 30 * time.Minute
+	netProbeFirst   = 3 * time.Minute
+	netProbeTimeout = 20 * time.Second
+)
+
+var netProbeLatest atomic.Pointer[netProbe]
+
+// probeOnce - дошли ли n байт с панели одним соединением за netProbeTimeout
+func probeOnce(panelURL, token string, n int) bool {
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/agent/probe?n=%d", strings.TrimRight(panelURL, "/"), n), nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	// без сжатия: меряем, сколько байт проходит по проводу
+	req.Header.Set("Accept-Encoding", "identity")
+	resp, err := panelClient(netProbeTimeout).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return false // старая панель ручки не знает: оба замера "не дошло", подсказки не будет
+	}
+	got, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, int64(n)+1))
+	return got == int64(n)
+}
+
+// probeRing - последние netProbeKeep замеров по одному пути (via - адрес подключения или "")
+type probeRing struct {
+	via        string
+	small, big []bool
+}
+
+func (p *probeRing) add(via string, small, big bool, at int64) *netProbe {
+	if via != p.via {
+		p.via, p.small, p.big = via, nil, nil
+	}
+	keep := func(xs []bool, x bool) []bool {
+		xs = append(xs, x)
+		if len(xs) > netProbeKeep {
+			xs = xs[len(xs)-netProbeKeep:]
+		}
+		return xs
+	}
+	p.small, p.big = keep(p.small, small), keep(p.big, big)
+	out := &netProbe{SmallN: len(p.small), BigN: len(p.big), BigKB: netProbeBig >> 10, At: at}
+	for _, ok := range p.small {
+		if ok {
+			out.SmallOK++
+		}
+	}
+	for _, ok := range p.big {
+		if ok {
+			out.BigOK++
+		}
+	}
+	return out
+}
+
+func netProbeLoop(panelURL, token string) {
+	// не все ноды парка разом после выкладки: разброс по времени старта
+	time.Sleep(netProbeFirst + time.Duration(time.Now().UnixNano()%int64(5*time.Minute)))
+	var ring probeRing
+	for {
+		via := connectAddr()
+		small := probeOnce(panelURL, token, netProbeSmall)
+		big := probeOnce(panelURL, token, netProbeBig)
+		netProbeLatest.Store(ring.add(via, small, big, time.Now().Unix()))
+		time.Sleep(netProbeEvery)
 	}
 }
 
@@ -8609,6 +8812,8 @@ func main() {
 	hostIsVM, hostVirt = detectVirt()
 	if agentProxy != "" {
 		fmt.Printf("kervax-agent %s → %s через прокси %s\n", version, url, agentProxy)
+	} else if c := connectAddr(); c != "" {
+		fmt.Printf("kervax-agent %s → %s по адресу подключения %s\n", version, url, c)
 	} else {
 		fmt.Printf("kervax-agent %s → %s\n", version, url)
 	}
@@ -8634,6 +8839,9 @@ func main() {
 	go hostScanLoop()
 	// пакеты и журнал установок раз в минуту (список перечитывается, только если менялся)
 	go pkgLoop()
+	// GRE до панели: helper ставит и снимает connect= в конфиге; замер "режут ли по объему"
+	go connectWatch(cfgPath)
+	go netProbeLoop(url, token)
 
 	const maxCycle = 90 * time.Second
 	kick := make(chan struct{}, 1)
