@@ -319,7 +319,7 @@ export function hasOwnFileBackup(s: Server): boolean {
 // Вышел ли бэкап за «ночное окно». Мягкое уведомление (не алерт): бэкап либо ещё идёт
 // после дедлайна, либо завершился позже него. backup_anytime отключает проверку — для
 // нод, где дневной бэкап это норма. Возвращает текст уведомления или null.
-export function backupWindowNote(s: Server): string | null {
+export function backupWindowNote(s: Server, now: number = Date.now()): string | null {
   if (s.backup_anytime) return null
   const b = s.last_report?.backup
   // метрика без restic и таймера - следы старого бэкапа, ее время к окну отношения не имеет
@@ -334,10 +334,15 @@ export function backupWindowNote(s: Server): string | null {
   // Окно - ночь до дедлайна. Начатый днем или вечером (расписание на 18:00, запуск руками) в
   // окно и не собирался: "позже окна" про него вводило в заблуждение
   if (started && hourOf(started) >= deadline && hourOf(started) < 22) return null
-  // бэкап ещё идёт (последний старт новее последнего завершения), и уже позже дедлайна
+  // бэкап ещё идёт (последний старт новее последнего завершения), и уже позже дедлайна.
+  // Дедлайн - ближайшие {deadline}:00 после старта: начатый в 23:30 бэкап укладывается до 8:00
+  // завтра. Раньше сверяли только час "сейчас", и в 23:31 любой ночной прогон "не уложился"
   const running = started > ended
   if (running) {
-    if (new Date().getHours() >= deadline) {
+    const end = new Date(started * 1000)
+    end.setHours(deadline, 0, 0, 0)
+    if (end.getTime() <= started * 1000) end.setDate(end.getDate() + 1)
+    if (now >= end.getTime()) {
       return tr('бэкап идёт с {from} и не уложился в окно (до {to}:00)',
                 { from: hhmm(started), to: deadline })
     }

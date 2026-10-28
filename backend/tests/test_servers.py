@@ -1888,6 +1888,38 @@ def test_slow_agent_download_is_progress_not_a_rejection():
     assert advice == ["обновление агента отклонено — подпись манифеста не сошлась"]
 
 
+async def test_target_older_than_agent_is_dropped(client, auth_headers):
+    """Раскатывали 2.55, а на одну ноду 2.56 поставили руками: панель так и просила 2.55,
+    агент отказывал откатываться, и в "Обновлениях" висело "обновление агента отклонено"
+    при всех агентах на 2.56. Цель не новее агента снимается, старый отказ не показывается."""
+    from app.api.servers import agent_update_error
+
+    r = await client.post("/api/servers", json={"name": "web-a"}, headers=auth_headers)
+    sid = r.json()["server"]["id"]
+    ah = {"Authorization": f"Bearer {r.json()['token']}"}
+    rep = {"agent_version": "2.55", "mem_used": 1, "mem_total": 2, "disks": [{"mount": "/", "used": 1, "total": 2}]}
+    assert (await client.post("/api/agent/report", json=rep, headers=ah)).status_code == 200
+    import app.api.servers as srv_api
+    srv_api._available_agent_version, keep = (lambda: "2.56"), srv_api._available_agent_version
+    try:
+        assert (await client.post("/api/servers/agent-update", json={"version": "2.56"},
+                                  headers=auth_headers)).status_code == 200
+    finally:
+        srv_api._available_agent_version = keep
+    # пока агент на 2.55 - панель просит 2.56
+    got = (await client.post("/api/agent/report", json=rep, headers=ah)).json()
+    assert (got.get("update") or {}).get("version") == "2.56"
+    # агент уже новее цели и помнит старый отказ
+    newer = {**rep, "agent_version": "2.57", "update_error": "2.56: панель просит 2.56, а подписан 2.57 — отказ"}
+    got = (await client.post("/api/agent/report", json=newer, headers=ah)).json()
+    assert not got.get("update")
+    out = (await client.get(f"/api/servers/{sid}", headers=auth_headers)).json()
+    assert out["target_agent_version"] == "" and not out.get("agent_update_error")
+    assert agent_update_error(newer) == ""
+    # отказ от версии новее стоящей - настоящий
+    assert agent_update_error({"agent_version": "2.55", "update_error": "2.56: подпись не сошлась"})
+
+
 async def test_expiry_alerts_at_seven_days_one_day_and_on_expiry():
     """По порогам [7, 1] (по умолчанию): сообщение за неделю, еще одно за день и когда
     срок вышел. Раньше было одно, за две недели, и к сроку о нем успевали забыть."""
