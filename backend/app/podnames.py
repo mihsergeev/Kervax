@@ -15,6 +15,7 @@ _A = "bcdfghjklmnpqrstvwxz2456789"
 _FROM_DEPLOYMENT = re.compile(rf"^(.+)-[{_A}]{{6,10}}-[{_A}]{{5}}$")
 _FROM_DAEMONSET = re.compile(rf"^(.+)-[{_A}]{{5}}$")
 _FROM_STATEFULSET = re.compile(r"^(.+)-\d+$")
+_REVISION = re.compile(rf"^.+-([{_A}]{{6,10}})-[{_A}]{{5}}$")
 
 
 def workload(name: str, ctrl: str = "") -> str:
@@ -26,6 +27,13 @@ def workload(name: str, ctrl: str = "") -> str:
         if m:
             return m.group(1)
     return name
+
+
+def revision(name: str) -> str:
+    """Хеш ReplicaSet в имени пода деплоймента (ревизия): mail-worker-6b8b56c769-f4k8m -> 6b8b56c769.
+    Пусто, если имя не такое."""
+    m = _REVISION.match(name)
+    return m.group(1) if m else ""
 
 
 def pod_key(key: str, ctrl: str = "") -> str:

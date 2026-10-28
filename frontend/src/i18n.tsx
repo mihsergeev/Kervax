@@ -432,6 +432,8 @@ const EN: Record<string, string> = {
     'docker-socket-proxy: viewing and restart, no exec or root. For new nodes, the --docker flag at install.',
   'Поды, которые перезапускались за сутки. В Telegram: OOMKilled от 3 раз, падения и убийства по пробе от 5, пачки от {n}. Выход с кодом 0 - плановый, только здесь.':
     'Pods restarted in the last 24 h. To Telegram: OOMKilled from 3 times, crashes and probe kills from 5, bursts from {n}. Exit code 0 is planned and shown only here.',
+  'Новый под первые полчаса не алертит, а пока рядом работает прошлая ревизия - час: так идет выкатка. Падает и после - алерт.':
+    'A new pod does not alert for the first half hour, or for an hour while the previous revision is still running next to it: that is a rollout. If it keeps crashing after that, it alerts.',
   'Пачек за сутки: {n}: поды разных ворклоадов перезапускались разом, подвисала нода':
     'Bursts in 24 h: {n}: pods of different workloads restarted at once, the node stalled',
   'Чинить ноду, а не поды: нагрузка, память, диск под etcd': 'Fix the node, not the pods: load, memory, the etcd disk',
@@ -3340,6 +3342,8 @@ const EN: Record<string, string> = {
   'повод для алерта': 'alerts',
   'поды перезапускаются пачками': 'pods restart in bursts',
   'реже порога': 'below threshold',
+  'выкатка, ждем до {t}': 'rollout, waiting until {t}',
+  'новый под, ждем до {t}': 'new pod, waiting until {t}',
   'Завершенные': 'Completed',
   'Ворклоады': 'Workloads',
   'Кластер': 'Cluster',

@@ -4433,7 +4433,8 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         # kube_pod (главная считала их своими правилами: Pending и NotReady уходили в Telegram, а
         # на главной было пусто). С именами: "проблемных подов 1" не говорил, какой
         pm = item_mutes(s, now, "kube_pod:")
-        bp = [p for p in kube_bad_pods(rep) if pod_item(p) not in pm]
+        ph = srv_restarts.rollout_hold(s, now)
+        bp = [p for p in kube_bad_pods(rep) if pod_item(p) not in pm and pod_ref(p) not in ph]
         if bp and _held_long(s, state, "kube_pod", now):
             add("kube_pod", 2, ("под не работает: " if len(bp) == 1 else "поды не работают: ") + bad_pods_text(bp, 3),
                 "pods", "kube_pod", state.get("kube_pod_since"), section="kuber")
@@ -4996,6 +4997,11 @@ def item_mutes(s: Server, now: datetime, prefix: str) -> set[str]:
         if k.startswith(prefix) and u is not None and u > now:
             keys.add(k[len(prefix):])
     return keys
+
+
+def pod_ref(p: dict) -> str:
+    """Под как ключ состояния перезапусков: "pod:<ns>/<под>"."""
+    return f"pod:{p.get('ns') or '?'}/{p.get('name') or ''}"
 
 
 def pod_item(p: dict) -> str:
@@ -6448,7 +6454,10 @@ def _server_conditions(s: Server, now: datetime,
     if online and (rep.get("kube") or {}).get("access"):
         # заглушенные поштучно (кнопкой под алертом): kube_pod:<ns>/<ворклоад>
         pm = item_mutes(s, now, "kube_pod:")
-        bad_pods = [p for p in kube_bad_pods(rep) if pod_item(p) not in pm]
+        # новая ревизия, пока рядом работает прошлая, - идет выкатка, сервис жив: ждем час
+        # (restarts.rollout_hold), зависшая выкатка придет алертом после
+        ph = srv_restarts.rollout_hold(s, now)
+        bad_pods = [p for p in kube_bad_pods(rep) if pod_item(p) not in pm and pod_ref(p) not in ph]
         sustain("kube_pod", bool(bad_pods),
                 {"pods": bad_pods_text(bad_pods), "n": len(bad_pods), "items": bad_pods},
                 below=not bad_pods, cool_s=_POD_CALM_S)
