@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { type RelayView } from './api'
+import { type GreView, type RelayView } from './api'
 import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
 import { UpdCmd, helperCmd } from './FleetUpdate'
@@ -32,6 +32,7 @@ export type ServerEditForm = {
   alert_sustain_min: number // «жарит дольше N минут» → алерт (хранится в сек)
   relay_enabled: boolean // ретранслятор для агентов (app/relay.py), сохраняется отдельно (setRelay)
   relay_port: number // 0 - по умолчанию
+  gre_enabled: boolean // GRE до панели (backend app/gre.py), сохраняется отдельно (setGre)
 }
 
 export const RELAY_DEFAULT_PORT = 8790
@@ -71,6 +72,7 @@ const areaOfMute = (k: string) =>
 const SECS: SecDef[] = [
   ...AREAS.map((a) => ({ id: a.id, label: a.label, group: '' })),
   { id: 'relay', label: 'Ретранслятор', group: 'Другое' },
+  { id: 'gre', label: 'GRE до панели', group: 'Другое' },
   { id: 'del', label: 'Удаление', group: 'Другое' },
 ]
 
@@ -121,6 +123,62 @@ function RelayStatus({ relay, host }: { relay: RelayView; host: string }) {
   )
 }
 
+// Как дела у GRE до панели: что сказал helper gre-setup, хост панели и агент
+function GreStatus({ gre, host }: { gre: GreView; host: string }) {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState(false)
+  const line =
+    gre.state === 'ok'
+      ? t('Работает: агент ходит в панель через туннель {node} -> {panel}, адрес сервера {peer}', {
+          node: gre.node_addr,
+          panel: gre.panel_addr,
+          peer: gre.peer,
+        })
+      : gre.state === 'up'
+        ? t('Туннель поднят, панель через него отвечает. Ждем первый отчет агента через туннель (нужен агент 2.56).')
+        : gre.state === 'no_helper'
+          ? t('Helper gre-setup еще не поставлен: он в "Требует действий", ставится плейбуком kervax_helpers.yml.')
+          : gre.state === 'waiting'
+            ? t('Helper поставлен, ждем его первого обращения к панели (раз в минуту).')
+            : gre.state === 'host'
+              ? t('Хост панели свою сторону туннеля еще не поднял: на нем нужен ops/gre-sync.sh (docs/install.md, раздел про GRE).')
+              : gre.state === 'nat'
+                ? t('У сервера нет публичного адреса на интерфейсе (он за NAT): GRE через NAT не проходит.')
+                : gre.state === 'stale'
+                  ? t('Helper давно не обращался к панели: сервер не на связи или не достает до нее.')
+                  : gre.state === 'down'
+                    ? t('Туннель не поднят: панель через него не отвечает. Агент пока ходит напрямую.')
+                    : t('Ошибка GRE: {err}', { err: gre.error })
+  const ok = gre.state === 'ok' || gre.state === 'up'
+  if (gre.state !== 'no_helper') {
+    return (
+      <p className={`small ${ok ? 'muted' : 'form-error'}`}>
+        🚇 {line}
+        {!ok && gre.error && gre.state !== 'error' && <span className="muted"> ({gre.error})</span>}
+      </p>
+    )
+  }
+  // helper ставит человек плейбуком: готовая команда на одну эту ноду
+  const cmd = helperCmd([host])
+  return (
+    <div className="small form-error">
+      🚇 {line}
+      <UpdCmd cmd={cmd} />
+      <button
+        type="button"
+        className="ghost small"
+        onClick={() => {
+          try { navigator.clipboard?.writeText(cmd)?.catch(() => {}) } catch { /* команда видна в строке */ }
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1500)
+        }}
+      >
+        {copied ? t('Скопировано ✓') : t('Скопировать команду')}
+      </button>
+    </div>
+  )
+}
+
 export function ServerEditModal({
   form,
   set,
@@ -129,6 +187,7 @@ export function ServerEditModal({
   groups,
   isVm,
   relay,
+  gre,
   host,
   note,
   initialSec,
@@ -143,6 +202,7 @@ export function ServerEditModal({
   groups: string[]
   isVm?: boolean
   relay?: RelayView | null
+  gre?: GreView | null
   host: string // имя ноды для ansible -l (как в "Требует действий")
   note: ReactNode // заметка: сохраняется сразу, отдельно от формы
   initialSec?: string
@@ -174,6 +234,7 @@ export function ServerEditModal({
   const side: Record<string, string> = {}
   for (const k of form.alert_mutes) if (!KNOWN.has(k) || shown(k)) side[areaOfMute(k)] = '🔕'
   if (form.relay_enabled) side.relay = t('вкл')
+  if (form.gre_enabled) side.gre = t('вкл')
 
   type NumKey = {
     [K in keyof ServerEditForm]: ServerEditForm[K] extends number ? K : never
@@ -419,6 +480,26 @@ export function ServerEditModal({
           </label>
         )}
         {form.relay_enabled && relay && <RelayStatus relay={relay} host={host} />}
+      </>
+    )
+  else if (sec === 'gre')
+    body = (
+      <>
+        {/* GRE до панели: туннель до хоста панели для агента, чье соединение с панелью режут по объему */}
+        <label className="checkbox se-check">
+          <input
+            type="checkbox"
+            checked={form.gre_enabled}
+            onChange={(e) => set({ gre_enabled: e.target.checked })}
+          />
+          <span title={t('Панель выделит серверу свою /30 в туннеле. Ставит helper gre-setup (появится в "Требует действий"), нужны python3 и публичный адрес на интерфейсе сервера. На хосте панели нужен ops/gre-sync.sh.')}>
+            🚇 {t('GRE до панели')} <span className="se-q">?</span>
+          </span>
+        </label>
+        <p className="muted small se-hint">
+          {t('Для сервера, чье соединение с панелью режут после ~16кб: обновления агента и большие ответы не доходят. Агент пойдет в панель через GRE-туннель до ее хоста, внутри то же TLS-соединение. Не отвечает туннель - агент сам вернется на прямое соединение.')}
+        </p>
+        {form.gre_enabled && gre && <GreStatus gre={gre} host={host} />}
       </>
     )
   else if (sec === 'del')

@@ -25,6 +25,7 @@ import {
   type InstallStatus,
   rotateServerToken,
   setRelay,
+  setGre,
   serverMetrics,
   serverOom,
   serverOomEvents,
@@ -6677,6 +6678,7 @@ function ServerDetail({
       alert_sustain_min: Math.round((s.alert_sustain_seconds ?? 900) / 60),
       relay_enabled: !!s.relay_enabled,
       relay_port: s.relay_port ?? 0,
+      gre_enabled: !!s.gre_enabled,
     })
     mutes0.current = s.alert_mutes ?? []
     setSaveErr(null)
@@ -6722,6 +6724,16 @@ function ServerDetail({
         } catch (e) {
           if (e instanceof ApiError && e.status === 401) return onUnauthorized()
           onChanged() // остальное уже сохранено
+          setSaveErr(e instanceof Error ? t(e.message) : t('Ошибка'))
+          return
+        }
+      // GRE так же отдельно: панель проверяет, что адрес сервера известен, и выделяет сеть туннеля
+      if (form.gre_enabled !== !!s.gre_enabled)
+        try {
+          await setGre(s.id, form.gre_enabled)
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 401) return onUnauthorized()
+          onChanged()
           setSaveErr(e instanceof Error ? t(e.message) : t('Ошибка'))
           return
         }
@@ -6841,6 +6853,19 @@ function ServerDetail({
         onInstall={isViewer ? undefined : () => reissue()} />
       {!isViewer && (s.agent_fix_command || (s.helper_advice?.length ?? 0) > 0) && (
         <ServerFixBanner titles={s.agent_advice} command={s.agent_fix_command} helpers={s.helper_advice || []} t={t} />
+      )}
+      {/* соединение до панели режут по объему (замеры агента): предложить GRE до панели */}
+      {s.gre_need && !s.gre_enabled && (
+        <div className="install-late">
+          <span>
+            🚇 {t('Соединение до панели режут после ~16кб: из {n} попыток кусок {kb}кб одним соединением дошел {ok} раз, мелкие доходят. Обновления агента и большие ответы идут с трудом - включите GRE до панели.', {
+              n: s.gre_need.big_n,
+              kb: s.gre_need.kb,
+              ok: s.gre_need.big_ok,
+            })}
+          </span>
+          {!isViewer && <button className="small-btn" onClick={() => startEdit('gre')}>{t('Включить GRE')}</button>}
+        </div>
       )}
       {/* сдвиг часов: ломает TOTP, TLS и логи, плюс команда фикса */}
       {r.clock && Math.abs(r.clock_skew_sec ?? 0) >= 5 && (
@@ -7564,6 +7589,7 @@ function ServerDetail({
         groups={groups}
         isVm={r.is_vm === true}
         relay={s.relay}
+        gre={s.gre}
         host={hostOf(s)}
         initialSec={editSec}
         note={

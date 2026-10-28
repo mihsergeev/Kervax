@@ -2512,6 +2512,10 @@ export type Server = {
   relay_port?: number // 0 - по умолчанию
   relay?: RelayView | null
   relay_via_id?: number | null
+  // GRE до панели (backend app/gre.py): галочка, состояние туннеля и подсказка "режут по объему"
+  gre_enabled?: boolean
+  gre?: GreView | null
+  gre_need?: GreNeed | null
   created_at?: string | null
   // лимит трафика тарифа (app/traffic.py): ГБ (0 - нет), что считает хостер, день начала периода
   traffic_limit_gb?: number
@@ -3547,6 +3551,30 @@ export type RelayView = {
 }
 export function setRelay(id: number, body: { enabled: boolean; port?: number }): Promise<Server> {
   return api<Server>(`/api/servers/${id}/relay`, { method: 'PUT', body: JSON.stringify(body) })
+}
+// GRE до панели: state - no_helper (helper не поставлен), waiting (еще не спрашивал панель), host (хост
+// панели свою сторону не поднял), nat (у ноды нет публичного адреса), error, stale (helper давно
+// молчит), down (туннель не поднят или панель через него не отвечает), up (поднят, ждем агента), ok
+export type GreView = {
+  state: 'no_helper' | 'waiting' | 'host' | 'nat' | 'error' | 'stale' | 'down' | 'up' | 'ok'
+  net: string
+  panel_addr: string
+  node_addr: string
+  peer: string // публичный адрес ноды - другой конец туннеля
+  local_ip: string
+  firewall: string
+  error: string
+  up: boolean
+  host: boolean
+  host_fw: string
+  seen_at: string | null
+  agent_at: string | null
+  helper: string
+}
+// замеры агента: из последних big_n попыток кусок big_kb КБ одним соединением дошел big_ok раз
+export type GreNeed = { big_ok: number; big_n: number; small_ok: number; small_n: number; kb: number }
+export function setGre(id: number, enabled: boolean): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/gre`, { method: 'PUT', body: JSON.stringify({ enabled }) })
 }
 // путь агента в панель для команды установки: proxy - адрес прокси с логином (ретранслятор, локация)
 export type InstallVia = { mode: 'direct' | 'relay' | 'location' | 'custom'; relay_id?: number; location_id?: number; ip?: string }

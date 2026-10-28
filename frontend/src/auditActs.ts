@@ -44,6 +44,8 @@ export const ACT: Record<string, string> = {
   server_install_via: 'выбрал путь агента в панель',
   relay_on: 'включил ретранслятор для агентов',
   relay_off: 'выключил ретранслятор для агентов',
+  gre_on: 'включил GRE до панели',
+  gre_off: 'выключил GRE до панели',
   changes_ack: 'отметил изменения доступа своими',
   webfiles_accept: 'отметил новые файлы сайта своими',
   webfiles_mode: 'сменил, правят ли сайт руками',

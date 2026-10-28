@@ -50,9 +50,11 @@ def current_setup_versions() -> dict[str, str]:
     return out
 
 
-def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bool = False) -> bool:
+def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bool = False,
+                 gre: bool = False) -> bool:
     """Нужен ли helper этой ноде; mutes - решения человека по ноде (alert_mutes сервера),
-    relay - на сервере включен ретранслятор для агентов (app/relay.py).
+    relay - на сервере включен ретранслятор для агентов (app/relay.py), gre - GRE до панели
+    (app/gre.py).
 
     Незнакомое имя (helper добавили, а условие сюда не дописали) считаем нужным
     всюду: лучше лишний пункт в «Требует действий», который сразу видно и легко
@@ -61,6 +63,9 @@ def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bo
     # и открывает порт, это решение человека, а не свойство ноды
     if name == "relay-setup":
         return relay
+    # gre-setup - так же только по галочке: туннель до хоста панели включает человек
+    if name == "gre-setup":
+        return gre
     if name == "backupserver-setup":
         bsrv = rep.get("backup_server") or {}
         return bool(bsrv.get("present") and bsrv.get("repos"))
@@ -171,13 +176,14 @@ _HELPER_LABEL = {
     "gitlab-setup": "версия, бэкап и миграции GitLab",
     "sockfix-setup": "compose внешнего прокси: сокет и образ",
     "relay-setup": "ретранслятор для агентов",
+    "gre-setup": "GRE-туннель до панели",
     "webfiles-setup": "признаки взлома в файлах сайтов",
     "autoban-setup": "автобан сканеров",
 }
 
 
 def gaps(rep: dict, cur: dict[str, str], mutes: list[str] | None = None,
-         relay: bool = False) -> list[tuple[str, str]]:
+         relay: bool = False, gre: bool = False) -> list[tuple[str, str]]:
     """Что на ноде появилось, а покрытия под это нет: (ключ, человеческая строка).
 
     Только ПЕРВАЯ установка и доступы. Устаревшая версия helper'а сюда НЕ попадает:
@@ -201,7 +207,7 @@ def gaps(rep: dict, cur: dict[str, str], mutes: list[str] | None = None,
         out.append(("kube", _MISSING_LABEL["kube"]))
     sv = rep.get("setup_versions") or {}
     for name in sorted(cur):
-        if not setup_needed(name, rep, mutes, relay) or sv.get(name) is not None:
+        if not setup_needed(name, rep, mutes, relay, gre) or sv.get(name) is not None:
             continue
         if name == "kube-setup" and ("kube", _MISSING_LABEL["kube"]) in out:
             continue  # про кластер уже сказано строкой выше — не дублируем

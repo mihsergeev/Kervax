@@ -336,6 +336,53 @@ lets in only known addresses. The proxy address has to be allowed in the panel f
 if it has one. A server whose agent has not reported for 10 minutes after it was added
 gets a hint in its card with a button that opens this window.
 
+### GRE to the panel: when the connection is cut after ~16 KB
+
+On some links the provider's DPI freezes a TCP connection to the panel once ~16 KB have gone
+through it in either direction. Ping is fine, downloads from elsewhere are fast, compressed
+reports pass, but an agent update crawls in 8 KB pieces and a big command result never
+arrives. The agent (2.56+) measures this itself: every 30 minutes it fetches a small and a
+100 KB piece from the panel, each in its own connection. When the big ones keep freezing and
+the small ones pass, the server card and "Action needed" say so.
+
+The cure is a bare GRE tunnel from the server to the panel host: such DPI leaves it alone, and
+inside it goes the same TLS connection to the panel, only to an inner address. Switch on
+**"GRE to the panel"** in the server settings:
+
+* the panel gives the server its own /30 from `KERVAX_GRE_POOL` (`10.254.0.0/16` by default):
+  the first address is the panel host's, the second the server's. It stays with the server
+  when GRE is switched off, so switching it on again brings back the same addresses;
+* the `gre-setup` helper shows up in "Action needed", the `kervax_helpers.yml` playbook installs
+  it (python3 and iproute2 are needed). Every minute it asks the panel what to hold with the
+  agent token, brings up `kervax-gre` (`ip tunnel mode gre`, mtu 1476) as its own systemd unit,
+  allows GRE from the panel host in ufw or firewalld when one is active, and checks that the
+  panel answers through the tunnel. Only then it writes `connect=<the panel's inner address>`
+  into the agent config: the agent keeps TLS and SNI on the panel's name (like
+  `curl --resolve`) and goes direct again by itself when the tunnel does not answer;
+* GRE does not pass NAT: a server without a public address on its interface says so in its
+  card and brings nothing up;
+* reports through the tunnel come from the inner address, and the panel shows the server's
+  real public address in the card instead;
+* switched off (or the server deleted) - the helper removes `connect=`, the tunnel, its
+  firewall rules and itself.
+
+The panel host needs its side too: `ops/gre-sync.sh` runs outside docker, reads
+`<data>/gre_tunnels` written by the panel, brings up a `kvxg<N>` interface per server and opens
+GRE from the server's address and 80/443 coming in on that interface (ufw, including
+`route allow` for ufw-docker, or firewalld). It touches only its own interfaces and rules and
+reports back to `<data>/gre_tunnels.applied`, where the panel takes the host address the
+servers send GRE to (`KERVAX_GRE_HOST_IP` sets it by hand). Install it once:
+
+```bash
+install -D -m755 ops/gre-sync.sh /lib65/kervax/gre-sync.sh
+install -m644 ops/kervax-gre-host.service ops/kervax-gre-host.path /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now kervax-gre-host.path kervax-gre-host.service
+```
+
+(the units assume `/app/kervax/data` - edit them if yours differs). The web server in front of
+the panel has to listen on 443 on every address of the host: a port docker publishes as
+`443:443` does, one published on a single address does not reach the inner one.
+
 ## Your first site
 
 **"Add monitor"**: type an address (`example.com`,

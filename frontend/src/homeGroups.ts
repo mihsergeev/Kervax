@@ -7,7 +7,7 @@ type T = (k: string, p?: Record<string, string | number>) => string
 export const HOME_MUTE = 'home:'
 // у этих групп нет состояния, кроме "есть": ключ без отпечатка, пункт вернется, если починили и
 // сломалось снова, или руками
-const PLAIN = new Set(['d-acc', 'k-acc', 'onb', 'bs-setup'])
+const PLAIN = new Set(['d-acc', 'k-acc', 'onb', 'bs-setup', 'gre-need'])
 
 export function grpLabel(grp: string, t: T): string {
   const fixed: Record<string, string> = {
@@ -34,6 +34,7 @@ export function grpLabel(grp: string, t: T): string {
     dockrisk: t('у контейнеров ключи от хоста - взлом приложения в них даст root на сервере'),
     'sw-eol': t('ПО без поддержки - обновите'),
     'sw-soon': t('скоро кончится поддержка ПО - запланируйте обновление'),
+    'gre-need': t('соединение до панели режут после ~16кб - включите GRE до панели'),
   }
   return fixed[grp] ?? grp
 }
