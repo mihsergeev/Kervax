@@ -125,11 +125,13 @@ import { LinksCard, NetTile, TrafficCard, type Tone } from './NetLinks'
 import { HomeTile, tileIssues } from './HomeTiles'
 import { byTone, srvIssueRows } from './sectionIssues'
 import { DiskWritersBlock, NetUsersCard } from './Usage'
+import { VpnFlowCard } from './VpnFlow'
 import { SoftwareCard } from './Software'
 import { type FixStep, FixSteps, useFixDone } from './FixSteps'
 import { AccessFix } from './AccessFix'
 import { GpuCard, GpuChip } from './Gpu'
 import { RoleChips } from './RoleChips'
+import { VpnCards, vpnSearch, vpnSecLine } from './Vpn'
 import { KnownServerList, knownItems, knownTitle } from './KnownDialog'
 import { AgentUpdRow, agentBehind, hostOf, useFleetRollout } from './FleetUpdate'
 import { MaintBanner, MaintChip } from './MaintModal'
@@ -833,6 +835,7 @@ const DETAIL_SECTIONS: SecDef[] = [
   { id: 'journal', label: 'Журнал', group: 'Система' },
   { id: 'changes', label: 'Изменения', group: 'Система' },
   { id: 'web', label: 'Веб', group: 'Сервисы' },
+  { id: 'vpn', label: 'VPN', group: 'Сервисы' },
   { id: 'deps', label: 'Зависимости', group: 'Сервисы' },
   { id: 'alerts', label: 'Алерты', group: 'События' },
   { id: 'timeline', label: 'Хронология', group: 'События' },
@@ -851,7 +854,7 @@ const SECTION_LABEL: Record<string, string> = { services: 'Сервисы', kube
 const SEC_OF_CARD: Record<string, string> = {
   cores: 'cpu', freq: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
   swap: 'mem', memwb: 'mem', oom: 'mem', memleak: 'mem', memlimit: 'mem',
-  netifrx: 'net', netiftx: 'net', neterr: 'net', nethealth: 'net', links: 'net', traffic: 'net', netusers: 'net',
+  netifrx: 'net', netiftx: 'net', neterr: 'net', nethealth: 'net', links: 'net', traffic: 'net', netusers: 'net', vpnflow: 'vpn',
   conntrack: 'net', sockets: 'net',
   diskio: 'disk', diskiops: 'disk', diskutil: 'disk', disklat: 'disk', disktemp: 'disk', diskfill: 'disk',
   diskhealth: 'disk', du: 'disk', diskwrite: 'disk',
@@ -926,6 +929,7 @@ function serverSecInfo(c: {
   ok.vulns = !v ? '' : !v.release ? t('сверка пока только для Ubuntu') : !v.feed_ts ? t('база уязвимостей еще не скачана') : t('важных нет')
   ok.units = unitsBlock(r) ? t('упавших служб нет') : t('нет данных')
   ok.gpu = gpuSecLine(s, t)
+  ok.vpn = vpnSecLine(s, t)
   const top = r.top_cpu?.[0]
   ok.proc = top ? t('больше всех CPU: {name}, {p}', { name: top.comm, p: `${top.cpu.toFixed(1)}%` }) : ''
   const last = s.changes?.log[0]
@@ -5418,7 +5422,8 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
     if (filter === 'offline' && s.online) return false
     if (filter === 'problem' && !probIds.has(s.id)) return false
     if (!q) return true
-    return [s.name, s.group_name, s.hostname, s.os]
+    // и по VPN: "vpn", "amnezia", "vless", "tailscale" (Vpn.tsx)
+    return [s.name, s.group_name, s.hostname, s.os, vpnSearch(s)]
       .some((v) => v?.toLowerCase().includes(q)) || srvIpHit(s, q)
   })
   // сырое (неокруглённое) значение метрики — чтобы близкие значения не «ничьились»
@@ -5956,7 +5961,7 @@ function ServerRow({
               {t('разработка')}
             </span>
           )}
-          <RoleChips s={s} servers={servers} t={t} />
+          <RoleChips s={s} servers={servers} t={t} onVpn={() => onOpenSec('vpn')} />
           {s.gpu_sum && (
             <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
           )}
@@ -7077,6 +7082,7 @@ function ServerDetail({
     switch (id) {
       case 'web': return hasWeb
       case 'gpu': return !!s.gpu
+      case 'vpn': return !!s.vpn || !!s.vpn_flow
       case 'access': return !!(s.ssh || s.access?.accounts.length)
       case 'updates': return !!(r.os_upd || s.os_advice?.length || s.sw_advice?.length || r.docker?.containers?.length)
       case 'vulns':
@@ -7181,7 +7187,7 @@ function ServerDetail({
               </span>
             )}
             {/* роли как в списке; состояние ретранслятора живет в настройках сервера: клик туда */}
-            <RoleChips s={s} servers={servers} t={t} onRelay={isViewer ? undefined : editRelay} />
+            <RoleChips s={s} servers={servers} t={t} onRelay={isViewer ? undefined : editRelay} onVpn={() => go('vpn')} mesh />
             {s.gpu_sum && (
               <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
             )}
@@ -7596,6 +7602,20 @@ function ServerDetail({
                 {chartCard('gpupower')}
               </div>
             )}
+          </div>
+        )}
+
+        {active === 'vpn' && (
+          <div className="srv-sec">
+            <div className="net-cards">
+              <VpnCards
+                server={s}
+                rows={issues
+                  .filter((i) => !i.section && secOfLink(i.sec) === 'vpn')
+                  .map((i) => ({ tone: i.tone, text: i.text, since: i.since }))}
+              />
+              {s.vpn_flow && <VpnFlowCard server={s} info={s.vpn_flow} onChanged={onChanged} />}
+            </div>
           </div>
         )}
 

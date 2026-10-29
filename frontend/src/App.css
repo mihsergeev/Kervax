@@ -5122,6 +5122,8 @@ textarea:focus {
 .docker-c-name.cron-cmd { white-space: normal; overflow-wrap: anywhere; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; font-weight: 500; }
 /* stderr ушел в cron из-за порядка 2>&1 - ошибка в самой строке крона */
 .docker-c-img.cron-lost { color: var(--degraded); white-space: normal; }
+/* клиенты VPN (VpnFlow.tsx): признаки торрента переносятся, а не режутся многоточием */
+.docker-c-img.vpnf-wrap { white-space: normal; overflow-wrap: anywhere; }
 /* заглушенная очередь (не алертить): блеклая, кнопка "не алертить" и выбор срока в строке */
 .docker-row.q-muted { border-left-color: var(--border); opacity: 0.65; }
 .q-mute-btn { width: 34px; flex-shrink: 0; padding: 2px 0; text-align: center; }
@@ -5824,6 +5826,11 @@ button.svc-site-on:hover {
   width: 0.7em;
   height: 0.7em;
   border-width: 1.5px;
+}
+/* путь проверки изнутри (в обход caddy, через адрес сервера) - строкой под доменом */
+.adopt-via {
+  margin: 0 0 0.2rem 1.55rem;
+  overflow-wrap: anywhere;
 }
 .adopt-how-path {
   flex-shrink: 0;
@@ -7923,6 +7930,9 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
    Не зеленый/желтый/красный статусов и не синий групп */
 .role-chip { --rc: #a78bfa; display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.68rem; font-weight: 600; letter-spacing: 0.03em; padding: 0.05rem 0.4rem; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--rc) 45%, transparent); color: var(--rc); background: color-mix(in srgb, var(--rc) 10%, transparent); flex-shrink: 0; white-space: nowrap; }
 .role-chip svg { width: 0.8rem; height: 0.8rem; flex-shrink: 0; }
+/* длинная плашка (VPN: "VLESS, AmneziaWG, OpenVPN") на телефоне не шире строки: обрезается, целиком в подсказке */
+.role-chip { max-width: 100%; min-width: 0; }
+.role-chip-t { overflow: hidden; text-overflow: ellipsis; }
 .role-chip.clickable:hover { background: color-mix(in srgb, var(--rc) 20%, transparent); }
 .role-backup { --rc: #a78bfa; }
 .role-relay, .role-via { --rc: #22d3ee; }
@@ -7934,6 +7944,23 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
 :root[data-theme='light'] .role-relay, :root[data-theme='light'] .role-via { --rc: #0e7490; }
 :root[data-theme='light'] .role-kube { --rc: #a21caf; }
 :root[data-theme='light'] .role-llm { --rc: #4338ca; }
+/* VPN: медный, не желтый предупреждений; участие в меше - пунктиром и без заливки */
+.role-vpn, .role-mesh { --rc: #e0a370; }
+.role-mesh { border-style: dashed; background: transparent; }
+/* клиенты VPN (Vpn.tsx): шаблон колонок задает сама таблица по тому, какие колонки у нее есть */
+.gpu-ptbl.vpn-tbl { grid-template-columns: var(--vpn-cols); }
+.vpn-tr .lk-dot { align-self: center; }
+.vpn-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vpn-ep { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) {
+  .gpu-ptbl.vpn-tbl { grid-template-columns: var(--vpn-cols-1); }
+  .vpn-m2 { display: none; }
+}
+@media (max-width: 640px) {
+  .gpu-ptbl.vpn-tbl { grid-template-columns: var(--vpn-cols-2); }
+  .vpn-m { display: none; }
+}
+:root[data-theme='light'] .role-vpn, :root[data-theme='light'] .role-mesh { --rc: #9a5b1e; }
 /* GPU: плашка в списке серверов - средняя загрузка карт полосой, красная при поломке */
 .gpu-chip { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.68rem; font-weight: 600; letter-spacing: 0.03em; padding: 0.05rem 0.4rem; border-radius: 6px; border: 1px solid rgba(118, 185, 0, 0.45); color: #6f9d2a; background: rgba(118, 185, 0, 0.08); flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .gpu-chip-bar { display: inline-block; width: 26px; height: 5px; border-radius: 3px; background: var(--border); position: relative; overflow: hidden; }

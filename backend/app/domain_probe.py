@@ -309,6 +309,7 @@ def _kind(status: str, message: str) -> tuple[str, int]:
 def out(
     row: DomainProbe, now: datetime, names: dict[int, str],
     local_hint: tuple[dict | None, bool] = (None, False),
+    via: str = "",
 ) -> DomainProbeOut:
     """Строка для мастера. Просроченное ожидание дочитываем здесь: ответ агента мог не
     прийти вовсе, а фоновую проверку снаружи мог оборвать перезапуск панели."""
@@ -347,6 +348,7 @@ def out(
         ext_kind=ext_kind, ext_code=ext_code,
         local_status=local[0], local_latency_ms=local[1], local_message=local[2],
         local_kind=local_kind, local_code=local_code, local_server=server,
+        local_via=checks_exec.via_text(via) if local[0] not in ("pending", "none") else "",
         ext_hint=_hint(row.ext_hint) if row.ext_ts is not None else None,
         local_hint=_hint(local_hint[0]), local_hint_pending=local_hint[1],
     )
@@ -365,7 +367,11 @@ async def rows_out(
         )
     ))
     hints = await local_hints(session, rows, now)
+    ids = [r.local_request_id for r in rows if r.local_request_id]
+    vias = dict((await session.execute(
+        select(ProbeRequest.id, ProbeRequest.via).where(ProbeRequest.id.in_(ids))
+    )).all()) if ids else {}
     return [
-        out(r, now, names, hints.get(r.domain, (None, False)))
+        out(r, now, names, hints.get(r.domain, (None, False)), vias.get(r.local_request_id) or "")
         for r in sorted(rows, key=lambda r: r.domain)
     ]

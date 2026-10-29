@@ -761,7 +761,7 @@ export function AddMonitor({
         ? t('Изнутри сервера проверяются только сайты.')
         : inside?.kind === 'no_server'
           ? t('Домен не нашелся на серверах с агентом: проверять изнутри некому.')
-          : t('Агент откроет сайт на самом сервере, через localhost. Для сайтов за белым списком.'),
+          : t('Агент откроет сайт на самом сервере: через localhost или адрес сервера, а если белый список прокси не пускает и его, то бэкенд сайта напрямую. Для сайтов за белым списком.'),
       sub: inside?.web && srv ? t('домен есть в {web} на {srv}', { web: inside.web, srv }) : undefined,
       line: http ? insideLine() : <span className="muted">{t('недоступно')}</span>,
       off: !http || (fresh && !!inside && !insideKnown) || tried?.inside?.st === 'err',

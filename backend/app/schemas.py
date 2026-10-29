@@ -412,10 +412,12 @@ class AlertSnoozeIn(BaseModel):
     # logerr:<где>|<контейнер пода> - всплеск ошибок в одном логе;
     # fpm:<где>|<пул> - один пул PHP-FPM;
     # gitlab:<хост или контейнер> - один GitLab;
+    # torrent:<контейнер или host>|<адрес>, vpnheavy:<...>|<адрес или имя> - один клиент VPN;
     # oom:<виновник> - OOM из-за одной службы, контейнера или процесса (app/oom.py culprit)
     kind: str = Field(min_length=1, max_length=480,
                       pattern=r"^(?:[a-z_][a-z0-9_]*(?:@[1-3])?|web_5xx:[^\x00-\x1f]{1,220}|unit:[A-Za-z0-9@._:\\-]{1,200}"
                               r"|qstuck:[^\x00-\x1f]{1,470}|qfail:[^\x00-\x1f]{1,470}|worker:[^\x00-\x1f]{1,470}|cron:[^\x00-\x1f]{1,470}|logerr:[^\x00-\x1f]{1,470}|fpm:[^\x00-\x1f]{1,470}|gitlab:[^\x00-\x1f]{1,470}"
+                              r"|torrent:[^\x00-\x1f]{1,470}|vpnheavy:[^\x00-\x1f]{1,470}"
                               r"|oom:[^\x00-\x1f]{1,470})$")
     hours: float = Field(ge=0, le=24 * 30)
 
@@ -677,6 +679,9 @@ class DomainProbeOut(BaseModel):
     local_kind: str = ""
     local_code: int = 0
     local_server: str = ""
+    # как агент дошел до сайта изнутри, словами (app.checks.via_text): "через адрес 203.0.113.6",
+    # "контейнер app-1:80 в обход caddy"; пусто - через localhost
+    local_via: str = ""
     # главная не открылась, а типовой путь отвечает - его и предлагаем мониторить
     ext_hint: PathHint | None = None
     local_hint: PathHint | None = None
@@ -1659,6 +1664,8 @@ class ServerOut(BaseModel):
     gpu_sum: dict | None = None
     # LLM-сервисы с обычными задержками (gpu.llm_view)
     llm: list[dict] | None = None
+    # VPN и прокси на сервере с клиентами от helper'а vpn-setup (vpn.view): бейдж и раздел "VPN"
+    vpn: dict | None = None
     # очереди, которые не разбираются или стоят: {ключ очереди: {"age", "d0", "muted", "stall", "wait",
     # "why"}} (queue_watch.view)
     queue_watch: dict | None = None
@@ -1683,6 +1690,9 @@ class ServerOut(BaseModel):
     log_errors: dict | None = None
     # пулы PHP-FPM (helper fpm-setup): конфиг, очередь, счет за час и сутки, беда (fpm_pools.view)
     fpm: dict | None = None
+    # клиенты VPN по conntrack (helper vpnflow-setup) и трафик из списка клиентов: потоки, адреса, похоже
+    # ли на торрент, сколько прокачал за 3 часа, беда и мьюты (vpn_flow.view)
+    vpn_flow: dict | None = None
     # GitLab (helper gitlab-setup): версия и путь обновления, бэкап, миграции, автообновление (gitlab.view)
     gitlab: dict | None = None
     # проверка конфигов веб-серверов: [{server, where, ok, err}] (web_config.view)

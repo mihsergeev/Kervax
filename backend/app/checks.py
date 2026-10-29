@@ -683,6 +683,35 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
     via = getattr(probe, "via", "") or ""
     if via.startswith("cluster:"):
         return _outcome_via_cluster(check, probe, degraded_ms, via[len("cluster:"):])
+    if via.startswith("proxy:"):
+        return _outcome_via_proxy(check, probe, degraded_ms, via)
+    out = _outcome_local(check, probe, degraded_ms, via[len("addr:"):] if via.startswith("addr:") else "")
+    if via.startswith("addr:"):
+        out.message = f"{out.message} · {via_text(via)}"
+    return out
+
+
+def via_text(via: str) -> str:
+    """Каким путем агент проверил сайт изнутри, словами: для монитора и мастера доменов.
+
+    "" - как всегда, через localhost; "addr:<ip>" - через свой адрес сервера (агент 2.59: прокси
+    опубликован не на localhost); "proxy:<caddy|nginx> <container|addr> <имя:порт>" - бэкенд
+    прокси напрямую, в обход его белого списка (агент 2.59); "cluster:<ns>/<сервис>:<порт>" -
+    сервис кластера в обход шлюза (агент 2.9)."""
+    if via.startswith("cluster:"):
+        return f"сервис {via[len('cluster:'):]} в обход шлюза"
+    if via.startswith("addr:"):
+        return f"через адрес {via[len('addr:'):]}"
+    if via.startswith("proxy:"):
+        proxy, _, target = via[len("proxy:"):].partition(" ")
+        kind, _, name = target.partition(" ")
+        what = {"container": "контейнер", "addr": "адрес"}.get(kind, kind)
+        return f"{what} {name} в обход {proxy}"
+    return ""
+
+
+def _outcome_local(check, probe, degraded_ms: int, own: str) -> CheckOutcome:
+    """Вердикт по ответу через localhost или через свой адрес сервера own."""
     if probe.error:
         low = probe.error.lower()
         # У несостоявшегося запроса задержки нет. Агент присылает 0, и в журнале
@@ -719,6 +748,14 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
             # Советуем ОДИН адрес шлюза, а не подсеть 172.16.0.0/12: в сети без IPv6
             # с того же адреса приходят все клиенты по IPv6, и подсеть в белом списке
             # открыла бы сайт любому из них.
+            if own:
+                # агент 2.59 сам ищет бэкенд в конфиге прокси, и раз дошло до совета, бэкенд не
+                # нашелся. Запрос шел с адреса сервера, его белый список и не пускает
+                return CheckOutcome(
+                    "down", lat,
+                    message=f"сервер оборвал запрос изнутри: похоже, белый список сайта - "
+                            f"добавьте в него адрес сервера {own} ({probe.error[:200]})",
+                )
             return CheckOutcome(
                 "down", lat,
                 message="сервер оборвал запрос изнутри: похоже, белый список сайта — "
@@ -733,6 +770,28 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
         return CheckOutcome("down", lat, message=humanize_error(probe.error))
     return eval_parts(check, probe.code, probe.kw_up_found, probe.kw_down_found,
                       probe.latency_ms or 0, degraded_ms)
+
+
+def _outcome_via_proxy(check, probe, degraded_ms: int, via: str) -> CheckOutcome:
+    """Сайт проверен в обход caddy или nginx: их белый список не пускает и сам сервер (агент 2.59).
+
+    Бэкенд, куда прокси отправляет домен, агент нашел в конфиге прокси на сервере и спросил
+    напрямую с тем же Host. Как и с кластером, в сообщении это сказано явно: зеленый статус
+    значит "приложение отвечает". Прокси проверен TLS-рукопожатием, с него и сертификат."""
+    where = via_text(via)
+    if probe.error:
+        err = probe.error
+        if err.startswith("front "):
+            # приложение отвечает, а прокси не принимает соединения - посетители сайт не видят
+            addr = err[len("front "):].split(": ", 1)[0]
+            return CheckOutcome("down", None,
+                                message=f"прокси {addr} не принимает соединения: {humanize_error(err)}")
+        return CheckOutcome("down", probe.latency_ms or None,
+                            message=f"{humanize_error(err)} · {where}")
+    out = eval_parts(check, probe.code, probe.kw_up_found, probe.kw_down_found,
+                     probe.latency_ms or 0, degraded_ms)
+    out.message = f"{out.message} · {where}"
+    return out
 
 
 def _outcome_via_cluster(check, probe, degraded_ms: int, svc: str) -> CheckOutcome:

@@ -25,7 +25,7 @@ TOPIC = {
     "conntrack": "🔗", "listen_gone": "🔌", "exposed": "🔓", "port_new": "🚪", "cf_realip": "🎭", "access_change": "🔑",
     "access_risk": "🗝", "ssh_risk": "🔐", "docker_sock": "🐳", "docker_risk": "🐳", "units": "⚙️",
     "unit_loop": "⚙️", "workers": "👷", "cron_stuck": "⏲", "log_errors": "📜", "queue": "🐇",
-    "queue_stuck": "⏳", "queue_failed": "🧨", "fpm": "🐘", "gitlab": "🦊", "autoban": "🚫", "web_5xx": "🌐", "web_config": "🧾",
+    "queue_stuck": "⏳", "queue_failed": "🧨", "fpm": "🐘", "vpn_torrent": "🧲", "vpn_heavy": "📶", "gitlab": "🦊", "autoban": "🚫", "web_5xx": "🌐", "web_config": "🧾",
     "web_cert": "🔏", "webfiles": "🕵️", "db_conn": "🛢", "db_health": "🛢", "gpu": "🎛", "llm": "💬",
     "docker_down": "🐳", "docker_loop": "🐳", "docker_restarts": "🐳", "kube_pod": "☸️",
     "kube_restarts": "☸️", "kube_job": "☸️", "kube_cron": "☸️", "kube_node": "☸️",
@@ -79,6 +79,7 @@ RECOVERY = {
     "queue_stuck": "очереди снова разбираются", "queue_failed": "задачи больше не падают",
     "workers": "воркеры снова работают", "cron_stuck": "кроны больше не висят",
     "log_errors": "ошибок в логах снова обычно", "fpm": "PHP-FPM снова справляется",
+    "vpn_torrent": "торрент через VPN больше не качают", "vpn_heavy": "клиенты VPN больше не качают помногу",
     "gitlab": "GitLab снова в порядке", "autoban": "автобан снова в порядке",
     "disk_forecast": "диск больше не грозит заполниться", "units": "упавших юнитов нет",
     "cpu_spin": "пустых циклов больше нет", "backup_growth": "прирост бэкапа снова обычный",
@@ -112,7 +113,8 @@ RECOVERY = {
 _MODULE = {
     "workers": ("workers", "tg_short"), "cron_stuck": ("cron_watch", "tg_short"),
     "log_errors": ("log_errors", "tg_short"), "queue_stuck": ("queue_watch", "tg_short"),
-    "queue_failed": ("queue_watch", "tg_short_failed"), "fpm": ("fpm_pools", "tg_short"), "gitlab": ("gitlab", "tg_short"),
+    "queue_failed": ("queue_watch", "tg_short_failed"), "fpm": ("fpm_pools", "tg_short"), "vpn_torrent": ("vpn_flow", "tg_short_torrent"),
+    "vpn_heavy": ("vpn_flow", "tg_short_heavy"), "gitlab": ("gitlab", "tg_short"),
     "autoban": ("autoban", "tg_short"),
     "db_health": ("db_health", "tg_short"), "backup_custom": ("custom_backups", "tg_short"),
     "backup_restore": ("backup_verify", "tg_short"), "exposed": ("open_ports", "tg_short_exposed"),
@@ -261,6 +263,10 @@ SITE_RECOVERY = {"recovery": "снова отвечает", "recstable": "сно
                  "flakyrec": "снова отвечает стабильно", "tamperrec": "признаков взлома больше нет"}
 
 
+# как агент проверил сайт изнутри (app.checks.via_text): в обход шлюза или прокси, через адрес
+_VIA = re.compile(r"(?:в обход \S+|^через адрес \S+)$")
+
+
 def _reason(text: str) -> str:
     """Причина одной строкой: без сырой ошибки Go/httpx в скобках и без "Get "<адрес>": "."""
     why = _GO_URL.sub("", str(text or "").strip())
@@ -297,6 +303,10 @@ def site(kind: str, status: str, msg: str) -> tuple[str, str, list[str]] | str:
             facts = _multi_ip(msg[multi.end():], int(multi.group(1)), int(multi.group(2)))
             return ("⚠️🌐", "Тормозит", facts[1:]) if status == "degraded" else ("🔴🌐", "Не отвечает", facts)
         parts = [p.strip() for p in msg.split(" — ") if p.strip()]
+        # путь проверки изнутри после " · " ("... · контейнер app-1:80 в обход caddy"): в чат тоже
+        head, dot, way = parts[-1].rpartition(" · ") if parts else ("", "", "")
+        if dot and _VIA.search(way):
+            parts = parts[:-1] + [head, way]
         why = _reason(parts[0]) if parts else ""
         m = re.search(r"медленно: (\d+) мс", why)
         if m:
@@ -304,7 +314,7 @@ def site(kind: str, status: str, msg: str) -> tuple[str, str, list[str]] | str:
             why = (why + ", " if why else "") + f"ответ за {tg_fmt.dur(int(m.group(1)) / 1000)}"
         # После тире - пояснения и советы ("так бывает у Kubernetes, проверяйте из панели"): они в
         # панели и в истории алертов. В чат кроме причины только то, через что проверяли
-        facts = [why] + [p for p in parts[1:] if p.endswith("в обход шлюза")]
+        facts = [why] + [p for p in parts[1:] if _VIA.search(p)]
         if status == "degraded":
             return "⚠️🌐", "Тормозит", facts
         return "🔴🌐", "Не отвечает", facts

@@ -13,6 +13,7 @@ import re
 import time
 
 from app import gpu as gpu_mod
+from app import vpn as vpn_mod
 from app.config import get_settings
 
 
@@ -138,6 +139,14 @@ def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bo
     if name == "gitlab-setup":
         return (any(_gitlab_ct(c) for c in (rep.get("docker") or {}).get("containers") or [] if isinstance(c, dict))
                 or bool(((rep.get("extras") or {}).get("gitlab") or {}).get("instances")))
+    # vpn-setup - где по отчету что-то раздает VPN или прокси, есть туннель wg с неизвестной ролью или
+    # helper уже присылает клиентов. Один Tailscale на обычной ноде - клиент меша, не повод
+    if name == "vpn-setup":
+        return vpn_mod.needs_helper(rep)
+    # vpnflow-setup - где на сервере раздают VPN (app/vpn.py: контейнер по образу, туннель wg с
+    # неизвестной ролью) или helper уже присылает блок
+    if name == "vpnflow-setup":
+        return vpn_mod.needs_helper(rep) or "vpnflow" in (rep.get("extras") or {})
     # backup-setup — транспорт панели для дампов, нужен и без файлового бэкапа;
     # timesync-setup, agent-watchdog, diskusage-setup, diskhealth-setup и units-setup
     # ansible ставит всюду (диск забивается и ломается где угодно, а на VM здоровье дисков смотрит хотя бы
@@ -177,6 +186,7 @@ _HELPER_LABEL = {
     "cron-setup": "кроны на хосте и в контейнерах",
     "logerr-setup": "ошибки в логах контейнеров",
     "fpm-setup": "пулы PHP-FPM",
+    "vpnflow-setup": "торрент и трафик клиентов VPN",
     "gitlab-setup": "версия, бэкап и миграции GitLab",
     "sockfix-setup": "compose внешнего прокси: сокет и образ",
     "relay-setup": "ретранслятор для агентов",
@@ -184,6 +194,7 @@ _HELPER_LABEL = {
     "webfiles-setup": "признаки взлома в файлах сайтов",
     "autoban-setup": "автобан сканеров",
     "mirror-setup": "резервный сервер бэкапов",
+    "vpn-setup": "клиенты VPN",
 }
 
 

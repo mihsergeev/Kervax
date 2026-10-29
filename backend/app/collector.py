@@ -43,6 +43,7 @@ from app import workers as workers_mod
 from app import cron_watch
 from app import log_errors
 from app import fpm_pools
+from app import vpn_flow
 from app import gitlab as gitlab_mod
 from app import web_upstream
 from app import listen_watch
@@ -351,7 +352,7 @@ _SRV_SECTION = {
     "cpu_spin": "cpueat",
     "exposed": "exposure", "port_new": "exposure", "cf_realip": "exposure", "pressure": "pressure",
     "net_health": "nethealth",
-    "link": "links", "traffic": "traffic",
+    "link": "links", "traffic": "traffic", "vpn_torrent": "vpnflow", "vpn_heavy": "vpnflow",
     "access_change": "changes", "mem_leak": "memleak", "mem_limit": "memlimit", "ssh_risk": "ssh", "access_risk": "access",
     "listen_gone": "exposure", "disk_slow": "disklat", "gpu": "gpu", "gpu_heat": "gpu", "autoban": "web",
 }
@@ -2192,6 +2193,10 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "автобан снова в порядке: свои адреса не банит, баны держатся, лавины нет"
     if key == "fpm":
         return "PHP-FPM снова в норме: запросы не ждут воркеров и не убиваются по таймауту, воркеры не падают"
+    if key == "vpn_torrent":
+        return "клиенты VPN больше не похожи на торрент: сотен пиров на высоких портах нет"
+    if key == "vpn_heavy":
+        return "клиенты VPN больше не качают помногу: за 3 часа меньше половины порога"
     if key == "disk_forecast":
         return "диски больше не грозят заполниться в ближайшие дни: рост замедлился или место освободили"
     if key == "units":
@@ -4473,6 +4478,11 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     # PHP-FPM (helper fpm-setup): пул подолгу упирается в pm.max_children или рвет запросы по таймауту
     for x in fpm_pools.problems(s, now):
         add("fpm", x["level"], x["text"], "fpm", fpm_pools.MUTE_PREFIX + x["key"], section="services")
+    # Клиенты VPN (helper vpnflow-setup и список клиентов vpn-setup): похоже на торрент, качает очень много
+    for x in vpn_flow.torrent_problems(s, now):
+        add("vpn_torrent", x["level"], x["text"], "vpnflow", vpn_flow.MUTE_T + x["key"])
+    for x in vpn_flow.heavy_problems(s, now):
+        add("vpn_heavy", x["level"], x["text"], "vpnflow", vpn_flow.MUTE_H + x["key"])
     # Автобан сканеров (helper autoban-setup): бан своего адреса, не может банить, бан не действует, лавина
     for x in autoban_mod.problems(s, now):
         add("autoban", x["level"], x["text"], "web", autoban_mod.MUTE_PREFIX + x["key"])
@@ -4694,7 +4704,7 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # (ретранслятор, через него ходят агенты других серверов) не тут: их падение - повод для алерта.
 # kervax-mirror-pull (перекачка копий на резервном) тут: отставшую копию ловит алерт backup_mirror.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(autoban|changes|cron|db-stats|disk-health|disk-usage|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|gre|gre-sync|mirror-pull|queues|relay-sync|sockfix|units|web-rate|web-sites|webfiles|workers"
+    r"kervax-(autoban|changes|cron|db-stats|disk-health|disk-usage|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|gre|gre-sync|mirror-pull|queues|relay-sync|sockfix|units|vpn|vpnflow|web-rate|web-sites|webfiles|workers"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
@@ -4929,6 +4939,10 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
         return all(k in log_errors.muted_keys(s, now) for k in sig)
     if key == "fpm":
         return all(k in fpm_pools.muted_keys(s, now) for k in sig)
+    if key == "vpn_torrent":
+        return all(k in vpn_flow.muted_torrent(s, now) for k in sig)
+    if key == "vpn_heavy":
+        return all(k in vpn_flow.muted_heavy(s, now) for k in sig)
     if key == "gitlab":
         return all(k in gitlab_mod.muted_keys(s, now) for k in sig)
     if key == "autoban":
@@ -7072,6 +7086,16 @@ def _server_conditions(s: Server, now: datetime,
                       {"detail": "\n".join(x["text"] for x in fp[:3])
                                  + (f"\nи еще {len(fp) - 3}" if len(fp) > 3 else ""),
                        "sig": [x["key"] for x in fp], "items": fp, "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
+    # Клиенты VPN: выдержка уже в правиле (торрент - 10 минут из 15, трафик - за 3 часа), объявленный
+    # держится до половины порога. sig - какие клиенты: второй клиент с торрентом - новый алерт
+    if online and (vpn_flow.block(rep) is not None or state.get(vpn_flow.STATE_KEY)):
+        for kind, vp in (("vpn_torrent", vpn_flow.torrent_problems(s, now)),
+                         ("vpn_heavy", vpn_flow.heavy_problems(s, now))):
+            out[kind] = (max((x["level"] for x in vp), default=0),
+                         {"detail": "\n".join(x["text"] for x in vp[:3])
+                                    + (f"\nи еще {len(vp) - 3}" if len(vp) > 3 else ""),
+                          "sig": [x["key"] for x in vp], "items": vp, "parts": [(x["key"], x["text"]) for x in vp],
+                          "sep": "\n"})
     # Автобан сканеров: выдержка "не может банить" (10 минут) - в helper'е (err_since), остальное и так
     # устойчиво (бан своего адреса, доля вернувшихся за сутки, банов за час). sig - какие беды
     if online and autoban_mod.block(rep, now) is not None:
@@ -7747,7 +7771,8 @@ async def evaluate_servers(
             if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "mem_limit", "db_health",
                        "web_config", "web_cert", "webfiles", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
                        "cf_realip",
-                       "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm", "gitlab", "autoban"):
+                       "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm", "gitlab", "autoban",
+                       "vpn_torrent", "vpn_heavy"):
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
@@ -8301,6 +8326,11 @@ async def evaluate_servers(
             mlstate = mem_limit.update(st.get("memlim"), s.last_report or {}, now, pod_names)
             if mlstate is not None and mlstate != (st.get("memlim") or {}):
                 apply(s.id, "memlim", mlstate)
+            # счетчики трафика клиентов VPN раз в 5 минут: сколько клиент прокачал за 3 часа (vpn_flow)
+            if vpn_flow.has_clients(s.last_report or {}) or st.get(vpn_flow.STATE_KEY):
+                vstate = vpn_flow.update(st.get(vpn_flow.STATE_KEY), s.last_report or {}, now)
+                if vstate != (st.get(vpn_flow.STATE_KEY) or {}):
+                    apply(s.id, vpn_flow.STATE_KEY, vstate)
             # ход очередей: растет и не разбирается (queue_watch)
             if queue_watch.queues(s.last_report or {}) or st.get("qwatch"):
                 qw = queue_watch.update(st.get("qwatch"), s.last_report or {}, now,
