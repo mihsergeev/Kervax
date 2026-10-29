@@ -7,7 +7,8 @@ Xid драйвера из журнала ядра за сутки (helper 0.3 - 
 2.36 сам отдает карты на шине (gpu_pci, по ним панель просит helper) и метрики vLLM, SGLang и TEI
 за последние 5 минут (llm): очередь, KV-кэш, запросы и токены в секунду, перцентили задержек.
 
-Что алертит: драйвер не отвечает (после обновления ядра без пересборки модуля - классика), карта
+Что алертит: драйвер не отвечает дольше 5 минут (после обновления ядра без пересборки модуля -
+классика; минуту-две nvidia-smi молчит, пока перезагружают модуль nvidia), карта
 пропала с шины, ошибки Xid, после которых карте нужен сброс или замена (на виртуалке - с пометкой
 "из гостя не сбрасывать": сброс проброшенной карты изнутри ВМ роняет саму ВМ), перегрев с замедлением,
 LLM-сервис не отвечает, стоит очередь при полном KV-кэше, задержки в разы выше обычного держатся под
@@ -25,6 +26,9 @@ XID_HOLD = 3600  # ошибка Xid держится проблемой час: 
 DAY = 86400
 HEAT_MARGIN = 5  # предупреждение за 5 градусов до замедления, если карта не говорит свой предел
 FROZEN_S = 3600  # показания nvidia-smi не меняются час (helper 0.2): им нельзя верить
+# nvidia-smi не отвечает меньше 5 минут (helper 0.5 помнит, с какого прогона) - не тревога: так бывает,
+# пока перезагружают модуль nvidia
+DRV_SETTLE = 300
 LLM_BOOT = 900  # модель грузится минутами: молчание /metrics первые 15 минут процесса - не авария
 QUEUE_MIN = 5  # очередь меньше - обычная пачка запросов
 KV_FULL = 95.0
@@ -73,6 +77,15 @@ XID_BLIND_BAD = {48, 79, 119}
 # а карта поднимается только после перезагрузки хоста гипервизора
 VM_RESET = "нужен сброс GPU перезагрузкой хоста гипервизора, из гостя не сбрасывать: на ВМ с пробросом сброс изнутри роняет ВМ"
 VM_RESET_SHORT = "сброс только перезагрузкой хоста, из гостя не сбрасывать"
+# Xid 62 лечится без перезагрузки: процессы с карты убрали, модуль nvidia перезагрузили - драйвер поднял
+# карту заново, микроконтроллер ожил (на ВМ с пробросом H200 простой минуты, хост не трогали). При
+# выгрузке в журнале таймаут RISC-V и assert osinit.c - это шум выгрузки. Хост гипервизора или сервер -
+# только если карта после этого не поднялась
+XID62_FIX = "сброс: останови процессы на GPU и перезагрузи модуль nvidia (rmmod/modprobe), без nvidia-smi -r"
+XID62_FIX_VM = (" и без перезагрузки ВМ; перезагрузка хоста гипервизора - только если после этого "
+                "RmInitAdapter failed или карта не видна")
+XID62_FIX_HW = "; если после этого RmInitAdapter failed или карта не видна - перезагрузка сервера"
+XID62_SHORT = "нужна перезагрузка модуля nvidia"
 _RESET_RE = re.compile(r"нужен сброс.*$")
 ENGINE = {"vllm": "vLLM", "sglang": "SGLang", "tei": "TEI", "litellm": "LiteLLM"}
 # /metrics просит ключ: так настроено, а не сломалось (у LiteLLM require_auth_for_metrics_endpoint)
@@ -199,18 +212,28 @@ def reset_text(text: str, vm: bool) -> str:
 def xid_desc(code: int, vm: bool) -> str:
     d = XID_HW.get(code) or XID_APP.get(code) or ""
     if code == XID_BLIND:
-        return d + ("; на ВМ с пробросом сброс только перезагрузкой хоста гипервизора, из гостя не "
-                    "сбрасывать (nvidia-smi -r роняет ВМ)" if vm else "")
+        return f"{d}; {XID62_FIX}" + (XID62_FIX_VM if vm else XID62_FIX_HW)
     return reset_text(d, vm)
 
 
-def _drv_cause(b: dict) -> str:
+def settling(b: dict | None) -> bool:
+    """nvidia-smi не отвечает меньше DRV_SETTLE: модуль nvidia перезагружают, ждем следующих прогонов.
+    Helper до 0.5 не говорит, с какого прогона, - тогда сразу, как раньше"""
+    b = b or {}
+    since = _f(b.get("err_since"))
+    return bool(since) and not b.get("ok") and (_f(b.get("ts")) or 0) - since < DRV_SETTLE
+
+
+def _drv_cause(b: dict, vm: bool = False) -> str:
     kernel = str(b.get("kernel") or "")
     if b.get("mod") is False and b.get("mod_built") is False:
         return f": модуля nvidia нет для ядра {kernel} - ядро обновилось, а драйвер под него не собран (DKMS)"
     if b.get("mod") is False:
         return ": модуль ядра nvidia не загружен"
     why = str(b.get("nvrm") or b.get("err") or "")[:160]
+    if re.search(r"RmInitAdapter failed|rm_init_adapter failed", why, re.I):
+        # драйвер не поднял карту: перезагрузкой модуля ее уже не вернуть
+        return f" ({why}) - " + ("нужен сброс GPU перезагрузкой хоста гипервизора" if vm else "нужна перезагрузка сервера")
     return f" ({why})" if why else ""
 
 
@@ -231,22 +254,51 @@ def _xids(b: dict, now: datetime, hold: float | None = None) -> list[dict]:
     return sorted(seen.values(), key=lambda x: -x["ts"])
 
 
-def _load(b: dict) -> float:
-    """Когда загружен драйвер (helper 0.3): ошибки до этого ушли вместе со старым драйвером"""
-    return _f(b.get("nv_load")) or 0.0
+def _reinit(b: dict) -> dict[str, float]:
+    """Когда драйвер заново принял карту без загрузки модуля nvidia (helper 0.5: nvidia-drm пишет
+    "[GPU ID 0x...] Loading driver"), по шине"""
+    out: dict[str, float] = {}
+    for r in b.get("nv_rst") or []:
+        ts = _f(r.get("ts")) if isinstance(r, dict) else None
+        if ts:
+            k = bus_key(r.get("bus") or "")
+            out[k] = max(ts, out.get(k, 0.0))
+    return out
+
+
+def _alive_since(b: dict, bus: str, ts: float) -> bool:
+    """Показания карты менялись после ts (helper считает, сколько секунд они стоят, - frz): карта
+    ожила. Карты нет в nvidia-smi - не ожила"""
+    for g in _gpus(b):
+        if bus_key(g.get("bus") or "") == bus:
+            return (_f(b.get("ts")) or 0) - (_f(g.get("frz")) or 0) >= ts
+    return False
+
+
+def _load(b: dict, bus: str | None = None) -> float:
+    """Когда загружен драйвер (helper 0.3): ошибки до этого ушли вместе со старым драйвером. Для карты -
+    еще и когда драйвер принял ее заново: модуль перезагрузили, пока процессов на ней не было, драйвер
+    отпустил карту и поднял снова. Только если показания с тех пор менялись: перезагрузили один
+    nvidia_drm при работающей модели - карту не отпускали, она так и стоит"""
+    load = _f(b.get("nv_load")) or 0.0
+    if bus is None:
+        return load
+    k = bus_key(bus)
+    r = _reinit(b).get(k) or 0.0
+    return r if r > load and _alive_since(b, k, r) else load
 
 
 def _waits_reset(x: dict, b: dict) -> bool:
     """Карта после этой ошибки ждет сброса: драйвер с тех пор не перезагружали. Xid 154 говорит сам,
     что нужно: "... to 0x0 (None)" - восстанавливать больше нечего"""
-    if x["code"] not in XID_RESET or x["ts"] < _load(b):
+    if x["code"] not in XID_RESET or x["ts"] < _load(b, x["bus"]):
         return False
     return not (x["code"] == 154 and re.search(r"\bto 0x0\b", x["text"]))
 
 
 def _blind(b: dict, xids: list[dict]) -> set[str]:
     """Карты (шина) с Xid 62 после загрузки драйвера: телеметрия у них застыла до сброса"""
-    return {bus_key(x["bus"]) for x in xids if x["code"] == XID_BLIND and x["ts"] >= _load(b)}
+    return {bus_key(x["bus"]) for x in xids if x["code"] == XID_BLIND and x["ts"] >= _load(b, x["bus"])}
 
 
 def _dead_on(rep: dict, b: dict, bus: str) -> list[str]:
@@ -267,7 +319,7 @@ def _xid_level(x: dict, xids: list[dict], b: dict, rep: dict) -> int:
     if x["code"] != XID_BLIND:
         return 2
     k = bus_key(x["bus"])
-    worse = any(y["code"] in XID_BLIND_BAD and bus_key(y["bus"]) == k and y["ts"] >= _load(b) for y in xids)
+    worse = any(y["code"] in XID_BLIND_BAD and bus_key(y["bus"]) == k and y["ts"] >= _load(b, y["bus"]) for y in xids)
     return 2 if worse or _dead_on(rep, b, x["bus"]) else 1
 
 
@@ -285,15 +337,18 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]
                     "(nvidia-smi мог зависнуть на неисправной карте)", "gpu:stale", None)]
     if not b.get("smi"):
         return []  # драйвер не установлен: карта не используется, это видно в карточке
-    if not b.get("ok"):
-        return [(2, f"GPU недоступны: драйвер NVIDIA не отвечает{_drv_cause(b)}", "gpu:drv", None)]
-    out: list[tuple[int, str, str, str | None]] = []
     vm = vm_of(rep)
+    ok = bool(b.get("ok"))
+    if not ok and not settling(b):
+        return [(2, f"GPU недоступны: драйвер NVIDIA не отвечает{_drv_cause(b, vm)}", "gpu:drv", None)]
+    # пока модуль перезагружают, карт не видно: судим только по Xid из журнала ядра, чтобы висящий
+    # алерт по Xid не ушел ложным отбоем
+    out: list[tuple[int, str, str, str | None]] = []
     seen = _gpu_of_bus(b)
     xids = _xids(b, now)
     blind = _blind(b, xids)
     lost: set[str] = set()  # у пропавшей карты ее Xid 79 уже в строке "пропала", второй строкой не повторяем
-    for p in pci_list(rep):
+    for p in pci_list(rep) if ok else []:
         drv = str(p.get("drv") or "")
         k = bus_key(p["bus"])
         if drv not in ("nvidia", "") or k in seen:
@@ -321,7 +376,7 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]
         if eu:
             out.append((1, f"GPU {i}: неисправимых ошибок ECC с загрузки драйвера - {eu}", f"gpu:ecc:{i}", None))
     for x in xids:
-        if x["code"] not in XID_HW or bus_key(x["bus"]) in lost or x["ts"] < _load(b):
+        if x["code"] not in XID_HW or bus_key(x["bus"]) in lost or x["ts"] < _load(b, x["bus"]):
             continue
         if now.timestamp() - x["ts"] > XID_HOLD and not _waits_reset(x, b):
             continue
@@ -400,6 +455,7 @@ def summary(rep: dict, now: datetime) -> dict | None:
         "frozen": sum(1 for g in gs if frozen(g)),
         # карт с Xid 62: застывшие показания объясняются им (упал микроконтроллер), а не отдельной бедой
         "blind": len(blind),
+        "settling": settling(b),  # nvidia-smi молчит первые минуты: модуль перезагружают, не "нет связи"
     }
 
 
@@ -446,16 +502,18 @@ def view(rep: dict, now: datetime) -> dict | None:
         if old and not held:
             continue
         # hw - аппаратная ошибка, после которой драйвер не перезагружали; lv - ее уровень, как в
-        # problems: 2 - красная точка, 1 (одиночный Xid 62, много исправимых ECC) - желтая
-        hw = c in XID_HW and x["ts"] >= _load(b)
+        # problems: 2 - красная точка, 1 (одиночный Xid 62, много исправимых ECC) - желтая; fixed - после
+        # нее карту сбросили (драйвер перезагрузили или он принял карту заново)
+        hw = c in XID_HW and x["ts"] >= _load(b, x["bus"])
         xid.append({**x, "gpu": seen.get(bus_key(x["bus"])), "hw": hw, "lv": _xid_level(x, xids, b, rep) if hw else 0,
-                    "held": held, "old": old, "desc": xid_desc(c, vm)})
+                    "held": held, "old": old, "desc": xid_desc(c, vm), "fixed": c in XID_RESET and not hw})
     ok = bool(b.get("ok"))
     return {
         "helper": True, "age": round(age(b, now, rep)), "stale": age(b, now, rep) > STALE,
         "vm": vm,  # виртуалка: карту из гостя не сбрасывать
         "smi": bool(b.get("smi")), "ok": ok, "err": str(b.get("err") or "")[:300],
-        "cause": _drv_cause(b).lstrip(": ").strip(" ()") if b.get("smi") and not ok else "",
+        "cause": _drv_cause(b, vm).lstrip(": ").strip(" ()") if b.get("smi") and not ok else "",
+        "settling": settling(b),
         "driver": str(b.get("driver") or ""), "cuda": str(b.get("cuda") or ""), "kernel": str(b.get("kernel") or ""),
         "pci": [{"bus": p["bus"], "drv": str(p.get("drv") or ""),
                  "lost": ok and str(p.get("drv") or "") in ("nvidia", "") and bus_key(p["bus"]) not in seen}
@@ -683,6 +741,9 @@ def _gpu_one(p) -> tuple[str, list[str]]:
         m = re.search(r"не обновлялись (.+?):", text)
         return "Нет свежих данных о GPU" + (f" {m.group(1)}" if m else ""), ["helper gpu-setup не отрабатывает"]
     if kind == "drv":
+        if re.search(r"RmInitAdapter failed|rm_init_adapter failed", text, re.I):
+            return "Драйвер NVIDIA не поднял карту", [
+                "RmInitAdapter failed, " + ("нужна перезагрузка хоста гипервизора" if "гипервизора" in text else "нужна перезагрузка сервера")]
         why = text.partition("не отвечает")[2].strip(" :()")
         return "Драйвер NVIDIA не отвечает", [why.split(" - ")[0]] if why else []
     if kind == "lost":
@@ -706,7 +767,7 @@ def _gpu_one(p) -> tuple[str, list[str]]:
         if code is not None:
             vm = "из гостя" in text
             if code == XID_BLIND:
-                tail = "телеметрия застыла, " + (VM_RESET_SHORT if vm else "нужен плановый сброс")
+                tail = f"телеметрия застыла, {XID62_SHORT}" + (", ВМ не перезагружать" if "перезагрузки ВМ" in text else "")
             else:
                 tail = XID_HW.get(code, "").partition(": ")[2]
                 tail = _RESET_RE.sub(VM_RESET_SHORT, tail) if vm else tail

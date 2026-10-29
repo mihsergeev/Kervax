@@ -2072,6 +2072,16 @@ const EN: Record<string, string> = {
   'Xid 62: упал микроконтроллер GPU, показания застыли до сброса карты': 'Xid 62: the GPU microcontroller is down, readings are frozen until the card is reset',
   'ждет сброса': 'waits for a reset',
   'держится до перезагрузки сервера или драйвера NVIDIA': 'holds until the server or the NVIDIA driver is restarted',
+  'ждет сброса GPU: Xid 62, перезагрузить модуль nvidia': 'GPU waits for a reset: Xid 62, reload the nvidia module',
+  'Останови процессы на GPU и перезагрузи модуль nvidia (rmmod/modprobe), без nvidia-smi -r и без перезагрузки ВМ. Перезагрузка хоста гипервизора - только если после этого RmInitAdapter failed или карта не видна':
+    'Stop the processes on the GPU and reload the nvidia module (rmmod/modprobe), without nvidia-smi -r and without rebooting the VM. Reboot the hypervisor host only if after that RmInitAdapter failed or the card is not seen',
+  'Останови процессы на GPU и перезагрузи модуль nvidia (rmmod/modprobe), без nvidia-smi -r. Перезагрузка сервера - только если после этого RmInitAdapter failed или карта не видна':
+    'Stop the processes on the GPU and reload the nvidia module (rmmod/modprobe), without nvidia-smi -r. Reboot the server only if after that RmInitAdapter failed or the card is not seen',
+  'карта сброшена': 'card reset',
+  'после ошибки драйвер NVIDIA перезагрузили или он принял карту заново': 'after the error the NVIDIA driver was reloaded or took the card up again',
+  'драйвер NVIDIA перезагружается': 'the NVIDIA driver is being reloaded',
+  'nvidia-smi не отвечает: похоже, перезагружают модуль nvidia. Если не ответит 5 минут, это авария.':
+    'nvidia-smi does not answer: the nvidia module seems to be reloaded. If it stays silent for 5 minutes, that is a failure.',
   'Пропускная': 'Throughput',
   'Токены': 'Tokens',
   'в очереди {n}': '{n} queued',

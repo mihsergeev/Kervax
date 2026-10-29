@@ -34,18 +34,25 @@ function xidTime(ts: number, old?: boolean): string {
 const xidBad = (x: { hw: boolean; lv?: number }) => (x.lv ?? (x.hw ? 2 : 0)) >= 2
 const VM_RESET = (t: TFn) =>
   t('На ВМ с пробросом карту сбрасывает только перезагрузка хоста гипервизора: nvidia-smi -r или перезагрузка изнутри роняет ВМ')
+// Xid 62 лечится перезагрузкой модуля nvidia без перезагрузки сервера: драйвер отпускает карту и поднимает
+// заново. Хост гипервизора или сервер - только если карта после этого не поднялась
+const MOD_RELOAD = (t: TFn, vm?: boolean) =>
+  vm
+    ? t('Останови процессы на GPU и перезагрузи модуль nvidia (rmmod/modprobe), без nvidia-smi -r и без перезагрузки ВМ. Перезагрузка хоста гипервизора - только если после этого RmInitAdapter failed или карта не видна')
+    : t('Останови процессы на GPU и перезагрузи модуль nvidia (rmmod/modprobe), без nvidia-smi -r. Перезагрузка сервера - только если после этого RmInitAdapter failed или карта не видна')
 
 const KIND: Record<string, string> = { container: 'контейнер', pod: 'под', unit: 'юнит', user: 'пользователь' }
 
 // Плашка в списке серверов: средняя загрузка карт полосой, красная - если GPU не в порядке
 export function GpuChip({ sum, bad, t }: { sum: GpuSum; bad: boolean; t: TFn }) {
   // smi=false - драйвер NVIDIA не ставили, карта не используется: связь не терялась
-  const lost = sum.helper && !sum.ok && sum.smi !== false
+  // settling - nvidia-smi молчит первые минуты: модуль перезагружают
+  const lost = sum.helper && !sum.ok && sum.smi !== false && !sum.settling
   const tip = [
     `${sum.n} x ${sum.models.join(', ') || 'NVIDIA'}`,
     sum.mem != null ? t('память {a} из {b} ГБ', { a: sum.mem, b: sum.memt ?? 0 }) : '',
     !sum.helper ? t('нет helper gpu-setup: загрузка не видна') : sum.smi === false ? t('драйвер NVIDIA не установлен')
-      : !sum.ok ? t('драйвер NVIDIA не отвечает') : '',
+      : sum.settling ? t('драйвер NVIDIA перезагружается') : !sum.ok ? t('драйвер NVIDIA не отвечает') : '',
     sum.blind ? t('Xid 62: упал микроконтроллер GPU, показания застыли до сброса карты') : sum.frozen ? t('показания nvidia-smi застыли') : '',
   ].filter(Boolean).join(', ')
   return (
@@ -104,13 +111,15 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
   const xidDay = xid.filter((x) => !x.old)
   const xidHeld = [...new Set(xid.filter((x) => x.held).map((x) => x.code))]
   pills.push({ text: t('Xid за сутки: {n}', { n: xidDay.length }), lv: xidDay.some(xidBad) ? 'bad' : xidDay.length ? 'warn' : undefined })
-  // одиночный Xid 62 - мониторинг слеп, карта работает: плашка желтая. На ВМ с пробросом сброс из
-  // гостя роняет ВМ, поэтому сказано прямо, чем сбрасывать
+  // одиночный Xid 62 - мониторинг слеп, карта работает: плашка желтая, лечится перезагрузкой модуля
+  // nvidia. Остальные на ВМ с пробросом: сброс из гостя роняет ВМ, поэтому сказано прямо, чем сбрасывать
+  const only62 = xidHeld.length > 0 && xidHeld.every((c) => c === 62)
   if (xidHeld.length)
     pills.push({
-      text: g.vm ? t('ждет сброса GPU: Xid {list}, из гостя не сбрасывать', { list: xidHeld.join(', ') }) : t('ждет сброса GPU: Xid {list}', { list: xidHeld.join(', ') }),
+      text: only62 ? t('ждет сброса GPU: Xid 62, перезагрузить модуль nvidia')
+        : g.vm ? t('ждет сброса GPU: Xid {list}, из гостя не сбрасывать', { list: xidHeld.join(', ') }) : t('ждет сброса GPU: Xid {list}', { list: xidHeld.join(', ') }),
       lv: xid.some((x) => x.held && xidBad(x)) ? 'bad' : 'warn',
-      tip: g.vm ? VM_RESET(t) : undefined,
+      tip: only62 ? MOD_RELOAD(t, g.vm) : g.vm ? VM_RESET(t) : undefined,
     })
   if (pm.length === 1) pills.push({ text: `persistence mode ${pm[0] === 'Enabled' ? t('вкл') : t('выкл')}` })
   const vm = pci.filter((p) => p.drv === 'vfio-pci')
@@ -137,6 +146,9 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
             list: pci.map((p) => `${p.bus}${p.drv ? ` ${p.drv}` : ''}`).join(', '),
           })}
         </div>
+      )}
+      {g.settling && (
+        <div className="muted small">{t('nvidia-smi не отвечает: похоже, перезагружают модуль nvidia. Если не ответит 5 минут, это авария.')}</div>
       )}
       {g.smi && !g.ok && g.err && <div className="muted small mono gpu-err">{g.err}</div>}
       {vm.length > 0 && (
@@ -231,8 +243,14 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
                 Xid {x.code}
                 {x.desc ? ` - ${x.desc}` : ''}
                 {x.held && (
-                  <span className="type-chip off" title={g.vm ? VM_RESET(t) : t('держится до перезагрузки сервера или драйвера NVIDIA')}>
+                  <span className="type-chip off"
+                    title={x.code === 62 ? MOD_RELOAD(t, g.vm) : g.vm ? VM_RESET(t) : t('держится до перезагрузки сервера или драйвера NVIDIA')}>
                     {t('ждет сброса')}
+                  </span>
+                )}
+                {x.fixed && (
+                  <span className="type-chip" title={t('после ошибки драйвер NVIDIA перезагрузили или он принял карту заново')}>
+                    {t('карта сброшена')}
                   </span>
                 )}
                 <span className="muted small"> {x.text}</span>
