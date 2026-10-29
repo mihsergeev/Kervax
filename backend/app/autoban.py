@@ -291,10 +291,12 @@ async def store(session, srv: Server, extras: dict | None, now: datetime) -> Non
         r.end = "expired" if until <= now + timedelta(seconds=120) else (r.end or "gone")
 
 
-async def history(session, server_id: int, days: int = 30, limit: int = 300) -> list[dict]:
+async def history(session, server_id: int, days: int = 30, limit: int = 300,
+                  now: datetime | None = None) -> list[dict]:
+    now = now or datetime.now(timezone.utc)
     rows = list(await session.scalars(
         select(AutobanBan).where(AutobanBan.server_id == server_id,
-                                 AutobanBan.since >= datetime.now(timezone.utc) - timedelta(days=days))
+                                 AutobanBan.since >= now - timedelta(days=days))
         .order_by(AutobanBan.since.desc()).limit(limit)))
     return [{"ip": r.ip, "cc": geoip.country_of(r.ip), "since": r.since.timestamp(), "until": r.until.timestamp(),
              "n": r.n, "hits": r.hits, "paths": list(r.paths or []), "more": r.more, "where": r.where,

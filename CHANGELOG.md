@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.62] - 2026-10-29
+
+### Fixed
+- Тесты больше не зависят от сегодняшней даты: история автобана и "не на связи" при нехватке памяти считались
+  от текущего времени, а даты в тестах были зашиты, и через месяц тесты начали бы падать сами. Проверено
+  прогоном всех тестов с часами, сдвинутыми на годы вперед. Поведение панели не изменилось.
+
 ## [1.8.61] - 2026-10-29
 
 ### Changed
