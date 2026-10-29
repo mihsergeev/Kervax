@@ -1558,6 +1558,9 @@ class ServerOut(BaseModel):
     # недоступен: ответил ли сервер панели в момент алерта (app/liveness.py) -
     # {state: alive|refused|silent, where, tried, ts}
     offline_probe: dict | None = None
+    # недоступен: что было в последнем отчете перед пропажей, если было не так ("перед этим
+    # кончилась память: свободно 4%, swap 100%, PSI full 40%"), app/mem_starve.py
+    offline_before: str = ""
     # агент предупредил о штатной остановке: {kind, at, wait} (app/going_down.py)
     going_down: dict | None = None
     # прогноз износа SSD по дискам из отчета (app/disk_wear.py)
@@ -1748,6 +1751,9 @@ class ServerOut(BaseModel):
     mute_live: dict[str, dict] = Field(default_factory=dict)
     # временные заглушки, которые кончились при живой проблеме и держатся: {ключ: {at: исходный срок}}
     mute_over: dict[str, dict] = Field(default_factory=dict)
+    # заглушенные поштучно диски (app/drive_mute.py): {серийник: {dev, at, c: счетчики, spare, crit, keys}};
+    # пусто у серийника - заглушили только что, базовую линию сборщик еще не записал
+    drive_mutes: dict[str, dict] = Field(default_factory=dict)
     # CronJob кластера с проблемой (упал, давно нет успеха, у дампа - приостановлен): {ns/имя: причина}
     kube_cron_issues: dict[str, str] = Field(default_factory=dict)
     # репозитории бэкап-сервера со свежими бэкапами, чьих клиентов нет в панели (по ВСЕМ серверам)
@@ -1986,6 +1992,8 @@ class AgentReportIn(BaseModel):
     mem_free: int = 0
     swap_in: float = 0.0  # байт/сек
     swap_out: float = 0.0
+    # агент 2.58: major faults ноды в секунду (app/mem_starve.py); None - агент старый
+    majflt: float | None = None
     mem_slab: int = 0  # байты
     mem_dirty: int = 0
     mem_writeback: int = 0

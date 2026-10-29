@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.57"
+const version = "2.58"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -182,6 +182,11 @@ type report struct {
 	// swap-активность (байт/сек) + детальная разбивка памяти (байты)
 	SwapIn       float64 `json:"swap_in"`       // подкачано с диска
 	SwapOut      float64 `json:"swap_out"`      // вытеснено на диск
+	// 2.58: major faults ноды в секунду - страницы, которые пришлось читать с диска. Когда swap
+	// уже забит, своп почти стоит, а память все равно кончилась: ядро выкидывает код и кэш
+	// процессов и тут же читает их снова. Так зависал сервер с двумя сборками Gradle: swap_in
+	// 170 КБ/с, а major faults больше тысячи в секунду. nil - первый отчет после запуска
+	MajFlt *float64 `json:"majflt,omitempty"`
 	MemSlab      uint64  `json:"mem_slab"`      // память ядра (slab-аллокатор)
 	MemDirty     uint64  `json:"mem_dirty"`     // «грязные» страницы (ждут записи)
 	MemWriteback uint64  `json:"mem_writeback"` // активно пишутся на диск
@@ -832,6 +837,10 @@ type procStat struct {
 	Shared  uint64  `json:"shared,omitempty"`  // общая память (RssShmem: shared_buffers и т.п.), байты
 	Threads int     `json:"threads,omitempty"` // число потоков
 	State   string  `json:"state,omitempty"`   // состояние: R/S/D/Z/…
+	// 2.58, только в top_mem: чей процесс (container | pod | unit и имя, как в cpu_groups). Когда
+	// сервер замолкает без памяти, панель называет по ним, какой контейнер ее съел
+	Kind  string `json:"kind,omitempty"`
+	Owner string `json:"owner,omitempty"`
 }
 
 type cpuStat struct {
@@ -2256,9 +2265,9 @@ func meminfo() map[string]uint64 {
 	return m
 }
 
-// readVmstat — накопительные счётчики страниц swap in/out и OOM-киллов (/proc/vmstat).
+// readVmstat — накопительные счётчики страниц swap in/out, major faults и OOM-киллов (/proc/vmstat).
 // oomOK=false, если поля oom_kill нет (старое ядро <4.13).
-func readVmstat() (swpin, swpout, oom uint64, oomOK bool) {
+func readVmstat() (swpin, swpout, majflt, oom uint64, oomOK bool) {
 	f, err := os.Open("/proc/vmstat")
 	if err != nil {
 		return
@@ -2275,6 +2284,8 @@ func readVmstat() (swpin, swpout, oom uint64, oomOK bool) {
 			swpin, _ = strconv.ParseUint(strings.TrimSpace(v), 10, 64)
 		case "pswpout":
 			swpout, _ = strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+		case "pgmajfault":
+			majflt, _ = strconv.ParseUint(strings.TrimSpace(v), 10, 64)
 		case "oom_kill":
 			oom, _ = strconv.ParseUint(strings.TrimSpace(v), 10, 64)
 			oomOK = true
@@ -2817,6 +2828,32 @@ func procOwner(cg string) (kind, id string) {
 	return "", ""
 }
 
+// ownTopMem - владельцы процессов топа памяти: cgroup читается только у них (topProcN штук)
+func ownTopMem(top []procStat, conts, pods map[string]string) {
+	for i := range top {
+		kind, id := procOwner(procCgroup(top[i].Pid))
+		top[i].Kind, top[i].Owner = kind, ownerName(kind, id, conts, pods)
+	}
+}
+
+// ownerName - владелец словами: имя контейнера или пода, иначе начало id
+func ownerName(kind, id string, conts, pods map[string]string) string {
+	switch kind {
+	case "container":
+		if n := conts[id]; n != "" {
+			return n
+		} else if len(id) > 12 {
+			return id[:12]
+		}
+	case "pod":
+		if n := pods[id]; n != "" {
+			return n
+		}
+		return "pod " + id[:min(8, len(id))]
+	}
+	return id
+}
+
 // cpuGroups - процессы, евшие CPU за интервал, сложенные по (имя, владелец). cgroup читаем только
 // у них: простаивающих большинство, и /proc/<pid>/cgroup на каждый процесс каждые 15 с незачем.
 func cpuGroups(prev, cur sample, conts, pods map[string]string) []cpuGroup {
@@ -2836,21 +2873,7 @@ func cpuGroups(prev, cur sample, conts, pods map[string]string) []cpuGroup {
 			continue
 		}
 		kind, id := procOwner(procCgroup(pid))
-		owner := id
-		switch kind {
-		case "container":
-			if n := conts[id]; n != "" {
-				owner = n
-			} else if len(id) > 12 {
-				owner = id[:12]
-			}
-		case "pod":
-			if n := pods[id]; n != "" {
-				owner = n
-			} else {
-				owner = "pod " + id[:8]
-			}
-		}
+		owner := ownerName(kind, id, conts, pods)
 		key := c.comm + "\x00" + kind + "\x00" + owner
 		g := by[key]
 		if g == nil {
@@ -3932,6 +3955,7 @@ type sample struct {
 	rx, tx               uint64
 	rdB, wrB, rdIO, wrIO uint64             // накопительные счётчики дискового I/O
 	swpin, swpout        uint64             // накопительные счётчики страниц swap in/out
+	majflt               uint64             // накопительный счётчик major faults (чтение страниц с диска)
 	nifs                 map[string]netCtr  // per-interface счётчики rx/tx
 	ddevs                map[string]diskCtr // per-device счётчики диска
 	procs                map[int]procSample // снимок процессов (для дельты CPU)
@@ -3948,11 +3972,11 @@ func snap() sample {
 	rdB, wrB, rdIO, wrIO := readDiskIO()
 	agg, cores := readCPUAll()
 	thr, thrOK := readThrottleCount()
-	swpin, swpout, oom, oomOK := readVmstat()
+	swpin, swpout, majflt, oom, oomOK := readVmstat()
 	return sample{
 		cpu: agg, cores: cores, rx: rx, tx: tx,
 		rdB: rdB, wrB: wrB, rdIO: rdIO, wrIO: wrIO,
-		swpin: swpin, swpout: swpout,
+		swpin: swpin, swpout: swpout, majflt: majflt,
 		nifs: readNetIfaces(), ddevs: readDiskDevs(), procs: readProcs(),
 		thr: thr, thrOK: thrOK, oom: oom, oomOK: oomOK, tcp: readTCP(), at: time.Now(),
 	}
@@ -3978,6 +4002,7 @@ func collect(prev sample) (report, sample) {
 	netRx, netTx := 0.0, 0.0
 	dRead, dWrite, dRdIO, dWrIO := 0.0, 0.0, 0.0, 0.0
 	swapIn, swapOut := 0.0, 0.0
+	var majFlt *float64
 	var netIfaces []ifaceRate
 	var diskDevs []devRate
 	if el := cur.at.Sub(prev.at).Seconds(); el > 0 {
@@ -3992,6 +4017,10 @@ func collect(prev sample) (report, sample) {
 		dRdIO, dWrIO = rate(cur.rdIO, prev.rdIO), rate(cur.wrIO, prev.wrIO)
 		ps := float64(os.Getpagesize())
 		swapIn, swapOut = rate(cur.swpin, prev.swpin)*ps, rate(cur.swpout, prev.swpout)*ps
+		if prev.majflt > 0 {
+			v := round1(rate(cur.majflt, prev.majflt))
+			majFlt = &v
+		}
 		// per-interface rx/tx (байт/сек) + ошибки/дропы (пакетов/сек)
 		for name, c := range cur.nifs {
 			if p, ok := prev.nifs[name]; ok {
@@ -4096,7 +4125,7 @@ func collect(prev sample) (report, sample) {
 		CPUCoresPct: corePct, CPUFreqMHz: freq, CPUTemp: temp, CPUThrottle: throttle,
 		OOMKill: oomKill, OOMVictim: oomVictim, OOMTotal: oomTotal,
 		MemCached: mi["Buffers"] + mi["Cached"], MemFree: mi["MemFree"],
-		SwapIn: swapIn, SwapOut: swapOut,
+		SwapIn: swapIn, SwapOut: swapOut, MajFlt: majFlt,
 		MemSlab: mi["Slab"], MemDirty: mi["Dirty"], MemWriteback: mi["Writeback"],
 		NetIfaces: netIfaces, DiskDevs: diskDevs,
 		TopCPU: topCPU, TopMem: topMem,
@@ -4119,6 +4148,7 @@ func collect(prev sample) (report, sample) {
 	// группы процессов - после docker и kube: им нужны имена контейнеров и подов
 	cn, pn := containerNames(dk), podNames(r.Kube)
 	r.CPUGroups = cpuGroups(prev, cur, cn, pn)
+	ownTopMem(r.TopMem, cn, pn)
 	r.DiskWriters, r.DiskWritersV1 = diskWriters("/sys/fs/cgroup", cn, pn, time.Now())
 	r.MemLimits = memLimits("/sys/fs/cgroup", cn, pn, time.Now())
 	r.NetUsers = netUsers("/sys/fs/cgroup", "/proc", cn, pn, time.Now())

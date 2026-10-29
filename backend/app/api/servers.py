@@ -23,6 +23,7 @@ from app import backup_verify
 from app import gre as gre_mod, relay as relay_mod
 from app import disk_wear
 from app import mute_watch
+from app import drive_mute
 from app import request_watch
 from app import install_watch
 from app import panel_errors
@@ -37,6 +38,7 @@ from app import fpm_pools
 from app import gitlab as gitlab_mod
 from app import mem_trend
 from app import mem_limit
+from app import mem_starve
 from app import restarts as srv_restarts
 from app import access_audit
 from app import docker_risk
@@ -384,6 +386,8 @@ def _out(
     # недоступен: что ответил сервер панели в момент алерта (app/liveness.py)
     probe = (server.alert_state or {}).get("offline_probe")
     o.offline_probe = probe if isinstance(probe, dict) and not o.online else None
+    # и что было перед пропажей, если что-то было не так: кончалась память (app/mem_starve.py)
+    o.offline_before = "" if o.online else mem_starve.before_home((server.alert_state or {}).get("offline_before"))
     # молчит после штатной перезагрузки: ждем его или он не вернулся (app/going_down.py)
     o.going_down = going_down.view(server.last_report, o.online, now)
     if onboard.active(server, now):
@@ -400,6 +404,7 @@ def _out(
                               **cron_job_issues(server.last_report, now, False, server.alert_state)}
     o.alert_since = alert_since(server)
     o.mute_live, o.mute_over = mute_watch.view(server)
+    o.drive_mutes = drive_mute.view(server)
     o.docker_since = docker_since(server)
     o.backup_growth = backup_growth.jump(server, now)
     o.backup_state = backup_state.view(server)

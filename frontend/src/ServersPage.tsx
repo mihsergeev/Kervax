@@ -46,6 +46,7 @@ import {
   type FailedUnit,
   type DiskHealth,
   type DiskHealthDisk,
+  type DriveMute,
   type DiskHealthRaid,
   type DiskUsageDir,
   type DiskUsageFs,
@@ -94,6 +95,7 @@ import {
   osDecisionLabel,
   muteAutoNote,
   muteKindLabel,
+  DRIVE_MUTE,
   OOM_MUTE,
   oomCulpritLabel,
   SRV_ALERT_KINDS,
@@ -2111,8 +2113,33 @@ function DhIcon({ d, lv }: { d?: DiskHealthDisk; lv: string }) {
 
 type DhPill = { lv: DhLv | 'info' | 'mut'; text: string }
 
+// Заглушенный диск (app/drive_mute.py): что заглушили, словами - по базовой линии, а пока сборщик ее не
+// записал (только нажали) - по тому, что у диска сейчас
+function dhMutedWhat(d: DiskHealthDisk, base: DriveMute, t: TFn): string {
+  const c = base.c ?? { media: d.media ?? 0, realloc: d.realloc ?? 0, pending: d.pending ?? 0, uncorr: d.uncorr ?? 0, crc: d.crc ?? 0 }
+  const kinds = new Set((base.keys ?? []).map((k) => k.split(':')[0]))
+  if (!base.keys) {
+    if (dhSmartLv(d) === 'bad') kinds.add('smart')
+    if (dhCrit(d)) kinds.add('crit')
+    if (dhSpareLow(d)) kinds.add('spare')
+  }
+  const crit = base.c ? base.crit ?? 0 : dhCrit(d)
+  return [
+    c.media ? t('ошибок носителя {n}', { n: c.media }) : '',
+    c.realloc ? t('переназначено {n}', { n: c.realloc }) : '',
+    c.pending ? t('нечитаемых {n}', { n: c.pending }) : '',
+    c.uncorr ? t('неисправимых {n}', { n: c.uncorr }) : '',
+    c.crc ? t('ошибок CRC {n}', { n: c.crc }) : '',
+    (base.c ? c.ioerr : d.grow?.ioerr) ? t('ошибки чтения или записи в журнале NVMe') : '',
+    kinds.has('smart') ? 'SMART FAILED' : '',
+    kinds.has('crit') && crit ? dhCritText({ ...d, crit: '0x' + crit.toString(16).padStart(2, '0') }, t) : '',
+    kinds.has('spare') ? t('запас ячеек {n}%', { n: (base.c ? base.spare : d.spare) ?? 0 }) : '',
+    kinds.has('dead') ? t('не отвечает') : '',
+  ].filter(Boolean).join(', ')
+}
+
 // Сводка вместо плиток-счетчиков: что именно не так и с каким диском или массивом
-function dhSummary(dh: DiskHealth, disks: DiskHealthDisk[], t: TFn): DhPill[] {
+function dhSummary(dh: DiskHealth, disks: DiskHealthDisk[], t: TFn, muted: Map<string, DriveMute>): DhPill[] {
   const out: DhPill[] = []
   const raid = dh.raid ?? []
   const down = raid.filter(dhRaidDown)
@@ -2146,6 +2173,11 @@ function dhSummary(dh: DiskHealth, disks: DiskHealthDisk[], t: TFn): DhPill[] {
       else ok++
       continue
     }
+    const mb = muted.get(d.serial)
+    if (mb) {
+      out.push({ lv: 'mut', text: `${d.dev}: ${t('заглушен')} (${dhMutedWhat(d, mb, t) || dhDiskState(d, t)})` })
+      continue
+    }
     const why = [
       !d.ok || dhSmartLv(d) !== 'ok' ? dhDiskState(d, t) : '',
       dhCrit(d) ? dhCritText(d, t) : '',
@@ -2166,7 +2198,7 @@ function dhSummary(dh: DiskHealth, disks: DiskHealthDisk[], t: TFn): DhPill[] {
 }
 
 // Массив строкой: разделы подкрашены по своему диску - видно, что задевает сбойный диск
-function DhArray({ a, byDev }: { a: DiskHealthRaid; byDev: Map<string, DiskHealthDisk> }) {
+function DhArray({ a, byDev, muted }: { a: DiskHealthRaid; byDev: Map<string, DiskHealthDisk>; muted: Map<string, DriveMute> }) {
   const { t } = useI18n()
   const down = dhRaidDown(a)
   const lv: DhLv = down ? 'bad' : a.failed ? 'warn' : 'ok'
@@ -2184,7 +2216,8 @@ function DhArray({ a, byDev }: { a: DiskHealthRaid; byDev: Map<string, DiskHealt
       <div className="dh-parts">
         {parts.map((p) => {
           const d = byDev.get(dhDiskOf(p))
-          const pl: DhLv = d && d.err !== 'virtual' ? DH_LV[dhTone(d)] : 'ok'
+          // заглушенный диск (app/drive_mute.py) не красит свои разделы: он работает, его решили не трогать
+          const pl: DhLv = d && d.err !== 'virtual' && !muted.has(d.serial) ? DH_LV[dhTone(d)] : 'ok'
           return (
             <span key={p} className={`dh-part${pl !== 'ok' ? ` dh-part-${pl}` : ''}`}>
               <span className={`lk-dot lk-dot-${pl}`} />
@@ -2228,10 +2261,20 @@ function DhArray({ a, byDev }: { a: DiskHealthRaid; byDev: Map<string, DiskHealt
 
 // Плитка диска. Физический: SMART, износ с отметкой 90% и прогнозом, температура, наработка,
 // серийник (по нему диск меняют в ЦОД). Диск ВМ: здоровья у него нет, только загрузка и ответ
-function DhDiskTile({ d, fc, dev }: { d: DiskHealthDisk; fc?: DiskWear; dev?: { util: number; await: number } }) {
+// Плитка с поломкой - кнопка "заглушить диск" (app/drive_mute.py): только этот диск и только то, что у
+// него есть сейчас. Заглушенный не красный, с пометкой, что заглушено, и кнопкой "вернуть"
+function DhDiskTile({ d, fc, dev, muted, busy, onMute }: {
+  d: DiskHealthDisk
+  fc?: DiskWear
+  dev?: { util: number; await: number }
+  muted?: DriveMute
+  busy?: boolean
+  onMute?: (on: boolean) => void
+}) {
   const { t } = useI18n()
   const virtual = d.err === 'virtual'
-  const lv: DhLv = virtual ? 'ok' : DH_LV[dhTone(d)]
+  const sick = !virtual && dhTone(d) !== 'up'
+  const lv: DhLv = virtual || muted ? 'ok' : DH_LV[dhTone(d)]
   const kind = virtual ? '' : d.type === 'nvme' ? 'NVMe' : d.rota === 1 ? 'HDD' : d.rota === 0 ? 'SSD' : ''
   const head = [d.model, kind, d.size ? fmtBytes(d.size) : ''].filter(Boolean).join(' · ')
   const counters = [
@@ -2264,14 +2307,14 @@ function DhDiskTile({ d, fc, dev }: { d: DiskHealthDisk; fc?: DiskWear; dev?: { 
               : '',
           ].filter(Boolean).join(' · ')
   return (
-    <div className={`dh-tile${lv !== 'ok' ? ` dh-tile-${lv}` : ''}`}>
+    <div className={`dh-tile${lv !== 'ok' ? ` dh-tile-${lv}` : ''}${muted && sick ? ' dh-tile-mute' : ''}`}>
       <div className="dh-thead">
-        <DhIcon d={d} lv={virtual ? 'muted' : lv} />
+        <DhIcon d={d} lv={virtual || (muted && sick) ? 'muted' : lv} />
         <div className="dh-tid">
           <div className="dh-tname mono">{d.dev}</div>
           {head && <div className="dh-tmodel muted" title={head}>{head}</div>}
         </div>
-        <span className={`dh-chip dh-chip-${dhChip(d)}`}>{virtual ? t('виртуальный') : dhDiskState(d, t)}</span>
+        <span className={`dh-chip dh-chip-${muted ? 'mut' : dhChip(d)}`}>{virtual ? t('виртуальный') : dhDiskState(d, t)}</span>
       </div>
       {!virtual &&
         (!d.ok ? (
@@ -2307,15 +2350,49 @@ function DhDiskTile({ d, fc, dev }: { d: DiskHealthDisk; fc?: DiskWear; dev?: { 
         </div>
       )}
       {counters.length > 0 && <div className="dh-cnt muted">{counters.join(' · ')}</div>}
-      {grow.length > 0 && <div className="dh-cnt t-degraded">{t('за сутки: {v}', { v: grow.join(', ') })}</div>}
+      {grow.length > 0 && <div className={`dh-cnt ${muted ? 'muted' : 't-degraded'}`}>{t('за сутки: {v}', { v: grow.join(', ') })}</div>}
+      {muted ? (
+        <div className="dh-mute muted small">
+          <span>
+            🔕 {sick || muted.c
+              ? t('заглушен: {what}, вернется, если станет больше', { what: dhMutedWhat(d, muted, t) || dhDiskState(d, t) })
+              : t('заглушен')}
+          </span>
+          {onMute && (
+            <button className="ghost small row-act" disabled={busy} onClick={() => onMute(false)}>
+              {t('вернуть')}
+            </button>
+          )}
+        </div>
+      ) : (
+        sick && d.serial && onMute && (
+          <div className="dh-mute">
+            <button
+              className="ghost small row-act"
+              disabled={busy}
+              title={t('Диск работает, второй цел: панель перестанет алертить по этому диску с тем, что у него есть сейчас. Станет хуже - алерт вернется сам, другие диски и массивы алертят как обычно')}
+              onClick={() => onMute(true)}
+            >
+              🔕 {t('заглушить диск')}
+            </button>
+          </div>
+        )
+      )}
     </div>
   )
 }
 
 // Здоровье дисков: сводка, массивы, плитки. На дедике - физические диски со SMART, на ВМ -
 // виртуальные (helper 0.2, со старым - имена из disk_devs агента): их здоровье видит хостер
-function DiskHealthBlock({ r, wear }: { r: ServerReport; wear?: DiskWear[] }) {
+function DiskHealthBlock({ r, wear, server: s, isViewer, onChanged }: {
+  r: ServerReport
+  wear?: DiskWear[]
+  server: Server
+  isViewer: boolean
+  onChanged: () => void
+}) {
   const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
   const dh = diskHealth(r)
   if (!dh) return null
   const bare = dh.virt === 'none' && !dh.container
@@ -2329,7 +2406,28 @@ function DiskHealthBlock({ r, wear }: { r: ServerReport; wear?: DiskWear[] }) {
   // в контейнере сказать нечего: массивы и журнал ядра чужие, диски тоже
   if (!bare && !raid.length && !io.count && !disks.length) return null
   const byDev = new Map(disks.map((d) => [d.dev, d]))
-  const pills = dhSummary(dh, disks, t)
+  // заглушенные поштучно диски: серийник -> базовая линия (пустая, пока сборщик ее не записал)
+  const muted = new Map(
+    (s.alert_mutes ?? []).filter((k) => k.startsWith(DRIVE_MUTE)).map((k) => {
+      const ser = k.slice(DRIVE_MUTE.length)
+      return [ser, s.drive_mutes?.[ser] ?? {}] as [string, DriveMute]
+    }),
+  )
+  const setMuted = async (d: DiskHealthDisk, on: boolean) => {
+    if (on && !window.confirm(t('Заглушить диск {dev} ({ser})? Алерта по нему не будет, пока не станет хуже: больше ошибок, новый признак поломки, выпал из массива. Другие диски и массивы алертят как обычно, после замены диска заглушка уйдет сама.', { dev: d.dev, ser: d.serial })))
+      return
+    setBusy(true)
+    try {
+      const k = DRIVE_MUTE + d.serial
+      await muteServerKeys(s.id, on ? [k] : [], on ? [] : [k])
+      onChanged()
+    } catch (e) {
+      toastError(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const pills = dhSummary(dh, disks, t, muted)
   const notes = dhNotes(dh, disks, t)
   return (
     <div className="chart-card net-card net-card-wide" id="mcard-diskhealth">
@@ -2359,7 +2457,7 @@ function DiskHealthBlock({ r, wear }: { r: ServerReport; wear?: DiskWear[] }) {
       {raid.length > 0 && (
         <div className="dh-arrays">
           {raid.map((a) => (
-            <DhArray key={a.dev} a={a} byDev={byDev} />
+            <DhArray key={a.dev} a={a} byDev={byDev} muted={muted} />
           ))}
         </div>
       )}
@@ -2371,6 +2469,9 @@ function DiskHealthBlock({ r, wear }: { r: ServerReport; wear?: DiskWear[] }) {
               d={d}
               fc={(wear ?? []).find((w) => w.serial === d.serial)}
               dev={devs.find((x) => x.dev === d.dev)}
+              muted={muted.get(d.serial)}
+              busy={busy}
+              onMute={isViewer || !d.serial ? undefined : (on) => setMuted(d, on)}
             />
           ))}
           {missing.map((m) => {
@@ -7342,7 +7443,7 @@ function ServerDetail({
           <div className="srv-sec">
           <div className="net-cards">
             <DiskSpaceCard server={s} r={r} onChanged={onChanged} />
-            <DiskHealthBlock r={r} wear={s.wear_forecast} />
+            <DiskHealthBlock r={r} wear={s.wear_forecast} server={s} isViewer={isViewer} onChanged={onChanged} />
             <DiskWritersBlock server={s} r={r} />
           </div>
           <div className="chart-grid">

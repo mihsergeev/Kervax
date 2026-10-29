@@ -851,6 +851,15 @@ const EN: Record<string, string> = {
   'неисправимых {n}': 'uncorrectable {n}',
   'ошибок носителя {n}': 'media errors {n}',
   'ошибок CRC {n}': 'CRC errors {n}',
+  'ошибки чтения или записи в журнале NVMe': 'read or write errors in the NVMe error log',
+  'заглушен: {what}, вернется, если станет больше': 'muted: {what}, comes back if it gets worse',
+  'заглушить диск': 'mute this disk',
+  'Диск работает, второй цел: панель перестанет алертить по этому диску с тем, что у него есть сейчас. Станет хуже - алерт вернется сам, другие диски и массивы алертят как обычно':
+    'The disk works and the other one is fine: the panel stops alerting about this disk with what it has now. If it gets worse the alert comes back by itself, other disks and arrays alert as usual',
+  'Заглушить диск {dev} ({ser})? Алерта по нему не будет, пока не станет хуже: больше ошибок, новый признак поломки, выпал из массива. Другие диски и массивы алертят как обычно, после замены диска заглушка уйдет сама.':
+    'Mute disk {dev} ({ser})? There will be no alert about it until it gets worse: more errors, a new failure sign, dropped out of an array. Other disks and arrays alert as usual, the mute goes away by itself once the disk is replaced.',
+  'вернется сам, если диску станет хуже; снимется после замены': 'comes back by itself if the disk gets worse; removed after replacement',
+  'диск с серийником': 'disk with serial',
   'за сутки: {v}': 'in the last 24 hours: {v}',
   'пропал': 'vanished',
   'последний раз виден {n} ч назад': 'last seen {n} h ago',

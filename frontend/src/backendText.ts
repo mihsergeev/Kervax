@@ -179,6 +179,18 @@ const PHRASES: Rule[] = [
   // мьют поломки диска снят сам (app/disk_mute.py)
   [/мьют снят: диски? (.+?) заменены?, массив собран/g, 'mute lifted: disk $1 replaced, array rebuilt'],
   [/мьют снят: диск заменен, массив собран/g, 'mute lifted: disk replaced, array rebuilt'],
+  // заглушка одного диска (app/drive_mute.py)
+  [/заглушка диска (\S+) \(([^)]+)\) снята: стало хуже - /g, 'disk $1 ($2) mute lifted: it got worse - '],
+  [/заглушка диска (\S+ )?\(([^)]+)\) снята: диск заменен/g, 'disk $1($2) mute lifted: disk replaced'],
+  [/диск (\S+) был заглушен, стало хуже: /g, 'disk $1 was muted, it got worse: '],
+  [/ошибок носителя (\d+), было (\d+)/g, '$1 media errors, was $2'],
+  [/переназначенных секторов (\d+), было (\d+)/g, '$1 reallocated sectors, was $2'],
+  [/нечитаемых секторов (\d+), было (\d+)/g, '$1 pending sectors, was $2'],
+  [/неисправимых ошибок (\d+), было (\d+)/g, '$1 uncorrectable errors, was $2'],
+  [/ошибок CRC (\d+), было (\d+)/g, '$1 CRC errors, was $2'],
+  [/запас ячеек ([\d.]+)%, был ([\d.]+)%/g, 'spare $1%, was $2%'],
+  [/новые ошибки чтения или записи в журнале NVMe/g, 'new read or write errors in the NVMe error log'],
+  [/выпал из массива (\S+)/g, 'dropped out of array $1'],
   // порты и доступы
   [/в интернет открылся новый порт: /g, 'new port open to the internet: '],
   [/служебное открыто в интернет: /g, 'service ports open to the internet: '],
@@ -316,6 +328,20 @@ const PHRASES: Rule[] = [
   [/(\d)мб(?![а-яё])/g, '$1 MB'],
   [/(\d)кб(?![а-яё])/g, '$1 KB'],
   // давление на ресурсы и зависшие процессы (collector.pressure_problems)
+  // кончилась память на всем сервере и что было перед пропажей агента (app/mem_starve.py)
+  [/кончилась память, сервер может встать: /g, 'out of memory, the server may freeze: '],
+  [/свободно ([\d.]+)% из /g, '$1% free of '],
+  [/swap занят на (\d+)%/g, 'swap $1% used'],
+  [/swap нет/g, 'no swap'],
+  [/все процессы разом стоят ([\d.]+)% времени/g, 'all processes stalled $1% of the time'],
+  [/процессы ждут память ([\d.]+)% времени/g, 'processes wait for memory $1% of the time'],
+  [/с диска читается (\d+) страниц\/с/g, '$1 pages/s read back from disk'],
+  [/подкачка ([\d.]+ ?[MGK]?B)\/с/g, 'swapping $1/s'],
+  [/перед этим кончилась память: /g, 'before that memory ran out: '],
+  [/перед этим: /g, 'before that: '],
+  [/память ([\d.]+)%/g, 'memory $1%'],
+  [/load (\d+) на (\d+) ядрах/g, 'load $1 on $2 cores'],
+  [/диск ждут (\d+)% времени/g, 'disk waited $1% of the time'],
   [/не хватает памяти: все процессы разом стоят ([\d.]+)% времени/g, 'out of memory: all processes stalled $1% of the time'],
   [/не хватает памяти: процессы ждут память ([\d.]+)% времени/g, 'out of memory: processes wait for memory $1% of the time'],
   [/диск не успевает: все процессы разом ждут диск ([\d.]+)% времени/g, 'disk cannot keep up: all processes wait for disk $1% of the time'],
@@ -480,7 +506,8 @@ export function trBackend(s: string): string {
 
 // Поля ответов API, где лежат такие тексты. Ключи и идентификаторы (mute, key, kind) не трогаем:
 // по ним панель шлет запросы обратно
-const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note', 'bsrv_rotation', 'reasons', 'reason', 'why', 'blockers'])
+const FIELDS = new Set(['text', 'detail', 'what', 'hint', 'note', 'bsrv_rotation', 'reasons', 'reason', 'why', 'blockers',
+  'offline_before'])
 // Словари, где текст - значение под именем объекта: причины CronJob {ns/имя: почему}
 const MAPS = new Set(['kube_cron_issues'])
 

@@ -165,7 +165,8 @@ export function srvIssuesRaw(
             // эталон: и на связи панель до сервера не достукивалась, молчание ничего не значит
             : p?.state === 'blind' ? t('с панели не проверить: порты закрыты для нее') : ''
     const head = gd?.kind === 'stop' ? t('агента остановили штатно') : t('оффлайн')
-    return [{ tone: 't-down', text: why ? `${head} - ${why}` : head, mute: 'offline', kind: 'offline', since: s.last_seen }]
+    const text = (why ? `${head} - ${why}` : head) + (s.offline_before ? `; ${s.offline_before}` : '')
+    return [{ tone: 't-down', text, mute: 'offline', kind: 'offline', since: s.last_seen }]
   }
   const out: SrvIssue[] = []
   // все, о чем шлют алерты (место и inode, CPU, RAM, температуры, conntrack и троттлинг - по уровню

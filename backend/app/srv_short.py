@@ -14,7 +14,7 @@ import importlib
 import re
 from datetime import datetime
 
-from app import going_down, podnames, tg_fmt
+from app import going_down, mem_starve, podnames, tg_fmt
 
 # Тема - второй эмодзи после уровня: по нему в ленте видно, про что алерт
 TOPIC = {
@@ -223,7 +223,7 @@ def _units(items: list[dict], why_fn) -> tuple[str, list[str]]:
 
 
 _PRESSURE_WHAT = {
-    "mem": "Серверу не хватает памяти", "io": "Сервер ждет диск", "dstate": "Процессы зависли",
+    "mem": "Серверу не хватает памяти", "thrash": "Кончилась память", "io": "Сервер ждет диск", "dstate": "Процессы зависли",
     "fds": "Кончаются файловые дескрипторы", "cpu": "Серверу не хватает CPU",
 }
 
@@ -519,7 +519,14 @@ def _short(key: str, ctx: dict, s, level: int):
         res = items[0][1]
         what = _PRESSURE_WHAT.get(res) or tg_fmt.split_detail(items[0][2])[0]
         facts = []
-        if res == "mem":
+        if res == "thrash":
+            # кончилась память на всем сервере (app/mem_starve.py): кто ее ест и насколько плохо
+            what = mem_starve.what(rep)
+            top = mem_starve.eaters(rep)
+            facts.append(tg_fmt.fact("Едят", mem_starve.eaters_text(top[:2])) if top else "")
+            sg = mem_starve.signs(rep)
+            facts.append(tg_fmt.cap(mem_starve.numbers(sg)) if sg else "")
+        elif res == "mem":
             top = top_proc(rep, "mem")
             facts.append(tg_fmt.fact("Ест", top) if top else "")
         elif res == "io":

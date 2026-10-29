@@ -60,8 +60,9 @@ PROBLEM_KINDS = frozenset({
 # под своим ключом, нет ее там - тихо
 SHADOW_PREFIXES = ("unit:", "qstuck:", "qfail:", "worker:", "cron:", "logerr:", "fpm:", "autoban:", "gitlab:",
                    "listen:", "leak:", "restarts:", "oom:")
-# Поштучные ключи, которые сборщик проверяет сам (collector.mute_present): поды, Job, CronJob, контейнеры
-PRESENT_PREFIXES = ("kube_pod:", "kube_job:", "kube_cron:", "docker_down:", "docker_loop:")
+# Поштучные ключи, которые сборщик проверяет сам (collector.mute_present): поды, Job, CronJob, контейнеры,
+# заглушенные диски (app/drive_mute.py)
+PRESENT_PREFIXES = ("kube_pod:", "kube_job:", "kube_cron:", "docker_down:", "docker_loop:", "drive:")
 
 
 def _ts(v) -> datetime | None:

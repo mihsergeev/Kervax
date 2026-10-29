@@ -83,10 +83,11 @@ async def test_units_alert_lifecycle(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     cfg = Settings(alert_webhook="http://hook")
 
+    old = int(now.timestamp()) - 3600  # лежит час: выдержка алерта прошла (units_confirm)
+
     async def tick(units, mutes=None):
         nonlocal now
         now = now + timedelta(minutes=2)
-        old = int(now.timestamp()) - 600
         async with factory() as s:
             srv = (await s.execute(select(Server))).scalars().one()
             srv.last_seen = now
@@ -303,10 +304,11 @@ async def test_timer_job_failing_every_run_does_not_flap(tmp_path, monkeypatch):
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     cfg = Settings(alert_webhook="http://hook")
 
+    old = int(now.timestamp()) - 3600
+
     async def tick(units, state=None):
         nonlocal now
         now = now + timedelta(minutes=2)
-        old = int(now.timestamp()) - 600
         async with factory() as s:
             srv = (await s.execute(select(Server))).scalars().one()
             srv.last_seen = now
@@ -374,9 +376,10 @@ async def test_backup_unit_and_new_server_stay_quiet(tmp_path, monkeypatch):
     rest = dict(CERTBOT, unit="systemd-rest.service")
     custom = dict(CERTBOT, unit="pg-dump.service")
 
+    old = int(now.timestamp()) - 3600
+
     def report(units):
         ts = int(now.timestamp())
-        old = ts - 600
         return {"clock_unix": ts, "uptime_seconds": 100000, "backup": {"present": True, "configured": True},
                 "extras": {"units": {"v": 1, "ts": ts - 30, "units": [dict(u, since=old) for u in units], "fix": True},
                            "custom-backups": {"v": 1, "ts": ts, "jobs": [{"id": "systemd:pg-dump.timer", "unit": "pg-dump.service"}]}}}
@@ -459,4 +462,108 @@ async def test_benign_distro_timers_do_not_alert(tmp_path, monkeypatch):
     async with factory() as s:
         ev = (await s.execute(select(AlertEvent))).scalars().all()
     assert [e.kind for e in ev] == ["units"] and "больше не считаем проблемой: служебный юнит" in ev[0].text
+    await engine.dispose()
+
+
+def test_confirm_waits_for_a_real_failure():
+    """В алерт - только лежащий всерьез юнит: задание дольше 30 минут, демон дольше 10, упавший
+    второй раз подряд или не стартующий вообще (start-limit-hit) - сразу, объявленный - пока лежит."""
+    from app.collector import units_confirm
+
+    t = 1_000_000.0
+    job = dict(CERTBOT, since=t)
+    ok, eps = units_confirm(None, [job], t + 9 * 60, set())
+    assert ok == [] and eps["certbot.service"]["runs"] == 1
+    ok, eps = units_confirm(eps, [job], t + 31 * 60, set())
+    assert ok == [job]
+
+    daemon = dict(NGINX, since=t)
+    assert units_confirm(None, [daemon], t + 5 * 60, set())[0] == []
+    assert units_confirm(None, [daemon], t + 11 * 60, set())[0] == [daemon]
+    stuck = dict(NGINX, result="start-limit-hit", since=t)
+    assert units_confirm(None, [stuck], t + 2 * 60, set())[0] == [stuck]
+    assert units_confirm(None, [job], t + 3 * 60, {"certbot.service"})[0] == [job]
+
+    # упал, следующий прогон идет (в failed не числится), упал снова - два подряд
+    _, eps = units_confirm(None, [job], t + 3 * 60, set())
+    _, eps = units_confirm(eps, [], t + 5 * 60, set())
+    assert eps["certbot.service"]["gone"] == t + 5 * 60
+    again = dict(job, since=t + 6 * 60)
+    ok, eps = units_confirm(eps, [again], t + 8 * 60, set())
+    assert ok == [again] and eps["certbot.service"]["runs"] == 2
+
+    # прогон прошел, юнит полчаса в порядке: следующее падение - новый эпизод
+    _, eps = units_confirm(None, [job], t + 3 * 60, set())
+    _, eps = units_confirm(eps, [], t + 5 * 60, set())
+    _, eps = units_confirm(eps, [], t + 36 * 60, set())
+    assert eps == {}
+    later = dict(job, since=t + 40 * 60)
+    ok, eps = units_confirm(eps, [later], t + 42 * 60, set())
+    assert ok == [] and eps["certbot.service"] == {"from": t + 40 * 60, "runs": 1, "since": t + 40 * 60, "gone": None}
+
+
+async def test_one_failed_run_is_not_an_alert(tmp_path, monkeypatch):
+    """Задание по таймеру упало один раз, следующий прогон прошел: ни "упал", ни "упавших юнитов
+    нет" (было 12:06 и 12:27 на webservices-autodeploy), в "Что сломано" оно видно сразу. Два
+    падения подряд - одно сообщение, отбой после выдержки."""
+    from app import collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+    from app.models import Server
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'r.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    now = datetime.now(timezone.utc)
+    job = dict(CERTBOT, unit="autodeploy.service", log=["Failed to start autodeploy.service - Auto deploy."])
+
+    def report(units):
+        ts = int(now.timestamp())
+        return {"clock_unix": ts, "uptime_seconds": 100000,
+                "extras": {"units": {"v": 1, "ts": ts - 30, "units": units, "fix": True}}}
+
+    async with factory() as s:
+        s.add(Server(name="node", token_hash="x", enabled=True, backup_not_required=True,
+                     last_seen=now, cpu_alert_percent=0, mem_alert_percent=0, last_report=report([])))
+        await s.commit()
+    sent: list[str] = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    cfg = Settings(alert_webhook="http://hook")
+
+    async def tick(units):
+        nonlocal now
+        now = now + timedelta(minutes=2)
+        async with factory() as s:
+            srv = (await s.execute(select(Server))).scalars().one()
+            srv.last_seen, srv.last_report = now, report(units)
+            await s.commit()
+        await collector.evaluate_servers(factory, cfg, now)
+        async with factory() as s:
+            return (await s.execute(select(Server))).scalars().one()
+
+    failed = dict(job, since=int(now.timestamp()))
+    for _ in range(5):  # 10 минут в failed
+        srv = await tick([failed])
+    assert any(p["kind"] == "units" and "autodeploy" in p["text"] for p in collector.server_problems(srv, now))
+    for _ in range(20):  # следующий прогон прошел
+        srv = await tick([])
+    assert sent == [] and not srv.alert_state.get("units_eps")
+
+    # упал, следующий прогон упал тоже
+    first = dict(job, since=int(now.timestamp()))
+    await tick([first])
+    await tick([first])
+    await tick([])
+    second = dict(job, since=int(now.timestamp()))
+    await tick([second])
+    await tick([second])
+    assert len(sent) == 1 and "autodeploy.service" in sent[0]
+    for _ in range(12):  # третий прошел: отбой через выдержку
+        await tick([])
+    assert len(sent) == 2 and sent[1] == "✅ node: упавших юнитов нет"
     await engine.dispose()
