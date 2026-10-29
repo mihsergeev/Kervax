@@ -10,7 +10,7 @@ import logging
 import re
 
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
@@ -201,15 +201,100 @@ def route_hits(cfg: dict, m: str) -> list[dict]:
     return [r for r in (cfg.get("routes") or {}).get("chats") or [] if group in r.get(field, [])]
 
 
+# Критичное во время паузы копий все равно нужно в основном чате: сервер пропал, диск кончается.
+# Без кнопок бота подтвердить в группе нечем - такое идет в основной чат сразу; с кнопками -
+# через DUP_HOLD_MIN, если в группе никто не нажал "взял" и беда не прошла (tg_bot.dup_catchup)
+CRIT_KINDS = frozenset({"offline"})
+DUP_HOLD_MIN = 10
+
+
+def critical(m) -> bool:
+    """Критичный алерт: сервер недоступен или уровень 🚨 (критичный диск, взлом и т.п.)."""
+    if getattr(m, "recovery", False):
+        return False
+    return getattr(m, "kind", "") in CRIT_KINDS or str(m).startswith(tg_fmt.LEVEL[3])
+
+
+def dup_paused(cfg: dict, now: datetime | None = None) -> bool:
+    """Стоит ли пауза копий в основной чат: кончилась по времени - копии вернулись сами."""
+    p = cfg.get("dup_pause") or {}
+    if not p.get("on"):
+        return False
+    if not p.get("until"):
+        return True
+    try:
+        until = datetime.fromisoformat(p["until"])
+    except ValueError:
+        return False
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    return until > (now or datetime.now(timezone.utc))
+
+
+def _pairs(m) -> set[tuple[str, str]]:
+    """(вид, объект) алерта; у шторма - каждого сервера."""
+    return {(getattr(p, "kind", ""), getattr(p, "target", "")) for p in getattr(m, "parts", None) or [m]}
+
+
+def _passed(cfg: dict, m) -> bool:
+    """Отбой того, что во время паузы ушло в основной чат: туда же."""
+    if not getattr(m, "recovery", False) or not cfg.get("main_passed"):
+        return False
+    have = {tuple(x) for x in cfg["main_passed"]}
+    return bool(_pairs(m) & have)
+
+
+def main_copy(cfg: dict, m: str) -> bool:
+    """Нужна ли основному чату копия алерта, который ушел в чат по группам: общий выбор main,
+    выбор по группе (main_by), пауза копий. Критичное в паузу без кнопок бота идет сразу."""
+    if _passed(cfg, m):
+        return True
+    if dup_paused(cfg):
+        return critical(m) and not buttons_on(cfg)
+    routes = cfg.get("routes") or {}
+    section, group = _msg_scope(m)
+    by = (routes.get("main_by") or {}).get(f"{'srv' if section in _SERVER_SECTIONS else 'site'}:{group}")
+    return by if by is not None else routes.get("main") != "rest"
+
+
+DUP_OPS = ("2h", "morning", "forever", "off")
+
+
+def dup_pause_value(op: str, now: datetime, tz: str, who: str) -> dict:
+    """Пауза копий по кнопке: на 2 часа, до утра, пока не включат или снять."""
+    if op == "off":
+        return {"on": False}
+    until = ("" if op == "forever" else
+             (now + timedelta(hours=2) if op == "2h" else tg_buttons.next_morning(now, tz)).isoformat())
+    return {"on": True, "until": until, "by": who, "at": now.isoformat()}
+
+
+def dup_pause_text(cfg: dict, now: datetime | None = None) -> str:
+    """Строка о паузе для бота: "до 21:30", "пока не включат" или пусто, если паузы нет."""
+    now = now or datetime.now(timezone.utc)
+    if not dup_paused(cfg, now):
+        return ""
+    until = (cfg.get("dup_pause") or {}).get("until")
+    if not until:
+        return "пока не включат"
+    return "до " + tg_buttons.hhmm(datetime.fromisoformat(until), cfg.get("tz") or "UTC", now)
+
+
+def dup_held(cfg: dict, m: str) -> bool:
+    """Критичное, которое пауза придержала: уйдет в основной чат, если в группе не возьмут."""
+    return (dup_paused(cfg) and buttons_on(cfg) and critical(m) and bool(route_hits(cfg, m))
+            and not _passed(cfg, m))
+
+
 def chats_for(cfg: dict, m: str) -> list[str]:
     """Куда в Telegram идет алерт: основной чат (всё или только то, что не забрали чаты по
-    группам) и чаты по группам. Без повторов, основной первым."""
+    группам, см. main_copy) и чаты по группам. Без повторов, основной первым."""
     main = str(cfg.get("telegram_chat") or "") if cfg.get("telegram_token") else ""
     if not cfg.get("telegram_token"):
         return []
     hits = [r["chat"] for r in route_hits(cfg, m)]
     out: list[str] = []
-    if main and ((cfg.get("routes") or {}).get("main") != "rest" or not hits):
+    if main and (not hits or main_copy(cfg, m)):
         out.append(main)
     for c in hits:
         if c not in out:
@@ -752,6 +837,11 @@ async def dispatch(
         delivered = [m for i, m in enumerate(messages) if i in got]
         if rows:
             await tg_buttons.store_sent(session_factory, sent)
+            held = [rows[i] for i, m in enumerate(messages) if i in rows and dup_held(cfg, m)]
+            if held:
+                await tg_buttons.hold(session_factory, held, main)
+        if session_factory is not None and main:
+            await _note_passed(session_factory, cfg, messages, on_main, got)
         if session_factory is not None and buttons_on(cfg):
             await tg_resolve(session_factory, cfg, messages)
         if session_factory is not None:
@@ -759,6 +849,35 @@ async def dispatch(
     if session_factory is not None and delivered:
         await record_history(session_factory, delivered)
     return ok
+
+
+async def _note_passed(session_factory, cfg: dict, messages: list, on_main: list[bool], got: set[int]) -> None:
+    """Запомнить критичное, что в паузу копий ушло в основной чат (его отбой пойдет туда же), и
+    забыть, когда отбой туда дошел."""
+    if not dup_paused(cfg) and not cfg.get("main_passed"):
+        return
+    add, drop = [], set()
+    for i, m in enumerate(messages):
+        if i not in got or not on_main[i] or not route_hits(cfg, m):
+            continue
+        if getattr(m, "recovery", False):
+            drop |= _pairs(m)
+        elif critical(m) and dup_paused(cfg):
+            add += [list(p) for p in _pairs(m)]
+    if add or drop:
+        await note_passed(session_factory, add, drop)
+
+
+async def note_passed(session_factory, add: list, drop: set | None = None) -> None:
+    try:
+        async with session_factory() as session:
+            cur = await settings_store.get_main_passed(session)
+            new = [x for x in cur if tuple(x) not in (drop or set())]
+            new += [x for x in add if x not in new]
+            if new != cur:
+                await settings_store.set_main_passed(session, new)
+    except Exception:  # noqa: BLE001
+        log.warning("критичные в основном чате не записаны", exc_info=True)
 
 
 _NOTE_MAX = 300

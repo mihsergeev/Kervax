@@ -1162,12 +1162,17 @@ export type AlertConfig = {
   route_groups: { servers: string[]; sites: string[] }
   // чаты, которые последний раз не приняли сообщение
   routes_state: Record<string, { err: string; at: string }>
+  // пауза копий в основной чат: until - iso, пусто - пока не включат
+  dup_pause: DupPause
 }
 
+export type DupPause = { on: boolean; until: string; by: string; at: string }
+
 // Чаты по группам: алерты выбранных групп идут еще и в свои чаты. main: 'all' - основной чат
-// получает все, 'rest' - только то, что не ушло в чаты по группам
+// получает все, 'rest' - только то, что не ушло в чаты по группам. main_by - группа, решенная
+// иначе: {"srv:<группа>" | "site:<группа>": есть ли копия в основном чате}
 export type AlertRoute = { name: string; chat: string; server_groups: string[]; site_groups: string[] }
-export type AlertRoutes = { main: 'all' | 'rest'; chats: AlertRoute[] }
+export type AlertRoutes = { main: 'all' | 'rest'; main_by?: Record<string, boolean>; chats: AlertRoute[] }
 
 // Повтор алерта, на который никто не нажал «взял»
 export type Escalation = {
@@ -1196,6 +1201,11 @@ export function putAlerts(body: {
   routes?: AlertRoutes
 }): Promise<AlertConfig> {
   return api<AlertConfig>('/api/alerts', { method: 'PUT', body: JSON.stringify(body) })
+}
+
+// пауза копий сразу, без "Сохранить": на 2 часа, до утра, пока не включат, снять
+export function setDupPause(op: '2h' | 'morning' | 'forever' | 'off'): Promise<AlertConfig> {
+  return api<AlertConfig>('/api/alerts/dup-pause', { method: 'POST', body: JSON.stringify({ op }) })
 }
 
 export function testAlertRoute(chat: string): Promise<{ sent: boolean; errors: string[] }> {
@@ -3743,6 +3753,18 @@ export type GreView = {
   seen_at: string | null
   agent_at: string | null
   helper: string
+  // для пометки "через GRE" (Gre.tsx): интерфейсы с двух сторон, MTU, адрес хоста панели, когда хост
+  // отвечал, каким путем пришел последний отчет и с каких пор, connect= агента и откатился ли он
+  iface: string
+  node_iface: string
+  mtu: number
+  panel_ip: string
+  host_at: string | null
+  via: 'gre' | 'direct' | ''
+  via_since: string | null
+  connect: string
+  connect_down: boolean
+  probe: { small_ok: number; small_n: number; big_ok: number; big_n: number; big_kb: number } | null
 }
 // замеры агента: из последних big_n попыток кусок big_kb КБ одним соединением дошел big_ok раз
 export type GreNeed = { big_ok: number; big_n: number; small_ok: number; small_n: number; kb: number }

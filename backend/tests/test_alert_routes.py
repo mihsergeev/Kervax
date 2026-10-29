@@ -202,7 +202,7 @@ async def test_api_routes_roundtrip(client, auth_headers, tg):
     r = await client.put("/api/alerts", json=body, headers=auth_headers)
     assert r.status_code == 200, r.text
     j = r.json()
-    assert j["routes"] == {"main": "rest", "chats": [
+    assert j["routes"] == {"main": "rest", "main_by": {}, "chats": [
         {"name": "CS-deploy", "chat": "-200", "server_groups": ["web"], "site_groups": ["shop"]}]}
     assert j["route_groups"] == {"servers": ["web"], "sites": ["shop"]}
     # без поля routes чаты по группам не трогаем

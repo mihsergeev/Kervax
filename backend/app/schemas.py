@@ -897,12 +897,15 @@ class AlertConfigOut(BaseModel):
     escalation: dict = {}
     # кому можно эскалировать: учетки панели и привязан ли у них Telegram
     esc_candidates: list[dict] = []
-    # чаты по группам: {main: all|rest, chats: [{name, chat, server_groups, site_groups}]}
+    # чаты по группам: {main: all|rest, main_by: {"srv:<группа>"|"site:<группа>": bool},
+    # chats: [{name, chat, server_groups, site_groups}]}
     routes: dict = {}
     # какие группы есть у серверов и сайтов - для выбора в чатах по группам
     route_groups: dict = {}
     # чаты, которые последний раз не приняли сообщение: {chat: {err, at}}
     routes_state: dict = {}
+    # пауза копий в основной чат: {on, until (iso, "" - пока не включат), by, at}; кончилась - on false
+    dup_pause: dict = {}
 
 
 class AlertConfigIn(BaseModel):
@@ -927,7 +930,14 @@ class RouteIn(BaseModel):
 
 class RoutesIn(BaseModel):
     main: Literal["all", "rest"] = "all"
+    # группа, которую основной чат получает не так, как main: копия есть (true) или нет (false)
+    main_by: dict[str, bool] = Field(default_factory=dict, max_length=200)
     chats: list[RouteIn] = Field(default_factory=list, max_length=20)
+
+
+class DupPauseIn(BaseModel):
+    # на 2 часа, до утра, пока не включат, снять
+    op: Literal["2h", "morning", "forever", "off"]
 
 
 class RouteTestIn(BaseModel):

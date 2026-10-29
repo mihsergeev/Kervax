@@ -1,4 +1,4 @@
-"""Бот панели: нажатия кнопок под алертами и команды /status, /mutes.
+"""Бот панели: нажатия кнопок под алертами и команды /status, /mutes, /copies.
 
 Апдейты забираем long polling'ом (getUpdates), а не вебхуком: панели стоят за белым списком,
 Telegram до них не достучится. Читать апдейты бота может только один потребитель: если этого
@@ -35,13 +35,15 @@ _IDLE = 20                # кнопки выключены: раз в 20 с с�
 _KEEP_DAYS = 30           # записи кнопок старше месяца не нужны: такие алерты никто не жмет
 _STATE_EVERY_S = 60       # "последний опрос" в настройках обновляем не чаще раза в минуту
 _CB = re.compile(r"kx:(\d+):(" + "|".join(tg_buttons.OPS) + r")")
+_CB_COPIES = re.compile(r"kxc:(" + "|".join(alerts.DUP_OPS) + r")")
 _MAX_TEXT = 3900
 
 HELP = (
     "Команды:\n"
     "/status - что сейчас горит\n"
     "/mutes - что заглушено\n"
-    "/id - id этого чата для настроек панели\n\n"
+    "/id - id этого чата для настроек панели\n"
+    "/copies - не дублировать в основной чат то, что ушло в чаты групп (на 2 ч, до утра)\n\n"
     "Кнопки под алертом: заглушить то, о чем алерт (юнит, крон, под, контейнер), на час, до 9 утра "
     "или насовсем, \"взял\" - отметить, что занимаешься. Заглушенное возвращает кнопка \"Вернуть "
     "алерты\". Глушить могут только те, кто привязал Telegram к учетке панели (/link)."
@@ -431,7 +433,59 @@ async def escalate(session_factory, settings: Settings, now: datetime | None = N
     return done
 
 
+async def dup_catchup(session_factory, settings: Settings, now: datetime | None = None) -> int:
+    """Критичное, которое пауза копий придержала (alerts.dup_held): в группе за DUP_HOLD_MIN
+    никто не нажал "взял", а беда не прошла - отдать в основной чат. Возвращает, сколько отдано."""
+    now = now or datetime.now(timezone.utc)
+    add: list[list[str]] = []
+    done = 0
+    async with session_factory() as session:
+        cfg = await settings_store.get_alert_config(session, settings)
+        if not cfg.get("telegram_token") or await settings_store.get_muted(session):
+            return 0
+        rows = [r for r in (await session.scalars(select(TgAlert).where(
+            TgAlert.resolved_at.is_(None), TgAlert.ts > now - timedelta(days=1)))).all()
+            if (r.undo or {}).get("held")]
+        tz = cfg.get("tz") or "UTC"
+        after = timedelta(minutes=alerts.DUP_HOLD_MIN)
+        for row in rows:
+            undo = dict(row.undo or {})
+            chat = str(undo.pop("held"))
+            if row.acked_by or "mute" in undo:
+                row.undo = undo  # взяли или заглушили в группе - основному чату не нужно
+                continue
+            if now - (_aware(row.ts) or now) < after:
+                continue
+            wanted = await _still_wanted(session, row, now)
+            if not wanted:
+                if wanted is None:
+                    row.resolved_at = now
+                row.undo = undo
+                continue
+            mins = int((now - _aware(row.ts)).total_seconds() // 60)
+            text = f"⏰ В чате группы никто не взял за {mins} мин\n\n" + tg_buttons.row_text(row, tz, now)
+            try:
+                mid = await alerts.tg_send(cfg.get("telegram_api", ""), cfg["telegram_token"], chat,
+                                           text, "HTML", tg_buttons.row_keyboard(row))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("придержанный алерт в %s не отправлен: %s", chat, exc)
+                continue  # попробуем на следующем заходе
+            if mid is not None:
+                row.messages = list(row.messages or []) + [{"chat": chat, "id": mid}]
+            row.undo = undo
+            # у шторма в target имена через запятую, а отбой приходит по каждому серверу
+            add += [[row.kind, t.strip()] for t in (row.target or "").split(", ") if t.strip()]
+            done += 1
+        await session.commit()
+    if add:
+        await alerts.note_passed(session_factory, add)
+    return done
+
+
 async def handle_callback(session_factory, cfg: dict, cq: dict, now: datetime) -> None:
+    if _CB_COPIES.fullmatch(str(cq.get("data") or "")):
+        await handle_copies(session_factory, cfg, cq, now)
+        return
     m = _CB.fullmatch(str(cq.get("data") or ""))
     toast = ""
     row = None
@@ -619,10 +673,17 @@ async def handle_message(session_factory, cfg: dict, msg: dict, now: datetime) -
     cmd = parts[0].split("@", 1)[0].lower()
     chat = str((msg.get("chat") or {}).get("id") or "")
     tz = cfg.get("tz") or "UTC"
-    reply = None
+    reply, markup = None, None
     async with session_factory() as session:
         if cmd == "/link" and len(parts) > 1:
             reply = await _link(session, cfg, msg, parts[1].strip().upper(), now)
+        elif cmd == "/copies":
+            ok, _, why = await _copies_allowed(session, cfg, chat, str((msg.get("chat") or {}).get("type")
+                                                                       or "private"), msg.get("from") or {})
+            if ok:
+                reply, markup = copies_text(cfg, now), copies_keyboard(cfg, now)
+            elif (await _chat_user(session, cfg, chat))[0]:
+                reply = html.escape(why)
         elif cmd == "/id":
             # id чата для настроек панели (основной чат, чаты по группам, эскалация)
             reply = f"id этого чата: <code>{html.escape(chat)}</code>"
@@ -640,9 +701,68 @@ async def handle_message(session_factory, cfg: dict, msg: dict, now: datetime) -
     if reply:
         try:
             await _call(cfg, "sendMessage", {"chat_id": chat, "text": reply, "parse_mode": "HTML",
-                                             "disable_web_page_preview": True})
+                                             "disable_web_page_preview": True,
+                                             **({"reply_markup": markup} if markup else {})})
         except Exception:  # noqa: BLE001
             log.warning("ответ боту не отправлен", exc_info=True)
+
+
+# --- пауза копий в основной чат -------------------------------------------------------------
+
+def copies_text(cfg: dict, now: datetime) -> str:
+    when = alerts.dup_pause_text(cfg, now)
+    if when:
+        return (f"⏸ Копии алертов групп сюда не идут {html.escape(when)}. Критичное (сервер недоступен, "
+                "🚨) придет сюда, если в чате группы его не возьмут.")
+    return "🔔 Сюда приходят копии алертов групп, у которых есть свой чат."
+
+
+def copies_keyboard(cfg: dict, now: datetime) -> dict:
+    if alerts.dup_paused(cfg, now):
+        return {"inline_keyboard": [[{"text": "▶️ Вернуть копии", "callback_data": "kxc:off"}]]}
+    return {"inline_keyboard": [[
+        {"text": "⏸ На 2 ч", "callback_data": "kxc:2h"},
+        {"text": "До утра", "callback_data": "kxc:morning"},
+        {"text": "Пока не включу", "callback_data": "kxc:forever"},
+    ]]}
+
+
+async def _copies_allowed(session, cfg: dict, chat: str, chat_type: str, frm: dict) -> tuple[bool, str, str]:
+    """Пауза копий - только из основного чата. Личный чат - его владельца, в групповом нужен
+    привязанный Telegram с правом правки, как у кнопок "заглушить"."""
+    if not chat or chat != str(cfg.get("telegram_chat") or ""):
+        return False, "", "Копии ставятся на паузу из основного чата алертов"
+    who, user = await _who(session, frm)
+    if chat_type != "private" and (user is None or user.role == "viewer"):
+        return False, who, "Привяжите Telegram к учетке панели с правом правки (/link)"
+    return True, who, ""
+
+
+async def handle_copies(session_factory, cfg: dict, cq: dict, now: datetime) -> None:
+    op = _CB_COPIES.fullmatch(str(cq.get("data") or "")).group(1)
+    chat_obj = (cq.get("message") or {}).get("chat") or {}
+    chat = str(chat_obj.get("id") or "")
+    async with session_factory() as session:
+        ok, who, toast = await _copies_allowed(session, cfg, chat, str(chat_obj.get("type") or "private"),
+                                               cq.get("from") or {})
+        if ok:
+            await settings_store.set_dup_pause(
+                session, alerts.dup_pause_value(op, now, cfg.get("tz") or "UTC", who))
+            await audit.record(session, f"tg:{who}", "alerts_dup_pause", "", op)
+            cfg = {**cfg, "dup_pause": await settings_store.get_dup_pause(session)}
+            toast = "Копии вернулись" if op == "off" else "Копии на паузе"
+    try:
+        await _call(cfg, "answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": toast})
+    except Exception:  # noqa: BLE001
+        pass
+    mid = (cq.get("message") or {}).get("message_id")
+    if ok and mid is not None:
+        try:
+            await _call(cfg, "editMessageText", {"chat_id": chat, "message_id": mid, "parse_mode": "HTML",
+                                                 "text": copies_text(cfg, now),
+                                                 "reply_markup": copies_keyboard(cfg, now)})
+        except Exception:  # noqa: BLE001
+            log.warning("сообщение о паузе копий не обновлено", exc_info=True)
 
 
 async def handle_update(session_factory, cfg: dict, upd: dict, now: datetime) -> None:
@@ -741,6 +861,10 @@ async def poll_loop(session_factory, settings: Settings) -> None:
             await escalate(session_factory, settings)
         except Exception:  # noqa: BLE001
             log.exception("эскалация упала")
+        try:
+            await dup_catchup(session_factory, settings)
+        except Exception:  # noqa: BLE001
+            log.exception("придержанные критичные не разобраны")
         now = datetime.now(timezone.utc)
         if last_clean is None or now - last_clean > timedelta(days=1):
             await _cleanup(session_factory)

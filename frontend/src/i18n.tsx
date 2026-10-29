@@ -5311,6 +5311,35 @@ const EN: Record<string, string> = {
     'Alerts of groups that have their own chat do not go to the main chat. It gets the other groups, servers without a group and panel-wide alerts.',
   'Основной чат получает все алерты, а чаты по группам - копии про свои группы.':
     'The main chat gets all alerts, and the group chats get copies about their groups.',
+  // копии в основной чат по группам и пауза копий (AlertsModal.tsx)
+  'Кроме групп, выбранных в строке группы выше: {list}.':
+    'Except groups set in their row above: {list}.',
+  'Копия идет в основной чат, сейчас на паузе. Нажмите, чтобы выключить совсем':
+    'The copy goes to the main chat, paused right now. Click to turn it off for good',
+  'Копия идет в основной чат. Нажмите, чтобы выключить':
+    'The copy goes to the main chat. Click to turn it off',
+  'Копии в основном чате нет. Нажмите, чтобы включить':
+    'No copy in the main chat. Click to turn it on',
+  'Нажмите "Основной чат" в строке группы, чтобы выключить или вернуть копию ее алертов в основной чат.':
+    'Click "Main chat" in a group row to turn the copy of its alerts in the main chat off or back on.',
+  'пока не включите': 'until you turn them back on',
+  'до {time}': 'until {time}',
+  'Копии алертов групп в основной чат не идут': 'Group alert copies do not go to the main chat',
+  '⏸ Копии на паузе {when}': '⏸ Copies paused {when}',
+  'Критичное (сервер недоступен, критичный диск) придет и туда, если в чате группы за 10 минут никто не нажмет "взял".':
+    'Critical ones (server down, critical disk) still come there if nobody presses "on it" in the group chat within 10 minutes.',
+  'Критичное (сервер недоступен, критичный диск) все равно придет и туда.':
+    'Critical ones (server down, critical disk) still come there.',
+  '⏸ Копии в основной чат на паузе {when}': '⏸ Copies to the main chat paused {when}',
+  'Алерты групп со своим чатом приходят только туда.': 'Alerts of groups with their own chat go only there.',
+  'Вернуть копии': 'Resume copies',
+  'Не дублировать в основной чат': 'Do not copy to the main chat',
+  'на 2 ч': 'for 2 h',
+  'до утра': 'until morning',
+  'пока не включу': 'until I turn them on',
+  'Когда сидите в чате группы: ее алерты не придут в основной чат второй раз. Время выйдет - копии вернутся сами.':
+    'For when you are in the group chat: its alerts will not come to the main chat a second time. When the time is up, copies come back by themselves.',
+  'В Telegram то же делает команда /copies в основном чате.': 'In Telegram, /copies in the main chat does the same.',
   'только группы: {list}':
     'only groups: {list}',
   'только серверов: {n}':
@@ -6143,6 +6172,8 @@ const EN: Record<string, string> = {
     'brought domains back',
   'проверил чат алертов':
     'tested an alert chat',
+  'поставил или снял паузу копий в основной чат':
+    'paused or resumed copies to the main chat',
   'сменил логотип':
     'changed the logo',
   'вернул стандартный логотип':
@@ -7373,6 +7404,58 @@ const EN: Record<string, string> = {
     'After editing, press "Check again" in the "Check" section: the check will use the new settings.',
   'Это монитор сертификата старого типа: его настройки меняются только через API. Удалить его можно в разделе "Удаление", а за сертификатом следит и обычный монитор сайта.':
     'This is an old-style certificate monitor: its settings can only be changed through the API. You can delete it in the "Deletion" section, and a regular site monitor watches the certificate too.',
+  // --- GRE до панели у адреса и в разделе Сеть (Gre.tsx) ---
+  'агент не дождался ответа панели через туннель и ходит напрямую, повторит через 2 минуты': 'the agent got no answer from the panel through the tunnel and goes directly, it retries in 2 minutes',
+  'helper gre-setup еще не поставлен': 'the gre-setup helper is not installed yet',
+  'helper поставлен, ждем его первого обращения к панели': 'the helper is installed, waiting for its first call to the panel',
+  'хост панели свою сторону туннеля не поднял (ops/gre-sync.sh)': 'the panel host has not brought up its side of the tunnel (ops/gre-sync.sh)',
+  'у сервера нет публичного адреса на интерфейсе, GRE через NAT не проходит': 'the server has no public address on its interface, GRE does not pass NAT',
+  'helper gre-setup давно не обращался к панели': 'the gre-setup helper has not called the panel for a long time',
+  'туннель не поднят или панель через него не отвечает': 'the tunnel is down or the panel does not answer through it',
+  'ошибка GRE: {err}': 'GRE error: {err}',
+  'туннель поднят, агент вот-вот перейдет в него': 'the tunnel is up, the agent is about to move into it',
+  'туннель поднят, но агент о нем не знает: нужен агент 2.56 и connect= в его конфиге': 'the tunnel is up, but the agent does not know about it: agent 2.56 and connect= in its config are needed',
+  'последний отчет пришел напрямую': 'the last report came directly',
+  'Туннель: {node} {naddr} на сервере, {iface} {paddr} на хосте панели {host}': 'Tunnel: {node} {naddr} on the server, {iface} {paddr} on the panel host {host}',
+  'Туннель: {node} {naddr} на сервере, {iface} {paddr} на хосте панели': 'Tunnel: {node} {naddr} on the server, {iface} {paddr} on the panel host',
+  'Сеть {net}, MTU {mtu}': 'Network {net}, MTU {mtu}',
+  'Внешний адрес сервера {ip}: его панель и показывает вместо туннельного': 'External address of the server {ip}: the panel shows it instead of the tunnel one',
+  'Туннель жив: helper {h} проверил панель через него {ago}': 'The tunnel is alive: helper {h} checked the panel through it {ago}',
+  'Последний отчет через туннель: {ago}': 'Last report through the tunnel: {ago}',
+  'Сервер сейчас не на связи: это про последний отчет': 'The server is offline now: this is about the last report',
+  'Агент ходит в панель через GRE-туннель с {at} ({dur})': 'The agent reaches the panel through the GRE tunnel since {at} ({dur})',
+  'Агент ходит в панель через GRE-туннель': 'The agent reaches the panel through the GRE tunnel',
+  'через GRE': 'via GRE',
+  'GRE до панели включен и настраивается: {why}': 'GRE to the panel is on and being set up: {why}',
+  'GRE до панели включен, но последний отчет пришел напрямую: {why}': 'GRE to the panel is on, but the last report came directly: {why}',
+  'Напрямую с {at}': 'Direct since {at}',
+  'GRE настраивается': 'GRE setting up',
+  'GRE: напрямую': 'GRE: direct',
+  'Нажмите: подробнее в разделе Сеть': 'Click: details in the Network section',
+  'На хосте панели': 'On the panel host',
+  'туннель еще не поднял': 'has not brought up the tunnel yet',
+  'Хост панели': 'Panel host',
+  'отвечал {ago}': 'answered {ago}',
+  'Внешний адрес сервера': 'External address of the server',
+  'Сеть и MTU': 'Network and MTU',
+  'Агент знает туннель': 'Agent knows the tunnel',
+  'сейчас не отвечает': 'not answering now',
+  'нет (connect= не задан)': 'no (connect= is not set)',
+  'Фаервол': 'Firewall',
+  'на сервере {fw}': 'on the server {fw}',
+  'на хосте {fw}': 'on the host {fw}',
+  'Путь последнего отчета': 'Path of the last report',
+  'с {at}': 'since {at}',
+  'Туннель': 'Tunnel',
+  'жив': 'alive',
+  'настраивается': 'setting up',
+  'не работает': 'not working',
+  'helper {h}, проверял {ago}': 'helper {h}, checked {ago}',
+  'helper еще не обращался': 'the helper has not called yet',
+  'Отчет через туннель': 'Report through the tunnel',
+  'Куски по {kb} КБ от панели': '{kb} KB pieces from the panel',
+  'дошли, мелкие {ok}/{n}': 'got through, small ones {ok}/{n}',
+  'Замеры агента раз в 30 минут, своими соединениями: по ним панель и советует GRE': 'Agent measurements every 30 minutes, each over its own connection: the panel suggests GRE based on them',
 }
 
 type Ctx = {

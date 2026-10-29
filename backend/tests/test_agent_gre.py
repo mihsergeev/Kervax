@@ -103,6 +103,56 @@ async def test_report_through_the_tunnel_shows_the_real_address(client: httpx.As
     assert (await _get(client, auth_headers, sid))["external_ip"] == "198.51.100.20"
 
 
+async def test_card_knows_which_way_the_last_report_came_and_since_when(client: httpx.AsyncClient, auth_headers):
+    """Пометка "через GRE" в карточке: каким путем пришел последний отчет, с каких пор этим путем,
+    интерфейсы с двух сторон, MTU и с какого адреса хост панели держит туннель."""
+    sid, tok = await _gre(client, auth_headers)
+    _applied(f"kvxg{sid} 198.51.100.10 203.0.113.5 ok")
+    g = (await _get(client, auth_headers, sid))["gre"]
+    # до включения отчет пришел напрямую, а путь пишется только серверу с GRE: пока не знаем
+    assert (g["via"], g["iface"], g["node_iface"], g["mtu"], g["panel_ip"]) == (
+        "direct", f"kvxg{sid}", "kervax-gre", 1476, "203.0.113.5")
+    assert g["host_at"] and g["probe"] is None and g["connect"] == ""
+
+    await _report(client, tok, xff="10.254.0.2", connect="10.254.0.1",
+                  net_probe={"small_ok": 6, "small_n": 6, "big_ok": 5, "big_n": 6, "big_kb": 100})
+    g = (await _get(client, auth_headers, sid))["gre"]
+    assert (g["via"], g["connect"], g["connect_down"]) == ("gre", "10.254.0.1", False)
+    assert g["probe"] == {"small_ok": 6, "small_n": 6, "big_ok": 5, "big_n": 6, "big_kb": 100}
+    since = g["via_since"]
+    assert since
+    # следующий отчет тем же путем - "с каких пор" не сдвигается
+    await _report(client, tok, xff="10.254.0.2", connect="10.254.0.1")
+    assert (await _get(client, auth_headers, sid))["gre"]["via_since"] == since
+
+    # туннель не ответил, агент откатился напрямую: путь и отметка агента видны, алерта нет
+    await _report(client, tok, xff="198.51.100.10", connect="10.254.0.1", connect_down=True)
+    s = await _get(client, auth_headers, sid)
+    g = s["gre"]
+    assert (g["via"], g["connect_down"]) == ("direct", True)
+    assert g["via_since"] and g["via_since"] >= since
+    assert not [p for p in s.get("problems") or [] if "gre" in (p.get("kind") or "")]
+
+
+def test_path_is_carried_while_it_stays_the_same():
+    from datetime import datetime, timedelta, timezone
+    srv = Server(name="x", gre_enabled=True)
+    t0 = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
+    rep: dict = {}
+    gre.track_path(srv, {}, rep, True, t0)
+    assert rep["gre_path"] == {"via": "gre", "since": int(t0.timestamp())}
+    nxt: dict = {}
+    gre.track_path(srv, rep, nxt, True, t0 + timedelta(minutes=5))
+    assert nxt["gre_path"]["since"] == int(t0.timestamp())
+    back: dict = {}
+    gre.track_path(srv, nxt, back, False, t0 + timedelta(minutes=9))
+    assert back["gre_path"] == {"via": "direct", "since": int((t0 + timedelta(minutes=9)).timestamp())}
+    # без GRE и не туннелем - ничего не пишется
+    off: dict = {}
+    gre.track_path(Server(name="y", gre_enabled=False), back, off, False, t0)
+    assert "gre_path" not in off
+
+
 async def test_helper_gets_the_host_address_only_when_the_host_is_ready(client: httpx.AsyncClient, auth_headers):
     sid, tok = await _gre(client, auth_headers)
     hdr = {"Authorization": f"Bearer {tok}"}
