@@ -1423,6 +1423,7 @@ export type ServerProblem = {
   kind: string; level: number; text: string; sec: string; mute: string; since?: string | null
   section?: 'kuber' | 'services' | 'backups' | 'docker'; srv?: boolean; sub?: string
   unit?: string; log?: string[] // юнит в цикле перезапусков и последние строки его лога
+  dev?: boolean // сервер разработки, вид приложения: серым, не на главной (backend app/dev_mode.py)
 }
 // Кто ест CPU группами (агент 2.21): процессы с одним именем у одного владельца. cpu - % одного
 // ядра (как top), spin - сколько из них давно крутят по ядру вхолостую, spin_age - возраст старшего
@@ -2566,6 +2567,7 @@ export type Server = {
   // что сломано по новым проверкам (диски, прогноз, inode, упавшие юниты) - считает бэкенд
   // с теми же уровнями, что у алертов; level 2-3 - проблема, 1 - предупреждение
   problems?: ServerProblem[]
+  backup_busy?: string | null // бэкап, который сейчас идет на сервере: ожидание диска без алерта (collector.backup_busy)
   kube_cron_issues?: Record<string, string> // CronJob с проблемой: {ns/имя: причина}, считает бэкенд
   temp_alert_c: number
   conntrack_alert_percent: number
@@ -2583,6 +2585,10 @@ export type Server = {
   backup_mirror?: Record<string, MirrorEntry> | null
   backup_mirror_sync?: Record<string, { allow?: MirrorSyncResult; set?: MirrorSyncResult }> | null
   backup_mirror_role?: boolean
+  // сервер разработки (backend app/dev_mode.py): виды приложений не будят, в панели серым;
+  // dev_hint - имя похоже на разработку, а пометки нет
+  is_dev?: boolean
+  dev_hint?: boolean
   backup_audit_mutes?: string[] | null // приглушённые находки покрытия (по ключу)
   backup_not_required: boolean // на сервере бэкап не требуется (алерт снят)
   db_dumps_ok: boolean // дампы СУБД настроены отдельно (пункт снят с главной)
@@ -3167,6 +3173,7 @@ export function updateServer(
     traffic_limit_gb?: number // лимит трафика тарифа, ГБ (0 - без лимита)
     traffic_count?: 'out' | 'both'
     traffic_cycle_day?: number
+    is_dev?: boolean // сервер разработки (backend app/dev_mode.py)
   },
 ): Promise<Server> {
   return api<Server>(`/api/servers/${id}`, { method: 'PATCH', body: JSON.stringify(body) })

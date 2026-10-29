@@ -58,7 +58,9 @@ async def test_copies_of_a_worker_coming_back_one_by_one_are_one_message(tmp_pat
     сообщение, десять за полтора часа."""
     engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
     t0 = datetime.now(timezone.utc) + timedelta(days=1)
-    await _tick(factory, cfg, t0, _workers(t0, "00", "01"))
+    # копии падают и поднимаются уже дольше выдержки (workers.LOOP_HOLD)
+    held = {"workers_loop": {"Supervisor, контейнер feed-supervisor|listen": [int(t0.timestamp()) - 1900, int(t0.timestamp())]}}
+    await _tick(factory, cfg, t0, _workers(t0, "00", "01"), state=held)
     full = full_text(sent[0])
     assert len(sent) == 1 and "воркер listen (Supervisor, контейнер feed-supervisor) падает и поднимается" in full
     assert "так 2 копии из 15" in full

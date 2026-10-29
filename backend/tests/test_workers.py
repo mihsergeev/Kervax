@@ -23,13 +23,17 @@ def _rep(progs=None, pm2=None, ts=TS, skipped=None):
             "extras": {"workers": {"v": 1, "ts": ts, "daemons": ds, "skipped": skipped or []}}}
 
 
-def _srv(rep=None, mutes=None):
-    return Server(id=1, name="app-a", token_hash="x", enabled=True, backup_not_required=True, last_seen=NOW,
+def _srv(rep=None, mutes=None, held=True):
+    """held - воркеры, что падают и поднимаются, делают это уже дольше выдержки"""
+    s = Server(id=1, name="app-a", token_hash="x", enabled=True, backup_not_required=True, last_seen=NOW,
                   offline_after_seconds=120, alert_sustain_seconds=900, last_report=rep or _rep(),
                   alert_state={}, alert_mutes=mutes or [], cpu_alert_percent=0, mem_alert_percent=0,
                   disk_warn_percent=0, disk_alert_percent=0, disk_crit_percent=0, temp_alert_c=0,
                   conntrack_alert_percent=0, disk_temp_alert_c=0, db_conn_alert_percent=0,
                   web_5xx_alert_percent=0, kube_expiry_warn_days=[])
+    if held:
+        s.alert_state = {wk.LOOP_STATE: wk.loop_update(None, s, NOW - timedelta(seconds=wk.LOOP_HOLD))}
+    return s
 
 
 def test_what_is_trouble():
@@ -161,3 +165,35 @@ def test_planned_restarts_are_not_trouble():
     s = _srv(_rep([_prog("listen:listen_00", p60=8), _prog("listen:listen_01", p60=6)]))
     assert wk.problems(s, NOW) == []
     assert [x["p60"] for x in wk.view(s, NOW)[0]["progs"]] == [8, 6]
+
+
+def test_a_short_loop_does_not_alert():
+    """Ночью слушатель трижды за пару минут перезапустился и через десять минут работал как ни в чем
+    не бывало, а пришли и тревога, и "воркеры снова работают". Падает и поднимается - алерт только
+    после получаса; не запускается (FATAL) - сразу"""
+    s = _srv(_rep([_prog("listen-chat:listen-chat_00", r15=3), _prog("mailer", "FATAL")]), held=False)
+    loop = "Supervisor, контейнер app-workers-1|listen-chat:listen-chat_00"
+    assert [x["name"] for x in wk.problems(s, NOW)] == ["mailer"]
+    assert collector._server_conditions(s, NOW)["workers"][1]["sig"] == ["Supervisor, контейнер app-workers-1|mailer"]
+    assert [p["level"] for p in wk.view(s, NOW)[0]["progs"]] == [1, 2]  # в разделе видно сразу
+    st = wk.loop_update(None, s, NOW)
+    assert st == {loop: [TS, TS]}
+    s.alert_state = {wk.LOOP_STATE: st}
+    assert [x["name"] for x in wk.problems(s, NOW + timedelta(minutes=29))] == ["mailer"]
+    # перерыв короче 15 минут эпизод не прерывает: держится полчаса - алерт
+    st = wk.loop_update(st, s, NOW + timedelta(minutes=12))
+    s.alert_state = {wk.LOOP_STATE: st}
+    assert len(wk.problems(s, NOW + timedelta(minutes=30))) == 2
+    # прошло само: через 15 минут без перезапусков эпизод забыт, следующий начинается заново
+    s.last_report = _rep([_prog("listen-chat:listen-chat_00"), _prog("mailer", "FATAL")])
+    assert wk.loop_update(st, s, NOW + timedelta(minutes=26)) == {loop: [TS, TS + 12 * 60]}
+    assert wk.loop_update(st, s, NOW + timedelta(minutes=28)) == {}
+    # о чем уже сказали, пока алерт открыт, держим до конца эпизода (и после выкатки без состояния)
+    s.last_report = _rep([_prog("listen-chat:listen-chat_00", r15=3)])
+    s.alert_state = {"workers": 1, "workers_told": [loop]}
+    assert [x["key"] for x in wk.problems(s, NOW)] == [loop]
+    s.alert_state = {"workers": 0, "workers_told": [loop]}
+    assert wk.problems(s, NOW) == []
+    # без свежего блока helper'а состояние не трогаем
+    s.last_report = _rep([_prog("a", r15=3)], ts=TS - 3600)
+    assert wk.loop_update(st, s, NOW + timedelta(hours=2)) is st

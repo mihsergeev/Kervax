@@ -33,6 +33,7 @@ export type ServerEditForm = {
   relay_enabled: boolean // ретранслятор для агентов (app/relay.py), сохраняется отдельно (setRelay)
   relay_port: number // 0 - по умолчанию
   gre_enabled: boolean // GRE до панели (backend app/gre.py), сохраняется отдельно (setGre)
+  is_dev: boolean // сервер разработки (backend app/dev_mode.py)
 }
 
 export const RELAY_DEFAULT_PORT = 8790
@@ -191,6 +192,7 @@ export function ServerEditModal({
   host,
   note,
   initialSec,
+  devHint,
   onSubmit,
   onCancel,
   onDelete,
@@ -206,6 +208,7 @@ export function ServerEditModal({
   host: string // имя ноды для ansible -l (как в "Требует действий")
   note: ReactNode // заметка: сохраняется сразу, отдельно от формы
   initialSec?: string
+  devHint?: boolean // имя или группа похожи на разработку, а пометки нет (backend dev_mode.looks_dev)
   onSubmit: () => void
   onCancel: () => void
   onDelete: () => void
@@ -355,6 +358,29 @@ export function ServerEditModal({
               placeholder="203.0.113.10"
             />
           </label>
+        </div>
+        {/* сервер разработки: поведение приложений не будит алертами (backend app/dev_mode.py) */}
+        <div className="se-dev">
+          <div className="win-switch" role="group" aria-label={t('Назначение')}>
+            {([[false, t('Прод')], [true, t('Разработка')]] as const).map(([v, l]) => (
+              <button
+                key={l}
+                type="button"
+                className={`win-btn${form.is_dev === v ? ' win-btn-active' : ''}`}
+                aria-pressed={form.is_dev === v}
+                onClick={() => set({ is_dev: v })}
+              >
+                {l}
+              </button>
+            ))}
+          </div>
+          <span className="muted small">
+            {form.is_dev
+              ? t('Перезапуски подов и контейнеров, воркеры, очереди, базы, ошибки в логах и 5xx не шлются, в панели серым. Недоступность, диск, память, бэкапы и безопасность - как обычно.')
+              : devHint
+                ? t('По имени похоже на сервер разработки: там падения приложений бывают нормой.')
+                : t('Разработка: поведение приложений не будит алертами, инфраструктура - как обычно.')}
+          </span>
         </div>
         <div className="se-note">{note}</div>
         {rows(area, { offline: thr('offline_after_seconds', t('сек'), { min: 30, max: 86400 }) }, { offline: t('молчит дольше') })}

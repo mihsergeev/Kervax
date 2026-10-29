@@ -1999,7 +1999,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   if (missing > 0) soft('sites', t('всего {n}, без монитора {m}', { n: siteList.length, m: missing }))
   if (qHotN > 0) soft('queues', t('переполнены: {n} (от {m} сообщений)', { n: qHotN, m: QUEUE_HOT }))
   markMuted(info, srvMuted(s, t).filter((i) => i.section === 'services').map((i) => ({
-    sec: SVC_SEC_IDS.has(i.sec ?? '') ? i.sec! : (SVC_SEC_OF_KIND[i.kind ?? ''] ?? 'overview'), text: i.text,
+    sec: SVC_SEC_IDS.has(i.sec ?? '') ? i.sec! : (SVC_SEC_OF_KIND[i.kind ?? ''] ?? 'overview'), text: i.text, dev: i.dev,
   })), t)
 
   const rows: OvRow[] = SVC_SECTIONS.flatMap(({ id, label }) =>

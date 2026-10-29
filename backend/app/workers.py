@@ -20,6 +20,9 @@ r15 и r60 - сколько раз программа поднималась п�
 - BACKOFF дольше BACKOFF_S - проблема: supervisor все еще пробует, но запуститься не выходит;
 - завершился с ненулевым кодом и не перезапускается (EXITED, autorestart=false) - предупреждение;
 - работает, но перезапустился LOOP_MIN раз за 15 минут - предупреждение: падает и поднимается.
+  Алерт и строка в "Что сломано" - только если так держится LOOP_HOLD (loop_update): слушатель
+  очереди ночью трижды за пару минут перезапустился и через 10 минут работал как ни в чем не бывало,
+  а пришли и тревога, и "снова работают". Короткий эпизод виден в разделе "Воркеры".
 Остановленную руками (STOPPED, pm2 stopped) не судим: это решение человека.
 
 Заглушить воркер можно насовсем (alert_mutes "worker:<ключ>") или на время (alert_snoozes с тем
@@ -38,6 +41,9 @@ from app.queue_watch import where_in, where_text
 MUTE_PREFIX = "worker:"
 BACKOFF_S = 180  # BACKOFF дольше трех минут - не переходное состояние, а не запускается
 LOOP_MIN = 3  # перезапусков за 15 минут - падает и поднимается
+LOOP_HOLD = 1800  # падает и поднимается полчаса - уже не эпизод, который пройдет сам
+LOOP_GAP = 900  # перерыв в перезапусках короче 15 минут - тот же эпизод
+LOOP_STATE = "workers_loop"  # ключ alert_state: {ключ беды: [с какого, последний раз]}
 MAX_AGE = 600  # блок старше 10 минут - helper встал, судить не по чему
 KIND_LABEL = {"supervisor": "Supervisor", "pm2": "PM2"}
 _SKIP_WHY = {"auth": "не пустил по паролю из его конфига", "norpc": "у supervisord не включен сокет управления",
@@ -200,11 +206,42 @@ def _all(s: Server) -> list[dict]:
     return out
 
 
+def loop_update(state: dict | None, s: Server, now: datetime) -> dict:
+    """С какого момента воркер падает и поднимается (LOOP_STATE). Перерыв короче LOOP_GAP эпизод не
+    прерывает: r15 то дотягивает до порога, то нет"""
+    old = state if isinstance(state, dict) else {}
+    if block(s.last_report or {}) is None:
+        return old
+    ts = int(now.timestamp())
+    out = {k: [int(v[0]), int(v[1])] for k, v in old.items()
+           if isinstance(v, list) and len(v) == 2 and ts - int(v[1]) <= LOOP_GAP}
+    for x in _all(s):
+        if x["state"] == "loop":
+            out[x["key"]] = [out[x["key"]][0], ts] if x["key"] in out else [ts, ts]
+    return out
+
+
+def _held(s: Server, x: dict, now: datetime) -> bool:
+    """Падает и поднимается дольше LOOP_HOLD или о нем уже сказали, пока алерт открыт"""
+    st = s.alert_state or {}
+    v = (st.get(LOOP_STATE) or {}).get(x["key"])
+    if isinstance(v, list) and len(v) == 2 and now.timestamp() - int(v[0]) >= LOOP_HOLD:
+        return True
+    if not st.get("workers"):
+        return False
+    # до 1.4.273 перечень был по копиям: о программе уже сказано
+    said = [str(k) for k in [*(st.get("workers_told") or []), *(st.get("workers_sig") or [])]]
+    told = {*said, *(program_key(k) for k in said)}
+    return x["key"] in told
+
+
 def problems(s: Server, now: datetime) -> list[dict]:
     """Воркеры в беде, без заглушенных: {"key", "name", "source", "level", "why", "text", "since"}. Копии
-    программы заглушены и мьютом программы, и когда заглушена каждая (мьюты до 1.4.273 были по копиям)"""
+    программы заглушены и мьютом программы, и когда заглушена каждая (мьюты до 1.4.273 были по копиям).
+    Падает и поднимается - только после выдержки (_held)"""
     muted = muted_keys(s, now)
-    return [x for x in _all(s) if x["key"] not in muted and not all(c in muted for c in x["copies"])]
+    return [x for x in _all(s) if x["key"] not in muted and not all(c in muted for c in x["copies"])
+            and (x["state"] != "loop" or _held(s, x, now))]
 
 
 _WHAT = {"dead": ("Воркер не запускается", "Воркеры не запускаются"),

@@ -51,6 +51,7 @@ from app import webfiles as webfiles_mod
 from app import changes as srv_changes
 from app import known
 from app import kube_expiry
+from app import dev_mode
 from app import onboard
 from app import parents as parents_mod
 from app import boot_warmup
@@ -71,7 +72,7 @@ from app.collector import (
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
     backup_run_start, dump_local_stale, needed_pod_names, panel_server_names, pod_uid_names,
     disk_health_block, send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
-    web_error_window, web_label_key, web_log_label, web_rate_total, panel_started_at,
+    web_error_window, web_label_key, web_log_label, web_rate_total, panel_started_at, backup_busy,
 )
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
@@ -355,7 +356,7 @@ def _out(
     o.noboot_advice = reboot_survive.advice(server, now)
     o.access = access_audit.view(server, now)
     o.access_advice = access_audit.advice(server, now)
-    o.db_health = db_health.view(server.last_report or {}, now)
+    o.db_health = db_health.view(server.last_report or {}, now, (server.alert_state or {}).get(db_health.DUMP_STATE))
     o.db_fails = db_health.fails(server.last_report or {}, now)
     o.gpu = gpu_mod.view(server.last_report or {}, now)
     o.gpu_sum = gpu_mod.summary(server.last_report or {}, now)
@@ -388,6 +389,12 @@ def _out(
     if onboard.active(server, now):
         o.onboard = {"until": onboard.until(server).isoformat()}
     o.problems = server_problems(server, now, pod_names, web_err)
+    # какой бэкап идет на сервере: карточка "Давление" объясняет, почему ожидание диска без алерта
+    o.backup_busy = backup_busy(server.last_report or {}) or None
+    if dev_mode.active(server):
+        dev_mode.mark(o.problems)
+    else:
+        o.dev_hint = dev_mode.looks_dev(server.name) or dev_mode.looks_dev(server.group_name or "")
     if ((server.last_report or {}).get("kube") or {}).get("access"):
         o.kube_cron_issues = {**cron_job_issues(server.last_report, now, True, server.alert_state),
                               **cron_job_issues(server.last_report, now, False, server.alert_state)}
@@ -1785,6 +1792,9 @@ async def update_server(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Авто-очистку диска включает только админ")
     if autofix_changed:
         fields["disk_autofix"] = autofix
+    dev_changed = fields.get("is_dev") is not None and fields["is_dev"] != server.is_dev
+    if fields.get("is_dev", False) is None:
+        fields.pop("is_dev")
     if "group_name" in fields and fields["group_name"] != server.group_name and (
             not group_allowed(user, fields["group_name"])):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Группа недоступна для этой учётной записи")
@@ -1816,6 +1826,8 @@ async def update_server(
     if autofix_changed:
         await audit.record(session, user.username,
                            "disk_autofix_on" if autofix else "disk_autofix_off", server.name)
+    if dev_changed:
+        await audit.record(session, user.username, "server_dev_on" if server.is_dev else "server_dev_off", server.name)
     return _out(server, datetime.now(timezone.utc))
 
 
