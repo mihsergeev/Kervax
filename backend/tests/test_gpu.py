@@ -113,11 +113,12 @@ def test_xid_waiting_for_reset_holds_until_driver_reload():
                nv_load=TS - 60 * 86400)
     probs = gpu.problems(_rep(b), NOW)
     # 62 месяц назад держится, 92 только час, 154 сказал "восстанавливать нечего", 13 - ошибка приложения
-    assert [(p[0], p[1], p[2]) for p in probs] == [
-        (2, "GPU 0: ошибка Xid 62 - внутренняя ошибка микрокода: нужен сброс GPU", f"gpu:xid:41:00:62:{old}")]
+    assert [(p[0], p[2]) for p in probs] == [(1, f"gpu:xid:41:00:62:{old}")]
+    assert probs[0][1].startswith("GPU 0: ошибка Xid 62 - мониторинг GPU слеп, нужен плановый сброс")
     assert probs[0][3].startswith("2026-09-13")
     v = gpu.view(_rep(b), NOW)
-    assert [(x["code"], x["held"], x["hw"], x["old"]) for x in v["xid"]] == [(92, False, True, False), (62, True, True, True)]
+    assert [(x["code"], x["held"], x["hw"], x["old"], x["lv"]) for x in v["xid"]] == [
+        (92, False, True, False, 1), (62, True, True, True, 1)]
     # Xid 154 с "нужен сброс" держится
     b["xid"][3]["text"] = "GPU recovery action changed from 0x0 (None) to 0x1 (GPU Reset Required)"
     assert {p[2] for p in gpu.problems(_rep(b), NOW)} == {f"gpu:xid:41:00:62:{old}", f"gpu:xid:81:00:154:{TS - 3 * 86400}"}
@@ -128,6 +129,68 @@ def test_xid_waiting_for_reset_holds_until_driver_reload():
     # helper 0.2 без nv_load: держится, пока ошибка в его окне за сутки
     b2 = _block(xid=[{"ts": TS - 7200, "bus": "0000:41:00", "code": 119, "text": "Timeout after 6s of waiting for RPC"}])
     assert [p[2] for p in gpu.problems(_rep(b2), NOW)] == [f"gpu:xid:41:00:119:{TS - 7200}"]
+
+
+def test_xid62_alone_is_blind_monitoring_not_broken():
+    """Xid 62 один: встал микроконтроллер телеметрии, nvidia-smi отвечает, показания застыли, модель
+    работает. Это предупреждение "мониторинг слеп", застывшие показания - его причина, не вторая тревога"""
+    x62 = {"ts": TS - 7 * 86400, "bus": "0000:41:00", "code": 62, "text": "pid='<unknown>', name=<unknown>, 2a5d1c9c"}
+    b = _block(xid=[x62], nv_load=TS - 30 * 86400)
+    b["gpus"][0] = _g(0, "00000000:41:00.0", U0, frz=7 * 86400, temp=95, slow=89)
+    rep = _rep(b)
+    probs = gpu.problems(rep, NOW)
+    assert [(p[0], p[2]) for p in probs] == [(1, f"gpu:xid:41:00:62:{TS - 7 * 86400}")]
+    txt = probs[0][1]
+    assert "упал внутренний микроконтроллер" in txt and "проверь сервис" in txt and "из гостя" not in txt
+    # застывшая температура - не перегрев, загрузка слепой карты не в плашке и не на графике
+    assert gpu.heat(rep, NOW) == (0, "")
+    s = gpu.summary(rep, NOW)
+    assert s["util"] == 12 and s["blind"] == 1 and s["frozen"] == 1
+    assert [p["g"] for p in gpu.metric_gpu(rep["extras"], NOW, TS)] == ["1"]
+    v = gpu.view(rep, NOW)
+    assert [g["blind"] for g in v["gpus"]] == [True, False] and v["vm"] is False
+    assert [(x["code"], x["lv"], x["held"]) for x in v["xid"]] == [(62, 1, True)]
+    # Xid 62 только что: показания еще не застыли на час, а перегрев по ним уже не судим
+    b2 = _block(xid=[{**x62, "ts": TS - 120}])
+    b2["gpus"][0]["temp"] = 95
+    assert gpu.heat(_rep(b2), NOW) == (0, "")
+    # драйвер перезагрузили после Xid 62 - карта сброшена, застывшие показания снова своя тревога
+    b["nv_load"] = TS - 86400
+    assert [p[2] for p in gpu.problems(_rep(b), NOW)] == ["gpu:frozen:0"]
+
+
+def test_xid62_red_when_gpu_really_broken():
+    x62 = {"ts": TS - 7200, "bus": "0000:41:00", "code": 62, "text": ""}
+    # на той же карте 119 (GSP завис) - красный; 48 на соседней карте 62 не красит
+    b = _block(xid=[x62, {"ts": TS - 600, "bus": "0000:41:00", "code": 119, "text": "Timeout after 6s of waiting for RPC"}])
+    assert {p[2]: p[0] for p in gpu.problems(_rep(b), NOW)}[f"gpu:xid:41:00:62:{TS - 7200}"] == 2
+    b = _block(xid=[x62, {"ts": TS - 600, "bus": "0000:81:00", "code": 48, "text": ""}])
+    got = {p[2]: p[0] for p in gpu.problems(_rep(b), NOW)}
+    assert got[f"gpu:xid:41:00:62:{TS - 7200}"] == 1 and got[f"gpu:xid:81:00:48:{TS - 600}"] == 2
+    # сервис на этой карте не отвечает - красный и сказано, какой
+    dead = _llm(ok=False, err="timeout", up=7200)
+    probs = gpu.problems(_rep(_block(xid=[x62]), llm=[dead]), NOW)
+    assert probs[0][0] == 2 and probs[0][1].endswith("; не отвечает vLLM vllm-qwen")
+    # не отвечает сервис на другой карте (tei на GPU 1) или модель еще грузится - не повод
+    assert gpu.problems(_rep(_block(xid=[x62]), llm=[_llm(name="tei", engine="tei", ok=False, err="timeout", up=7200)]), NOW)[0][0] == 1
+    assert gpu.problems(_rep(_block(xid=[x62]), llm=[_llm(ok=False, err="timeout", up=300)]), NOW)[0][0] == 1
+
+
+def test_reset_advice_on_vm_says_not_from_guest():
+    """На ВМ с пробросом сброс из гостя роняет ВМ: советы про сброс - перезагрузкой хоста гипервизора"""
+    b = _block(xid=[{"ts": TS - 7200, "bus": "0000:41:00", "code": 62, "text": ""},
+                    {"ts": TS - 600, "bus": "0000:81:00", "code": 48, "text": ""}],
+               gpus=[_g(0, "00000000:41:00.0", U0), _g(1, "00000000:81:00.0", U1, remap=True)])
+    for vm in ({"is_vm": True, "virt": "VMware"}, {"virt": "KVM"}):
+        probs = {p[2]: p[1] for p in gpu.problems(_rep(b, **vm), NOW)}
+        assert all("из гостя не сбрасывать" in t and "хоста гипервизора" in t for t in probs.values()), probs
+        assert "nvidia-smi -r" in probs[f"gpu:xid:41:00:62:{TS - 7200}"]
+        v = gpu.view(_rep(b, **vm), NOW)
+        assert v["vm"] is True and all("из гостя не сбрасывать" in x["desc"] for x in v["xid"])
+    # железо: обычный совет
+    probs = {p[2]: p[1] for p in gpu.problems(_rep(b, virt="none", is_vm=False), NOW)}
+    assert probs[f"gpu:xid:81:00:48:{TS - 600}"].endswith("нужен сброс GPU или перезагрузка")
+    assert not any("из гостя" in t for t in probs.values())
 
 
 def test_memory_waiting_for_reset_and_stale_block():
@@ -152,7 +215,7 @@ def test_heat_levels():
 def test_summary_and_view():
     s = gpu.summary(_rep(), NOW)
     assert s == {"n": 2, "models": ["A100 80GB PCIe"], "util": 50, "mem": 75.8, "memt": 160.0, "helper": True, "ok": True,
-                 "smi": True, "frozen": 0}
+                 "smi": True, "frozen": 0, "blind": 0}
     # без helper'а - по шине из отчета агента
     s = gpu.summary({"gpu_pci": [{"bus": "0000:41:00.0", "dev": "20b5", "drv": "nvidia"}]}, NOW)
     assert s["n"] == 1 and not s["helper"] and s["util"] is None

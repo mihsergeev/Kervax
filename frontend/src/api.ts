@@ -3100,6 +3100,7 @@ export type GpuCardRow = {
   ecc_u: number | null; ecc_c: number | null; slow: number | null; maxop: number | null
   thermal: boolean; pcap: boolean; brake: boolean; remap: boolean; remap_fail: boolean
   frozen?: number // показания не меняются столько секунд (0 - живые)
+  blind?: boolean // Xid 62: упал микроконтроллер, телеметрия застыла до сброса карты
 }
 export type GpuView = {
   helper: boolean
@@ -3112,15 +3113,17 @@ export type GpuView = {
   driver?: string
   cuda?: string
   kernel?: string
+  vm?: boolean // виртуалка: карту из гостя не сбрасывать
   pci: { bus: string; drv: string; lost?: boolean }[]
   gpus?: GpuCardRow[]
   procs?: { gpu: number | null; pid: number | null; name: string; kind: string; owner: string; mem: number | null }[]
-  xid?: { ts: number; bus: string; code: number; text: string; gpu: number | null; hw: boolean; held?: boolean; old?: boolean; desc: string }[]
+  xid?: { ts: number; bus: string; code: number; text: string; gpu: number | null; hw: boolean; lv?: number; held?: boolean; old?: boolean; desc: string }[]
 }
 // плашка списка серверов (gpu.summary): память в ГиБ
 export type GpuSum = {
   n: number; models: string[]; util: number | null; mem: number | null; memt: number | null; helper: boolean; ok: boolean
   frozen?: number // сколько карт с застывшими показаниями
+  blind?: number // сколько карт с Xid 62 (застыли по нему)
   smi?: boolean // false - nvidia-smi нет, драйвер NVIDIA не ставили
 }
 // LLM-сервис (gpu.llm_view): за последние 5 минут, задержки [p50, p95, p99] в секундах

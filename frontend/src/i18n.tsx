@@ -2066,6 +2066,10 @@ const EN: Record<string, string> = {
   'заглушено': 'muted',
   'Ошибки драйвера (Xid) за сутки и те, после которых GPU ждет сброса': 'Driver errors (Xid) in a day and those after which the GPU waits for a reset',
   'ждет сброса GPU: Xid {list}': 'GPU waits for a reset: Xid {list}',
+  'ждет сброса GPU: Xid {list}, из гостя не сбрасывать': 'GPU waits for a reset: Xid {list}, do not reset from the guest',
+  'На ВМ с пробросом карту сбрасывает только перезагрузка хоста гипервизора: nvidia-smi -r или перезагрузка изнутри роняет ВМ':
+    'On a VM with passthrough only a reboot of the hypervisor host resets the card: nvidia-smi -r or a reboot from inside brings the VM down',
+  'Xid 62: упал микроконтроллер GPU, показания застыли до сброса карты': 'Xid 62: the GPU microcontroller is down, readings are frozen until the card is reset',
   'ждет сброса': 'waits for a reset',
   'держится до перезагрузки сервера или драйвера NVIDIA': 'holds until the server or the NVIDIA driver is restarted',
   'Пропускная': 'Throughput',

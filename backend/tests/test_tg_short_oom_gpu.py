@@ -209,6 +209,21 @@ def test_gpu_problems():
     assert gpu.tg_short([]) is None
 
 
+def test_gpu_xid62_and_vm():
+    """Xid 62 - слепой мониторинг; на ВМ совет про сброс - только с хоста, из гостя не сбрасывать"""
+    rep = _gpu_rep([{"i": 0, "bus": "00000000:41:00.0"}], xid=[{"code": 62, "ts": TS - 60, "bus": "PCI:0000:41:00"}])
+    assert gpu.tg_short(gpu.problems(rep, NOW)) == ("Мониторинг GPU 0 слеп", ["Xid 62, телеметрия застыла, нужен плановый сброс"])
+    assert gpu.tg_short(gpu.problems({**rep, "is_vm": True, "virt": "VMware"}, NOW)) == (
+        "Мониторинг GPU 0 слеп", ["Xid 62, телеметрия застыла, сброс только перезагрузкой хоста, из гостя не сбрасывать"])
+    rep = _gpu_rep([{"i": 1, "bus": "00000000:42:00.0", "remap": True}], xid=[{"code": 48, "ts": TS - 90, "bus": "PCI:0000:42:00"}])
+    vm = {**rep, "virt": "KVM"}
+    assert gpu.tg_short(gpu.problems(vm, NOW)[:1]) == (
+        "Ошибки памяти GPU 1", ["Xid 48, сброс только перезагрузкой хоста, из гостя не сбрасывать"])
+    assert gpu.tg_short(gpu.problems(vm, NOW)[1:]) == (
+        "Сбойная память на GPU 1", ["сброс только перезагрузкой хоста, из гостя не сбрасывать"])
+    assert gpu.tg_short(gpu.problems(rep, NOW)[1:]) == ("Сбойная память на GPU 1", ["нужен сброс GPU или перезагрузка"])
+
+
 def test_gpu_heat():
     hot = _gpu_rep([{"i": 1, "temp": 89, "slow": 87, "thr": {"sw": True}, "clk": 1200, "clkm": 1800}])
     assert _clean(*gpu.tg_short_heat(gpu.heat(hot, NOW))) == ("GPU 1 греется до 89°C", ["частота снижена до 1200 из 1800 МГц"])

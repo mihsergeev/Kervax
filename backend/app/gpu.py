@@ -8,7 +8,8 @@ Xid драйвера из журнала ядра за сутки (helper 0.3 - 
 за последние 5 минут (llm): очередь, KV-кэш, запросы и токены в секунду, перцентили задержек.
 
 Что алертит: драйвер не отвечает (после обновления ядра без пересборки модуля - классика), карта
-пропала с шины, ошибки Xid, после которых карте нужен сброс или замена, перегрев с замедлением,
+пропала с шины, ошибки Xid, после которых карте нужен сброс или замена (на виртуалке - с пометкой
+"из гостя не сбрасывать": сброс проброшенной карты изнутри ВМ роняет саму ВМ), перегрев с замедлением,
 LLM-сервис не отвечает, стоит очередь при полном KV-кэше, задержки в разы выше обычного держатся под
 нагрузкой (llm_lat: всплеск на паре запросов - не алерт, он виден в разделе LLM).
 """
@@ -37,7 +38,8 @@ BASE_KEEP = 24
 XID_HW = {
     48: "двойная ошибка ECC памяти: нужен сброс GPU или перезагрузка",
     61: "внутренняя ошибка микрокода: нужен сброс GPU",
-    62: "внутренняя ошибка микрокода: нужен сброс GPU",
+    62: "мониторинг GPU слеп, нужен плановый сброс: упал внутренний микроконтроллер карты, телеметрия застыла, "
+        "температуру и нагрузку не видно; приложения на карте могут работать дальше - проверь сервис",
     63: "ошибка ECC, сбойная память ждет исключения: нужен сброс GPU",
     64: "не удалось исключить сбойную память: карту под замену",
     74: "ошибка NVLink",
@@ -48,7 +50,7 @@ XID_HW = {
     119: "GSP не отвечает: GPU зависла, нужен сброс или перезагрузка",
     120: "ошибка GSP: нужен сброс GPU или перезагрузка",
     140: "неисправимая ошибка ECC: нужен сброс GPU",
-    154: "драйвер требует восстановления GPU",
+    154: "драйвер требует восстановления GPU: нужен сброс GPU",
 }
 XID_APP = {
     13: "ошибка приложения (graphics engine exception)",
@@ -62,6 +64,16 @@ XID_WARN = {92, 94}  # карта работает дальше - предупр
 # (Xid 62 месяц назад - карта так и висит). 63 и 64 тут нет: сбойную память, которая ждет сброса,
 # helper видит сам (remap/retire), и это проходит после сброса
 XID_RESET = {48, 61, 62, 74, 79, 95, 119, 120, 140, 154}
+# Xid 62 сам по себе - слепой мониторинг, а не авария: встал микроконтроллер телеметрии, nvidia-smi
+# отвечает сразу, но значения замерли, а модель на карте работает дальше. Красный - только вместе с
+# этими на той же карте (отвалилась от шины, ECC, завис GSP) или когда не отвечает сервис на ней
+XID_BLIND = 62
+XID_BLIND_BAD = {48, 79, 119}
+# Проброшенную в ВМ карту изнутри не сбросить: nvidia-smi -r или перезагрузка гостя на ESXi роняет ВМ,
+# а карта поднимается только после перезагрузки хоста гипервизора
+VM_RESET = "нужен сброс GPU перезагрузкой хоста гипервизора, из гостя не сбрасывать: на ВМ с пробросом сброс изнутри роняет ВМ"
+VM_RESET_SHORT = "сброс только перезагрузкой хоста, из гостя не сбрасывать"
+_RESET_RE = re.compile(r"нужен сброс.*$")
 ENGINE = {"vllm": "vLLM", "sglang": "SGLang", "tei": "TEI", "litellm": "LiteLLM"}
 # /metrics просит ключ: так настроено, а не сломалось (у LiteLLM require_auth_for_metrics_endpoint)
 LOCKED = ("http 401", "http 403")
@@ -173,6 +185,25 @@ def _dur(sec: float) -> str:
     return f"{max(sec // 60, 1)} мин"
 
 
+def vm_of(rep: dict | None) -> bool:
+    """Сервер - виртуалка (агент: is_vm и virt - VMware, KVM, Hyper-V): GPU в нее проброшена"""
+    r = rep or {}
+    return bool(r.get("is_vm")) or str(r.get("virt") or "none") not in ("", "none")
+
+
+def reset_text(text: str, vm: bool) -> str:
+    """Совет "нужен сброс GPU" для виртуалки: только перезагрузкой хоста, из гостя не сбрасывать"""
+    return _RESET_RE.sub(VM_RESET, text) if vm else text
+
+
+def xid_desc(code: int, vm: bool) -> str:
+    d = XID_HW.get(code) or XID_APP.get(code) or ""
+    if code == XID_BLIND:
+        return d + ("; на ВМ с пробросом сброс только перезагрузкой хоста гипервизора, из гостя не "
+                    "сбрасывать (nvidia-smi -r роняет ВМ)" if vm else "")
+    return reset_text(d, vm)
+
+
 def _drv_cause(b: dict) -> str:
     kernel = str(b.get("kernel") or "")
     if b.get("mod") is False and b.get("mod_built") is False:
@@ -213,6 +244,33 @@ def _waits_reset(x: dict, b: dict) -> bool:
     return not (x["code"] == 154 and re.search(r"\bto 0x0\b", x["text"]))
 
 
+def _blind(b: dict, xids: list[dict]) -> set[str]:
+    """Карты (шина) с Xid 62 после загрузки драйвера: телеметрия у них застыла до сброса"""
+    return {bus_key(x["bus"]) for x in xids if x["code"] == XID_BLIND and x["ts"] >= _load(b)}
+
+
+def _dead_on(rep: dict, b: dict, bus: str) -> list[str]:
+    """LLM-сервисы на этой карте, которые не отвечают (как в llm_problems). Карта сервиса - по
+    процессам nvidia-smi (владелец - контейнер, под или юнит); карта на сервере одна - все сервисы ее"""
+    uuid = {str(g.get("uuid") or "") for g in _gpus(b) if bus_key(g.get("bus") or "") == bus_key(bus)}
+    owners = {str(p.get("owner") or "") for p in b.get("procs") or []
+              if isinstance(p, dict) and str(p.get("gpu") or "") in uuid}
+    one = len(_gpus(b)) <= 1
+    return [llm_label(x) for x in llm_list(rep) if _llm_dead(x) and (one or str(x.get("name") or "") in owners)]
+
+
+def _xid_level(x: dict, xids: list[dict], b: dict, rep: dict) -> int:
+    """Уровень Xid: одиночный 62 при живой карте - предупреждение (мониторинг слеп), красный - если
+    на той же карте еще 79, 48 или 119 или сервис на ней не отвечает"""
+    if x["code"] in XID_WARN:
+        return 1
+    if x["code"] != XID_BLIND:
+        return 2
+    k = bus_key(x["bus"])
+    worse = any(y["code"] in XID_BLIND_BAD and bus_key(y["bus"]) == k and y["ts"] >= _load(b) for y in xids)
+    return 2 if worse or _dead_on(rep, b, x["bus"]) else 1
+
+
 def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]:
     """(уровень, текст, ключ, с какого момента) для алерта "gpu": драйвер, пропавшая карта, Xid,
     сбойная память. Без helper'а судить не о чем: его отсутствие флагает "Требует действий"."""
@@ -230,8 +288,10 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]
     if not b.get("ok"):
         return [(2, f"GPU недоступны: драйвер NVIDIA не отвечает{_drv_cause(b)}", "gpu:drv", None)]
     out: list[tuple[int, str, str, str | None]] = []
+    vm = vm_of(rep)
     seen = _gpu_of_bus(b)
     xids = _xids(b, now)
+    blind = _blind(b, xids)
     lost: set[str] = set()  # у пропавшей карты ее Xid 79 уже в строке "пропала", второй строкой не повторяем
     for p in pci_list(rep):
         drv = str(p.get("drv") or "")
@@ -249,10 +309,11 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]
         if g.get("remap_fail"):
             out.append((2, f"GPU {i}: не удалось исключить сбойную память - карту под замену", f"gpu:rf:{i}", None))
         elif g.get("remap") or g.get("retire"):
-            out.append((1, f"GPU {i}: сбойная память ждет исключения - нужен сброс GPU или перезагрузка",
-                        f"gpu:remap:{i}", None))
+            out.append((1, f"GPU {i}: сбойная память ждет исключения - "
+                           + reset_text("нужен сброс GPU или перезагрузка", vm), f"gpu:remap:{i}", None))
         fz = frozen(g)
-        if fz:
+        # при Xid 62 показания застыли по его причине: это в строке Xid, второй тревогой не повторяем
+        if fz and bus_key(g.get("bus") or "") not in blind:
             out.append((1, f"GPU {i}: показания nvidia-smi не меняются {_dur(fz)} - загрузка, питание и "
                            "температура застыли, перегрев по ним не увидеть", f"gpu:frozen:{i}",
                         datetime.fromtimestamp(now.timestamp() - fz, timezone.utc).isoformat()))
@@ -267,7 +328,9 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str, str | None]]
         gi = seen.get(bus_key(x["bus"]))
         who = f"GPU {gi}" if gi is not None else f"GPU {x['bus']}"
         since = datetime.fromtimestamp(x["ts"], timezone.utc).isoformat()
-        out.append((1 if x["code"] in XID_WARN else 2, f"{who}: ошибка Xid {x['code']} - {XID_HW[x['code']]}",
+        dead = _dead_on(rep, b, x["bus"]) if x["code"] == XID_BLIND else []
+        extra = f"; не отвечает {tg_fmt.names(dead)}" if dead else ""
+        out.append((_xid_level(x, xids, b, rep), f"{who}: ошибка Xid {x['code']} - {xid_desc(x['code'], vm)}{extra}",
                     f"gpu:xid:{bus_key(x['bus'])}:{x['code']}:{int(x['ts'])}", since))
     out.sort(key=lambda p: -p[0])
     return out
@@ -280,9 +343,10 @@ def heat(rep: dict, now: datetime) -> tuple[int, str]:
     if b is None or not b.get("ok") or age(b, now, rep) > STALE:
         return 0, ""
     worst = (0, "", -1.0)
+    blind = _blind(b, _xids(b, now))
     for g in _gpus(b):
-        if frozen(g):
-            continue
+        if frozen(g) or bus_key(g.get("bus") or "") in blind:
+            continue  # температура застыла: перегрев по ней не судим
         t = _f(g.get("temp"))
         if t is None:
             continue
@@ -319,7 +383,9 @@ def summary(rep: dict, now: datetime) -> dict | None:
         m = short_model(g.get("name") or "")
         if m and m not in models:
             models.append(m)
-    util = [u for u in (_f(g.get("util")) for g in gs if not frozen(g)) if u is not None]
+    blind = _blind(b, _xids(b, now)) if gs else set()
+    util = [u for u in (_f(g.get("util")) for g in gs if not frozen(g) and bus_key(g.get("bus") or "") not in blind)
+            if u is not None]
     mem = sum(_f(g.get("mem")) or 0 for g in gs)
     memt = sum(_f(g.get("memt")) or 0 for g in gs)
     return {
@@ -332,6 +398,8 @@ def summary(rep: dict, now: datetime) -> dict | None:
         "ok": bool(b and b.get("ok")),
         "smi": bool(b and b.get("smi")),  # false - драйвер NVIDIA не ставили: не "нет связи"
         "frozen": sum(1 for g in gs if frozen(g)),
+        # карт с Xid 62: застывшие показания объясняются им (упал микроконтроллер), а не отдельной бедой
+        "blind": len(blind),
     }
 
 
@@ -345,7 +413,10 @@ def view(rep: dict, now: datetime) -> dict | None:
     if b is None:
         return {"helper": False, "pci": [{"bus": p["bus"], "drv": str(p.get("drv") or "")} for p in pci]}
     gs = _gpus(b)
+    vm = vm_of(rep)
     seen = _gpu_of_bus(b)
+    xids = _xids(b, now)
+    blind = _blind(b, xids)
     uuid_i = {str(g.get("uuid") or ""): _i(g.get("i")) for g in gs}
     gpus = []
     for g in gs:
@@ -360,6 +431,7 @@ def view(rep: dict, now: datetime) -> dict | None:
             "thermal": bool(thr.get("hw") or thr.get("sw")), "pcap": bool(thr.get("pcap")), "brake": bool(thr.get("brake")),
             "remap": bool(g.get("remap") or g.get("retire")), "remap_fail": bool(g.get("remap_fail")),
             "frozen": frozen(g),
+            "blind": bus_key(g.get("bus") or "") in blind,  # Xid 62: телеметрия застыла до сброса карты
         })
     procs = []
     for p in b.get("procs") or []:
@@ -369,16 +441,19 @@ def view(rep: dict, now: datetime) -> dict | None:
                       "kind": str(p.get("kind") or ""), "owner": str(p.get("owner") or ""), "mem": _f(p.get("mem"))})
     procs.sort(key=lambda p: (-(p["mem"] or 0), p["gpu"] if p["gpu"] is not None else 99))
     xid = []
-    for x in _xids(b, now):
+    for x in xids:
         c, held, old = x["code"], _waits_reset(x, b), now.timestamp() - x["ts"] > DAY
         if old and not held:
             continue
-        # hw - красная точка: аппаратная ошибка, после которой драйвер не перезагружали
-        xid.append({**x, "gpu": seen.get(bus_key(x["bus"])), "hw": c in XID_HW and x["ts"] >= _load(b),
-                    "held": held, "old": old, "desc": XID_HW.get(c) or XID_APP.get(c) or ""})
+        # hw - аппаратная ошибка, после которой драйвер не перезагружали; lv - ее уровень, как в
+        # problems: 2 - красная точка, 1 (одиночный Xid 62, много исправимых ECC) - желтая
+        hw = c in XID_HW and x["ts"] >= _load(b)
+        xid.append({**x, "gpu": seen.get(bus_key(x["bus"])), "hw": hw, "lv": _xid_level(x, xids, b, rep) if hw else 0,
+                    "held": held, "old": old, "desc": xid_desc(c, vm)})
     ok = bool(b.get("ok"))
     return {
         "helper": True, "age": round(age(b, now, rep)), "stale": age(b, now, rep) > STALE,
+        "vm": vm,  # виртуалка: карту из гостя не сбрасывать
         "smi": bool(b.get("smi")), "ok": ok, "err": str(b.get("err") or "")[:300],
         "cause": _drv_cause(b).lstrip(": ").strip(" ()") if b.get("smi") and not ok else "",
         "driver": str(b.get("driver") or ""), "cuda": str(b.get("cuda") or ""), "kernel": str(b.get("kernel") or ""),
@@ -464,6 +539,14 @@ def _sec(v: float) -> str:
     return f"{round(v * 1000)} мс" if v < 1 else f"{v:.1f} с"
 
 
+def _llm_dead(x: dict) -> bool:
+    """Сервис не отвечает на /metrics. local и noaddr - агенту некуда стучаться, ключ на /metrics -
+    так настроено, сервис тут ни при чем (это видно в карточке); первые минуты модель грузится"""
+    if x.get("ok") or x.get("no_metrics"):
+        return False
+    return str(x.get("err") or "") not in ("local", "noaddr", *LOCKED) and (_f(x.get("up")) or 0) >= LLM_BOOT
+
+
 def llm_problems(rep: dict, base: dict | None, lat: dict | None = None,
                  now: datetime | None = None) -> list[tuple[int, str, str]]:
     """(уровень, текст, ключ) по LLM-сервисам; выдержку добавляют вызывающие. Задержки - только
@@ -477,11 +560,9 @@ def llm_problems(rep: dict, base: dict | None, lat: dict | None = None,
         if x.get("no_metrics"):
             continue
         if not x.get("ok"):
-            err = str(x.get("err") or "")
-            # local и noaddr - агенту некуда стучаться, ключ на /metrics - так настроено, сервис тут
-            # ни при чем: это видно в карточке
-            if err in ("local", "noaddr", *LOCKED) or (_f(x.get("up")) or 0) < LLM_BOOT:
+            if not _llm_dead(x):
                 continue
+            err = str(x.get("err") or "")
             out.append((2, f"{label}: не отвечает на /metrics ({err_text(err)}), процесс работает {_dur(_f(x.get('up')) or 0)}",
                         f"llm:down:{k}"))
             continue
@@ -540,8 +621,9 @@ def metric_gpu(extras: dict | None, now: datetime, clock: int = 0) -> list[dict]
     if b is None or not b.get("ok") or age(b, now, {"clock_unix": clock}) > 180:
         return None
     out = []
+    blind = _blind(b, _xids(b, now))
     for g in _gpus(b):
-        if frozen(g):
+        if frozen(g) or bus_key(g.get("bus") or "") in blind:
             continue  # застывшие показания на графике - ровная ложная линия, честнее пропуск
         memt, pwl = _f(g.get("memt")), _f(g.get("pwl"))
         mem, pw = _f(g.get("mem")), _f(g.get("pw"))
@@ -577,7 +659,9 @@ def _xid_what(code: int, who: str) -> str:
         return f"Отвалилась {who}"
     if code in (48, 63, 64, 92, 94, 95, 140):
         return f"Ошибки памяти {who}"
-    if code in (61, 62):
+    if code == XID_BLIND:
+        return f"Мониторинг {who} слеп"
+    if code == 61:
         return f"Сбой микрокода {who}"
     if code in (119, 120):
         return f"Зависла {who}"
@@ -608,7 +692,8 @@ def _gpu_one(p) -> tuple[str, list[str]]:
     if kind == "rf":
         return f"{who} под замену", ["не удалось исключить сбойную память"]
     if kind == "remap":
-        return f"Сбойная память на {who}", ["нужен сброс GPU или перезагрузка"]
+        fix = text.rpartition(" - ")[2]
+        return f"Сбойная память на {who}", [VM_RESET_SHORT if "из гостя" in fix else fix]
     if kind == "frozen":
         m = re.search(r"не меняются (.+?) - ", text)
         return f"Застыли показания {who}", [f"nvidia-smi не меняется {m.group(1)}"] if m else []
@@ -619,7 +704,12 @@ def _gpu_one(p) -> tuple[str, list[str]]:
         # gpu:xid:<шина 41:00>:<код>:<время> - в шине тоже двоеточие
         code = _i(parts[-2]) if len(parts) > 4 else None
         if code is not None:
-            tail = XID_HW.get(code, "").partition(": ")[2]
+            vm = "из гостя" in text
+            if code == XID_BLIND:
+                tail = "телеметрия застыла, " + (VM_RESET_SHORT if vm else "нужен плановый сброс")
+            else:
+                tail = XID_HW.get(code, "").partition(": ")[2]
+                tail = _RESET_RE.sub(VM_RESET_SHORT, tail) if vm else tail
             return _xid_what(code, who), [f"Xid {code}" + (f", {tail}" if tail else "")]
     return tg_fmt.split_detail(text)
 
