@@ -70,6 +70,11 @@ WHEN_WORDS = ("amnezia", "acontrol-awg", "xray", "v2ray", "v2fly", "sing-box", "
               "netbirdio", "mtg", "mtproto", "telegrammessenger", "telemt", "shadowbox", "outline-ss", "shadowsocks", "ss-server",
               "strongswan", "ipsec", "libreswan", "ocserv", "softether", "pritunl", "hysteria", "trojan",
               "naiveproxy", "3proxy", "squid", "dante", "sockd", "gost")
+# то же для helper'а vpnflow-setup (KERVAX_SETUP_WHEN в vpnflow-setup.sh): conntrack с внутренними адресами
+# клиентов есть только там, где живет интерфейс туннеля. MTProto, Xray, Squid, 3proxy соединения открывают
+# сами, условие на такой ноде ложно - панель не должна держать ее в kervax_outdated
+FLOW_IF = ("wg", "awg", "tun", "tap")
+FLOW_WORDS = ("amnezia", "wireguard", "wg-easy", "openvpn")
 
 # Интерфейсы хоста: wg/awg - туннель, пока helper не скажет, что к нам подключаются клиенты.
 # gre0/gretap0 ядро создает само при загрузке модуля ip_gre, amn0 - docker-сеть Amnezia
@@ -261,6 +266,24 @@ def needs_helper(rep: dict) -> bool:
     if block(rep):
         return True
     return any(m["role"] == "server" or m.get("guess") for m in services(rep, 0))
+
+
+def needs_flow_helper(rep: dict) -> bool:
+    """Нужен ли helper vpnflow-setup: интерфейс wg/awg/tun/tap на хосте или работающий контейнер,
+    у которого в имени или образе слово из FLOW_WORDS (условие на ноде ищет их во всей строке docker ps:
+    у Amnezia Control образ acontrol-awg3, а контейнер amnezia-awg3), или helper уже присылает блок"""
+    if "vpnflow" in (rep.get("extras") or {}):
+        return True
+    for f in rep.get("net_ifaces") or []:
+        if isinstance(f, dict) and str(f.get("if") or "").startswith(FLOW_IF):
+            return True
+    for c in (rep.get("docker") or {}).get("containers") or []:
+        if not isinstance(c, dict) or c.get("state") != "running":
+            continue
+        s = f"{c.get('name') or ''} {c.get('image') or ''}".lower()
+        if any(w in s for w in FLOW_WORDS):
+            return True
+    return False
 
 
 def clients(rep: dict, now_ts: float) -> list[dict]:

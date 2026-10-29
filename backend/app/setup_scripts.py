@@ -143,10 +143,11 @@ def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bo
     # helper уже присылает клиентов. Один Tailscale на обычной ноде - клиент меша, не повод
     if name == "vpn-setup":
         return vpn_mod.needs_helper(rep)
-    # vpnflow-setup - где на сервере раздают VPN (app/vpn.py: контейнер по образу, туннель wg с
-    # неизвестной ролью) или helper уже присылает блок
+    # vpnflow-setup - где есть интерфейс туннеля (на хосте или в контейнере AmneziaWG, WireGuard,
+    # OpenVPN) или helper уже присылает блок. Не по гейту vpn-setup: с ним MTProto, Xray и Squid без
+    # туннеля навсегда оставались в kervax_outdated, а условие в скрипте на ноде ложно
     if name == "vpnflow-setup":
-        return vpn_mod.needs_helper(rep) or "vpnflow" in (rep.get("extras") or {})
+        return vpn_mod.needs_flow_helper(rep)
     # backup-setup — транспорт панели для дампов, нужен и без файлового бэкапа;
     # timesync-setup, agent-watchdog, diskusage-setup, diskhealth-setup и units-setup
     # ansible ставит всюду (диск забивается и ломается где угодно, а на VM здоровье дисков смотрит хотя бы
