@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.67] - 2026-10-29
+
+### Changed
+- GPU: плашка "Xid за сутки" оранжевая или красная, только пока есть ошибка после последней загрузки драйвера или
+  карта ждет сброса. После сброса карты (перезагрузка модуля nvidia или драйвер заново принял карту) она сразу
+  серая и остается счетчиком истории, а не держится цветом до конца суток.
+
 ## [1.8.66] - 2026-10-29
 
 ### Added
