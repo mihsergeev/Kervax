@@ -19,11 +19,13 @@ import {
   type Server,
   dropCheckKnown,
   dropServerKnown,
+  setServerFixed,
   setServerKnown,
   type KnownIssue,
 } from './api'
 import type { Section } from './App'
 import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta, tallyTile, type TallyTile } from './serverUtils'
+import { FixedDialog, FIX_KINDS } from './FixedDialog'
 import { KnownDialog } from './KnownDialog'
 import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, collectMutes, isDecision, kindLabel, liftMute, muteDate, muteLiveText, muteQuiet, oomCulpritLabel, withLive, type MuteItem } from './mutes'
 import { MaintChip, MaintHome } from './MaintModal'
@@ -550,6 +552,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const viaPanels = useViaPanels()
   // отметить проблему сервера известной (📌 в "Что сломано")
   const [knownFor, setKnownFor] = useState<{ id: number; kind: string; title: string } | null>(null)
+  // починили (✅ в "Что сломано", FixedDialog.tsx): markable - можно предложить известную, если еще видно
+  const [fixFor, setFixFor] = useState<{ id: number; kind: string; title: string; markable: boolean } | null>(null)
   const [avail, setAvail] = useState('')
   const [relProblem, setRelProblem] = useState('')
   const [probeHints, setProbeHints] = useState<LocalProbeSuggestion[]>([])
@@ -827,6 +831,15 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           </span>
         )}
       </span>
+      {it.srv && FIX_KINDS.has(it.kind) && !isViewer && (
+        <span className="quick-mute" title={t('Починили: убрать алерт сейчас и считать заново')}
+          onClick={(e) => {
+            e.stopPropagation()
+            setFixFor({ id: it.id, kind: it.kind, title: `${it.name} - ${it.text}`, markable: !!it.markable })
+          }}>
+          ✅
+        </span>
+      )}
       {it.markable && !isViewer && (
         <span className="quick-mute" title={t('Известная проблема: алерт молчит, пока не станет хуже')}
           onClick={(e) => {
@@ -1084,6 +1097,21 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   return (
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
+      {fixFor && (
+        <FixedDialog
+          title={fixFor.title}
+          onClose={() => setFixFor(null)}
+          onKnown={fixFor.markable ? () => {
+            setKnownFor({ id: fixFor.id, kind: fixFor.kind, title: fixFor.title })
+            setFixFor(null)
+          } : undefined}
+          onSave={async (text) => {
+            await setServerFixed(fixFor.id, fixFor.kind, text)
+            setFixFor(null)
+            load()
+          }}
+        />
+      )}
       {knownFor && (
         <KnownDialog
           title={knownFor.title}

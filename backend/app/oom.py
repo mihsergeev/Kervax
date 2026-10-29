@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import podnames, tg_fmt
+from app import fixed, podnames, tg_fmt
 from app.models import OomKill, Server
 
 EXTRA_KEY = "oom"
@@ -997,7 +997,9 @@ def problem(s: Server, now: datetime, pod_names: dict[str, str] | None = None) -
     if b is None:
         return None
     failed, conts = units_failed_now(rep), names_of(rep, pod_names)
-    day = [e for e in episodes(records(b)) if e["start"] >= now.timestamp() - 86400
+    # отметили "починили" (app/fixed.py): эпизоды до отметки не в счет
+    since = max(now.timestamp() - 86400, fixed.after_ts(s, "oom"))
+    day = [e for e in episodes(records(b)) if e["start"] >= since
            and not episode_muted(e, mutes, failed, conts)]
     if not day:
         return None

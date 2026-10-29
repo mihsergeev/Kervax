@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timedelta
 
-from app import podnames
+from app import fixed, podnames
 from app.models import Server
 
 WINDOW = 86400  # сутки
@@ -217,6 +217,18 @@ def _pods(rep: dict | None) -> dict[str, dict]:
     return out
 
 
+def _after(rs: dict, prefix: str, at: datetime | None) -> dict:
+    """Счетчики, где у объектов prefix остались только перезапуски после at (отметка "починили")."""
+    if at is None:
+        return rs
+    out = dict(rs)
+    for k, cs in rs.items():
+        if k.startswith(prefix) and isinstance(cs, dict):
+            out[k] = {**cs, "ev": [e for e in cs.get("ev") or []
+                                   if isinstance(e, list) and len(e) == 2 and (t := _ts(e[0])) is not None and t > at]}
+    return out
+
+
 def _events(cs: dict | None, now: datetime) -> list[tuple[datetime, int]]:
     out = []
     for e in (cs or {}).get("ev") or []:
@@ -347,12 +359,14 @@ def rollout_hold(s: Server, now: datetime) -> set[str]:
     return out
 
 
-def _pod_rows(s: Server, now: datetime) -> tuple[list[dict], list[dict]]:
+def _pod_rows(s: Server, now: datetime, rs: dict | None = None) -> tuple[list[dict], list[dict]]:
     """Поды с перезапусками за сутки и пачки. У пода: n - всего, solo - не в пачках, cause, alert -
     повод для алерта: OOMKilled от MIN_OOM, остальное (кроме выхода с кодом 0) - от MIN не в пачках;
-    перезапуски выкатки (_young) не в счет, wait - до какого момента ждем нового пода"""
+    перезапуски выкатки (_young) не в счет, wait - до какого момента ждем нового пода. rs - счетчики,
+    если не из состояния (с отметки "починили", _after)"""
     st = s.alert_state or {}
-    rs = st.get("restarts") if isinstance(st.get("restarts"), dict) else {}
+    if rs is None:
+        rs = st.get("restarts") if isinstance(st.get("restarts"), dict) else {}
     ctrl = podnames.ctrls(s.last_report)
     pods = _pods(s.last_report)
     muted = muted_keys(s)
@@ -421,6 +435,8 @@ def problems(s: Server, now: datetime) -> list[dict]:
     ворклоада) и без контейнеров, по которым уже ушел алерт о быстром цикле (docker_loop)."""
     st = s.alert_state or {}
     rs = st.get("restarts") if isinstance(st.get("restarts"), dict) else {}
+    # отметили "починили" (app/fixed.py): перезапуски до отметки не в счет
+    rs = _after(_after(rs, "docker:", fixed.after(s, "docker_restarts")), "pod:", fixed.after(s, "kube_restarts"))
     dk = st.get("docker") if isinstance(st.get("docker"), dict) else {}
     muted = muted_keys(s)
     ctrl = podnames.ctrls(s.last_report)
@@ -432,7 +448,7 @@ def problems(s: Server, now: datetime) -> list[dict]:
         if n < MIN or (dk.get(key[7:]) or {}).get("alerted_loop"):
             continue
         groups[key] = [(key[7:], n, last, "")]
-    rows, bl = _pod_rows(s, now)
+    rows, bl = _pod_rows(s, now, rs)
     for r in rows:
         if r["alert"] and not podnames.muted(muted, r["key"], r["ctrl"]):
             groups.setdefault(podnames.pod_key(r["key"], r["ctrl"]), []).append(

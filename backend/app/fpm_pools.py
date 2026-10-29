@@ -35,7 +35,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from app import tg_fmt
+from app import fixed, tg_fmt
 from app.models import Server
 from app.queue_watch import where_in, where_text
 
@@ -149,6 +149,8 @@ def muted_keys(s: Server, now: datetime) -> set[str]:
 
 
 def _held(s: Server) -> set[str]:
+    if fixed.pending(s, "fpm"):
+        return set()  # отметили "починили" (app/fixed.py): объявленное больше не держит пониженный порог
     return {str(k) for k in ((s.alert_state or {}).get("fpm_sig") or [])}
 
 

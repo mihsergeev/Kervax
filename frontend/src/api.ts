@@ -4157,6 +4157,15 @@ export function setServerKnown(id: number, kind: string, text: string, days: num
   })
 }
 
+// Починили (backend app/fixed.py): алерт закрывается сейчас, счет по окну - с отметки; беда еще
+// видна - 409 "Еще не починено: ..."
+export function setServerFixed(id: number, kind: string, text: string): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/fixed/${encodeURIComponent(kind)}`, {
+    method: 'POST',
+    body: JSON.stringify({ text }),
+  })
+}
+
 export function dropServerKnown(id: number, kind: string): Promise<Server> {
   return api<Server>(`/api/servers/${id}/known/${encodeURIComponent(kind)}`, { method: 'DELETE' })
 }

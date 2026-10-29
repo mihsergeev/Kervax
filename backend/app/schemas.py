@@ -2438,6 +2438,11 @@ class KnownIn(BaseModel):
     days: int = Field(default=0, ge=0, le=90)
 
 
+class FixedIn(BaseModel):
+    """Починили: что сделали, по желанию (в отбой и в журнал)."""
+    text: str = Field(default="", max_length=500)
+
+
 class MaintIn(BaseModel):
     """Окно обслуживания. Проверки (конец позже начала, длина, дни недели) - в API: там они
     отвечают человеку строкой, а не списком ошибок pydantic."""

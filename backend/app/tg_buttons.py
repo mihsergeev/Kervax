@@ -10,13 +10,14 @@ import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app import fixed
 from app.models import TgAlert
 
 log = logging.getLogger("kervax.tg_buttons")
 
 # Действия кнопок (callback_data "kx:<id>:<op>", лимит Telegram 64 байта)
-OP_HOUR, OP_MORNING, OP_FOREVER, OP_ACK, OP_US, OP_UNDO = "h1", "mo", "pm", "ak", "us", "un"
-OPS = (OP_HOUR, OP_MORNING, OP_FOREVER, OP_ACK, OP_US, OP_UNDO)
+OP_HOUR, OP_MORNING, OP_FOREVER, OP_ACK, OP_US, OP_UNDO, OP_FIX = "h1", "mo", "pm", "ak", "us", "un", "fx"
+OPS = (OP_HOUR, OP_MORNING, OP_FOREVER, OP_ACK, OP_US, OP_UNDO, OP_FIX)
 MORNING_HOUR = 9
 
 # Что глушит кнопка под алертом. Раньше - вид целиком: "заглушить" под алертом про один CronJob
@@ -76,7 +77,7 @@ def _btn(text: str, aid: int, op: str) -> dict:
 
 
 def keyboard(aid: int, kind: str, *, muted: bool = False, acked: bool = False,
-             us_done: bool = False) -> dict:
+             us_done: bool = False, fix_done: bool = False) -> dict:
     rows = []
     if muted:
         rows.append([_btn("↩️ Вернуть алерты", aid, OP_UNDO)])
@@ -88,6 +89,9 @@ def keyboard(aid: int, kind: str, *, muted: bool = False, acked: bool = False,
         second.append(_btn("✋ Взял", aid, OP_ACK))
     if kind == "access_change" and not us_done:
         second.append(_btn("✅ Это мы", aid, OP_US))
+    # починили (app/fixed.py): алерт закроется сейчас, счет по окну - с отметки
+    if kind in fixed.KINDS and not fix_done:
+        second.append(_btn("✅ Починили", aid, OP_FIX))
     if second:
         rows.append(second)
     return {"inline_keyboard": rows}
@@ -99,7 +103,7 @@ def row_keyboard(row: TgAlert) -> dict:
         # беда ушла: глушить и брать нечего, но заглушенное кнопкой надо уметь вернуть
         return {"inline_keyboard": [[_btn("↩️ Вернуть алерты", row.id, OP_UNDO)]] if "mute" in undo else []}
     return keyboard(row.id, row.kind, muted="mute" in undo, acked=bool(row.acked_by),
-                    us_done=bool(undo.get("us")))
+                    us_done=bool(undo.get("us")), fix_done=bool(undo.get("fix")))
 
 
 def _cut_html(text: str, limit: int) -> str:
@@ -137,6 +141,8 @@ def row_text(row: TgAlert, tz: str, now: datetime | None = None) -> str:
     undo = row.undo or {}
     if undo.get("us"):
         lines.append(f"✅ {_esc(str(undo.get('us_by') or ''))}: это мы")
+    if undo.get("fix"):
+        lines.append(f"✅ {_esc(str(undo.get('fix_by') or ''))}: починили")
     if row.muted:
         lines.append(_esc(row.muted))
     if row.resolved_at is not None:

@@ -3992,6 +3992,17 @@ const EN: Record<string, string> = {
   'месяц': 'a month',
   'до {d}': 'until {d}',
   'Известная проблема': 'Known issue',
+  'Починили': 'Fixed',
+  'Что сделали (необязательно)': 'What was done (optional)',
+  'Алерт закроется сейчас, счет начнется заново. Повторится - алерт придет как обычно.':
+    'The alert closes now and counting starts over. If it happens again, the alert comes as usual.',
+  'Еще не починено': 'Not fixed yet',
+  'Еще не починено: ': 'Not fixed yet: ',
+  'Панель все еще это видит. Если чинить будут позже, отметьте известной проблемой.':
+    'The panel still sees it. If it will be fixed later, mark it as a known issue.',
+  'Починили: убрать алерт сейчас и считать заново': 'Fixed: close the alert now and start counting over',
+  'Этот алерт так не закрывается': 'This alert cannot be closed this way',
+  'отметил: починили': 'marked as fixed',
   'Что известно: кто чинит, когда, где тикет': 'What is known: who is fixing it, when, where the ticket is',
   'Молчать': 'Stay quiet',
   'Алерт молчит, пока не станет хуже. Проблема ушла сама - отметка закроется, вышел срок - алерт придет как обычно. Раз в неделю бот напомнит, что она все еще висит.':
