@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.68] - 2026-10-29
+
+### Fixed
+- Ноды с MTProto, Xray, 3x-ui, Squid, 3proxy, sing-box или Headscale без VPN-туннеля больше не висят в
+  "Требует действий" и в группе ansible kervax_outdated из-за helper'а vpnflow-setup. Панель просила его по
+  тому же признаку, что и vpn-setup (на сервере что-то раздает VPN или прокси), а условие helper'а на ноде
+  требует интерфейс wg/awg/tun/tap или контейнер AmneziaWG, WireGuard, OpenVPN: плейбук на таких нодах ничего
+  не ставил и писал "Не подошли этой ноде: vpnflow-setup". Теперь панель смотрит то же, что условие: интерфейсы
+  хоста и имена и образы работающих контейнеров. Тест сверяет признаки панели со строкой KERVAX_SETUP_WHEN.
+
 ## [1.8.67] - 2026-10-29
 
 ### Changed

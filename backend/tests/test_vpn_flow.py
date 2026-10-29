@@ -236,6 +236,65 @@ def test_helper_is_needed_where_vpn_is_served():
     assert "vpnflow-setup" in setup_scripts._HELPER_LABEL
 
 
+def _node(cts=(), ifs=("eth0", "docker0"), flow=None):
+    """Отчет ноды без блока vpnflow: работающие контейнеры (имя, образ) и интерфейсы хоста"""
+    sv = {"vpn-setup": "0.1"} | ({"vpnflow-setup": flow} if flow else {})
+    return {"agent_version": "2.59", "clock_unix": TS, "setup_versions": sv,
+            "net_ifaces": [{"if": i} for i in ifs],
+            "docker": {"present": True, "access": True, "containers": [
+                {"name": n, "image": img, "state": "running"} for n, img in cts]}}
+
+
+def test_helper_is_asked_only_where_its_condition_holds():
+    """Панель просит vpnflow-setup ровно там, где KERVAX_SETUP_WHEN на ноде выполнится: MTProto, Xray,
+    3x-ui, Squid, 3proxy, sing-box и Headscale без туннеля - не повод, иначе нода навсегда в kervax_outdated
+    (плейбук пишет "Не подошли этой ноде: vpnflow-setup")"""
+    from app import vpn
+    from app.api.servers import _helper_advice
+
+    src = (ROOT / "agent" / "vpnflow-setup.sh").read_text(encoding="utf-8")
+    when = re.search(r'^KERVAX_SETUP_WHEN="(.*)"$', src, re.M).group(1)
+    ls, ps = when.split("docker ps", 1)
+    assert set(re.findall(r"-e \^(\w+)", ls)) == set(vpn.FLOW_IF)
+    assert set(re.findall(r"-e ([^\s)]+)", ps)) == set(vpn.FLOW_WORDS)
+
+    cur = {"vpn-setup": "0.1", "vpnflow-setup": "0.1"}
+    proxies = [
+        _node([("mtg", "nineseconds/mtg:2"), ("squid_proxy", "thelebster/docker-squid-simple-proxy")]),
+        _node([("xray", "ghcr.io/xtls/xray-core:26.3.27")], ifs=("eth0", "docker0", "gre0", "gretap0", "erspan0")),
+        _node([("3x-ui", "ghcr.io/mhsanaei/3x-ui:v2.2.0"), ("3x-ui-caddy-1", "lucaslorentz/caddy-docker-proxy:2.13.1")]),
+        _node([("socks-proxy", "3proxy/3proxy:latest"), ("tg-tunnel", "ghcr.io/sagernet/sing-box@sha256:da0e")]),
+        _node([("vpn-headscale-1", "headscale/headscale:0.29.2")]),
+    ]
+    for rep in proxies:
+        assert vpn.needs_helper(rep), rep  # клиентов VPN helper vpn-setup с них читает
+        assert not setup_scripts.setup_needed("vpnflow-setup", rep), rep
+        assert [a.name for a in _helper_advice(_srv(rep), cur)] == [], rep
+
+    tunnels = [
+        # Amnezia Control: образ acontrol-awg3, контейнер amnezia-awg3 - условие видит имя в docker ps
+        _node([("amnezia-awg3", "acontrol-awg3")]),
+        _node([("amnezia-awg2", "amnezia-awg2")]),
+        _node([("openvpn", "kylemanna/openvpn")]),
+        _node([("wg-easy", "ghcr.io/wg-easy/wg-easy:15")]),
+        _node(ifs=("eth0", "wg0")),
+        _node(ifs=("eth0", "awg0")),
+        _node(ifs=("eth0", "tun0")),
+    ]
+    for rep in tunnels:
+        assert setup_scripts.setup_needed("vpnflow-setup", rep), rep
+        assert [a.name for a in _helper_advice(_srv(rep), cur)] == ["vpnflow-setup"], rep
+        # helper свежий - больше не просим
+        rep["setup_versions"]["vpnflow-setup"] = "0.1"
+        assert _helper_advice(_srv(rep), cur) == [], rep
+    # остановленный контейнер docker ps не покажет
+    stopped = _node([("amnezia-awg2", "amnezia-awg2")])
+    stopped["docker"]["containers"][0]["state"] = "exited"
+    assert not setup_scripts.setup_needed("vpnflow-setup", stopped)
+    # helper уже присылает блок - он стоит, обновлять его нужно и там
+    assert setup_scripts.setup_needed("vpnflow-setup", _node(flow="0.0") | {"extras": {"vpnflow": {"v": 1}}})
+
+
 # ---- сам helper ----
 
 ROOT = Path(__file__).resolve().parents[2]
