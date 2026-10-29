@@ -197,3 +197,17 @@ async def store_sent(session_factory, sent: dict[int, list]) -> None:
             await session.commit()
     except Exception:  # noqa: BLE001
         log.warning("не записано, куда ушли алерты с кнопками", exc_info=True)
+
+
+async def hold(session_factory, ids: list[int], chat: str) -> None:
+    """Критичное в паузу копий: запись помнит, в какой чат отдать его, если в группе не возьмут
+    (tg_bot.dup_catchup)."""
+    try:
+        async with session_factory() as session:
+            for aid in ids:
+                row = await session.get(TgAlert, aid)
+                if row is not None and row.messages:
+                    row.undo = {**(row.undo or {}), "held": chat}
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        log.warning("придержанные критичные не записаны", exc_info=True)

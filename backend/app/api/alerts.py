@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, status
@@ -16,6 +17,7 @@ from app.schemas import (
     AlertConfigIn,
     AlertConfigOut,
     AlertTestResult,
+    DupPauseIn,
     RouteTestIn,
     ServerAlertKindInfo,
     ServerAlertRulesIn,
@@ -50,6 +52,7 @@ async def _current(session, settings) -> AlertConfigOut:
             "sites": sorted({g for g in await session.scalars(select(Check.group_name)) if g}),
         },
         routes_state=await settings_store.get_routes_state(session),
+        dup_pause={**cfg["dup_pause"], "on": alerts.dup_paused(cfg)},
     )
 
 
@@ -85,6 +88,17 @@ async def put_alerts(
         await settings_store.set_routes(session, body.routes.model_dump())
     await settings_store.set_muted(session, body.muted)
     await audit.record(session, user.username, "alerts_config", "")
+    return await _current(session, settings)
+
+
+@router.post("/dup-pause", response_model=AlertConfigOut)
+async def dup_pause(body: DupPauseIn, user: AdminUser, session: SessionDep) -> AlertConfigOut:
+    """Пауза копий в основной чат: сразу, без "Сохранить" - это кнопка на время, а не настройка."""
+    settings = get_settings()
+    cfg = await settings_store.get_alert_config(session, settings)
+    await settings_store.set_dup_pause(
+        session, alerts.dup_pause_value(body.op, datetime.now(timezone.utc), cfg.get("tz") or "UTC", user.username))
+    await audit.record(session, user.username, "alerts_dup_pause", "", body.op)
     return await _current(session, settings)
 
 

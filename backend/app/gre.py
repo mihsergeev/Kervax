@@ -149,6 +149,38 @@ def real_ip(server: Server, ext: str, now: datetime) -> str:
     return ""
 
 
+PATH_KEY = "gre_path"
+
+
+def track_path(server: Server, prev_rep: dict, rep: dict, via_gre: bool, now: datetime) -> None:
+    """Каким путем пришел этот отчет и с каких пор агент ходит этим путем: rep["gre_path"] =
+    {"via": "gre" | "direct", "since": unix}. Живет в отчете и переносится из прошлого, пока путь
+    тот же: так карточка пишет "через GRE с 14:20" или "GRE включен, а агент ходит напрямую"
+    без отдельной колонки. Серверу без GRE не пишется."""
+    if not server.gre_enabled and not via_gre:
+        return
+    via = "gre" if via_gre else "direct"
+    prev = prev_rep.get(PATH_KEY) if isinstance(prev_rep.get(PATH_KEY), dict) else {}
+    since = prev.get("since") if prev.get("via") == via else None
+    rep[PATH_KEY] = {"via": via, "since": since if isinstance(since, int) else int(now.timestamp())}
+
+
+def _path(server: Server) -> tuple[str, str | None]:
+    """(путь последнего отчета, с каких пор этим путем ISO). Отчеты до track_path - по отметке
+    gre_agent_at: она ставится тем же временем, что last_seen, когда отчет пришел туннелем."""
+    p = (server.last_report or {}).get(PATH_KEY)
+    if isinstance(p, dict) and p.get("via") in ("gre", "direct"):
+        since = p.get("since")
+        at = datetime.fromtimestamp(since, timezone.utc).isoformat() if isinstance(since, int) else None
+        return p["via"], at
+    seen, agent_at = _aware(server.last_seen), _aware(server.gre_agent_at)
+    if seen is None:
+        return "", None
+    if agent_at is not None and abs((seen - agent_at).total_seconds()) < 2:
+        return "gre", None
+    return "direct", None
+
+
 def enable_problem(server: Server) -> str:
     """Почему GRE этому серверу не включить, '' - можно."""
     if (server.last_report or {}).get("proxy"):
@@ -279,6 +311,9 @@ def view(server: Server, now: datetime, host: dict | None = None) -> dict | None
     hi = (host.get("ifaces") or {}).get(iface_of(server)) or {}
     host_ok = bool(hi.get("ok")) and time.time() - (host.get("ts") or 0) < HOST_STALE
     mine, node = addrs(server.gre_net or "")
+    via, via_since = _path(server)
+    rep = server.last_report or {}
+    probe = rep.get("net_probe") if isinstance(rep.get("net_probe"), dict) else None
     if seen is None:
         state = "waiting" if installed else "no_helper"
     elif now - seen > STALE:
@@ -308,6 +343,20 @@ def view(server: Server, now: datetime, host: dict | None = None) -> dict | None
         "seen_at": seen.isoformat() if seen else None,
         "agent_at": agent_at.isoformat() if agent_at else None,
         "helper": str(installed) if installed else "",
+        # для пометки "через GRE" в карточке: интерфейсы с двух сторон, MTU, адрес хоста панели,
+        # каким путем пришел последний отчет и с каких пор, что агент знает про туннель
+        "iface": iface_of(server),
+        "node_iface": NODE_IFACE,
+        "mtu": MTU,
+        "panel_ip": panel_ip(server, host),
+        "host_at": (datetime.fromtimestamp(host["ts"], timezone.utc).isoformat()
+                    if isinstance(host.get("ts"), int) and host.get("ts") else None),
+        "via": via,
+        "via_since": via_since,
+        "connect": str(rep.get("connect") or "")[:64],
+        "connect_down": bool(rep.get("connect_down")),
+        "probe": {k: _count(probe.get(k)) for k in ("small_ok", "small_n", "big_ok", "big_n", "big_kb")}
+        if probe else None,
     }
 
 

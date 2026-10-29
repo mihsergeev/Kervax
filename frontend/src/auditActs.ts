@@ -105,6 +105,7 @@ export const ACT: Record<string, string> = {
   maint_delete: 'удалил окно обслуживания',
   alerts_config: 'изменил алерты',
   alerts_route_test: 'проверил чат алертов',
+  alerts_dup_pause: 'поставил или снял паузу копий в основной чат',
   retention_config: 'изменил сроки хранения',
   branding_set: 'сменил логотип',
   branding_clear: 'вернул стандартный логотип',

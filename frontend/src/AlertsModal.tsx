@@ -7,11 +7,13 @@ import {
   putAlerts,
   putServerAlertRules,
   putSiteAlertRules,
+  setDupPause,
   testAlertRoute,
   testAlerts,
   type AlertConfig,
   type AlertRoute,
   type AlertRoutes,
+  type DupPause,
   type Escalation,
   type ServerAlertRules as Rules,
 } from './api'
@@ -176,6 +178,17 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
     return c
   }
 
+  // пауза копий в основной чат - сразу, без "Сохранить": несохраненное в форме не трогаем
+  async function dupPause(op: '2h' | 'morning' | 'forever' | 'off') {
+    setErr(null)
+    try {
+      const c = await setDupPause(op)
+      setCfg(c)
+    } catch (e) {
+      fail(e)
+    }
+  }
+
   // проверка чата по группам: сначала сохраняем каналы, чтобы чат и его группы уже были
   async function testRoute(chat: string): Promise<string> {
     try {
@@ -251,6 +264,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
       : cfg.enabled
         ? { dot: 'ok', text: t('Каналы настроены') }
         : { dot: 'bad', text: t('Каналы не настроены') }
+  const paused = !!cfg && pauseOn(cfg.dup_pause)
 
   return (
     <div className="modal-backdrop">
@@ -261,6 +275,11 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
             <span className="al-state muted small">
               <span className={`lk-dot lk-dot-${state.dot}`} />
               {state.text}
+            </span>
+          )}
+          {paused && cfg && (
+            <span className="al-state al-state-pause small" title={t('Копии алертов групп в основной чат не идут')}>
+              {t('⏸ Копии на паузе {when}', { when: untilText(cfg.dup_pause, cfg.tz, t) })}
             </span>
           )}
           <button className="ghost" onClick={close}>
@@ -289,7 +308,21 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
                         </button>
                       </div>
                     )}
-                    <RouteMap f={f} groups={cfg.route_groups} />
+                    <DupPauseBar cfg={cfg} onSet={dupPause} />
+                    <RouteMap
+                      f={f}
+                      groups={cfg.route_groups}
+                      paused={paused}
+                      onToggle={(keys, on) => {
+                        const by = { ...(f.routes.main_by ?? {}) }
+                        // совпадающее с общим выбором не храним: его меняет переключатель ниже
+                        for (const k of keys) {
+                          if (on === (f.routes.main === 'all')) delete by[k]
+                          else by[k] = on
+                        }
+                        set({ routes: { ...f.routes, main_by: by } })
+                      }}
+                    />
                     {scopedSrv + scopedSite > 0 && (
                       <ScopedNote
                         n={scopedSrv + scopedSite}
@@ -438,50 +471,161 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
   )
 }
 
-// Карта "группа -> куда уходят ее алерты": видно сразу, не теряется ли что-то
-function RouteMap({ f, groups }: { f: Form; groups: AlertConfig['route_groups'] }) {
+// Карта "группа -> куда уходят ее алерты": видно сразу, не теряется ли что-то. У группы со своим
+// чатом "Основной чат" - кнопка: идет ли копия ее алертов в основной чат
+function RouteMap({
+  f,
+  groups,
+  paused,
+  onToggle,
+}: {
+  f: Form
+  groups: AlertConfig['route_groups']
+  paused: boolean
+  onToggle: (keys: string[], on: boolean) => void
+}) {
   const { t } = useI18n()
-  const main = f.telegram_chat.trim() ? [t('Основной чат')] : []
+  const hasMain = !!f.telegram_chat.trim()
   const chats = f.routes.chats.filter((c) => c.chat.trim())
+  const by = f.routes.main_by ?? {}
+  type Row = { g: string; kind: string; hit: string[]; copy: boolean; keys: string[] }
   const to = (g: string, field: 'server_groups' | 'site_groups') => {
+    const k = `${field === 'server_groups' ? 'srv' : 'site'}:${g}`
     const hit = chats.filter((c) => c[field].includes(g)).map((c) => c.name.trim() || c.chat)
-    return [...(f.routes.main === 'all' || !hit.length ? main : []), ...hit]
+    return { hit, copy: by[k] ?? f.routes.main === 'all', key: k }
   }
-  const rows: { g: string; kind: string; dest: string[] }[] = []
+  const rows: Row[] = []
   for (const g of [...new Set([...groups.servers, ...groups.sites])]) {
     const s = groups.servers.includes(g) ? to(g, 'server_groups') : null
     const w = groups.sites.includes(g) ? to(g, 'site_groups') : null
-    if (s && w && key(s) === key(w)) rows.push({ g, kind: t('серверы и сайты'), dest: s })
+    const same = s && w && key(s.hit) === key(w.hit) && (!s.hit.length || s.copy === w.copy)
+    if (s && w && same) rows.push({ g, kind: t('серверы и сайты'), hit: s.hit, copy: s.copy, keys: [s.key, w.key] })
     else {
-      if (s) rows.push({ g, kind: t('серверы'), dest: s })
-      if (w) rows.push({ g, kind: t('сайты'), dest: w })
+      if (s) rows.push({ g, kind: t('серверы'), hit: s.hit, copy: s.copy, keys: [s.key] })
+      if (w) rows.push({ g, kind: t('сайты'), hit: w.hit, copy: w.copy, keys: [w.key] })
     }
   }
-  rows.push({ g: t('Без группы'), kind: t('серверы и сайты'), dest: main })
-  rows.push({ g: t('Общие алерты'), kind: t('про саму панель'), dest: main })
+  rows.push({ g: t('Без группы'), kind: t('серверы и сайты'), hit: [], copy: true, keys: [] })
+  rows.push({ g: t('Общие алерты'), kind: t('про саму панель'), hit: [], copy: true, keys: [] })
+  const canToggle = hasMain && rows.some((r) => r.hit.length)
   return (
     <div className="al-flow">
-      {rows.map((r) => (
-        <div key={`${r.g}/${r.kind}`} className={`al-flow-row${r.dest.length ? '' : ' al-flow-lost'}`}>
-          <span className="al-flow-g">
-            <b>{r.g}</b>
-            <span className="muted small">{r.kind}</span>
-          </span>
-          <span className="al-flow-ar">→</span>
-          <span className="al-flow-to">
-            {r.dest.length ? (
-              r.dest.map((d, i) => (
-                <span key={d} className={`al-dest${i === 0 && main.length && d === main[0] ? ' al-dest-main' : ''}`}>
-                  {d}
-                </span>
-              ))
-            ) : (
-              <span className="t-down small">{t('никуда')}</span>
-            )}
-          </span>
-        </div>
-      ))}
+      {rows.map((r) => {
+        const lost = !r.hit.length && !hasMain
+        return (
+          <div key={`${r.g}/${r.kind}`} className={`al-flow-row${lost ? ' al-flow-lost' : ''}`}>
+            <span className="al-flow-g">
+              <b>{r.g}</b>
+              <span className="muted small">{r.kind}</span>
+            </span>
+            <span className="al-flow-ar">→</span>
+            <span className="al-flow-to">
+              {lost ? (
+                <span className="t-down small">{t('никуда')}</span>
+              ) : (
+                <>
+                  {hasMain && !r.hit.length && <span className="al-dest al-dest-main">{t('Основной чат')}</span>}
+                  {hasMain && r.hit.length > 0 && (
+                    <button
+                      type="button"
+                      className={`al-dest al-dest-main al-dest-btn${r.copy ? '' : ' al-dest-off'}${r.copy && paused ? ' al-dest-paused' : ''}`}
+                      aria-pressed={r.copy}
+                      title={
+                        r.copy
+                          ? paused
+                            ? t('Копия идет в основной чат, сейчас на паузе. Нажмите, чтобы выключить совсем')
+                            : t('Копия идет в основной чат. Нажмите, чтобы выключить')
+                          : t('Копии в основном чате нет. Нажмите, чтобы включить')
+                      }
+                      onClick={() => onToggle(r.keys, !r.copy)}
+                    >
+                      {t('Основной чат')}
+                      {r.copy && paused ? ' ⏸' : ''}
+                    </button>
+                  )}
+                  {r.hit.map((d) => (
+                    <span key={d} className="al-dest">
+                      {d}
+                    </span>
+                  ))}
+                </>
+              )}
+            </span>
+          </div>
+        )
+      })}
+      {canToggle && (
+        <p className="muted small">
+          {t('Нажмите "Основной чат" в строке группы, чтобы выключить или вернуть копию ее алертов в основной чат.')}
+        </p>
+      )}
       {f.webhook.trim() && <p className="muted small">{t('Webhook получает все алерты, без деления по группам.')}</p>}
+    </div>
+  )
+}
+
+const pauseOn = (p: DupPause | undefined) => !!p?.on && (!p.until || new Date(p.until).getTime() > Date.now())
+
+// "до 21:30", "до 09:00 30.10" по поясу панели или "пока не включите"
+function untilText(p: DupPause, tz: string, t: (s: string, v?: Record<string, string | number>) => string) {
+  if (!p.until) return t('пока не включите')
+  const d = new Date(p.until)
+  const fmt = (o: Intl.DateTimeFormatOptions) => {
+    try {
+      return d.toLocaleString('ru-RU', { ...o, timeZone: tz || undefined })
+    } catch {
+      return d.toLocaleString('ru-RU', o)
+    }
+  }
+  const hm = fmt({ hour: '2-digit', minute: '2-digit' })
+  const day = fmt({ day: '2-digit', month: '2-digit' })
+  const today = new Date().toLocaleString('ru-RU', { day: '2-digit', month: '2-digit' })
+  return t('до {time}', { time: day === today ? hm : `${hm} ${day}` })
+}
+
+// Пауза копий: человек сидит в чате группы и не хочет видеть те же алерты второй раз в основном
+// чате. На время, сразу, без "Сохранить"; время вышло - копии вернулись сами
+function DupPauseBar({ cfg, onSet }: { cfg: AlertConfig; onSet: (op: '2h' | 'morning' | 'forever' | 'off') => void }) {
+  const { t } = useI18n()
+  const routed = cfg.routes.chats.some((c) => c.server_groups.length || c.site_groups.length)
+  if (!cfg.telegram_token || !cfg.telegram_chat || !routed) return null
+  const crit = cfg.tg_buttons
+    ? t('Критичное (сервер недоступен, критичный диск) придет и туда, если в чате группы за 10 минут никто не нажмет "взял".')
+    : t('Критичное (сервер недоступен, критичный диск) все равно придет и туда.')
+  if (pauseOn(cfg.dup_pause))
+    return (
+      <div className="al-note al-note-warn al-dup">
+        <span>
+          <b>{t('⏸ Копии в основной чат на паузе {when}', { when: untilText(cfg.dup_pause, cfg.tz, t) })}</b>
+          <br />
+          {t('Алерты групп со своим чатом приходят только туда.')} {crit}
+        </span>
+        <button className="small" onClick={() => onSet('off')}>
+          {t('Вернуть копии')}
+        </button>
+      </div>
+    )
+  return (
+    <div className="al-box al-dup">
+      <div className="al-box-head">
+        <b>{t('Не дублировать в основной чат')}</b>
+        <span className="al-box-acts">
+          <button className="ghost small" onClick={() => onSet('2h')}>
+            {t('на 2 ч')}
+          </button>
+          <button className="ghost small" onClick={() => onSet('morning')}>
+            {t('до утра')}
+          </button>
+          <button className="ghost small" onClick={() => onSet('forever')}>
+            {t('пока не включу')}
+          </button>
+        </span>
+      </div>
+      <span className="muted small">
+        {t('Когда сидите в чате группы: ее алерты не придут в основной чат второй раз. Время выйдет - копии вернутся сами.')}{' '}
+        {crit}
+        {cfg.tg_buttons && ' ' + t('В Telegram то же делает команда /copies в основном чате.')}
+      </span>
     </div>
   )
 }
@@ -505,14 +649,14 @@ function MainChat({ f, set }: { f: Form; set: (p: Partial<Form>) => void }) {
             <button
               type="button"
               className={`win-btn${routes.main === 'all' ? ' win-btn-active' : ''}`}
-              onClick={() => set({ routes: { ...routes, main: 'all' } })}
+              onClick={() => set({ routes: { ...routes, main: 'all', main_by: {} } })}
             >
               {t('все алерты')}
             </button>
             <button
               type="button"
               className={`win-btn${routes.main === 'rest' ? ' win-btn-active' : ''}`}
-              onClick={() => set({ routes: { ...routes, main: 'rest' } })}
+              onClick={() => set({ routes: { ...routes, main: 'rest', main_by: {} } })}
             >
               {t('только остальное')}
             </button>
@@ -521,6 +665,11 @@ function MainChat({ f, set }: { f: Form; set: (p: Partial<Form>) => void }) {
             {routes.main === 'rest'
               ? t('Алерты групп, у которых есть свой чат, в основной чат не попадают. Туда идут остальные группы, серверы без группы и общие алерты панели.')
               : t('Основной чат получает все алерты, а чаты по группам - копии про свои группы.')}
+            {Object.keys(routes.main_by ?? {}).length > 0 &&
+              ' ' +
+                t('Кроме групп, выбранных в строке группы выше: {list}.', {
+                  list: [...new Set(Object.keys(routes.main_by ?? {}).map((k) => k.slice(k.indexOf(':') + 1)))].join(', '),
+                })}
           </span>
         </div>
       )}

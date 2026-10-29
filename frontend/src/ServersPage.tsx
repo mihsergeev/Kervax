@@ -131,6 +131,7 @@ import { type FixStep, FixSteps, useFixDone } from './FixSteps'
 import { AccessFix } from './AccessFix'
 import { GpuCard, GpuChip } from './Gpu'
 import { RoleChips } from './RoleChips'
+import { GreCard, GreChip } from './Gre'
 import { VpnCards, vpnSearch, vpnSecLine } from './Vpn'
 import { KnownServerList, knownItems, knownTitle } from './KnownDialog'
 import { AgentUpdRow, agentBehind, hostOf, useFleetRollout } from './FleetUpdate'
@@ -5969,7 +5970,10 @@ function ServerRow({
               мониторинг сервера, а речь об одном-двух алертах. Что именно заглушено - в карточке */}
           {!s.online && <span className="type-chip off">{t('оффлайн')}</span>}
         </div>
-        <div className="check-target mono"><ServerAddr s={s} t={t} /></div>
+        <div className="check-target mono">
+          <ServerAddr s={s} t={t} />
+          <GreChip s={s} compact onClick={() => onOpenSec('net')} />
+        </div>
       </div>
       <div className="srv-meters">
         <Meter label="CPU" value={r.cpu_percent != null ? Math.round(r.cpu_percent) : null} />
@@ -7248,6 +7252,7 @@ function ServerDetail({
             )}
             {s.hostname && <span className="srv-meta-item mono">{s.hostname}</span>}
             {(s.external_ip || s.local_ip) && <ServerAddr s={s} t={t} />}
+            <GreChip s={s} onClick={() => go('net')} />
             <span className="srv-meta-item">
               <span className="srv-meta-k">{t('аптайм')}</span> {fmtUptime(r.uptime_seconds)}
             </span>
@@ -7550,6 +7555,7 @@ function ServerDetail({
               )}
           </div>
           <div className="net-cards">
+            <GreCard server={s} />
             <NetHealth server={s} />
             <LinksCard server={s} />
             <TrafficCard server={s} onChanged={onChanged} />

@@ -18,6 +18,10 @@ ESC_KEY = "alerts_escalation"
 ROUTES_KEY = "alerts_routes"
 # какой чат по группам последним не принял сообщение: видно в настройках
 ROUTES_STATE_KEY = "alerts_routes_state"
+# пауза копий в основной чат: то, что ушло в чат группы, в основной чат на время не дублируется
+DUP_PAUSE_KEY = "alerts_dup_pause"
+# критичные, что во время паузы все равно ушли в основной чат: их отбой тоже нужен там
+MAIN_PASSED_KEY = "alerts_main_passed"
 # локации со сломанным прокси: {id: {since, err, notified}} - один алерт на прокси, а не по сайтам
 LOC_BROKEN_KEY = "locations_broken"
 ESC_KINDS_DEFAULT = ["down", "offline"]
@@ -388,6 +392,8 @@ async def get_alert_config(session: AsyncSession, settings: Settings) -> dict:
         "tz": data.get("tz") or settings.alert_tz,
         # чаты по группам: отдельный ключ, чтобы сохранение основных настроек их не стирало
         "routes": await get_routes(session),
+        "dup_pause": await get_dup_pause(session),
+        "main_passed": await get_main_passed(session),
     }
 
 
@@ -444,9 +450,21 @@ def _names(v) -> list[str]:
     return out[:100]
 
 
+def _main_by(v) -> dict[str, bool]:
+    """Копия в основной чат по группе вопреки main: {"srv:<группа>" | "site:<группа>": bool}."""
+    out: dict[str, bool] = {}
+    for k, on in (v.items() if isinstance(v, dict) else []):
+        kind, _, g = str(k).partition(":")
+        g = g.strip()[:128]
+        if kind in ("srv", "site") and g and len(out) < 200:
+            out[f"{kind}:{g}"] = bool(on)
+    return out
+
+
 def _routes_clean(data: dict) -> dict:
     """main: "all" - основной чат получает все алерты, "rest" - только то, что не ушло в чаты по
-    группам. chats: [{name, chat, server_groups, site_groups}], чат без групп ничего не получает."""
+    группам. main_by - то же по группе, если она решена иначе, чем main. chats: [{name, chat,
+    server_groups, site_groups}], чат без групп ничего не получает."""
     chats = []
     for c in data.get("chats") or []:
         if not isinstance(c, dict):
@@ -460,7 +478,10 @@ def _routes_clean(data: dict) -> dict:
             "server_groups": _names(c.get("server_groups")),
             "site_groups": _names(c.get("site_groups")),
         })
-    return {"main": "rest" if data.get("main") == "rest" else "all", "chats": chats[:20]}
+    main = "rest" if data.get("main") == "rest" else "all"
+    # совпадающее с main не храним: переключатель main тогда меняет все такие группы разом
+    by = {k: v for k, v in _main_by(data.get("main_by")).items() if v != (main == "all")}
+    return {"main": main, "main_by": by, "chats": chats[:20]}
 
 
 async def get_routes(session: AsyncSession) -> dict:
@@ -488,6 +509,41 @@ async def get_routes_state(session: AsyncSession) -> dict:
 
 async def set_routes_state(session: AsyncSession, data: dict) -> None:
     await _set_raw(session, ROUTES_STATE_KEY, json.dumps(data, ensure_ascii=False))
+
+
+def _dup_clean(data: dict) -> dict:
+    """{"on": стоит ли пауза, "until": iso или "" (пока не включат), "by": кто, "at": когда}."""
+    on = bool(data.get("on"))
+    return {"on": on, "until": str(data.get("until") or "")[:40] if on else "",
+            "by": str(data.get("by") or "")[:64] if on else "", "at": str(data.get("at") or "")[:40] if on else ""}
+
+
+async def get_dup_pause(session: AsyncSession) -> dict:
+    raw = await _get_raw(session, DUP_PAUSE_KEY)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        data = {}
+    return _dup_clean(data if isinstance(data, dict) else {})
+
+
+async def set_dup_pause(session: AsyncSession, data: dict) -> None:
+    await _set_raw(session, DUP_PAUSE_KEY, json.dumps(_dup_clean(data), ensure_ascii=False))
+
+
+async def get_main_passed(session: AsyncSession) -> list[list[str]]:
+    """[[вид, объект], ...] - критичные, ушедшие в основной чат во время паузы копий."""
+    raw = await _get_raw(session, MAIN_PASSED_KEY)
+    try:
+        data = json.loads(raw) if raw else []
+    except ValueError:
+        data = []
+    return [[str(x[0]), str(x[1])] for x in data if isinstance(x, list) and len(x) == 2]         if isinstance(data, list) else []
+
+
+async def set_main_passed(session: AsyncSession, data: list) -> None:
+    # держим последние: отбой, который так и не пришел (сервер удалили), не должен копиться вечно
+    await _set_raw(session, MAIN_PASSED_KEY, json.dumps([list(x) for x in data][-300:], ensure_ascii=False))
 
 
 async def get_escalation(session: AsyncSession) -> dict:

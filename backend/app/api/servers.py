@@ -3655,6 +3655,7 @@ async def agent_report(
     # через GRE до панели (app/gre.py) запрос приходит с адреса ноды в туннеле: в карточку идет
     # ее настоящий публичный адрес, а не 10.254.x.x
     ext = gre_mod.real_ip(server, ext, now)
+    via_gre = server.gre_agent_at == now
     if ext:
         server.external_ip = ext
     server.agent_version = body.agent_version[:32]
@@ -3721,6 +3722,8 @@ async def agent_report(
                                int(now.timestamp()) - body.clock_unix, now.timestamp())
         report_dict["clock_win"] = cw
         report_dict["clock_skew_sec"] = cw["win"][0][1]
+    # каким путем пришел отчет (туннель GRE или напрямую) и с каких пор этим путем: для пометки в карточке
+    gre_mod.track_path(server, prev_rep, report_dict, via_gre, now)
     server.last_report = report_dict
     server.last_seen = now
     if body.pkg_ev:
