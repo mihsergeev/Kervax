@@ -182,7 +182,7 @@ async def test_store_history_and_digest(tmp_path, monkeypatch):
         # следующий блок без бана: бан закрыт (снят раньше срока - gone)
         await autoban.store(s, srv, {"autoban": _block(ts=T + 60, bans=[])}, NOW + timedelta(minutes=1))
         await s.commit()
-        h = await autoban.history(s, 1)
+        h = await autoban.history(s, 1, now=NOW + timedelta(minutes=1))
         assert h[0]["end"] == "gone" and h[0]["ended"] is not None
 
     sent = []
