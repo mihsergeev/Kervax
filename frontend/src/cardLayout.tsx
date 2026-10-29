@@ -46,15 +46,16 @@ export function secInfoOf(
 // замечания и желтые строки раздела важнее, их не трогаем
 export function markMuted(
   info: Record<string, SecInfo>,
-  muted: { sec: string; text: string }[],
+  muted: { sec: string; text: string; dev?: boolean }[],
   t: (k: string, p?: Record<string, string | number>) => string,
 ): void {
   const seen = new Set<string>()
-  for (const { sec, text } of muted) {
+  for (const { sec, text, dev } of muted) {
     const cur = info[sec]
     if (!cur || cur.level || seen.has(sec)) continue
     seen.add(sec)
-    info[sec] = { ...cur, idle: true, line: t('заглушено: {text}', { text }) }
+    // dev - сервер разработки, поведение приложения: не будит, но видно (backend app/dev_mode.py)
+    info[sec] = { ...cur, idle: true, line: dev ? t('разработка: {text}', { text }) : t('заглушено: {text}', { text }) }
   }
 }
 
@@ -112,6 +113,7 @@ export type OvRow = {
   text: string
   since?: string | null
   act?: { label: string; onClick: () => void }
+  dev?: boolean // сервер разработки, вид приложения: серым с пометкой (backend app/dev_mode.py)
 }
 export function OvRows({ rows }: { rows: OvRow[] }) {
   const { t } = useI18n()
@@ -120,8 +122,8 @@ export function OvRows({ rows }: { rows: OvRow[] }) {
     <div className="ov-issues">
       {rows.map((i, n) => (
         <div key={n} className="ov-issue">
-          <span className={`lk-dot ${i.tone === 't-down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
-          <span className="ov-issue-text">{i.text}</span>
+          <span className={`lk-dot ${i.dev ? 'lk-dot-idle' : i.tone === 't-down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
+          <span className={`ov-issue-text${i.dev ? ' muted' : ''}`}>{i.dev ? t('разработка: {text}', { text: i.text }) : i.text}</span>
           {sinceShort(i.since, t) && <span className="muted small">{sinceShort(i.since, t)}</span>}
           {i.act && (
             <button className="ghost small row-act" onClick={i.act.onClick}>

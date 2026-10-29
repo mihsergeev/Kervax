@@ -53,6 +53,7 @@ from app import oom as oom_mod
 from app import restarts as srv_restarts
 from app import ssh_audit
 from app import known as known_mod
+from app import dev_mode
 from app import onboard as onboard_mod
 from app import liveness
 from app import disk_wear
@@ -3840,8 +3841,15 @@ _PSI_IO_SOME = 80.0
 # через два часа. Бэкапы при этом проходят, зависших нет, делать нечего. Давление только по диску
 # на таком сервере алертит, если держится дольше _BSRV_IO_HOLD_S: столько не идет ни один prune,
 # значит что-то не так (prune крутится без конца, диск умирает). Зависшие в D, память и дескрипторы -
-# как у всех
+# как у всех.
+# Так же - пока бэкап идет на самом сервере (backup_busy): холодная копия на сетевом хранилище каждый
+# час тянет к себе бэкапы других серверов, и процессы ждали хранилище по 3-4 часа каждое утро -
+# красная тревога и отбой на его обычной работе. Свое задание запущено или стартовало за последний
+# час (_BK_RECENT_S), в базе идет дамп. Задания чаще чем раз в полчаса (метрики раз в 5 минут) - не
+# окно бэкапа, иначе окно было бы всегда. Бэкап кончился, а диск все ждут - выдержка снова обычная
 _BSRV_IO_HOLD_S = 6 * 3600
+_BK_RECENT_S = 3600
+_BK_FREQ_S = 1800
 # Зависшие процессы (агент 2.40, dstate.stuck) - как их видит ядро (hung_task): тот же процесс в D
 # отчет за отчетом и ни одного переключения контекста дольше двух минут. Само число процессов в D
 # не беда: под тяжелым чтением в D каждую секунду другие процессы на миллисекунды, на базе их было
@@ -3933,18 +3941,49 @@ def pressure_problems(rep: dict) -> list[tuple[int, str, str]]:
     return out
 
 
-def pressure_hold_s(rep: dict, pr: list[tuple[int, str, str]]) -> float | None:
-    """Своя выдержка алерта о давлении: на сервере бэкапов, когда ждут только диск (см.
-    _BSRV_IO_HOLD_S). None - общая выдержка сервера."""
-    if pr and all(r == "io" for _l, r, _t in pr) and (rep.get("backup_server") or {}).get("present"):
+def _bsrv_role(rep: dict, s: Server | None) -> bool:
+    """Сервер бэкапов: rest-server или резервный сервер бэкапов"""
+    return bool((rep.get("backup_server") or {}).get("present")) or bool(getattr(s, "backup_mirror_role", False))
+
+
+def backup_busy(rep: dict) -> str:
+    """Какой бэкап сейчас идет на самом сервере ("" - никакой): свое задание (custom-backups) запущено
+    или стартовало за последний час, или в базе идет дамп"""
+    now_ts = float(rep.get("clock_unix") or 0) or time.time()
+    blk = (rep.get("extras") or {}).get(custom_backups.EXTRA_KEY)
+    for j in (blk.get("jobs") or []) if isinstance(blk, dict) else []:
+        if not isinstance(j, dict) or j.get("kind") not in ("systemd", "cron"):
+            continue
+        run, nxt = _int(j.get("run_ts")), _int(j.get("next_ts"))
+        if j.get("kind") == "systemd" and run and 0 < nxt - run < _BK_FREQ_S:
+            continue
+        if j.get("kind") == "cron" and custom_backups.cron_interval(str(j.get("schedule") or "")) < _BK_FREQ_S:
+            continue
+        if j.get("running") or (run and 0 <= now_ts - run <= _BK_RECENT_S):
+            return str(j.get("name") or j.get("unit") or "бэкап")
+    for x in db_health.block(rep, datetime.fromtimestamp(now_ts, timezone.utc)) or []:
+        for f in ("xact_app", "idle_xmin_app", "idle_app"):
+            if db_health.is_dump(str(x.get(f) or "")):
+                return str(x.get(f))
+    return ""
+
+
+def pressure_hold_s(rep: dict, pr: list[tuple[int, str, str]], s: Server | None = None) -> float | None:
+    """Своя выдержка алерта о давлении: на сервере бэкапов и пока на сервере идет бэкап, когда ждут
+    только диск (см. _BSRV_IO_HOLD_S). None - общая выдержка сервера."""
+    if pr and all(r == "io" for _l, r, _t in pr) and (_bsrv_role(rep, s) or backup_busy(rep)):
         return _BSRV_IO_HOLD_S
     return None
 
 
-def bsrv_io_note(hold_s: float | None) -> str:
-    """Пояснение к давлению на сервере бэкапов, которое все-таки дошло до алерта"""
-    return (f"на сервере бэкапов так бывает во время prune и check, но не дольше {hold_s // 3600:.0f} ч"
-            if hold_s else "")
+def bsrv_io_note(hold_s: float | None, rep: dict | None = None, s: Server | None = None) -> str:
+    """Пояснение к давлению на сервере бэкапов или во время бэкапа, которое все-таки дошло до алерта"""
+    if not hold_s:
+        return ""
+    if rep is None or _bsrv_role(rep, s):
+        return f"на сервере бэкапов так бывает во время prune и check, но не дольше {hold_s // 3600:.0f} ч"
+    job = backup_busy(rep)
+    return f"во время бэкапа{f' ({job})' if job else ''} так бывает, но не дольше {hold_s // 3600:.0f} ч"
 
 
 # Ноды кластера (агент 2.26 отдает условия): kubelet под давлением уже выселяет поды или не
@@ -4498,10 +4537,10 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             _BSRV_SEC["backup_mirror"], "backup_mirror", section="backups", srv=True)
     # Сервер задыхается: как и у алерта, только то, что держится дольше выдержки
     pr = pressure_problems(rep)
-    pr_hold = pressure_hold_s(rep, pr)
+    pr_hold = pressure_hold_s(rep, pr, s)
     if pr and _held_long(s, state, "pressure", now, pr_hold):
         add("pressure", pr[0][0], "; ".join(t for _l, _r, t in pr[:3])
-            + (f" ({bsrv_io_note(pr_hold)})" if pr_hold else "") + _routine_tail(state, "pressure", now),
+            + (f" ({bsrv_io_note(pr_hold, rep, s)})" if pr_hold else "") + _routine_tail(state, "pressure", now),
             "pressure", "pressure", state.get("pressure_since"))
     nets = net_problems(rep)
     if nets and _held_long(s, state, "net_health", now):
@@ -6082,7 +6121,7 @@ def _fallback_rule(key: str) -> dict:
 def db_health_problems(s: Server, rep: dict, now: datetime) -> list[tuple[int, str, str]]:
     """Проблемы баз; отказы в подключении (MySQL, dbstat-setup 0.11) у экземпляра, по которому уже горит
     алерт коннектов, не повторяем: та же беда, строка "занято N из M" о ней уже говорит"""
-    dh = db_health.problems(rep, now)
+    dh = db_health.problems(rep, now, (s.alert_state or {}).get(db_health.DUMP_STATE))
     thr = getattr(s, "db_conn_alert_percent", 0) or 0
     worst = db_conn_worst(rep) if thr else None
     if worst is None or worst[0] < thr:
@@ -6801,11 +6840,11 @@ def _server_conditions(s: Server, now: datetime,
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
         pr = pressure_problems(rep)
-        pr_hold = pressure_hold_s(rep, pr)
+        pr_hold = pressure_hold_s(rep, pr, s)
         pctx = {"detail": "; ".join(t for _l, _r, t in pr[:3]), "res": pr[0][1] if pr else "", "cause": "",
                 "hint": pressure_hint(rep), "items": pr}
         if pr_hold:
-            pctx["_note"] = bsrv_io_note(pr_hold)
+            pctx["_note"] = bsrv_io_note(pr_hold, rep, s)
         sustain_lvl("pressure", pr[0][0] if pr else 0, cool_s=_CALM_S, ctx=pctx, hold_s=pr_hold)
     # Сеть ноды: потери TCP, очередь accept, conntrack, ошибки и дропы интерфейсов
     if online and (rep.get("tcp") or rep.get("net_ifaces")):
@@ -6924,8 +6963,8 @@ def _server_conditions(s: Server, now: datetime,
                                {"detail": "\n".join(x["text"] for x in fp[:3])
                                           + (f"\nи еще {len(fp) - 3}" if len(fp) > 3 else ""),
                                 "sig": [x["key"] for x in fp], "items": fp, "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
-    # Воркеры под supervisor и pm2: выдержка уже в правилах (BACKOFF три минуты, три перезапуска
-    # за 15 минут), FATAL - сразу. sig - какие воркеры, второй упавший дает свой алерт
+    # Воркеры под supervisor и pm2: выдержка уже в правилах (BACKOFF три минуты, падает и поднимается
+    # полчаса - workers.loop_update), FATAL - сразу. sig - какие воркеры, второй упавший дает свой алерт
     if online and workers_mod.block(rep) is not None:
         wp = workers_mod.problems(s, now)
         out["workers"] = (max((x["level"] for x in wp), default=0),
@@ -7279,6 +7318,8 @@ async def evaluate_servers(
     # отправляется только офлайн и критичный диск (onboard_mod.split)
     marks: list[tuple[int | None, int, int, int, int]] = []
     onboarding: set[int] = set()
+    # серверы разработки (app/dev_mode.py): после цикла виды приложений не отправляются
+    dev_srv: set[int] = set()
     probes_left = _LIVENESS_PER_TICK
     live_common = liveness.shared(servers)  # адреса, общие для нескольких серверов: там только SSH
 
@@ -7315,6 +7356,9 @@ async def evaluate_servers(
             onboarding.add(s.id)
             if not st.get("onboard"):
                 apply(s.id, "onboard", 1)
+        dev = dev_mode.active(s)
+        if dev:
+            dev_srv.add(s.id)
         # заглушённые типы: постоянные мьюты + точечный ВРЕМЕННЫЙ снуз отдельных
         # типов (напр. приглушить OOM на день, но продолжать слать offline/CPU)
         mutes = set(s.alert_mutes or [])
@@ -7481,14 +7525,17 @@ async def evaluate_servers(
                 continue
             k_lvl, k_ctx = conds.get(kk, (0, {}))
             new_k, what = known_mod.step(ent, int(k_ctx["raw"]) if "raw" in k_ctx else k_lvl, k_ctx.get("sig"), now)
+            # сервер разработки: про приложение не напоминаем, отметка пишется сразу
+            k_dev = what == "remind" and dev and dev_mode.quiet(kk)
             if new_k != ent:
                 # отметку напоминания - только когда напоминание дошло (как fire_apply): иначе сбой
                 # отправки откладывал следующее на неделю
-                (known_remind if what == "remind" else known_upd).append((s.id, kk, ent.get("at"), new_k, what))
+                (known_remind if what == "remind" and not k_dev else known_upd).append(
+                    (s.id, kk, ent.get("at"), new_k, what))
             if new_k is None:
                 continue
             known_now[kk] = new_k
-            if what == "remind":
+            if what == "remind" and not k_dev:
                 reminds.append((kk, new_k))
         if reminds:
             # Отмеченные разом (что было при подключении) напоминают о себе в один тик: одним
@@ -8143,6 +8190,17 @@ async def evaluate_servers(
                 lat = llm_lat.update(st.get("llm_lat"), s.last_report or {}, bstate, now)
                 if lat != (st.get("llm_lat") or {}):
                     apply(s.id, "llm_lat", lat)
+            # с какого момента воркеры падают и поднимаются: алерт только после выдержки (workers.loop_update)
+            if workers_mod.block(s.last_report or {}) is not None or st.get(workers_mod.LOOP_STATE):
+                wl = workers_mod.loop_update(st.get(workers_mod.LOOP_STATE), s, now)
+                if wl != (st.get(workers_mod.LOOP_STATE) or {}):
+                    apply(s.id, workers_mod.LOOP_STATE, wl)
+            # прогоны дампов баз: сколько и когда дамп обычно идет (db_health.dump_update)
+            if db_health.block(s.last_report or {}, now) is not None or st.get(db_health.DUMP_STATE):
+                dstate = db_health.dump_update(st.get(db_health.DUMP_STATE), s.last_report or {}, now,
+                                               cfg.get("tz") or "Europe/Moscow")
+                if dstate != (st.get(db_health.DUMP_STATE) or {}):
+                    apply(s.id, db_health.DUMP_STATE, dstate)
             # всплески ошибок в логах за сутки и сколько держится авария (log_errors.update)
             if log_errors.block(s.last_report or {}) is not None or st.get("logerr_ev"):
                 lev = log_errors.update(st.get("logerr_ev"), s.last_report or {}, now)
@@ -8441,9 +8499,10 @@ async def evaluate_servers(
                                      kind="ingest_gap", target="панель", recovery=True))
         _gap_said.pop("at", None)
 
-    if onboarding:
-        # У серверов на подключении уходит только офлайн и критичный диск. Отметки придержанных
-        # событий пишутся сразу, как будто сообщение дошло: после закрытия старое не придет
+    if onboarding or dev_srv:
+        # У серверов на подключении уходит только офлайн и критичный диск, у серверов разработки -
+        # все, кроме видов приложений. Отметки придержанных событий пишутся сразу, как будто
+        # сообщение дошло: после закрытия подключения или снятия пометки старое не придет
         marks.append((None, len(fires), len(fire_apply), len(recoveries), len(rec_apply)))
         now_apply: list[tuple[int, str, object]] = []
         nf, nfa, nr, nra = [], [], [], []
@@ -8453,6 +8512,9 @@ async def evaluate_servers(
                 kr, kra = onboard_mod.split(sid, recoveries[r0:r1], rec_apply[ra0:ra1], now_apply)
             else:
                 kf, kfa, kr, kra = fires[f0:f1], fire_apply[a0:a1], recoveries[r0:r1], rec_apply[ra0:ra1]
+            if sid in dev_srv:
+                kf, kfa = dev_mode.split(kf, kfa, now_apply)
+                kr, kra = dev_mode.split(kr, kra, now_apply)
             nf += kf
             nfa += kfa
             nr += kr

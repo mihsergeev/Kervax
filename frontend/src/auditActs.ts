@@ -52,6 +52,8 @@ export const ACT: Record<string, string> = {
   exposure_scan: 'проверил, что открыто в интернет',
   disk_autofix_on: 'включил автоочистку диска',
   disk_autofix_off: 'выключил автоочистку диска',
+  server_dev_on: 'пометил сервер разработкой',
+  server_dev_off: 'пометил сервер продом',
   known_set: 'отметил известную проблему',
   known_drop: 'снял известную проблему',
   known_closed: 'известная проблема прошла',

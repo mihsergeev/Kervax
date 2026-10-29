@@ -14,7 +14,8 @@ from __future__ import annotations
 import posixpath
 import re
 import shlex
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from app import tg_fmt
 from app.compose_cmd import verdict
@@ -29,10 +30,23 @@ XID_WARN = 1_000_000_000  # на 2.1 млрд PostgreSQL остановится,
 XID_CRIT = 1_500_000_000
 VAC_DAYS = 7
 # Дамп держит одну транзакцию от начала до конца, это его природа: ночной pg_dump большой базы
-# шел четыре часа и давал алерт "транзакция идет 1 ч". Про дамп скажем, только если он идет
-# больше 12 часов - тогда он, скорее всего, завис.
-_DUMP_APPS = ("pg_dump", "pg_dumpall", "pg_basebackup", "mysqldump")
+# шел четыре часа и давал алерт "транзакция идет 1 ч", а между таблицами он простаивает в этой
+# транзакции со снимком и давал "транзакция висит 33 мин". Сам по себе дамп не беда. Беда - когда
+# он идет намного дольше обычного для этой базы (DUMP_SLOW: вдвое и на два часа дольше самого
+# долгого из прошлых прогонов), идет днем не в свое время (DUMP_OFF_HOURS, ждет как обычная
+# транзакция) или 12 часов (без истории - только так). Прогоны помнит dump_update в alert_state.
+# Ждущие блокировку - своя строка, как и без дампа
+_DUMP_APPS = ("pg_dump", "pg_dumpall", "pg_basebackup", "pg_restore", "pg_probackup", "pgbackrest", "barman",
+              "wal-g", "mysqldump", "mariadb-dump", "mydumper")
 DUMP_XACT_WARN = 12 * 3600
+DUMP_STATE = "db_dumps"  # ключ alert_state
+DUMP_RUNS = 7  # сколько прошлых прогонов помнить
+DUMP_RUNS_MIN = 2  # с какого числа прогонов знаем, сколько и когда он обычно идет
+DUMP_SAME = 300  # тот же прогон: начало сдвинулось не больше чем на 5 минут
+DUMP_SLOW = 2 * 3600
+DUMP_OFF = 2 * 3600  # начался на два часа в стороне от всех прошлых начал - не по расписанию
+DUMP_OFF_HOURS = (8, 21)  # днем по поясу панели
+DUMP_FORGET = 30 * 86400
 STALE = 3600  # блок старше часа - helper не работает, не судим по старому
 # ClickHouse: куски в одной партиции. С parts_to_delay_insert вставки замедляются, с
 # parts_to_throw_insert отклоняются (TOO_MANY_PARTS); старые версии - 150 и 300, новые - 1000 и 3000
@@ -89,6 +103,135 @@ def _mins(sec: int) -> str:
 
 def _gib(n: int) -> str:
     return f"{n / (1 << 30):.1f} ГБ" if n >= 1 << 30 else f"{round(n / (1 << 20))} МБ"
+
+
+def is_dump(app: str) -> bool:
+    return str(app or "").lower().startswith(_DUMP_APPS)
+
+
+def _block_ts(rep: dict) -> int:
+    b = ((rep or {}).get("extras") or {}).get("db-health")
+    try:
+        return int(float((b or {}).get("ts") or 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+# где helper называет транзакцию с клиентом: самая долгая работающая, простаивающая со снимком, просто
+# простаивающая
+_XACT_FIELDS = (("xact", "xact_db", "xact_app"), ("idle_xmin", "idle_xmin_db", "idle_xmin_app"),
+                ("idle_xact", "idle_db", "idle_app"))
+
+
+def _dumps_of(x: dict, k: str, ts: int) -> dict[str, tuple[int, int]]:
+    """Дампы экземпляра в блоке: "<движок>:<контейнер>|<база>|<клиент>" -> (начало, сколько идет).
+    Дамп то работает, то простаивает между таблицами: одна транзакция попадает то в самую долгую
+    работающую, то в простаивающую, берем самую давнюю"""
+    out: dict[str, tuple[int, int]] = {}
+    for f_age, f_db, f_app in _XACT_FIELDS:
+        app, age = str(x.get(f_app) or ""), _int(x.get(f_age))
+        if age <= 0 or not is_dump(app):
+            continue
+        key = f"{k}|{x.get(f_db) or ''}|{app}"
+        if key not in out or age > out[key][1]:
+            out[key] = (ts - age, age)
+    return out
+
+
+def dump_update(state: dict | None, rep: dict, now: datetime, tz: str = "Europe/Moscow") -> dict:
+    """Прогоны дампов по блоку db-health (alert_state[DUMP_STATE]): {"ts", "tz", "db": {ключ _dumps_of:
+    {"run": [начало, сколько идет], "runs": [[начало, длительность], ...]}}}. Прогон кончился, когда в
+    новом блоке его нет. Helper показывает только самую давнюю транзакцию каждого вида, и дамп может
+    на один блок спрятаться за чужую: вернулся с тем же началом - это тот же прогон"""
+    old = state if isinstance(state, dict) else {}
+    ts = _block_ts(rep)
+    items = block(rep, now)
+    if items is None or not ts or ts == old.get("ts"):
+        return old
+    seen: dict[str, tuple[int, int]] = {}
+    for x in items:
+        seen.update(_dumps_of(x, f"{x.get('engine')}:{x.get('container') or ''}", ts))
+    db: dict[str, dict] = {}
+    for key, e in (old.get("db") or {}).items():
+        if not isinstance(e, dict):
+            continue
+        db[key] = {"runs": [[_int(r[0]), _int(r[1])] for r in e.get("runs") or []
+                            if isinstance(r, list) and len(r) == 2]}
+        if isinstance(e.get("run"), list) and len(e["run"]) == 2:
+            db[key]["run"] = [_int(e["run"][0]), _int(e["run"][1])]
+    for key in set(db) | set(seen):
+        e = db.setdefault(key, {"runs": []})
+        run, runs, cur = e.pop("run", None), e["runs"], seen.get(key)
+        if run and cur and abs(run[0] - cur[0]) <= DUMP_SAME:
+            e["run"] = [run[0], max(run[1], cur[1])]
+            continue
+        if run:
+            runs.append(run)
+        if cur:
+            if runs and abs(runs[-1][0] - cur[0]) <= DUMP_SAME:
+                last = runs.pop()
+                e["run"] = [last[0], max(last[1], cur[1])]
+            else:
+                e["run"] = [cur[0], cur[1]]
+        e["runs"] = runs[-DUMP_RUNS:]
+    db = {k: e for k, e in db.items() if e.get("run") or (e["runs"] and ts - e["runs"][-1][0] < DUMP_FORGET)}
+    return {"ts": ts, "tz": tz, "db": db}
+
+
+def _zone(tz: str):
+    try:
+        return ZoneInfo(tz or "UTC")
+    except Exception:  # noqa: BLE001 - кривой пояс в настройках не должен ронять сборщик
+        return timezone.utc
+
+
+def _tod(ts: int, z) -> int:
+    t = datetime.fromtimestamp(ts, z)
+    return t.hour * 3600 + t.minute * 60 + t.second
+
+
+def _dump_note(e: dict | None, start: int, age: int, tz: str) -> tuple[int, str] | None:
+    """(уровень, что не так с дампом) или None, если он идет как обычно. Пока прошлых прогонов меньше
+    DUMP_RUNS_MIN, не знаем ни сколько, ни когда он обычно идет - судим только по 12 часам"""
+    if age >= DUMP_XACT_WARN:
+        return 2, "скорее всего, завис"
+    runs = [r for r in ((e or {}).get("runs") or []) if abs(r[0] - start) > DUMP_SAME]
+    if len(runs) < DUMP_RUNS_MIN:
+        return None
+    usual = max(r[1] for r in runs)
+    if age > max(2 * usual, usual + DUMP_SLOW):
+        return 1, f"обычно идет не больше {_dur(usual)}"
+    z = _zone(tz)
+    if age >= XACT_WARN and DUMP_OFF_HOURS[0] <= datetime.fromtimestamp(start, z).hour < DUMP_OFF_HOURS[1]:
+        s0 = _tod(start, z)
+        near = min(min(abs(s0 - _tod(r[0], z)), 86400 - abs(s0 - _tod(r[0], z))) for r in runs)
+        if near > DUMP_OFF:
+            return 1, (f"начался днем в {datetime.fromtimestamp(start, z):%H:%M}, а обычно начинается в "
+                       f"{datetime.fromtimestamp(runs[-1][0], z):%H:%M}")
+    return None
+
+
+def _dump_rows(x: dict, name: str, k: str, ts: int, dumps: dict | None) -> list[tuple[int, str, str]]:
+    """Дампы экземпляра, которые идут не как обычно: строка на базу"""
+    st = dumps if isinstance(dumps, dict) else {}
+    out = []
+    for dk, (start, age) in sorted(_dumps_of(x, k, ts).items()):
+        _inst, db, app = dk.rsplit("|", 2)
+        v = _dump_note((st.get("db") or {}).get(dk), start, age, str(st.get("tz") or "Europe/Moscow"))
+        if v:
+            out.append((v[0], f"{name}: дамп идет {_dur(age)} ({_who(db, app)}) - {v[1]}", f"{k}:dump:{db}"))
+    return out
+
+
+def _dump_tail(x: dict, k: str, ts: int) -> str:
+    """Для строки о ждущих блокировку: какой дамп сейчас идет. Дамп берет блокировку на чтение всех
+    таблиц, и ALTER, TRUNCATE, миграция ждут его конца, а за ними встают и обычные запросы"""
+    ds = _dumps_of(x, k, ts)
+    if not ds:
+        return ""
+    dk, (_s, age) = max(ds.items(), key=lambda kv: kv[1][1])
+    _inst, db, app = dk.rsplit("|", 2)
+    return f", идет дамп ({_who(db, app)}) {_dur(age)}"
 
 
 def _ch_problems(x: dict, name: str, k: str) -> list[tuple[int, str, str]]:
@@ -160,13 +303,13 @@ def _rd_problems(x: dict, name: str, k: str) -> list[tuple[int, str, str]]:
     return out
 
 
-def _my_problems(x: dict, name: str, k: str) -> list[tuple[int, str, str]]:
+def _my_problems(x: dict, name: str, k: str, ts: int = 0, dumps: dict | None = None) -> list[tuple[int, str, str]]:
     """MySQL/MariaDB (dbstat-setup 0.11). Долгая транзакция, простаивающая транзакция и очередь очистки
     чаще всего одна беда: транзакцию забыли закрыть, и из-за нее растет очередь. Про нее одна строка"""
     out: list[tuple[int, str, str]] = []
     xa, idle, sleep, hist = _int(x.get("xact")), _int(x.get("idle_xact")), _int(x.get("idle_sleep")), _int(x.get("hist"))
     who = _who(str(x.get("xact_db") or ""), str(x.get("xact_app") or ""))
-    dump = str(x.get("xact_app") or "").startswith(_DUMP_APPS) and xa < DUMP_XACT_WARN
+    dump = is_dump(str(x.get("xact_app") or ""))
     tail = f"; очередь очистки InnoDB уже {hist / 1e6:.1f} млн версий строк" if hist >= HIST_WARN else ""
     told = False
     # Транзакция открыта, а соединение ничего не делает (Sleep): приложение забыло COMMIT или держит в пуле
@@ -177,6 +320,8 @@ def _my_problems(x: dict, name: str, k: str) -> list[tuple[int, str, str]]:
                     f"{name}: транзакция открыта {_dur(idle)} и простаивает {_dur(sleep)}" + (f" ({iw})" if iw else "")
                     + ": держит блокировки строк и не дает InnoDB удалять старые версии" + tail, k + ":idle"))
         told = True
+    # дамп (mysqldump --single-transaction) - своей строкой, если идет не как обычно
+    out.extend(_dump_rows(x, name, k, ts, dumps))
     # самая старая - другая, работающая (идет дольше простаивающей) - про нее своя строка
     if xa >= XACT_WARN and not dump and not (told and idle >= xa - 60):
         out.append((2 if xa >= XACT_CRIT else 1, f"{name}: транзакция идет {_dur(xa)}" + (f" ({who})" if who else "")
@@ -193,6 +338,8 @@ def _my_problems(x: dict, name: str, k: str) -> list[tuple[int, str, str]]:
         txt = f"{name}: ждут блокировку {lw} запр., дольше всех {_dur(lwt)}"
         if 60 <= sleep < IDLE_WARN:
             txt += f", а транзакция простаивает {_dur(sleep)} - держит, скорее всего, она"
+        else:
+            txt += _dump_tail(x, k, ts)
         out.append((1, txt, k + ":lock"))
     # Отказы по max_connections: приложение получает "Too many connections", это видно только в его логе
     ld = x.get("load") if isinstance(x.get("load"), dict) else {}
@@ -204,9 +351,11 @@ def _my_problems(x: dict, name: str, k: str) -> list[tuple[int, str, str]]:
     return out
 
 
-def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
-    """(уровень, текст, ключ): ключ - что именно сломалось, чтобы новая беда дала свой алерт"""
+def problems(rep: dict, now: datetime, dumps: dict | None = None) -> list[tuple[int, str, str]]:
+    """(уровень, текст, ключ): ключ - что именно сломалось, чтобы новая беда дала свой алерт. dumps -
+    прошлые прогоны дампов (dump_update): по ним дамп, идущий как обычно, не беда"""
     items = block(rep, now)
+    ts = _block_ts(rep)
     out: list[tuple[int, str, str]] = []
     for x in items or []:
         eng = _ENG.get(str(x.get("engine")), "СУБД")
@@ -238,10 +387,11 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
         elif lag >= LAG_WARN:
             out.append((2 if lag >= LAG_CRIT else 1, f"{name}: реплика отстает от основной на {_dur(lag)}", k + ":lag"))
         if x.get("engine") == "mysql":
-            out.extend(_my_problems(x, name, k))
+            out.extend(_my_problems(x, name, k, ts, dumps))
             continue
+        out.extend(_dump_rows(x, name, k, ts, dumps))
         xa = _int(x.get("xact"))
-        if xa >= XACT_WARN and not (str(x.get("xact_app") or "").startswith(_DUMP_APPS) and xa < DUMP_XACT_WARN):
+        if xa >= XACT_WARN and not is_dump(str(x.get("xact_app") or "")):
             who = _who(str(x.get("xact_db") or ""), str(x.get("xact_app") or ""))
             out.append((2 if xa >= XACT_CRIT else 1, f"{name}: транзакция идет {_dur(xa)}" + (f" ({who})" if who else ""),
                         k + ":xact"))
@@ -249,7 +399,7 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
         # мертвые строки во всей базе. Без снимка она держит только свои блокировки: на одной ноде
         # самой старой была такая (advisory lock), а VACUUM держала соседняя после SELECT
         idle, imin = _int(x.get("idle_xact")), _int(x.get("idle_xmin"))
-        if imin >= IDLE_WARN:
+        if imin >= IDLE_WARN and not is_dump(str(x.get("idle_xmin_app") or "")):
             who = _who(str(x.get("idle_xmin_db") or ""), str(x.get("idle_xmin_app") or ""))
             out.append((1, f"{name}: транзакция открыта и простаивает {_dur(imin)}" + (f" ({who})" if who else "")
                            + ": держит снимок, VACUUM не может чистить мертвые строки", k + ":idle"))
@@ -259,9 +409,11 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
         lw, lwt = _int(x.get("lock_waits")), _int(x.get("lock_wait"))
         if lw and lwt >= LOCK_WARN:
             txt = f"{name}: ждут блокировку {lw} запр., дольше всех {_dur(lwt)}"
-            if idle >= IDLE_WARN and idle > imin + 60:
+            if idle >= IDLE_WARN and idle > imin + 60 and not is_dump(str(x.get("idle_app") or "")):
                 who = _who(str(x.get("idle_db") or ""), str(x.get("idle_app") or ""))
                 txt += f", а транзакция простаивает {_dur(idle)}" + (f" ({who})" if who else "") + " - держит, скорее всего, она"
+            else:
+                txt += _dump_tail(x, k, ts)
             out.append((1, txt, k + ":lock"))
         xid = _int(x.get("xid"))
         if xid >= XID_WARN:
@@ -290,6 +442,7 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str, str]]:
 
 # беда по виду из ключа коротким названием - для строки "Еще: ..."
 _TAG = {"stream": "реплика не получает данные", "lag": "реплика отстает", "xact": "долгая транзакция",
+        "dump": "дамп идет не как обычно",
         "idle": "висит транзакция", "lock": "ждут блокировку", "xid": "wraparound", "vac": "давно не было VACUUM",
         "hist": "очередь очистки InnoDB", "conn": "отказы в подключении", "parts": "много кусков",
         "rej": "отклоняются вставки", "delay": "замедляются вставки", "ro": "таблица только на чтение",
@@ -340,6 +493,11 @@ def _short_one(lvl: int, text: str, key: str) -> tuple[str, list[str]]:
         m = find(r"отстает(?: от основной)? на (.+)$")
         sec = _secs(m.group(1)) if m else 0
         return (f"Реплика {eng} отстает на {tg_fmt.dur(sec)}" if sec else f"Реплика {eng} отстает"), [place]
+    if kind == "dump":
+        m = find(r"дамп идет (.+?) \(([^()]*)\) - (.+)$")
+        sec = _secs(m.group(1)) if m else 0
+        facts = [_who_back(m.group(2)) if m else inst] + ([m.group(3)] if m else [])
+        return (f"Дамп базы идет {tg_fmt.dur(sec)}" if sec else "Дамп базы идет не как обычно"), facts
     if kind in ("xact", "idle"):
         word = "идет" if kind == "xact" else "простаивает"
         m = find(rf"{word} (.+?)(?: \(([^()]*)\))?(?::|;|$)")
@@ -903,12 +1061,12 @@ def fails(rep: dict, now: datetime) -> list[dict] | None:
     return out or None
 
 
-def view(rep: dict, now: datetime) -> list[dict] | None:
+def view(rep: dict, now: datetime, dumps: dict | None = None) -> list[dict] | None:
     """Для раздела "Сервисы": по движку роль, отставание, самая долгая транзакция и проблемы"""
     items = block(rep, now)
     if items is None:
         return None
-    probs = problems(rep, now)
+    probs = problems(rep, now, dumps)
     pg_count = sum(1 for x in items if x.get("engine") == "pg")
     my_count = sum(1 for x in items if x.get("engine") == "mysql")
     ssd = _ssd(rep)

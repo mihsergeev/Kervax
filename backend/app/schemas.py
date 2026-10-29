@@ -1274,6 +1274,7 @@ class ServerUpdate(BaseModel):
     traffic_limit_gb: int | None = Field(default=None, ge=0, le=10_000_000)
     traffic_count: str | None = Field(default=None, pattern=r"^(out|both)$")
     traffic_cycle_day: int | None = Field(default=None, ge=1, le=28)
+    is_dev: bool | None = None  # сервер разработки (app/dev_mode.py)
 
     _kube_days = field_validator("kube_expiry_warn_days")(_clean_warn_days)
 
@@ -1605,6 +1606,9 @@ class ServerOut(BaseModel):
     backup_mirror: dict | None = None
     backup_mirror_role: bool = False
     backup_mirror_sync: dict | None = None
+    # сервер разработки (app/dev_mode.py); dev_hint - имя похоже на разработку, а пометки нет
+    is_dev: bool = False
+    dev_hint: bool = False
     # что открыто в интернет: последняя внешняя проверка портов (app/exposure.py)
     exposure: dict | None = None
     # что сделать с ОС ноды (os_support.advice): конец поддержки, перезагрузка, обновления
@@ -1715,6 +1719,8 @@ class ServerOut(BaseModel):
     # Что сломано по новым проверкам (диски, прогноз, inode, юниты): kind, level 1-3, text,
     # sec - куда вести в карточке, mute - ключ приглушения. Считает collector.server_problems.
     problems: list[dict] = []
+    # бэкап, который сейчас идет на сервере (collector.backup_busy): ожидание диска в это время без алерта
+    backup_busy: str | None = None
     custom_backup_ignored: list[str] | None = None
     kube_node_ignored: list[str] | None = None  # ноды кластера, где агент не нужен (по имени)
     # сроки кластера с отметкой "не следить": {"<kind>|<where>": {by, at}}, только действующие

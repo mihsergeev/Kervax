@@ -354,3 +354,59 @@ async def test_backup_server_stuck_still_alerts(tmp_path, monkeypatch):
     got = [m for m in sent if m.startswith("🔴🫁 ")]
     assert len(got) == 1 and "завис postgres" in full_text(got[0]), sent
     await engine.dispose()
+
+
+T0 = int(NOW.timestamp())
+
+
+def _jobs(*jobs):
+    return {"v": 1, "ts": T0, "jobs": list(jobs)}
+
+
+def _job(name, run_ago, *, every=3600, kind="systemd", running=False, schedule=""):
+    run = T0 - run_ago
+    return {"id": f"{kind}:{name}", "name": name, "kind": kind, "run_ts": run, "next_ts": run + every,
+            "running": running, "schedule": schedule}
+
+
+# Холодная копия бэкапов на сетевом хранилище (не rest-server): свои задания каждый час тянут к себе
+# бэкапы других серверов, процессы каждое утро по 3-4 часа ждали хранилище, локальные диски свободны.
+# Красная тревога в 5:01 и отбой в 9:14 на его обычной работе
+PULL = dict(BUSY, backup_server=None, clock_unix=T0,
+            extras={"custom-backups": _jobs(_job("pull-copy", 40 * 60), _job("copy-metrics", 60, every=300))})
+
+
+def test_io_wait_during_own_backup_is_held():
+    pr = collector.pressure_problems(PULL)
+    assert collector.backup_busy(PULL) == "pull-copy"
+    assert collector.pressure_hold_s(PULL, pr) == 6 * 3600
+    s = _srv(PULL, {"pressure_since": (NOW - timedelta(hours=4)).isoformat()})
+    assert collector._server_conditions(s, NOW)["pressure"][0] == 0
+    assert not [p for p in collector.server_problems(s, NOW) if p["kind"] == "pressure"]
+    s.alert_state = {"pressure_since": (NOW - timedelta(hours=6, minutes=1)).isoformat()}
+    lvl, ctx = collector._server_conditions(s, NOW)["pressure"]
+    assert lvl == 2 and ctx["_note"] == "во время бэкапа (pull-copy) так бывает, но не дольше 6 ч"
+    # задание раз в 5 минут (метрики) - не окно бэкапа, иначе окно было бы всегда
+    only_metrics = dict(PULL, extras={"custom-backups": _jobs(_job("copy-metrics", 60, every=300))})
+    assert collector.backup_busy(only_metrics) == ""
+    assert collector.pressure_hold_s(only_metrics, pr) is None
+    cron5 = dict(PULL, extras={"custom-backups": _jobs(_job("m", 60, kind="cron", schedule="*/5 * * * *"))})
+    assert collector.backup_busy(cron5) == ""
+    # бэкап кончился больше часа назад, а диск все ждут - выдержка обычная
+    done = dict(PULL, extras={"custom-backups": _jobs(_job("pull-copy", 2 * 3600, every=86400))})
+    assert collector.pressure_hold_s(done, pr) is None
+    s = _srv(done, {"pressure_since": (NOW - timedelta(minutes=16)).isoformat()})
+    assert collector._server_conditions(s, NOW)["pressure"][0] == 2
+    # долгое задание, которое еще идет
+    long = dict(PULL, extras={"custom-backups": _jobs(_job("pg-dump", 5 * 3600, every=86400, running=True))})
+    assert collector.backup_busy(long) == "pg-dump"
+    # дамп базы на сервере
+    dump = dict(PULL, extras={"db-health": {"v": 1, "ts": T0, "items": [
+        {"engine": "pg", "container": "pg", "xact": 1800, "xact_db": "app", "xact_app": "pg_dump"}]}})
+    assert collector.backup_busy(dump) == "pg_dump"
+    # зависший процесс - как у всех, несмотря на бэкап
+    stuck = dict(PULL, dstate=_ds(6, [dict(PG, sec=430)]))
+    assert collector.pressure_hold_s(stuck, collector.pressure_problems(stuck)) is None
+    # резервный сервер бэкапов - роль, как rest-server
+    mirror = _srv(dict(BUSY, backup_server=None), backup_mirror_role=True)
+    assert collector.pressure_hold_s(mirror.last_report, pr, mirror) == 6 * 3600

@@ -127,7 +127,7 @@ def test_a_dump_holds_its_transaction_by_design():
             {"engine": "pg", "container": "pg", "role": "primary", "xact": xact, "xact_db": "feed", "xact_app": app}]}}}
     assert db_health.problems(rep(4 * 3600, "pg_dump"), now) == []
     assert db_health.problems(rep(4 * 3600, "pg_basebackup"), now) == []
-    assert [k for _l, _t, k in db_health.problems(rep(13 * 3600, "pg_dump"), now)] == ["pg:pg:xact"]
+    assert [k for _l, _t, k in db_health.problems(rep(13 * 3600, "pg_dump"), now)] == ["pg:pg:dump:feed"]
     assert [k for _l, _t, k in db_health.problems(rep(2 * 3600, "worker"), now)] == ["pg:pg:xact"]
 
 
@@ -666,3 +666,95 @@ def test_helper_enters_pods_of_every_engine():
     assert '"fails":[%s]}' in src and "why=nsenter" in src and "124) why=timeout" in src and "127) why=client" in src
     # имя пода, а не pid: снимки нагрузки и размеры не теряются при перезапуске пода
     assert 'n=$(inst_name "$c")' in src and 'health_pg "$c" "$n"' in src and 'idx_pg "$c" "$n"' in src
+
+
+def _dump(ts, age, *, idle=False, app="pg_dump", db="stat", **kw):
+    """Блок с дампом: то работает (самая долгая работающая), то простаивает между таблицами со снимком"""
+    f = {"idle_xmin": age, "idle_xmin_db": db, "idle_xmin_app": app} if idle else {"xact": age, "xact_db": db, "xact_app": app}
+    return _rep(_pg(**f, **kw), ts=ts)
+
+
+def _at(ts):
+    return datetime.fromtimestamp(ts, timezone.utc)
+
+
+def _nights(state, starts_h, dur, base=T - 7 * 86400):
+    """Прогоны по ночам: каждые сутки в starts_h (часы UTC от base), идет dur секунд, блок раз в 15 минут"""
+    for d in range(len(starts_h)):
+        st = base + d * 86400 + int(starts_h[d] * 3600)
+        for t in [*range(st + 60, st + dur, 900), st + dur]:
+            state = db_health.dump_update(state, _dump(t, t - st, idle=(t // 900) % 2 == 1), _at(t))
+        state = db_health.dump_update(state, _rep(_pg(), ts=st + dur + 900), _at(st + dur + 900))
+    return state
+
+
+def test_a_dump_idle_between_tables_is_not_a_hung_transaction():
+    """29.10 в 2:34 два сервера прислали "Транзакция висит 33 мин, база stat, клиент pg_dump": ночной
+    дамп между таблицами простаивает в своей транзакции со снимком. Так же pg_restore во временную базу
+    в 4:50 ("транзакция идет 1 ч 10 мин")"""
+    assert db_health.problems(_dump(T, 33 * 60, idle=True), NOW) == []
+    assert db_health.problems(_dump(T, 70 * 60, app="pg_restore", db="stat__tmp_20261029"), NOW) == []
+    assert db_health.problems(_dump(T, 3 * 3600, idle=True, app="pgBackRest [backup]"), NOW) == []
+    # и в MySQL
+    my = _my(role="primary", xact=3 * 3600, xact_db="shop", xact_app="mysqldump")
+    assert db_health.problems(_rep(my), NOW) == []
+    # не дамп - как раньше
+    assert [k for _l, _t, k in db_health.problems(_dump(T, 33 * 60, idle=True, app="worker"), NOW)] == ["pg:pg:idle"]
+
+
+def test_dump_runs_are_remembered():
+    st = _nights(None, [0, 0.1, 0.05], 2 * 3600)
+    runs = st["db"]["pg:pg|stat|pg_dump"]["runs"]
+    assert len(runs) == 3 and "run" not in st["db"]["pg:pg|stat|pg_dump"]
+    assert all(abs(d - 2 * 3600) <= 900 for _s, d in runs)
+    # тот же блок второй раз - ничего не меняется
+    assert db_health.dump_update(st, _rep(_pg(), ts=st["ts"]), _at(st["ts"])) is st
+    # дамп на один блок спрятался за чужую транзакцию и вернулся с тем же началом - тот же прогон
+    t0 = T - 3600
+    s1 = db_health.dump_update(st, _dump(t0, 600), _at(t0))
+    s2 = db_health.dump_update(s1, _rep(_pg(xact=4000, xact_app="report"), ts=t0 + 900), _at(t0 + 900))
+    s3 = db_health.dump_update(s2, _dump(t0 + 1800, 2400), _at(t0 + 1800))
+    assert s3["db"]["pg:pg|stat|pg_dump"]["run"] == [t0 - 600, 2400] and len(s3["db"]["pg:pg|stat|pg_dump"]["runs"]) == 3
+    # протухший блок - не судим и не закрываем прогон
+    assert db_health.dump_update(s3, _dump(T - 7200, 600), NOW) is s3
+
+
+def test_dump_alerts_only_when_unusual():
+    """Дамп, идущий как обычно, молчит. Говорим, когда он идет намного дольше обычного, днем не в свое
+    время или 12 часов; ждущие блокировку - своя строка, с дампом в ней"""
+    st = _nights(None, [-12, -12.1, -12.05], 2 * 3600)  # обычно около полуночи UTC
+    night = T - 12 * 3600 + 600
+    # как обычно - тихо
+    assert db_health.problems(_dump(night + 2 * 3600, 2 * 3600, idle=True), _at(night + 2 * 3600), st) == []
+    # без истории о прогонах - только 12 часов
+    assert db_health.problems(_dump(night + 5 * 3600, 5 * 3600), _at(night + 5 * 3600)) == []
+    # вдвое и на два часа дольше самого долгого прошлого
+    assert db_health.problems(_dump(night + 4 * 3600, 4 * 3600), _at(night + 4 * 3600), st) == []
+    slow = db_health.problems(_dump(night + 5 * 3600, 5 * 3600 - 60), _at(night + 5 * 3600), st)
+    assert [(lv, k) for lv, _t, k in slow] == [(1, "pg:pg:dump:stat")]
+    assert slow[0][1].startswith("PostgreSQL pg: дамп идет 4 ч 59 мин (база stat, pg_dump) - обычно идет не больше 2 ч")
+    assert db_health.tg_short(slow) == ("Дамп базы идет 4 ч",
+                                        ["база stat, клиент pg_dump", slow[0][1].rsplit(" - ", 1)[1]])
+    hung = db_health.problems(_dump(T, 12 * 3600), NOW, st)
+    assert hung[0][0] == 2 and hung[0][1].endswith("- скорее всего, завис")
+    # днем (по поясу панели) в стороне от обычного начала: час - как обычная транзакция
+    day = T  # 12:00 UTC = 15:00 MSK
+    assert db_health.problems(_dump(day, 50 * 60), _at(day), st) == []
+    off = db_health.problems(_dump(day, 70 * 60), _at(day), st)
+    assert off and "начался днем в 13:50, а обычно начинается в 02:57" in off[0][1]
+    # ждут блокировку - алерт как раньше, в строке - идущий дамп
+    lk = db_health.problems(_dump(night + 3600, 3600, lock_waits=4, lock_wait=900), _at(night + 3600), st)
+    assert [t for _l, t, _k in lk] == ["PostgreSQL pg: ждут блокировку 4 запр., дольше всех 15 мин, идет дамп "
+                                        "(база stat, pg_dump) 1 ч 0 мин"]
+    # раздел "Сервисы" видит то же
+    assert db_health.view(_dump(night + 2 * 3600, 2 * 3600, idle=True), _at(night + 2 * 3600), st)[0]["problems"] == []
+
+
+def test_dump_state_flows_through_the_collector():
+    s = _srv(_dump(T, 33 * 60, idle=True))
+    assert collector._server_conditions(s, NOW)["db_health"][0] == 0
+    s.alert_state = {db_health.DUMP_STATE: _nights(None, [-12, -12.1], 2 * 3600)}
+    t = T - 12 * 3600 + 6 * 3600
+    s.last_report = _dump(t, 6 * 3600)
+    lv, ctx = collector._server_conditions(s, _at(t))["db_health"]
+    assert lv == 1 and ctx["sig"] == ["pg:pg:dump:stat"]

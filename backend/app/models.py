@@ -868,6 +868,8 @@ class Server(Base):
     # на основном: чем кончилась последняя рассылка настроек копий, {"<id резервного>": {"allow":
     # {ok, out, ts}, "set": {...}}} - ответ helper'а основного (заметки про sshd) и резервного
     backup_mirror_sync: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # сервер разработки (app/dev_mode.py): поведение приложений не будит алертами, в панели серым
+    is_dev: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

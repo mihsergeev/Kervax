@@ -955,7 +955,7 @@ function serverSecInfo(c: {
   if (c.mutes.length && !out.alerts.n) out.alerts = { level: 1, n: c.mutes.length, line: ok.alerts }
   // заглушенная беда (упавшая служба, порт) - серым с пометкой, а не "упавших служб нет"
   markMuted(out, srvMuted(s, t).filter((i) => !i.section && i.kind !== 'offline')
-    .map((i) => ({ sec: secOfLink(i.sec) ?? 'overview', text: i.text })), t)
+    .map((i) => ({ sec: secOfLink(i.sec) ?? 'overview', text: i.text, dev: i.dev })), t)
   if (parent && !parent.online && !out.deps.n)
     out.deps = { level: 1, n: 0, line: t('стоит за {name}, он не на связи', { name: parent.name }) }
   const idle = [!ex && 'ports', !unitsBlock(r) && 'units', !wr && 'web', !!v && (!v.release || !v.feed_ts) && 'vulns',
@@ -3805,6 +3805,8 @@ function PressureCard({ server: s }: { server: Server }) {
   const io = PSI_ROWS.find((x) => x.k === 'io')!
   const ioHot = !!psi && ((psi.io_some_60 ?? 0) >= io.some || (psi.io_full_60 ?? 0) >= io.full)
   const bsrvBusy = !prob && ioHot && !!r?.backup_server?.present
+  // то же, пока на сервере идет свой бэкап или дамп базы (collector.backup_busy)
+  const jobBusy = !prob && ioHot && !bsrvBusy && s.backup_busy ? s.backup_busy : ''
   const pc = (v: number) => `${v.toFixed(v > 0 && v < 10 ? 1 : 0)}%`
   const fdPct = r?.fds && r.fds.max > 0 ? (r.fds.used / r.fds.max) * 100 : null
   const ds = r?.dstate
@@ -3834,6 +3836,11 @@ function PressureCard({ server: s }: { server: Server }) {
       {bsrvBusy && (
         <div className="net-note">
           {t('Сервер бэкапов: диск грузят prune и check репозиториев и прием бэкапов, это его обычная работа, алерт не шлем. Придет, если так продержится дольше 6 ч или процесс зависнет в ожидании диска.')}
+        </div>
+      )}
+      {jobBusy && (
+        <div className="net-note">
+          {t('Идет бэкап ({name}): процессы ждут диск или сетевое хранилище, это его обычная работа, алерт не шлем. Придет, если так продержится дольше 6 ч или процесс зависнет в ожидании диска.', { name: jobBusy })}
         </div>
       )}
       <div className="net-tiles">
@@ -5843,6 +5850,11 @@ function ServerRow({
           {showGroup && s.group_name && (
             <span className="type-chip group-chip">{s.group_name}</span>
           )}
+          {s.is_dev && (
+            <span className="type-chip dev-chip" title={t('Сервер разработки: поведение приложений не будит алертами, инфраструктура - как обычно')}>
+              {t('разработка')}
+            </span>
+          )}
           <RoleChips s={s} servers={servers} t={t} />
           {s.gpu_sum && (
             <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
@@ -6812,6 +6824,7 @@ function ServerDetail({
       relay_enabled: !!s.relay_enabled,
       relay_port: s.relay_port ?? 0,
       gre_enabled: !!s.gre_enabled,
+      is_dev: !!s.is_dev,
     })
     mutes0.current = s.alert_mutes ?? []
     setSaveErr(null)
@@ -6849,6 +6862,7 @@ function ServerDetail({
         alert_mutes: mutes,
         offline_after_seconds: int(form.offline_after_seconds),
         alert_sustain_seconds: Number.isFinite(form.alert_sustain_min) ? Math.max(0, Math.round(form.alert_sustain_min * 60)) : undefined,
+        is_dev: form.is_dev,
       })
       // ретранслятор отдельно: панель проверяет, что сервер сам достает до нее, и может отказать
       if (form.relay_enabled !== !!s.relay_enabled || (form.relay_enabled && form.relay_port !== (s.relay_port ?? 0)))
@@ -6974,7 +6988,8 @@ function ServerDetail({
   const cur = DETAIL_SECTIONS.find((x) => x.id === active) ?? DETAIL_SECTIONS[0]
   // на сводке строками: проблемы из другого раздела панели (со ссылкой туда) и то, у чего нет
   // своего раздела. Часы и DNS не здесь: у них свои блоки с тем, что делать
-  const ovIssues = issues.filter(
+  // сервер разработки: виды приложений там же, серым после настоящих (backend app/dev_mode.py)
+  const ovIssues = [...issues, ...srvMuted(s, t).filter((i) => i.dev)].filter(
     (i) => i.section || (i.kind !== 'offline' && i.kind !== 'clock' && i.kind !== 'dns' && (secOfLink(i.sec) ?? 'overview') === 'overview'),
   )
   const known = s.known_issues ?? {}
@@ -7027,6 +7042,7 @@ function ServerDetail({
           tone: i.tone,
           text: i.text,
           since: i.since,
+          dev: i.dev,
           act: i.section && onOpenSection
             ? { label: t(SECTION_LABEL[i.section] ?? i.section), onClick: () => onOpenSection(i.section!, i.srv, i.sec) }
             : undefined,
@@ -7058,6 +7074,11 @@ function ServerDetail({
             <h3>{s.name}</h3>
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
             {s.onboard && <span className="type-chip onb-chip">{t('подключается')}</span>}
+            {s.is_dev && (
+              <span className="type-chip dev-chip" title={t('Сервер разработки: поведение приложений не будит алертами, инфраструктура - как обычно')}>
+                {t('разработка')}
+              </span>
+            )}
             {/* роли как в списке; состояние ретранслятора живет в настройках сервера: клик туда */}
             <RoleChips s={s} servers={servers} t={t} onRelay={isViewer ? undefined : editRelay} />
             {s.gpu_sum && (
@@ -7727,6 +7748,7 @@ function ServerDetail({
         gre={s.gre}
         host={hostOf(s)}
         initialSec={editSec}
+        devHint={!!s.dev_hint}
         note={
           <NoteBar
             note={s.note}

@@ -1055,7 +1055,7 @@ function KubeHostModal({
     }))
   if (fluxBroken.length) soft('flux', t('не в Ready: {n}', { n: fluxBroken.length }))
   markMuted(info, srvMuted(s, t).filter((i) => i.section === 'kuber')
-    .map((i) => ({ sec: KUBE_SEC_IDS.has(i.sec ?? '') ? i.sec! : 'overview', text: i.text })), t)
+    .map((i) => ({ sec: KUBE_SEC_IDS.has(i.sec ?? '') ? i.sec! : 'overview', text: i.text, dev: i.dev })), t)
   // гигиена подов - справка, не проблема: серым, ведет в поды, где про нее написано
   const hyg: SecInfo = hygiene.nolim || hygiene.noprobe
     ? { level: 0, n: 0, idle: true, line: t('без лимита памяти {a}, без проб {b}', { a: hygiene.nolim, b: hygiene.noprobe }) }

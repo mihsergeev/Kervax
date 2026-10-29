@@ -40,11 +40,13 @@ async def _env(tmp_path, monkeypatch):
     return engine, factory, Settings(alert_webhook="http://hook"), sent
 
 
-async def _tick(factory, cfg, t, rep):
+async def _tick(factory, cfg, t, rep, state=None):
     async with factory() as s:
         srv = (await s.execute(select(Server))).scalars().one()
         srv.last_seen = t
         srv.last_report = {"uptime_seconds": 100000, "clock_unix": t.timestamp(), **rep}
+        if state:
+            srv.alert_state = {**(srv.alert_state or {}), **state}
         await s.commit()
     await collector.evaluate_servers(factory, cfg, t)
 
@@ -159,7 +161,9 @@ async def test_escalation_from_warning_is_still_news(tmp_path, monkeypatch):
     """Предупреждение, потом впервые проблема - это хуже, чем было объявлено: сообщение уходит"""
     engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
     t0 = datetime.now(timezone.utc) + timedelta(days=1)
-    await _tick(factory, cfg, t0, _workers(t0, looping=["mailer"]))
+    # падает и поднимается уже дольше выдержки (workers.LOOP_HOLD)
+    held = {"workers_loop": {"Supervisor, контейнер web-a-workers-1|mailer": [int(t0.timestamp()) - 1900, int(t0.timestamp())]}}
+    await _tick(factory, cfg, t0, _workers(t0, looping=["mailer"]), state=held)
     assert len(sent) == 1 and "падает и поднимается" in full_text(sent[0])
     assert _short(sent[0])[0] == "<b>Воркер падает и поднимается</b>"
     t = t0 + timedelta(minutes=1)

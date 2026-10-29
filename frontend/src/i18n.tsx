@@ -11,6 +11,24 @@ export type Lang = 'ru' | 'en'
 // Ключ = русская строка (дефолт). Значение = английский перевод.
 // Отсутствующий ключ → возвращается русский (мягкий фолбэк).
 const EN: Record<string, string> = {
+  // сервер разработки (ServerEdit.tsx, ServersPage.tsx, cardLayout.tsx, DockerPage.tsx; backend app/dev_mode.py)
+  'Назначение': 'Purpose',
+  'Прод': 'Production',
+  'Разработка': 'Development',
+  'разработка': 'development',
+  'разработка: {text}': 'development: {text}',
+  'Перезапуски подов и контейнеров, воркеры, очереди, базы, ошибки в логах и 5xx не шлются, в панели серым. Недоступность, диск, память, бэкапы и безопасность - как обычно.':
+    'Pod and container restarts, workers, queues, databases, log errors and 5xx are not sent, shown grey in the panel. Downtime, disk, memory, backups and security alert as usual.',
+  'По имени похоже на сервер разработки: там падения приложений бывают нормой.':
+    'The name looks like a development server: apps crashing there can be normal.',
+  'Разработка: поведение приложений не будит алертами, инфраструктура - как обычно.':
+    'Development: app behaviour does not wake you with alerts, infrastructure alerts as usual.',
+  'Сервер разработки: поведение приложений не будит алертами, инфраструктура - как обычно':
+    'Development server: app behaviour does not wake you with alerts, infrastructure alerts as usual',
+  'не работают или крутятся по кругу: {list}': 'down or restarting in a loop: {list}',
+  'сервер разработки: упали или крутятся по кругу, алерт не шлется': 'development server: down or restarting in a loop, no alert is sent',
+  'пометил сервер разработкой': 'marked the server as development',
+  'пометил сервер продом': 'marked the server as production',
   // резервный сервер бэкапов (BsrvMirror.tsx, auditActs.ts)
   'основной не пустил по SSH': 'the main server refused SSH',
   'список файлов с основного пришел неполным': 'the file list from the main server came incomplete',
@@ -1582,6 +1600,7 @@ const EN: Record<string, string> = {
   // сервер задыхается
   'Давление на ресурсы': 'Resource pressure',
   'Сервер бэкапов: диск грузят prune и check репозиториев и прием бэкапов, это его обычная работа, алерт не шлем. Придет, если так продержится дольше 6 ч или процесс зависнет в ожидании диска.': 'Backup server: the disk is busy with repository prune and check and incoming backups, which is its normal work, so no alert is sent. It will come if this lasts longer than 6 h or a process hangs waiting for the disk.',
+  'Идет бэкап ({name}): процессы ждут диск или сетевое хранилище, это его обычная работа, алерт не шлем. Придет, если так продержится дольше 6 ч или процесс зависнет в ожидании диска.': 'A backup is running ({name}): processes wait for the disk or network storage, which is its normal work, so no alert is sent. It will come if this lasts longer than 6 h or a process hangs waiting for the disk.',
   'ждут (some)': 'waiting (some)',
   'все стоят (full)': 'all stalled (full)',
   'доля времени, когда процессы ждали ресурс: за 10 секунд / за минуту': 'share of time processes waited for the resource: 10 seconds / 1 minute',

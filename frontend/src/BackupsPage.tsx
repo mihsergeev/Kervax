@@ -1083,7 +1083,7 @@ function BackupModal({
   else if (helperOld) soft('manage', t('helper на ноде устарел'))
   if (!v && !info.restore.level) info.restore.idle = true
   markMuted(info, srvMuted(s, t).filter((i) => i.section === 'backups' && !i.srv).map((i) => ({
-    sec: BK_SEC_IDS.has(i.sec ?? '') ? i.sec! : (BK_SEC_OF_KIND[i.kind ?? ''] ?? 'runs'), text: i.text,
+    sec: BK_SEC_IDS.has(i.sec ?? '') ? i.sec! : (BK_SEC_OF_KIND[i.kind ?? ''] ?? 'runs'), text: i.text, dev: i.dev,
   })), t)
 
   const rows: OvRow[] = BK_SECTIONS.flatMap(({ id, label }) =>
@@ -2599,7 +2599,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
     const repoOff = repoProbs.filter((p) => p.kind === 'repo' && p.off).map((p) => p.repo).sort()
     markMuted(infoSec, [
       ...srvMuted(s, t).filter((i) => i.section === 'backups' && i.srv)
-        .map((i) => ({ sec: BSRV_SEC_IDS.has(i.sec ?? '') ? i.sec! : 'repos', text: i.text })),
+        .map((i) => ({ sec: BSRV_SEC_IDS.has(i.sec ?? '') ? i.sec! : 'repos', text: i.text, dev: i.dev })),
       ...(lockedAll.length
         ? [{ sec: 'repos', text: t('залочен больше суток: {list}', { list: shortList(lockedAll.map((p) => p.repo), t, 3) }) }] : []),
       ...(repoOff.length

@@ -95,9 +95,10 @@ export function srvRamPct(s: Server): number | null {
 // since - с какого момента проблема видна (ISO): для "Что сломано" - "2 дн"
 // section и srv - куда вести с главной, если проблема не про карточку сервера (см. ServerProblem)
 // level - уровень с бэкенда (тот же, что у алерта): по нему мьют вида с уровнем (units@1)
+// dev - сервер разработки, вид приложения (backend app/dev_mode.py): как заглушенное, серым
 export type SrvIssue = {
   tone: 't-down' | 't-degraded'; text: string; sec?: string; mute?: string; kind?: string; since?: string | null
-  section?: 'kuber' | 'services' | 'backups' | 'docker'; srv?: boolean; level?: number
+  section?: 'kuber' | 'services' | 'backups' | 'docker'; srv?: boolean; level?: number; dev?: boolean
 }
 
 // Сколько длится проблема, коротко: "40 мин", "5 ч", "3 дн". Меньше минуты - пусто: только что
@@ -173,7 +174,7 @@ export function srvIssuesRaw(
   // же, что у алертов, считать их здесь второй раз незачем
   for (const p of s.problems ?? [])
     out.push({ tone: p.level >= 2 ? 't-down' : 't-degraded', text: p.text, sec: p.sec, mute: p.mute, kind: p.kind,
-      since: p.since, section: p.section, srv: p.srv, level: p.level })
+      since: p.since, section: p.section, srv: p.srv, level: p.level, dev: p.dev })
   // с какого момента: панель запоминает начало проблемы каждого вида (alert_since)
   for (const i of out) if (i.since === undefined && i.kind) i.since = s.alert_since?.[i.kind] ?? null
   return out
@@ -205,17 +206,18 @@ export function srvIssues(
   t: (k: string, p?: Record<string, string | number>) => string,
 ): SrvIssue[] {
   const mutes = srvMutesNow(s)
-  return srvIssuesRaw(s, t).filter((i) => !srvIssueMuted(i, mutes) && !srvKnownOf(s, i))
+  return srvIssuesRaw(s, t).filter((i) => !i.dev && !srvIssueMuted(i, mutes) && !srvKnownOf(s, i))
 }
 
 // Приглушенные проблемы сервера: на главной их нет, а в карточке раздел с такой проблемой серый с
-// пометкой, а не зеленый "все в порядке" рядом с "истёк" или "с проблемой 1"
+// пометкой, а не зеленый "все в порядке" рядом с "истёк" или "с проблемой 1". Сюда же виды
+// приложений на сервере разработки (dev): серым с пометкой "разработка"
 export function srvMuted(
   s: Server,
   t: (k: string, p?: Record<string, string | number>) => string,
 ): SrvIssue[] {
   const mutes = srvMutesNow(s)
-  return srvIssuesRaw(s, t).filter((i) => srvIssueMuted(i, mutes))
+  return srvIssuesRaw(s, t).flatMap((i) => (srvIssueMuted(i, mutes) ? [{ ...i, dev: false }] : i.dev ? [i] : []))
 }
 
 // Известные проблемы сервера: что сломано и что про это написали
@@ -226,7 +228,7 @@ export function srvKnown(
   const mutes = srvMutesNow(s)
   return srvIssuesRaw(s, t).flatMap((i) => {
     const k = srvKnownOf(s, i)
-    return k && !srvIssueMuted(i, mutes) ? [{ ...i, known: k }] : []
+    return k && !i.dev && !srvIssueMuted(i, mutes) ? [{ ...i, known: k }] : []
   })
 }
 

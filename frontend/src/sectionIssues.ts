@@ -35,7 +35,9 @@ export function dockerProblems(servers: Server[], t: T): ProbItem[] {
     // бэкенд ведет "лежит" и "в цикле" и без отправленного алерта; заглушенное (вид целиком или
     // контейнер кнопкой под алертом) на главную не идет, как и остальные заглушенные строки
     const mn = srvMutesNow(s)
-    const off = (kind: string, name: string) => mn.has(kind) || mn.has(`${kind}:${name}`)
+    // сервер разработки: контейнеры приложений падают по делу разработки, на главную не идут
+    // (backend app/dev_mode.py)
+    const off = (kind: string, name: string) => !!s.is_dev || mn.has(kind) || mn.has(`${kind}:${name}`)
     const down = d.containers.filter((c) => al[c.name] === 'down' && !off('docker_down', c.name)).map((c) => c.name)
     const loop = d.containers.filter((c) => al[c.name] === 'loop' && !off('docker_loop', c.name)).map((c) => c.name)
     if (down.length > 0)

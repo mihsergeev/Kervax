@@ -1007,7 +1007,9 @@ function DockerHostModal({
   const mutes = new Set(s.alert_mutes ?? [])
   const items: Record<string, SecItem[]> = {}
   const add = (sec: string, x: SecItem) => (items[sec] ??= []).push(x)
-  if (live) {
+  // сервер разработки: упавшие и крутящиеся контейнеры серым с пометкой, не бедой (backend app/dev_mode.py)
+  const devDown = live && s.is_dev ? cs.filter((c) => probs[c.name]).map((c) => c.name) : []
+  if (live && !s.is_dev) {
     const down = cs.filter((c) => probs[c.name] === 'down').map((c) => c.name)
     const loop = cs.filter((c) => probs[c.name] === 'loop').map((c) => c.name)
     if (down.length)
@@ -1023,6 +1025,8 @@ function DockerHostModal({
         count: loop.length,
         text: t(loop.length === 1 ? 'перезапускается в цикле {list}' : 'перезапускаются в цикле {list}', { list: shortList(loop, t, 3) }),
       })
+  }
+  if (live) {
     // утечки памяти и частые перезапуски контейнеров - с бэкенда, без заглушенных и известных
     for (const i of srvIssues(s, t).filter((x) => x.section === 'docker'))
       add('containers', { level: i.tone === 't-down' ? 2 : 1, text: i.text, since: i.since })
@@ -1078,7 +1082,9 @@ function DockerHostModal({
   if (live) {
     const riskAll = (s.docker_risk ?? []).filter((x) => !x.muted)
     markMuted(info, [
-      ...srvMuted(s, t).filter((i) => i.section === 'docker').map((i) => ({ sec: 'containers', text: i.text })),
+      ...(devDown.length
+        ? [{ sec: 'containers', dev: true, text: t('не работают или крутятся по кругу: {list}', { list: shortList(devDown, t, 3) }) }] : []),
+      ...srvMuted(s, t).filter((i) => i.section === 'docker').map((i) => ({ sec: 'containers', text: i.text, dev: i.dev })),
       ...(exposed.length && mutes.has('docker_sock')
         ? [{ sec: 'host', text: t('docker-сокет у {list}', { list: shortList(exposed.map((e) => e.name), t, 3) }) }] : []),
       ...(riskAll.length && mutes.has('docker_risk')
@@ -1334,7 +1340,11 @@ function HostRow({
           {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
           {!docker.access && <span className="type-chip off">{t('нет доступа')}</span>}
           {probs > 0 && (
-            <span className="type-chip off chip-names" title={t('по контейнерам ушел алерт: упали или крутятся по кругу')}>
+            <span
+              className={`type-chip chip-names${s.is_dev ? '' : ' off'}`}
+              title={s.is_dev ? t('сервер разработки: упали или крутятся по кругу, алерт не шлется')
+                : t('по контейнерам ушел алерт: упали или крутятся по кругу')}
+            >
               🔥 {shortList(Object.keys(s.docker_alerts ?? {}), t, 2)}
             </span>
           )}

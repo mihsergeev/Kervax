@@ -1,7 +1,7 @@
 """Короткий алерт в Telegram (формат A, app/tg_fmt.py) у сервисов: воркеры, кроны, ошибки в логах,
 очереди, PHP-FPM, здоровье баз, свои бэкапы, проверка восстановления. Вход - то, что модуль отдает
 collector'у (список из problems()), выход - (что случилось, конкретика)."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app import (backup_verify, cron_watch, custom_backups, db_health, fpm_pools, log_errors,
                  queue_watch, workers)
@@ -13,12 +13,16 @@ BAD = set("—–≥≤↳«»“”…·→ёЁ•")
 
 
 def _srv(rep, state=None):
-    return Server(id=1, name="app-a", token_hash="x", enabled=True, backup_not_required=True, last_seen=NOW,
+    s = Server(id=1, name="app-a", token_hash="x", enabled=True, backup_not_required=True, last_seen=NOW,
                   offline_after_seconds=120, alert_sustain_seconds=900, last_report=rep,
                   alert_state=state or {}, alert_mutes=[], cpu_alert_percent=0, mem_alert_percent=0,
                   disk_warn_percent=0, disk_alert_percent=0, disk_crit_percent=0, temp_alert_c=0,
                   conntrack_alert_percent=0, disk_temp_alert_c=0, db_conn_alert_percent=0,
                   web_5xx_alert_percent=0, kube_expiry_warn_days=[])
+    if state is None and ((rep or {}).get("extras") or {}).get("workers"):
+        # падают и поднимаются уже дольше выдержки (workers.LOOP_HOLD)
+        s.alert_state = {workers.LOOP_STATE: workers.loop_update(None, s, NOW - timedelta(seconds=workers.LOOP_HOLD))}
+    return s
 
 
 def _ok(out):

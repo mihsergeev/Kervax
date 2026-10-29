@@ -3027,6 +3027,12 @@ tr.mt-off button.mt-what-btn { color: var(--text-muted); text-decoration: line-t
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 14%, transparent);
 }
+/* сервер разработки (backend app/dev_mode.py) */
+.type-chip.dev-chip {
+  background: transparent;
+  border: 1px dashed var(--border);
+  padding: 0 0.35rem;
+}
 /* иконка ОС (SVG-логотип дистрибутива) в строках/шапках */
 .os-ico {
   vertical-align: -0.15em;
@@ -7797,6 +7803,10 @@ button.am-link.small { font-size: 0.82rem; }
 .se-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0 0.9rem; }
 .se-pair > .field { margin: 0.3rem 0; }
 .se-note { margin: 0.3rem 0 0.8rem; }
+/* прод / разработка: переключатель и что это значит */
+.se-dev { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.8rem; margin: 0.5rem 0 0.2rem; }
+.se-dev .win-switch { flex: none; }
+.se-dev > .small { flex: 1 1 16rem; min-width: 0; }
 .se-q { display: inline-flex; width: 15px; height: 15px; border-radius: 50%; border: 1px solid var(--border-strong); align-items: center; justify-content: center; font-size: 0.66rem; cursor: help; vertical-align: 1px; }
 .se-rows { display: flex; flex-direction: column; margin-top: 0.4rem; }
 .se-rows-head { display: flex; justify-content: space-between; padding: 0 0.5rem 0.2rem; color: var(--text-muted); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; }
