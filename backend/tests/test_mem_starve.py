@@ -115,9 +115,10 @@ def test_short_hold_not_the_server_sustain():
 
 
 def test_offline_quick_when_memory_ran_out():
-    """Агент замолчал без памяти: не ждем лишние три минуты, пока "канал перегружен" """
-    seen = datetime(2026, 10, 29, 8, 46, 30, tzinfo=timezone.utc)
-    now = seen + timedelta(seconds=150)
+    """Агент замолчал без памяти: не ждем лишние три минуты, пока "канал перегружен".
+    Время от текущего: первые минуты после старта панели offline молчит (panel_just_started)"""
+    now = datetime.now(timezone.utc)
+    seen = now - timedelta(seconds=150)
     assert collector._server_conditions(_srv(DYING, last_seen=seen), now)["offline"][0] == 1
     assert collector._server_conditions(_srv(CALM, last_seen=seen), now)["offline"][0] == 0
 

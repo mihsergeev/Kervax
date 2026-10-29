@@ -4710,11 +4710,12 @@ def own_helper_unit(name: str) -> bool:
 
 # Служебные таймеры дистрибутива, упавший прогон которых ни на что не влияет и никто на него не
 # реагирует: метаданные прошивок fwupd (на виртуалке и за закрытым CDN падает всегда), новости для
-# motd, кэш ESM. fwupd-refresh приходил алертом "упал юнит" с ноды, откуда не открывается
+# motd, кэш ESM, ежедневная пересборка индекса man (man-db падает на битой странице или нехватке
+# места в /var/cache и сам повторит на следующий день). fwupd-refresh приходил алертом "упал юнит" с ноды, откуда не открывается
 # cdn.fwupd.org. Не алертят и в "Что сломано" не попадают; в разделе юнитов видны как есть.
 _BENIGN_UNITS = frozenset({
     "fwupd-refresh.service", "motd-news.service", "apt-news.service", "esm-cache.service",
-    "update-notifier-download.service", "update-notifier-motd.service",
+    "update-notifier-download.service", "update-notifier-motd.service", "man-db.service",
 })
 
 

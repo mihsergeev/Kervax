@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.61] - 2026-10-29
+
+### Changed
+- Упавший man-db.service (ежедневная пересборка индекса man) больше не алертит и не попадает в "Что сломано",
+  как fwupd-refresh и новости motd: он сам повторит на следующий день. В разделе юнитов виден как есть.
+
 ## [1.8.60] - 2026-10-29
 
 ### Added

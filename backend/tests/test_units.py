@@ -423,6 +423,12 @@ async def test_backup_unit_and_new_server_stay_quiet(tmp_path, monkeypatch):
     await engine.dispose()
 
 
+def test_man_db_is_benign():
+    """Ежедневная пересборка индекса man падает и сама повторяет на следующий день - не алерт."""
+    from app.collector import benign_unit
+    assert benign_unit("man-db.service") and not benign_unit("nginx.service")
+
+
 async def test_benign_distro_timers_do_not_alert(tmp_path, monkeypatch):
     """fwupd-refresh на ноде, откуда не открывается cdn.fwupd.org, падает на каждом прогоне, и
     никто на это не реагирует: ни алерта, ни строки в "Что сломано"; алерт, объявленный по нему
