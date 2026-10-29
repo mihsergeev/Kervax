@@ -142,6 +142,9 @@ def test_xid62_alone_is_blind_monitoring_not_broken():
     assert [(p[0], p[2]) for p in probs] == [(1, f"gpu:xid:41:00:62:{TS - 7 * 86400}")]
     txt = probs[0][1]
     assert "упал внутренний микроконтроллер" in txt and "проверь сервис" in txt and "из гостя" not in txt
+    # лечится перезагрузкой модуля nvidia, сервер - только если карта не поднялась
+    assert "останови процессы на GPU и перезагрузи модуль nvidia (rmmod/modprobe), без nvidia-smi -r" in txt
+    assert txt.endswith("если после этого RmInitAdapter failed или карта не видна - перезагрузка сервера")
     # застывшая температура - не перегрев, загрузка слепой карты не в плашке и не на графике
     assert gpu.heat(rep, NOW) == (0, "")
     s = gpu.summary(rep, NOW)
@@ -181,16 +184,68 @@ def test_reset_advice_on_vm_says_not_from_guest():
     b = _block(xid=[{"ts": TS - 7200, "bus": "0000:41:00", "code": 62, "text": ""},
                     {"ts": TS - 600, "bus": "0000:81:00", "code": 48, "text": ""}],
                gpus=[_g(0, "00000000:41:00.0", U0), _g(1, "00000000:81:00.0", U1, remap=True)])
+    k62 = f"gpu:xid:41:00:62:{TS - 7200}"
     for vm in ({"is_vm": True, "virt": "VMware"}, {"virt": "KVM"}):
         probs = {p[2]: p[1] for p in gpu.problems(_rep(b, **vm), NOW)}
-        assert all("из гостя не сбрасывать" in t and "хоста гипервизора" in t for t in probs.values()), probs
-        assert "nvidia-smi -r" in probs[f"gpu:xid:41:00:62:{TS - 7200}"]
+        assert all("из гостя не сбрасывать" in t and "хоста гипервизора" in t for k, t in probs.items() if k != k62), probs
+        # Xid 62 лечится из гостя перезагрузкой модуля, без nvidia-smi -r и без перезагрузки ВМ; хост -
+        # только если карта не поднялась
+        assert "перезагрузи модуль nvidia (rmmod/modprobe), без nvidia-smi -r и без перезагрузки ВМ" in probs[k62]
+        assert probs[k62].endswith("перезагрузка хоста гипервизора - только если после этого RmInitAdapter failed или карта не видна")
         v = gpu.view(_rep(b, **vm), NOW)
-        assert v["vm"] is True and all("из гостя не сбрасывать" in x["desc"] for x in v["xid"])
+        assert v["vm"] is True and all("из гостя не сбрасывать" in x["desc"] for x in v["xid"] if x["code"] != 62)
     # железо: обычный совет
     probs = {p[2]: p[1] for p in gpu.problems(_rep(b, virt="none", is_vm=False), NOW)}
     assert probs[f"gpu:xid:81:00:48:{TS - 600}"].endswith("нужен сброс GPU или перезагрузка")
     assert not any("из гостя" in t for t in probs.values())
+
+
+def test_xid62_cleared_by_module_reload():
+    """Xid 62 на ВМ с пробросом лечится без перезагрузки: контейнер остановили, модули nvidia
+    перезагрузили, драйвер отпустил карту и поднял снова (nvidia-drm "[GPU ID 0x...] Loading driver",
+    сам модуль nvidia не выгружался - nv_load прежний). Показания ожили - ошибка до этого закрыта"""
+    x62 = {"ts": TS - 7200, "bus": "0000:41:00", "code": 62, "text": "323f0f30 0000e358"}
+    b = _block(xid=[x62], nv_load=TS - 30 * 86400, nv_rst=[{"bus": "0000:41:00", "ts": TS - 600}])
+    b["gpus"][0] = _g(0, "00000000:41:00.0", U0, frz=0, temp=40)
+    rep = _rep(b, is_vm=True, virt="VMware")
+    assert gpu.problems(rep, NOW) == []
+    v = gpu.view(rep, NOW)
+    assert [(x["code"], x["held"], x["hw"], x["lv"], x["fixed"]) for x in v["xid"]] == [(62, False, False, 0, True)]
+    assert [g["blind"] for g in v["gpus"]] == [False, False] and gpu.summary(rep, NOW)["blind"] == 0
+    assert gpu.heat(_rep(_block(**{**b, "gpus": [{**b["gpus"][0], "temp": 95}]})), NOW)[0] == 2
+    # показания стоят с самого Xid: перезагрузили один nvidia_drm при работающей модели, карту не отпускали
+    b["gpus"][0]["frz"] = 7200
+    assert [(p[0], p[2]) for p in gpu.problems(_rep(b), NOW)] == [(1, f"gpu:xid:41:00:62:{TS - 7200}")]
+    # принял заново соседнюю карту или до ошибки - не эта история
+    b["gpus"][0]["frz"] = 0
+    for rst in ({"bus": "0000:81:00", "ts": TS - 600}, {"bus": "0000:41:00", "ts": TS - 9000}):
+        b["nv_rst"] = [rst]
+        assert [p[2] for p in gpu.problems(_rep(b), NOW)] == [f"gpu:xid:41:00:62:{TS - 7200}"]
+
+
+def test_driver_reload_is_not_driver_down():
+    """Пока модуль nvidia перезагружают, nvidia-smi минуту не отвечает, а в журнале при выгрузке
+    таймаут RISC-V и assert osinit.c: красного "драйвер не отвечает" нет, Xid 62 держится как был
+    (висящий алерт не уходит ложным отбоем). Не отвечает дольше 5 минут - тогда авария"""
+    x62 = {"ts": TS - 7200, "bus": "0000:41:00", "code": 62, "text": ""}
+    b = _block(ok=False, gpus=[], procs=[], err="Unable to determine the device handle for GPU0000:41:00.0: Unknown Error",
+               nvrm="NVRM: nvAssertFailedNoLog: Assertion failed: rmStatus == NV_OK @ osinit.c:2501",
+               err_since=TS - 90, xid=[x62], nv_load=TS - 30 * 86400)
+    rep = _rep(b)
+    probs = gpu.problems(rep, NOW)
+    assert [(p[0], p[2]) for p in probs] == [(1, f"gpu:xid:41:00:62:{TS - 7200}")]
+    assert gpu.summary(rep, NOW)["settling"] is True and gpu.view(rep, NOW)["settling"] is True
+    lvl, ctx = collector._server_conditions(_srv(rep=rep), NOW)["gpu"]
+    assert lvl == 1 and ctx["sig"] == [f"gpu:xid:41:00:62:{TS - 7200}"]
+    assert not any(r["kind"] == "gpu" and r["level"] >= 2 for r in collector.server_problems(_srv(rep=rep), NOW))
+    # не отвечает 6 минут - драйвер правда не отвечает
+    b["err_since"] = TS - 30 - 360
+    [(lvl, txt, key, _s)] = gpu.problems(_rep(b), NOW)
+    assert lvl == 2 and key == "gpu:drv" and "osinit.c" in txt
+    # драйвер не поднял карту - на ВМ хост гипервизора, на железе сервер
+    b["nvrm"] = "NVRM: GPU 0000:41:00.0: RmInitAdapter failed! (0x22:0x56:1017)"
+    assert gpu.problems(_rep(b, is_vm=True), NOW)[0][1].endswith("нужен сброс GPU перезагрузкой хоста гипервизора")
+    assert gpu.problems(_rep(b), NOW)[0][1].endswith("нужна перезагрузка сервера")
 
 
 def test_memory_waiting_for_reset_and_stale_block():
@@ -215,7 +270,7 @@ def test_heat_levels():
 def test_summary_and_view():
     s = gpu.summary(_rep(), NOW)
     assert s == {"n": 2, "models": ["A100 80GB PCIe"], "util": 50, "mem": 75.8, "memt": 160.0, "helper": True, "ok": True,
-                 "smi": True, "frozen": 0, "blind": 0}
+                 "smi": True, "frozen": 0, "blind": 0, "settling": False}
     # без helper'а - по шине из отчета агента
     s = gpu.summary({"gpu_pci": [{"bus": "0000:41:00.0", "dev": "20b5", "drv": "nvidia"}]}, NOW)
     assert s["n"] == 1 and not s["helper"] and s["util"] is None

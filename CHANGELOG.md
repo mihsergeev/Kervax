@@ -4,6 +4,26 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.65] - 2026-10-29
+
+### Changed
+- GPU: совет при Xid 62 - сначала остановить процессы на карте и перезагрузить модуль nvidia
+  (rmmod/modprobe), без nvidia-smi -r и без перезагрузки ВМ. Драйвер отпускает карту и поднимает ее
+  заново, микроконтроллер оживает, простой - минуты. Перезагрузка хоста гипервизора (на железе - сервера)
+  только если после этого RmInitAdapter failed или карта не видна. То же в плашке "ждет сброса GPU" и в
+  Telegram.
+- GPU: "Драйвер NVIDIA не отвечает" - только если nvidia-smi молчит дольше 5 минут. Пока модуль nvidia
+  перезагружают, в журнале таймаут RISC-V и assert osinit.c, это шум выгрузки, а не авария (helper
+  gpu-setup 0.5).
+- GPU: после перезагрузки модулей nvidia Xid до нее закрыты, если драйвер заново принял карту и ее
+  показания ожили (модуль nvidia при этом может не выгружаться). Плашка "ждет сброса GPU" уходит, у
+  ошибки в карточке пометка "карта сброшена" (helper gpu-setup 0.5).
+- GPU: драйвер не поднял карту (RmInitAdapter failed) - в тексте сказано, что нужна перезагрузка хоста
+  гипервизора на ВМ или сервера на железе.
+
+### Upgrading
+- Helper gpu-setup 0.5 (сброс перезагрузкой модуля и выдержка "драйвер не отвечает"), ставится плейбуком kervax_helpers.yml на kervax_outdated.
+
 ## [1.8.64] - 2026-10-29
 
 ### Changed

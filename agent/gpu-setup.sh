@@ -12,9 +12,15 @@
 # JSON on Debian and Ubuntu, whose awk is mawk: there gsub(/\\/, "\\\\") puts back one backslash,
 # not two, and the agent drops a block that is not valid JSON - silently, the whole of it. Backslashes
 # are doubled by splitting the string now, the same in every awk.
+#
+# 0.5: since when nvidia-smi fails (err_since): while the nvidia module is reloaded it fails for a
+# minute, the panel waits before it says the driver does not answer. And when the driver took a GPU up
+# again without loading the nvidia module (nv_rst, from the "[nvidia-drm] [GPU ID 0x...] Loading driver"
+# line): with no processes on the GPU a reload of the modules lets the driver drop the card and start it
+# anew, and that clears an Xid 62 without a reboot.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
 # nvidia-smi is there, or an NVIDIA display card (class 0x03xx) not bound to nouveau: a card on nouveau
 # drives a monitor (hosters put them into Ryzen servers without integrated graphics), there is no CUDA on
 # it, so the helper has nothing to read. A card with no driver at all still gets the helper. No $ in the
@@ -80,6 +86,14 @@ if command -v nvidia-smi >/dev/null 2>&1; then
     err=$(cat "$STATE/q" "$STATE/q.err" 2>/dev/null | grep -v '^[[:space:]]*$' | head -1 | cut -c1-300)
     [ -n "$err" ] || err="nvidia-smi exited with an error"
   fi
+fi
+# since when nvidia-smi fails, run after run: while the module is reloaded it fails for a minute
+ERRSINCE=0
+if $smi && ! $ok; then
+  ERRSINCE=$(cat "$STATE/fail" 2>/dev/null || true)
+  case "$ERRSINCE" in ''|*[!0-9]*) ERRSINCE=$now; echo "$now" > "$STATE/fail" ;; esac
+else
+  rm -f "$STATE/fail"
 fi
 
 if $ok; then
@@ -213,13 +227,17 @@ fi
 # most); from earlier in this boot the last one of every GPU and code after the driver was loaded:
 # an error after which the GPU waits for a reset (Xid 62, 79, 119...) holds until a reboot or a
 # reload of the driver, however old it is. They are kept in $STATE/xidb too, should the journal
-# rotate. nv_load - when the driver was loaded, errors before it are gone with the old driver --
+# rotate. nv_load - when the driver was loaded, errors before it are gone with the old driver; nv_rst -
+# when nvidia-drm took a GPU again after that (GPU ID is domain << 16 | bus << 8 | device), the panel
+# counts it as a reset of that GPU once its readings move --
 XID=""
 NVRM=""
 NVLOAD=0
+NVRST=""
 if command -v journalctl >/dev/null 2>&1; then
   boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
-  journalctl -k -b -q -o short-unix --no-pager 2>/dev/null | grep -E 'NVRM: (Xid|loading NVIDIA)' > "$STATE/xid" || true
+  journalctl -k -b -q -o short-unix --no-pager 2>/dev/null \
+    | grep -E 'NVRM: (Xid|loading NVIDIA)|\[nvidia-drm\] \[GPU ID 0x[0-9A-Fa-f]+\] Loading driver' > "$STATE/xid" || true
   touch "$STATE/xidb"
   XID=$(awk -v now="$now" -v boot="$boot" -v old="$STATE/xidb" -v nb="$STATE/xidb.new" '
     function str(s,   _jp, _jn, _ji) { gsub(/[\001-\037]/, "", s); _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return "\"" s "\"" }
@@ -228,17 +246,23 @@ if command -v journalctl >/dev/null 2>&1; then
       if (!(k in last) || t >= last[k]) { last[k] = t; txt[k] = text }
     }
     function js(t, bus, code, text) { return "{\"ts\":" t ",\"bus\":" str(bus) ",\"code\":" code ",\"text\":" str(text) "}" }
+    function hex(s,   i, n) { s = tolower(s); n = 0; for (i = 1; i <= length(s); i++) n = n * 16 + index("0123456789abcdef", substr(s, i, 1)) - 1; return n }
+    function busof(s,   n) { n = hex(s); return sprintf("%04x:%02x:%02x", int(n / 65536) % 65536, int(n / 256) % 256, n % 256) }
     BEGIN {
       load = 0
       if ((getline l < old) > 0 && split(l, h, " ") >= 3 && h[1] == "boot" && h[2] == boot) {
         load = h[3] + 0
         while ((getline l < old) > 0) {
+          if (split(l, a, " ") == 3 && a[1] == "rst") { rst[a[2]] = a[3] + 0; continue }
           if (split(l, a, "|") >= 4) put(a[1] + 0, a[2], a[3], substr(l, length(a[1] a[2] a[3]) + 4))
         }
       }
     }
     {
       t = int($1)
+      if (match($0, /\[GPU ID 0x[0-9A-Fa-f]+\] Loading driver/)) {
+        b = busof(substr($0, RSTART + 10, RLENGTH - 26)); if (t > rst[b]) rst[b] = t; next
+      }
       if (index($0, "NVRM: loading NVIDIA")) { if (t > load) load = t; next }
       m = substr($0, index($0, "NVRM: Xid ") + 10)
       bus = ""
@@ -252,6 +276,7 @@ if command -v journalctl >/dev/null 2>&1; then
     }
     END {
       print "boot " boot " " load > nb
+      for (b in rst) if (rst[b] > load) print "rst " b " " rst[b] > nb
       for (k in last) {
         if (last[k] < load) continue
         print last[k] "|" k "|" txt[k] > nb
@@ -263,15 +288,16 @@ if command -v journalctl >/dev/null 2>&1; then
   mv -f "$STATE/xidb.new" "$STATE/xidb" 2>/dev/null || true
   NVLOAD=$(awk 'NR == 1 { print $3 + 0 }' "$STATE/xidb")
   case "$NVLOAD" in ''|*[!0-9]*) NVLOAD=0 ;; esac
+  NVRST=$(awk '$1 == "rst" && $2 ~ /^[0-9a-f:]+$/ && $3 ~ /^[0-9]+$/ { printf "%s{\"bus\":\"%s\",\"ts\":%s}", (c++ ? "," : ""), $2, $3 }' "$STATE/xidb")
   # the driver does not answer: its last words in this boot (API mismatch, failed to initialize)
   if [ -n "$err" ]; then
     NVRM=$(journalctl -k -b -q -o cat --no-pager 2>/dev/null | grep -E 'NVRM:|nvidia:|nvidia-' | grep -vF 'NVRM: Xid' | tail -1 | cut -c1-300)
   fi
 fi
 
-printf '{"v":1,"ts":%s,"smi":%s,"ok":%s,"err":"%s","driver":"%s","cuda":"%s","kernel":"%s","mod":%s,"mod_built":%s,"nvrm":"%s","pci":[%s],"gpus":[%s],"procs":[%s],"xid":[%s],"nv_load":%s}\n' \
-  "$now" "$smi" "$ok" "$(esc "$err")" "$(esc "$driver")" "$(esc "$cuda")" "$(esc "$kernel")" "$mod" "$mod_built" \
-  "$(esc "$NVRM")" "$PCI" "$GPUS" "$PROCS" "$XID" "$NVLOAD" > "$TMP"
+printf '{"v":1,"ts":%s,"smi":%s,"ok":%s,"err":"%s","err_since":%s,"driver":"%s","cuda":"%s","kernel":"%s","mod":%s,"mod_built":%s,"nvrm":"%s","pci":[%s],"gpus":[%s],"procs":[%s],"xid":[%s],"nv_load":%s,"nv_rst":[%s]}\n' \
+  "$now" "$smi" "$ok" "$(esc "$err")" "$ERRSINCE" "$(esc "$driver")" "$(esc "$cuda")" "$(esc "$kernel")" "$mod" "$mod_built" \
+  "$(esc "$NVRM")" "$PCI" "$GPUS" "$PROCS" "$XID" "$NVLOAD" "$NVRST" > "$TMP"
 mv -f "$TMP" "$OUT"
 chmod 0644 "$OUT"
 HELPER_EOF

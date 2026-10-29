@@ -3114,10 +3114,13 @@ export type GpuView = {
   cuda?: string
   kernel?: string
   vm?: boolean // виртуалка: карту из гостя не сбрасывать
+  settling?: boolean // nvidia-smi молчит первые минуты: похоже, перезагружают модуль nvidia
   pci: { bus: string; drv: string; lost?: boolean }[]
   gpus?: GpuCardRow[]
   procs?: { gpu: number | null; pid: number | null; name: string; kind: string; owner: string; mem: number | null }[]
-  xid?: { ts: number; bus: string; code: number; text: string; gpu: number | null; hw: boolean; lv?: number; held?: boolean; old?: boolean; desc: string }[]
+  xid?: { ts: number; bus: string; code: number; text: string; gpu: number | null; hw: boolean; lv?: number; held?: boolean; old?: boolean; desc: string
+    fixed?: boolean // после ошибки карту сбросили: драйвер перезагрузили или он принял карту заново
+  }[]
 }
 // плашка списка серверов (gpu.summary): память в ГиБ
 export type GpuSum = {
@@ -3125,6 +3128,7 @@ export type GpuSum = {
   frozen?: number // сколько карт с застывшими показаниями
   blind?: number // сколько карт с Xid 62 (застыли по нему)
   smi?: boolean // false - nvidia-smi нет, драйвер NVIDIA не ставили
+  settling?: boolean // nvidia-smi молчит первые минуты: модуль перезагружают, это не "нет связи"
 }
 // LLM-сервис (gpu.llm_view): за последние 5 минут, задержки [p50, p95, p99] в секундах
 // VPN (app/vpn.py). role: server - раздает клиентам, mesh - сам в меше или туннеле; guess - туннель wg без

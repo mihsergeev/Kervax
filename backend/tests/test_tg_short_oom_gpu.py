@@ -210,11 +210,21 @@ def test_gpu_problems():
 
 
 def test_gpu_xid62_and_vm():
-    """Xid 62 - слепой мониторинг; на ВМ совет про сброс - только с хоста, из гостя не сбрасывать"""
+    """Xid 62 - слепой мониторинг, лечится перезагрузкой модуля nvidia (на ВМ - без перезагрузки ВМ);
+    остальные советы про сброс на ВМ - только с хоста, из гостя не сбрасывать"""
     rep = _gpu_rep([{"i": 0, "bus": "00000000:41:00.0"}], xid=[{"code": 62, "ts": TS - 60, "bus": "PCI:0000:41:00"}])
-    assert gpu.tg_short(gpu.problems(rep, NOW)) == ("Мониторинг GPU 0 слеп", ["Xid 62, телеметрия застыла, нужен плановый сброс"])
+    assert gpu.tg_short(gpu.problems(rep, NOW)) == (
+        "Мониторинг GPU 0 слеп", ["Xid 62, телеметрия застыла, нужна перезагрузка модуля nvidia"])
     assert gpu.tg_short(gpu.problems({**rep, "is_vm": True, "virt": "VMware"}, NOW)) == (
-        "Мониторинг GPU 0 слеп", ["Xid 62, телеметрия застыла, сброс только перезагрузкой хоста, из гостя не сбрасывать"])
+        "Мониторинг GPU 0 слеп", ["Xid 62, телеметрия застыла, нужна перезагрузка модуля nvidia, ВМ не перезагружать"])
+    # драйвер не поднял карту после перезагрузки модуля - тогда хост
+    bad = {"clock_unix": TS, "is_vm": True, "extras": {"gpu": {
+        "v": 1, "ts": TS - 30, "smi": True, "ok": False, "err": "No devices were found",
+        "nvrm": "NVRM: GPU 0000:41:00.0: RmInitAdapter failed! (0x22:0x56:1017)"}}}
+    assert gpu.tg_short(gpu.problems(bad, NOW)) == (
+        "Драйвер NVIDIA не поднял карту", ["RmInitAdapter failed, нужна перезагрузка хоста гипервизора"])
+    bad["is_vm"] = False
+    assert gpu.tg_short(gpu.problems(bad, NOW))[1] == ["RmInitAdapter failed, нужна перезагрузка сервера"]
     rep = _gpu_rep([{"i": 1, "bus": "00000000:42:00.0", "remap": True}], xid=[{"code": 48, "ts": TS - 90, "bus": "PCI:0000:42:00"}])
     vm = {**rep, "virt": "KVM"}
     assert gpu.tg_short(gpu.problems(vm, NOW)[:1]) == (
