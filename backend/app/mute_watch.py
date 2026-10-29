@@ -51,7 +51,7 @@ PROBLEM_KINDS = frozenset({
     "backup_mirror", "backup_restore", "cf_realip", "clock", "conntrack", "cpu", "cpu_spin", "cron_stuck", "db_conn", "db_health",
     "disk", "disk_forecast", "disk_health", "disk_slow", "disktemp", "dns", "docker_restarts", "exposed",
     "flux_down", "flux_stale", "fpm", "gitlab", "gpu", "gpu_heat", "inode", "kube_cron", "kube_expiry",
-    "kube_job", "kube_node", "kube_pod", "kube_restarts", "link", "listen_gone", "llm", "log_errors", "mem",
+    "gre_down", "kube_job", "kube_node", "kube_pod", "kube_restarts", "link", "listen_gone", "llm", "log_errors", "mem",
     "mem_leak", "mem_limit", "net_health", "oom", "port_new", "pressure", "queue", "queue_failed", "queue_stuck",
     "ssh_risk", "temp", "throttle", "traffic", "unit_loop", "units", "web_5xx", "web_cert", "web_config",
     "vpn_heavy", "vpn_torrent", "webfiles", "workers",

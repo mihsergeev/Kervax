@@ -97,6 +97,9 @@ async def install_via(server_id: int, body: InstallViaIn, user: CurrentUser, ses
         except ValueError as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     if body.mode == "gre":
+        if not gre_was:
+            # туннель после включения еще не работал: алерт gre_down ждет первого отчета через него
+            server.gre_agent_at = None
         server.gre_enabled = True
     changed = via != server.relay_via_id
     server.relay_via_id = via

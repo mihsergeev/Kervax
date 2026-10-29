@@ -1994,6 +1994,7 @@ const EN: Record<string, string> = {
   'Не алертить о пуле PHP-FPM: на день, неделю или постоянно': 'No alerts on this PHP-FPM pool: for a day, a week or for good',
   'Похоже, клиент VPN качает торрент': 'A VPN client seems to be torrenting',
   'Клиент VPN качает очень много': 'A VPN client downloads a lot',
+  'GRE до панели не работает': 'GRE to the panel is down',
   'торрент через VPN': 'torrent over VPN',
   'много трафика через VPN': 'heavy traffic over VPN',
   'Клиенты VPN: торрент и трафик': 'VPN clients: torrent and traffic',

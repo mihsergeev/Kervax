@@ -47,6 +47,8 @@ INFRA = frozenset({
     "disk", "inode", "disk_forecast", "disk_health", "disk_slow", "disktemp",
     # сеть
     "net_health", "link", "traffic",
+    # GRE до панели: лежит туннель, отчеты сервера могут теряться
+    "gre_down",
     # клиенты VPN: торрент и много трафика (тариф и жалобы правообладателей идут на сервер)
     "vpn_torrent", "vpn_heavy",
     # безопасность
