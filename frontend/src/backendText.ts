@@ -8,6 +8,13 @@ type Rule = [RegExp, string]
 
 // Длинные фразы раньше коротких: "открыто в интернет" входит в "служебное открыто в интернет"
 const PHRASES: Rule[] = [
+  // как агент проверил сайт изнутри (app/checks.via_text)
+  [/контейнер (\S+) в обход (caddy|nginx)/g, 'container $1 past $2'],
+  [/адрес (\S+) в обход (caddy|nginx)/g, 'address $1 past $2'],
+  [/сервис (\S+) в обход шлюза/g, 'service $1 past the gateway'],
+  [/через адрес (\S+)/g, 'via address $1'],
+  [/прокси (\S+) не принимает соединения: /g, 'proxy $1 does not accept connections: '],
+  [/добавьте в него адрес сервера (\S+)/g, 'add the server address $1 to it'],
   // белые списки обходятся подменой CF-Connecting-IP (app/cf_realip.py)
   [/белые списки обходятся подменой (\S+): /g, 'allow lists are bypassed with a forged $1: '],
   [/IP клиента можно подделать заголовком (\S+): /g, 'the client IP can be forged with $1: '],
@@ -324,6 +331,20 @@ const PHRASES: Rule[] = [
   [/\(сессия ([^)]+)\)/g, '(session $1)'],
   [/\(контейнер ([^)]+)\)/g, '(container $1)'],
   [/\(под ([^)]+)\)/g, '(pod $1)'],
+  // клиенты VPN: похоже на торрент, качает очень много (app/vpn_flow.py)
+  [/Похоже, качает торрент: /g, 'Looks like torrent: '],
+  [/Клиент VPN качает очень много: /g, 'A VPN client downloads a lot: '],
+  [/\(([^,()]+), с ([^()]+)\) в (\S+) - /g, '($1, from $2) in $3 - '],
+  [/ \(с ([^()]+)\) в (\S+) - /g, ' (from $1) in $2 - '],
+  [/ в (\S+) - (\d+) адресов на высоких портах/g, ' in $1 - $2 addresses on high ports'],
+  [/(\d+) адресов на высоких портах/g, '$1 addresses on high ports'],
+  [/, (\d+(?:\.\d)?(?: тыс\.| млн)?) потоков/g, ', $1 flows'],
+  [/(\d) тыс\./g, '$1k'],
+  [/(\d) млн/g, '$1M'],
+  [/, (\d+) на портах BitTorrent/g, ', $1 on BitTorrent ports'],
+  [/, похоже на торрент/g, ', looks like torrent'],
+  [/(\d(?:\.\d)?)(гб|мб|тб|кб) за /g, '$1$2 in '],
+  [/(\d)тб(?![а-яё])/g, '$1 TB'],
   [/(\d)гб(?![а-яё])/g, '$1 GB'],
   [/(\d)мб(?![а-яё])/g, '$1 MB'],
   [/(\d)кб(?![а-яё])/g, '$1 KB'],

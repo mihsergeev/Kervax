@@ -54,7 +54,7 @@ PROBLEM_KINDS = frozenset({
     "kube_job", "kube_node", "kube_pod", "kube_restarts", "link", "listen_gone", "llm", "log_errors", "mem",
     "mem_leak", "mem_limit", "net_health", "oom", "port_new", "pressure", "queue", "queue_failed", "queue_stuck",
     "ssh_risk", "temp", "throttle", "traffic", "unit_loop", "units", "web_5xx", "web_cert", "web_config",
-    "webfiles", "workers",
+    "vpn_heavy", "vpn_torrent", "webfiles", "workers",
 })
 # Поштучные ключи, которые "Что сломано" отдает своим mute: без поштучных заглушек (shadow) вещь видна там
 # под своим ключом, нет ее там - тихо

@@ -67,6 +67,8 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'cron_stuck', label: 'Крон наслаивается или висит' },
   { k: 'log_errors', label: 'Всплеск ошибок в логах' },
   { k: 'fpm', label: 'PHP-FPM не справляется' },
+  { k: 'vpn_torrent', label: 'Похоже, клиент VPN качает торрент' },
+  { k: 'vpn_heavy', label: 'Клиент VPN качает очень много' },
   { k: 'gitlab', label: 'GitLab устарел' },
   { k: 'autoban', label: 'Автобан сканеров не в порядке' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },
@@ -120,6 +122,9 @@ export const CRON_MUTE = 'cron:'
 export const LOGERR_MUTE = 'logerr:'
 // Один пул PHP-FPM: fpm:<где>|<пул>
 export const FPM_MUTE = 'fpm:'
+// Один клиент VPN: torrent:<контейнер или host>|<внутренний адрес>, vpnheavy:<...>|<адрес или имя>
+export const TORRENT_MUTE = 'torrent:'
+export const VPNHEAVY_MUTE = 'vpnheavy:'
 // Один диск сервера по серийнику: drive:<серийник> (app/drive_mute.py) - этот диск с тем, что у него есть
 export const DRIVE_MUTE = 'drive:'
 // Один GitLab: gitlab:<хост из external_url или имя контейнера>
@@ -241,6 +246,11 @@ export function muteKindLabel(k: string, t: TFn): string | null {
     return `${t('пул PHP-FPM')}: ${p ?? ''} (${w})`
   }
   if (k.startsWith(GITLAB_MUTE)) return `GitLab: ${k.slice(GITLAB_MUTE.length)}`
+  if (k.startsWith(TORRENT_MUTE) || k.startsWith(VPNHEAVY_MUTE)) {
+    const tor = k.startsWith(TORRENT_MUTE)
+    const [w, c] = k.slice((tor ? TORRENT_MUTE : VPNHEAVY_MUTE).length).split('|')
+    return `${tor ? t('торрент через VPN') : t('много трафика через VPN')}: ${c ?? ''} (${w})`
+  }
   if (k.startsWith(AUTOBAN_MUTE)) {
     const key = k.slice(AUTOBAN_MUTE.length)
     if (key.startsWith('self:')) return `${t('автобан: свой адрес')} ${key.slice(5)}`

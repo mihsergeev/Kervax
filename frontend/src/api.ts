@@ -760,6 +760,8 @@ export type DomainProbe = {
   local_kind: string
   local_code: number
   local_server: string
+  // как агент дошел до сайта изнутри: "через адрес ...", "контейнер app-1:80 в обход caddy"; пусто - localhost
+  local_via?: string
   ext_hint: PathHint | null
   local_hint: PathHint | null
   local_hint_pending: boolean // агент ещё перебирает пути изнутри
@@ -2462,6 +2464,8 @@ export type Server = {
   gpu?: GpuView | null
   gpu_sum?: GpuSum | null
   llm?: LlmSvc[] | null
+  // VPN и прокси на сервере, клиенты от helper'а vpn-setup (app/vpn.py): бейдж и раздел "VPN"
+  vpn?: VpnView | null
   // очереди, которые растут и не разбираются: {ключ очереди: {age, d0, muted}} (queue_watch.view)
   // why: nocons - нет потребителей, slow - не отдает ни одного, grow - растет, stall - стоит
   queue_watch?: Record<string, { age: number; d0: number; muted: boolean; stall?: boolean; wait?: number; why?: string }> | null
@@ -2482,6 +2486,8 @@ export type Server = {
   log_errors?: LogErrInfo | null
   // пулы PHP-FPM (helper fpm-setup): воркеры, очередь, упоры в pm.max_children, медленные и убитые запросы
   fpm?: FpmInfo | null
+  // клиенты VPN (helper vpnflow-setup и список клиентов): похоже ли на торрент, сколько прокачал за 3 часа
+  vpn_flow?: VpnFlowInfo | null
   // GitLab (helper gitlab-setup): версия и путь обновления, бэкап, фоновые миграции, автообновление
   gitlab?: GitlabInfo | null
   // заглушенные очереди: насовсем или до срока
@@ -2772,6 +2778,42 @@ export type LogErrSource = {
   // всплески за сутки (log_errors.update), свежие первыми: peak - строк с ошибками за час, base - обычно
   spikes?: { from: string; to: string; peak: number; base: number | null; lvl: number }[]
   mute?: { perm?: boolean; until?: string }
+}
+// Клиент VPN (vpn_flow.view): key = "<контейнер или host>|<внутренний адрес или имя>", ep - адрес
+// подключения. По conntrack его netns (нет у Xray): flows - потоков, udp - из них UDP, peers - разных
+// удаленных адресов, hp - разных адресов на высоких портах мимо обычных служб, bt - потоков на порты
+// BitTorrent, h - hp по минутам за 15 минут, hot - сколько из них от torrent_hp. vol/span - сколько
+// прокачал (rx+tx) и за сколько секунд это видно (до 3 часов). torrent/heavy - алертит сейчас,
+// mute_t/mute_h - заглушен torrent:<key> / vpnheavy:<key>
+export type VpnFlowClient = {
+  key: string
+  src: string
+  ip: string
+  name: string
+  ep: string
+  flows?: number
+  udp?: number
+  peers?: number
+  hp?: number
+  bt?: number
+  hot?: number
+  h?: number[]
+  vol?: number
+  span?: number
+  torrent?: boolean
+  heavy?: boolean
+  mute_t?: { perm?: boolean; until?: string }
+  mute_h?: { perm?: boolean; until?: string }
+}
+export type VpnFlowInfo = {
+  ts: number | null
+  helper: boolean
+  clients: VpnFlowClient[]
+  skipped: { where: string; why: string; count: number }[]
+  torrent_hp: number
+  torrent_min: number
+  heavy_bytes: number
+  heavy_window: number
 }
 // Пул PHP-FPM (fpm_pools.view): конфиг (listen, pm, max = pm.max_children, slowlog/terminate в
 // секундах), сейчас - воркеров, соединений (обслуживаемые и ждущие), в очереди; sat - минут за час,
@@ -3082,6 +3124,20 @@ export type GpuSum = {
   smi?: boolean // false - nvidia-smi нет, драйвер NVIDIA не ставили
 }
 // LLM-сервис (gpu.llm_view): за последние 5 минут, задержки [p50, p95, p99] в секундах
+// VPN (app/vpn.py). role: server - раздает клиентам, mesh - сам в меше или туннеле; guess - туннель wg без
+// helper'а, роль неизвестна. n - сколько клиентов заведено (null - не знаем), on - сколько на связи.
+// rx - принял сервер от клиента, tx - отдал клиенту, hs - последний handshake или подключение (unix)
+export type VpnClient = {
+  name: string; ip: string; hs: number | null; rx: number; tx: number; ep: string; on: boolean; src: string
+}
+export type VpnSvc = {
+  k: string; label: string; short: string; role: 'server' | 'mesh'; src: string[]; ports: string[]
+  protos: string[]; n: number | null; on: number; clients: VpnClient[]; helper?: boolean; guess?: boolean
+  exit?: boolean; routes?: string[]
+  parts: { src: string; n: number | null; on: number; err: string; ports: string[] }[]
+}
+export type VpnView = { svc: VpnSvc[]; helper: boolean; ts: number | null; stale: boolean }
+
 export type LlmSvc = {
   key: string; label: string; engine: string; engine_name: string; kind: string; name: string; where: string
   model?: string | null; port: number; up?: number | null; ok: boolean; err: string

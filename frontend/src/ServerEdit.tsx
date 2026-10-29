@@ -44,7 +44,7 @@ const AREAS: { id: string; label: string; kinds: string[] }[] = [
   { id: 'srv', label: 'Сервер', kinds: ['offline', 'reboot', 'listen_gone'] },
   { id: 'load', label: 'Нагрузка и память', kinds: ['cpu', 'mem', 'temp', 'throttle', 'pressure', 'cpu_spin', 'oom', 'mem_leak', 'mem_limit'] },
   { id: 'disk', label: 'Диск', kinds: ['disk', 'disk_forecast', 'inode', 'disk_health', 'disk_slow', 'disktemp'] },
-  { id: 'net', label: 'Сеть', kinds: ['conntrack', 'net_health', 'link', 'traffic', 'port_new', 'exposed', 'cf_realip'] },
+  { id: 'net', label: 'Сеть', kinds: ['conntrack', 'net_health', 'link', 'traffic', 'vpn_torrent', 'vpn_heavy', 'port_new', 'exposed', 'cf_realip'] },
   { id: 'svc', label: 'Службы и очереди', kinds: ['units', 'unit_loop', 'workers', 'cron_stuck', 'queue_stuck', 'queue_failed', 'log_errors', 'fpm'] },
   { id: 'k8s', label: 'Docker и Kubernetes', kinds: ['docker_restarts', 'kube_restarts', 'kube_pod'] },
   { id: 'web', label: 'Веб', kinds: ['web_5xx', 'web_config', 'web_cert', 'gitlab'] },
@@ -58,7 +58,7 @@ const AREA_OF = new Map(AREAS.flatMap((a) => a.kinds.map((k) => [k, a.id] as con
 // кнопкой в Telegram. В старой форме их не было видно вовсе. Область - по началу ключа
 const OTHER_AREA: [string, string][] = [
   ['leak:', 'load'], ['memlim:', 'load'], ['oom:', 'load'],
-  ['exposed:', 'net'], ['cfip:', 'net'], ['dns', 'net'],
+  ['exposed:', 'net'], ['cfip:', 'net'], ['dns', 'net'], ['torrent:', 'net'], ['vpnheavy:', 'net'],
   ['unit:', 'svc'], ['noboot', 'svc'], ['qstuck:', 'svc'], ['qfail:', 'svc'], ['worker:', 'svc'],
   ['cron:', 'svc'], ['logerr:', 'svc'], ['fpm:', 'svc'], ['queue', 'svc'],
   ['restarts:', 'k8s'], ['docker_', 'k8s'], ['kube_', 'k8s'], ['flux_', 'k8s'], ['proxyold:', 'k8s'],

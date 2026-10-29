@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.58"
+const version = "2.59"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -1466,7 +1466,9 @@ func localProbeTargetOK(p siteProbe) error {
 // localDialer — транспорт, который ВСЕГДА идёт на localhost, каким бы ни был хост в
 // URL. Порт и схема берутся из URL, имя — уходит в Host и SNI, так что сервер отдаёт
 // тот же виртуальный хост и тот же сертификат, что и настоящему посетителю.
-func localDialer(timeout time.Duration, insecure bool) *http.Transport {
+// own - свой адрес сервера вместо localhost (см. ownFrontIP): его выбирает сам агент
+// из адресов своих интерфейсов, не панель.
+func localDialer(timeout time.Duration, insecure bool, own string) *http.Transport {
 	d := &net.Dialer{Timeout: timeout}
 	return &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -1476,6 +1478,9 @@ func localDialer(timeout time.Duration, insecure bool) *http.Transport {
 			}
 			if !localProbePorts[port] {
 				return nil, errLocalProbePort
+			}
+			if own != "" {
+				return d.DialContext(ctx, network, net.JoinHostPort(own, port))
 			}
 			conn, err := d.DialContext(ctx, network, net.JoinHostPort("127.0.0.1", port))
 			if err == nil {
@@ -1496,22 +1501,49 @@ func localDialer(timeout time.Duration, insecure bool) *http.Transport {
 	}
 }
 
-// probeSite — проверка сайта изнутри сервера. Сначала как всегда, через localhost. Если там
-// отказ, обрыв или 403 (сайт в Kubernetes: шлюз на localhost не слушает, а его белый список
-// не пускает саму ноду), а домен маршрутизирует кластер — проверяем сервис этого маршрута
-// напрямую, в обход шлюза.
+// probeSite - проверка сайта изнутри сервера. Сначала как всегда, через localhost. Порт там
+// закрыт - тот же порт на своих адресах сервера (прокси бывает опубликован только на одном из
+// них). Если и так отказ, обрыв или 403 (сайт в Kubernetes: шлюз на localhost не слушает, а его
+// белый список не пускает саму ноду), а домен маршрутизирует кластер - проверяем сервис этого
+// маршрута напрямую, в обход шлюза. Обрыв или 403 от caddy или nginx (их белый список не пускает
+// и сам сервер) - бэкенд, куда прокси отправляет этот домен, тоже напрямую.
 func probeSite(p siteProbe) siteProbeResult {
 	if err := localProbeTargetOK(p); err != nil {
 		return siteProbeResult{ID: p.ID, KwUpFound: true, Error: err.Error()}
 	}
 	res := probeSiteLocal(p)
+	front := "127.0.0.1"
+	if probeRefused(res.Error) {
+		if ip := ownFrontIP(p); ip != "" {
+			res = probeSiteAt(p, ip)
+			res.Via = "addr:" + ip
+			front = ip
+		}
+	}
 	if res.Error == "" && res.Code != 403 {
 		return res
 	}
 	if cr, ok := probeSiteCluster(p); ok {
 		return cr
 	}
+	if res.Code == 403 || probeDropped(res.Error) {
+		if pr, ok := probeSiteProxy(p, front); ok {
+			return pr
+		}
+	}
 	return res
+}
+
+// probeRefused - порт никто не слушает: на этом адресе веб-сервера нет
+func probeRefused(err string) bool {
+	return strings.Contains(err, "connection refused")
+}
+
+// probeDropped - соединение приняли и оборвали: так caddy (abort) и nginx (444) не пускают
+// адрес не из белого списка
+func probeDropped(err string) bool {
+	return strings.HasSuffix(err, "EOF") || strings.Contains(err, "reset by peer") ||
+		strings.Contains(err, "forcibly closed")
 }
 
 func probeTimeout(p siteProbe) time.Duration {
@@ -1566,6 +1598,11 @@ func probeKeywords(p siteProbe, resp *http.Response, res *siteProbeResult) {
 }
 
 func probeSiteLocal(p siteProbe) siteProbeResult {
+	return probeSiteAt(p, "")
+}
+
+// probeSiteAt - проверка через localhost (own = "") или через свой адрес сервера
+func probeSiteAt(p siteProbe, own string) siteProbeResult {
 	res := siteProbeResult{ID: p.ID, KwUpFound: true}
 	timeout := probeTimeout(p)
 	req, err := probeRequest(p, p.URL)
@@ -1575,7 +1612,7 @@ func probeSiteLocal(p siteProbe) siteProbeResult {
 	}
 	client := &http.Client{
 		Timeout:   timeout,
-		Transport: localDialer(timeout, p.IgnoreTLS),
+		Transport: localDialer(timeout, p.IgnoreTLS, own),
 		// Редирект наружу пошёл бы уже мимо localhost и упёрся бы в тот самый белый
 		// список: считаем ответом сам редирект, как это делает панель.
 		CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -1941,6 +1978,878 @@ func probeSiteCluster(p siteProbe) (siteProbeResult, bool) {
 		}
 		conn.Close()
 	}
+	return res, true
+}
+
+// ---- проверка изнутри через свои адреса сервера ----
+// Веб-сервер не всегда слушает localhost: на сервере с несколькими адресами прокси бывает
+// опубликован только на одном (443 соседнего адреса держит VPN), и проверка изнутри видела
+// "порт закрыт". Тогда агент пробует тот же порт на адресах СВОИХ интерфейсов: это та же
+// машина, а не чужой хост, и направить агента куда-то еще панель по-прежнему не может.
+// Первыми идут адреса, в которые резолвится сам домен. Из ответивших по https берем тот, чей
+// сертификат выписан на этот домен: соседний адрес может держать совсем другая служба.
+
+// ownIPs - адреса интерфейсов сервера без лупбека и link-local (подменяется в тестах)
+var ownIPs = func() []net.IP {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var out []net.IP
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok || n.IP.IsLoopback() || n.IP.IsLinkLocalUnicast() || n.IP.IsUnspecified() || n.IP.IsMulticast() {
+			continue
+		}
+		out = append(out, n.IP)
+	}
+	return out
+}
+
+// hostIPs - адреса, в которые резолвится домен (подменяется в тестах)
+var hostIPs = func(host string) []net.IP {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil
+	}
+	out := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, ip.IP)
+	}
+	return out
+}
+
+// ownFrontIP - свой адрес сервера, на котором слушает порт сайта, "" - нет такого
+func ownFrontIP(p siteProbe) string {
+	u, err := url.Parse(p.URL)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	port := u.Port()
+	if port == "" {
+		port = map[string]string{"http": "80", "https": "443"}[u.Scheme]
+	}
+	if !localProbePorts[port] {
+		return ""
+	}
+	host := u.Hostname()
+	own := ownIPs()
+	var cands []net.IP
+	seen := map[string]bool{}
+	for _, ip := range hostIPs(host) {
+		for _, o := range own {
+			if ip.Equal(o) && !seen[o.String()] {
+				seen[o.String()] = true
+				cands = append(cands, o)
+			}
+		}
+	}
+	for _, o := range own {
+		if !seen[o.String()] {
+			seen[o.String()] = true
+			cands = append(cands, o)
+		}
+	}
+	if len(cands) > 32 {
+		cands = cands[:32] // k8s-ноды с сотней адресов: порт сайта слушают первые
+	}
+	wait := probeTimeout(p)
+	if wait > 3*time.Second {
+		wait = 3 * time.Second
+	}
+	fallback := ""
+	for _, ip := range cands {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip.String(), port), wait)
+		if err != nil {
+			continue
+		}
+		if u.Scheme != "https" {
+			conn.Close()
+			return ip.String()
+		}
+		tc := tls.Client(conn, &tls.Config{ServerName: host, InsecureSkipVerify: true}) //nolint:gosec // смотрим только имя в сертификате
+		_ = tc.SetDeadline(time.Now().Add(wait))
+		err = tc.Handshake()
+		match := err == nil && len(tc.ConnectionState().PeerCertificates) > 0 &&
+			tc.ConnectionState().PeerCertificates[0].VerifyHostname(host) == nil
+		tc.Close()
+		if match {
+			return ip.String()
+		}
+		if fallback == "" {
+			fallback = ip.String()
+		}
+	}
+	return fallback
+}
+
+// ---- проверка в обход caddy и nginx ----
+// Белый список прокси (caddy remote_ip + abort, nginx allow/deny) часто не пускает и сам
+// сервер: проверка изнутри получала обрыв или 403, и чинилось это только правкой вайтлиста
+// руками. Здесь агент, как с шлюзом кубера, находит бэкенд, куда прокси отправляет этот домен,
+// и спрашивает его напрямую с тем же Host. Сертификат снимает TLS-рукопожатием с самого прокси:
+// рукопожатие проходит, белый список отказывает уже на уровне HTTP.
+//
+// Куда идти, агент берет только из конфигурации прокси на своем сервере: метки
+// caddy-docker-proxy, живой конфиг caddy (admin API на localhost), Caddyfile, конфиг nginx.
+// Панель присылает только URL.
+type proxyRoute struct {
+	hosts  []string // имена сайта в нижнем регистре, "*.example.com" - маска
+	path   string   // префикс пути, "" - любой
+	proxy  string   // caddy, nginx
+	scheme string   // http или https до бэкенда
+	addr   string   // хост:порт бэкенда
+	name   string   // как назвать бэкенд в мониторе: "container app-1:80" или "addr 127.0.0.1:8080"
+}
+
+var (
+	proxyRoutesMu    sync.Mutex
+	proxyRoutesAt    time.Time
+	proxyRoutesCache []proxyRoute
+	// подменяется в тестах
+	proxyRoutesLoad = loadProxyRoutes
+)
+
+// proxyRoutes - таблица маршрутов прокси, раз в минуту: конфиг меняется выкаткой, а сайтов за
+// белым списком на сервере бывает десяток
+func proxyRoutes() []proxyRoute {
+	proxyRoutesMu.Lock()
+	defer proxyRoutesMu.Unlock()
+	if proxyRoutesCache == nil || time.Since(proxyRoutesAt) > time.Minute {
+		proxyRoutesCache = proxyRoutesLoad()
+		proxyRoutesAt = time.Now()
+	}
+	return proxyRoutesCache
+}
+
+// matchProxyRoute - маршрут для хоста и пути: точное имя главнее маски, дальше самый длинный
+// префикс пути, при равенстве - первый найденный (метки раньше Caddyfile и nginx)
+func matchProxyRoute(routes []proxyRoute, host, path string) (proxyRoute, bool) {
+	host = strings.ToLower(host)
+	best, bestScore := proxyRoute{}, -1
+	for _, r := range routes {
+		hs := -1
+		for _, h := range r.hosts {
+			switch {
+			case h == host:
+				hs = 2
+			case hs < 1 && strings.HasPrefix(h, "*.") && strings.HasSuffix(host, h[1:]) &&
+				!strings.Contains(strings.TrimSuffix(host, h[1:]), "."):
+				hs = 1
+			}
+		}
+		if hs < 0 || !strings.HasPrefix(path, r.path) {
+			continue
+		}
+		if score := hs<<16 + len(r.path); score > bestScore {
+			best, bestScore = r, score
+		}
+	}
+	return best, bestScore >= 0
+}
+
+// proxyCtr - контейнер из списка docker: метки, адреса в сетях и смонтированные файлы
+type proxyCtr struct {
+	name, image, project, service string
+	labels                        map[string]string
+	nets                          map[string]string // сеть -> IP
+	mounts                        map[string]string // путь в контейнере -> путь на хосте
+}
+
+func proxyContainers() []proxyCtr {
+	if !dockerPresent() {
+		return nil
+	}
+	var raw []struct {
+		Names           []string
+		Image           string
+		Labels          map[string]string
+		NetworkSettings struct {
+			Networks map[string]struct{ IPAddress string }
+		}
+		Mounts []struct{ Source, Destination string }
+	}
+	if dockerGet(dockerHTTP(5*time.Second), "/containers/json", &raw) != nil {
+		return nil
+	}
+	out := make([]proxyCtr, 0, len(raw))
+	for _, c := range raw {
+		pc := proxyCtr{image: c.Image, labels: c.Labels, nets: map[string]string{}, mounts: map[string]string{}}
+		if len(c.Names) > 0 {
+			pc.name = strings.TrimPrefix(c.Names[0], "/")
+		}
+		pc.project = c.Labels["com.docker.compose.project"]
+		pc.service = c.Labels["com.docker.compose.service"]
+		for n, s := range c.NetworkSettings.Networks {
+			if s.IPAddress != "" {
+				pc.nets[n] = s.IPAddress
+			}
+		}
+		for _, m := range c.Mounts {
+			pc.mounts[m.Destination] = m.Source
+		}
+		out = append(out, pc)
+	}
+	return out
+}
+
+func loadProxyRoutes() []proxyRoute {
+	cs := proxyContainers()
+	out := caddyLabelRoutes(cs)
+	out = append(out, caddyAdminRoutes(cs)...)
+	files := []string{"/etc/caddy/Caddyfile"}
+	for _, c := range cs {
+		if !strings.Contains(c.image, "caddy") {
+			continue
+		}
+		if src := c.mounts["/etc/caddy/Caddyfile"]; src != "" {
+			files = append(files, src)
+		} else if src := c.mounts["/etc/caddy"]; src != "" {
+			files = append(files, filepath.Join(src, "Caddyfile"))
+		}
+	}
+	for i, f := range files {
+		if b, err := os.ReadFile(f); err == nil {
+			// Caddyfile из контейнера: localhost там - сам caddy, а имена - контейнеры
+			out = append(out, caddyfileRoutes(string(b), cs, i == 0)...)
+		}
+	}
+	return append(out, nginxRoutes("/etc/nginx/nginx.conf", cs)...)
+}
+
+// caddyNets - сети, в которых стоит caddy: адрес бэкенда берем из них
+func caddyNets(cs []proxyCtr) map[string]bool {
+	nets := map[string]bool{}
+	for _, c := range cs {
+		if strings.Contains(c.image, "caddy") {
+			for n := range c.nets {
+				nets[n] = true
+			}
+		}
+	}
+	return nets
+}
+
+// ctrIP - адрес контейнера: в сети caddy, иначе первый по имени сети
+func ctrIP(c proxyCtr, nets map[string]bool) string {
+	names := make([]string, 0, len(c.nets))
+	for n := range c.nets {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if nets[n] {
+			return c.nets[n]
+		}
+	}
+	if len(names) > 0 {
+		return c.nets[names[0]]
+	}
+	return ""
+}
+
+// findCtr - контейнер по имени из конфига прокси: имя контейнера или сервис compose (сначала в
+// том же проекте)
+func findCtr(cs []proxyCtr, name, project string) (proxyCtr, bool) {
+	for _, c := range cs {
+		if c.name == name {
+			return c, true
+		}
+	}
+	for pass := 0; pass < 2; pass++ {
+		for _, c := range cs {
+			if c.service == name && (pass == 1 || c.project == project) {
+				return c, true
+			}
+		}
+	}
+	return proxyCtr{}, false
+}
+
+// upstreamAddr - адрес бэкенда из записи прокси "[схема://]хост[:порт]". inCtr: прокси в
+// контейнере, имена там - контейнеры, а localhost - сам прокси (до него с хоста не дойти)
+func upstreamAddr(proxy, up string, cs []proxyCtr, nets map[string]bool, project string, inCtr bool) (proxyRoute, bool) {
+	scheme := "http"
+	if i := strings.Index(up, "://"); i > 0 {
+		switch up[:i] {
+		case "https":
+			scheme = "https"
+		case "http", "h2c":
+		default:
+			return proxyRoute{}, false
+		}
+		up = up[i+3:]
+	}
+	up = strings.TrimSuffix(up, "/")
+	if up == "" || strings.ContainsAny(up, "{}$/ ") {
+		return proxyRoute{}, false // плейсхолдер, переменная, unix-сокет
+	}
+	host, port, err := net.SplitHostPort(up)
+	if err != nil {
+		host, port = strings.Trim(up, "[]"), "80"
+		if scheme == "https" {
+			port = "443"
+		}
+	}
+	r := proxyRoute{proxy: proxy, scheme: scheme}
+	ip := net.ParseIP(host)
+	switch {
+	case ip != nil && ip.IsLoopback() && inCtr, host == "localhost" && inCtr:
+		return proxyRoute{}, false
+	case ip != nil || host == "localhost":
+		r.addr = net.JoinHostPort(host, port)
+		r.name = "addr " + r.addr
+	default:
+		c, ok := findCtr(cs, host, project)
+		if ok && ctrIP(c, nets) != "" {
+			r.addr = net.JoinHostPort(ctrIP(c, nets), port)
+			r.name = "container " + c.name + ":" + port
+		} else if inCtr {
+			return proxyRoute{}, false // имя из DNS docker-сети, с хоста не резолвится
+		} else {
+			r.addr = net.JoinHostPort(host, port)
+			r.name = "addr " + r.addr
+		}
+	}
+	return r, true
+}
+
+// caddyHosts - адреса сайта caddy ("https://a.example.com:443, b.example.com") -> имена
+func caddyHosts(s string) []string {
+	var out []string
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+		if i := strings.Index(f, "://"); i >= 0 {
+			f = f[i+3:]
+		}
+		if i := strings.IndexAny(f, "/"); i >= 0 {
+			f = f[:i]
+		}
+		if h, _, err := net.SplitHostPort(f); err == nil {
+			f = h
+		}
+		f = strings.ToLower(strings.TrimSpace(f))
+		if f != "" && !strings.HasPrefix(f, ":") && !strings.ContainsAny(f, "{}") {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// caddyPath - путь-матчер caddy ("/api/*", "/api*") -> префикс
+func caddyPath(m string) string {
+	return strings.TrimSuffix(m, "*")
+}
+
+var upstreamsTpl = regexp.MustCompile(`\{\{\s*upstreams\s*([^}]*)\}\}`)
+
+var labelOrderRe = regexp.MustCompile(`^[0-9]+_|_[0-9]+$`)
+
+// caddyLabelRoutes - маршруты из меток caddy-docker-proxy: caddy (caddy_N) = адреса сайта,
+// caddy.reverse_proxy = "{{upstreams [схема] [порт]}}" (сам контейнер) или адрес бэкенда.
+// Блоки handle/route без матчера или с путем тоже
+func caddyLabelRoutes(cs []proxyCtr) []proxyRoute {
+	nets := caddyNets(cs)
+	var out []proxyRoute
+	for _, c := range cs {
+		keys := make([]string, 0, len(c.labels))
+		for k := range c.labels {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if k != "caddy" && !(strings.HasPrefix(k, "caddy_") && !strings.Contains(k, ".")) {
+				continue
+			}
+			hosts := caddyHosts(c.labels[k])
+			if len(hosts) == 0 {
+				continue
+			}
+			type rp struct{ key, path string }
+			cand := []rp{{k + ".reverse_proxy", ""}}
+			for _, blk := range []string{"handle", "handle_path", "route"} {
+				for _, bk := range keys {
+					// порядок и номер у одинаковых директив: caddy.1_handle, caddy.handle_1
+					rest := strings.TrimPrefix(bk, k+".")
+					if rest == bk || strings.Contains(rest, ".") || labelOrderRe.ReplaceAllString(rest, "") != blk {
+						continue
+					}
+					m := strings.TrimSpace(c.labels[bk])
+					if m == "" || strings.HasPrefix(m, "/") {
+						cand = append(cand, rp{bk + ".reverse_proxy", caddyPath(m)})
+					}
+				}
+			}
+			for _, cd := range cand {
+				v, ok := c.labels[cd.key]
+				if !ok {
+					continue
+				}
+				for _, r := range caddyLabelUpstream(v, c, cs, nets) {
+					r.hosts, r.path = hosts, cd.path
+					out = append(out, r)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func caddyLabelUpstream(v string, c proxyCtr, cs []proxyCtr, nets map[string]bool) []proxyRoute {
+	if m := upstreamsTpl.FindStringSubmatch(v); m != nil {
+		scheme, port := "http", ""
+		for _, a := range strings.Fields(m[1]) {
+			switch {
+			case a == "https":
+				scheme = "https"
+			case a == "http" || a == "h2c":
+			default:
+				if _, err := strconv.Atoi(a); err == nil {
+					port = a
+				}
+			}
+		}
+		if port == "" {
+			port = map[string]string{"http": "80", "https": "443"}[scheme]
+		}
+		ip := ctrIP(c, nets)
+		if ip == "" {
+			return nil
+		}
+		return []proxyRoute{{proxy: "caddy", scheme: scheme, addr: net.JoinHostPort(ip, port),
+			name: "container " + c.name + ":" + port}}
+	}
+	f := strings.Fields(v)
+	if len(f) > 0 && (strings.HasPrefix(f[0], "@") || strings.HasPrefix(f[0], "/") || f[0] == "*") {
+		return nil // матчер у самой директивы: не знаем, подходит ли запрос
+	}
+	if len(f) == 0 {
+		return nil
+	}
+	if r, ok := upstreamAddr("caddy", f[0], cs, nets, c.project, true); ok {
+		return []proxyRoute{r}
+	}
+	return nil
+}
+
+// caddyAdminRoutes - живой конфиг caddy на самом сервере (admin API на localhost:2019): в нем
+// и сайты из Caddyfile, и уже подставленные адреса бэкендов
+func caddyAdminRoutes(cs []proxyCtr) []proxyRoute {
+	cl := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+	resp, err := cl.Get("http://127.0.0.1:2019/config/apps/http/servers")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil
+	}
+	var servers map[string]struct {
+		Routes []caddyJRoute `json:"routes"`
+	}
+	if json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&servers) != nil {
+		return nil
+	}
+	var out []proxyRoute
+	for _, s := range servers {
+		out = append(out, caddyJSONRoutes(s.Routes, nil, "", cs)...)
+	}
+	return out
+}
+
+type caddyJRoute struct {
+	Match []struct {
+		Host []string `json:"host"`
+		Path []string `json:"path"`
+	} `json:"match"`
+	Handle []struct {
+		Handler   string        `json:"handler"`
+		Routes    []caddyJRoute `json:"routes"`
+		Upstreams []struct {
+			Dial string `json:"dial"`
+		} `json:"upstreams"`
+		Transport *struct {
+			TLS json.RawMessage `json:"tls"`
+		} `json:"transport"`
+	} `json:"handle"`
+}
+
+func caddyJSONRoutes(routes []caddyJRoute, hosts []string, path string, cs []proxyCtr) []proxyRoute {
+	var out []proxyRoute
+	for _, rt := range routes {
+		h, p := hosts, path
+		for _, m := range rt.Match {
+			if len(m.Host) > 0 {
+				h = nil
+				for _, x := range m.Host {
+					h = append(h, strings.ToLower(x))
+				}
+			}
+			if len(m.Path) > 0 {
+				p = caddyPath(m.Path[0])
+			}
+		}
+		for _, hd := range rt.Handle {
+			switch hd.Handler {
+			case "subroute":
+				out = append(out, caddyJSONRoutes(hd.Routes, h, p, cs)...)
+			case "reverse_proxy":
+				if len(h) == 0 || len(hd.Upstreams) == 0 {
+					continue
+				}
+				up := hd.Upstreams[0].Dial
+				if hd.Transport != nil && len(hd.Transport.TLS) > 0 {
+					up = "https://" + up
+				}
+				if r, ok := upstreamAddr("caddy", up, cs, caddyNets(cs), "", false); ok {
+					r.hosts, r.path = h, p
+					out = append(out, r)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// confNode - директива конфига с аргументами и вложенным блоком (Caddyfile, nginx)
+type confNode struct {
+	args     []string
+	children []confNode
+}
+
+// confTokens - слова, "{", "}", ";" и (для Caddyfile) "\n"; комментарии и кавычки снимаются
+func confTokens(s string, lines bool) []string {
+	var out []string
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() > 0 {
+			out = append(out, cur.String())
+			cur.Reset()
+		}
+	}
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch {
+		case ch == '"' || ch == '\'':
+			j := strings.IndexByte(s[i+1:], ch)
+			if j < 0 {
+				j = len(s) - i - 1
+			}
+			cur.WriteString(s[i+1 : i+1+j])
+			i += j + 1
+		case ch == '#' && cur.Len() == 0:
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+			i--
+		case ch == '\n':
+			flush()
+			if lines {
+				out = append(out, "\n")
+			}
+		case ch == ' ' || ch == '\t' || ch == '\r':
+			flush()
+		case ch == ';' || ((ch == '{' || ch == '}') && (cur.Len() == 0 || !lines)):
+			// "{" вплотную к слову в Caddyfile - плейсхолдер ({$VAR}, {http.request.host})
+			if lines && ch == '{' && i+1 < len(s) && s[i+1] != ' ' && s[i+1] != '\n' && s[i+1] != '\r' && s[i+1] != '\t' {
+				cur.WriteByte(ch)
+				continue
+			}
+			flush()
+			out = append(out, string(ch))
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	flush()
+	return out
+}
+
+// confTree - дерево директив из токенов: директива кончается на ";", перевод строки или блок
+func confTree(toks []string, pos *int) []confNode {
+	var out []confNode
+	var args []string
+	for *pos < len(toks) {
+		t := toks[*pos]
+		*pos++
+		switch t {
+		case ";", "\n":
+			if len(args) > 0 {
+				out = append(out, confNode{args: args})
+				args = nil
+			}
+		case "{":
+			n := confNode{args: args}
+			n.children = confTree(toks, pos)
+			out = append(out, n)
+			args = nil
+		case "}":
+			if len(args) > 0 {
+				out = append(out, confNode{args: args})
+			}
+			return out
+		default:
+			args = append(args, t)
+		}
+	}
+	if len(args) > 0 {
+		out = append(out, confNode{args: args})
+	}
+	return out
+}
+
+// caddyfileRoutes - сайты Caddyfile: адреса перед "{", внутри reverse_proxy (в том числе в
+// handle/handle_path/route с путем). onHost - Caddyfile самого сервера (иначе смонтирован в
+// контейнер caddy)
+func caddyfileRoutes(text string, cs []proxyCtr, onHost bool) []proxyRoute {
+	pos := 0
+	nets := caddyNets(cs)
+	var out []proxyRoute
+	var walk func(nodes []confNode, hosts []string, path string)
+	walk = func(nodes []confNode, hosts []string, path string) {
+		for _, n := range nodes {
+			if len(n.args) == 0 {
+				continue
+			}
+			switch n.args[0] {
+			case "reverse_proxy":
+				ups := n.args[1:]
+				if len(ups) > 0 && strings.HasPrefix(ups[0], "@") {
+					continue // именованный матчер: не знаем, подходит ли запрос
+				}
+				if len(ups) > 0 && (strings.HasPrefix(ups[0], "/") || ups[0] == "*") {
+					ups = ups[1:]
+				}
+				if len(ups) == 0 {
+					for _, c := range n.children {
+						if len(c.args) > 1 && c.args[0] == "to" {
+							ups = c.args[1:]
+						}
+					}
+				}
+				if len(ups) == 0 {
+					continue
+				}
+				p := path
+				if len(n.args) > 1 && strings.HasPrefix(n.args[1], "/") {
+					p = caddyPath(n.args[1])
+				}
+				if r, ok := upstreamAddr("caddy", ups[0], cs, nets, "", !onHost); ok {
+					r.hosts, r.path = hosts, p
+					out = append(out, r)
+				}
+			case "handle", "handle_path", "route":
+				p := path
+				if len(n.args) > 1 {
+					if !strings.HasPrefix(n.args[1], "/") {
+						continue // именованный матчер: не знаем, подходит ли запрос
+					}
+					p = caddyPath(n.args[1])
+				}
+				walk(n.children, hosts, p)
+			}
+		}
+	}
+	for _, site := range confTree(confTokens(text, true), &pos) {
+		if len(site.args) == 0 || strings.HasPrefix(site.args[0], "(") || site.children == nil {
+			continue // глобальные опции и сниппеты
+		}
+		if hosts := caddyHosts(strings.Join(site.args, " ")); len(hosts) > 0 {
+			walk(site.children, hosts, "")
+		}
+	}
+	return out
+}
+
+// nginxConf - конфиг nginx с подставленными include (не глубже 8 уровней)
+func nginxConf(path string, depth int) []string {
+	b, err := os.ReadFile(path)
+	if err != nil || depth > 8 {
+		return nil
+	}
+	toks := confTokens(string(b), false)
+	var out []string
+	for i := 0; i < len(toks); i++ {
+		if toks[i] == "include" && i+2 < len(toks) && toks[i+2] == ";" &&
+			(i == 0 || toks[i-1] == ";" || toks[i-1] == "{" || toks[i-1] == "}") {
+			pat := toks[i+1]
+			if !filepath.IsAbs(pat) {
+				pat = filepath.Join("/etc/nginx", pat)
+			}
+			files, _ := filepath.Glob(pat)
+			for _, f := range files {
+				out = append(out, nginxConf(f, depth+1)...)
+			}
+			i += 2
+			continue
+		}
+		out = append(out, toks[i])
+	}
+	return out
+}
+
+// nginxRoutes - server_name и location с proxy_pass из конфига nginx на самом сервере
+func nginxRoutes(conf string, cs []proxyCtr) []proxyRoute {
+	toks := nginxConf(conf, 0)
+	if len(toks) == 0 {
+		return nil
+	}
+	pos := 0
+	tree := confTree(toks, &pos)
+	ups := map[string]string{}
+	var servers []confNode
+	var scan func(nodes []confNode)
+	scan = func(nodes []confNode) {
+		for _, n := range nodes {
+			switch {
+			case len(n.args) == 2 && n.args[0] == "upstream":
+				for _, c := range n.children {
+					if len(c.args) > 1 && c.args[0] == "server" {
+						ups[n.args[1]] = c.args[1]
+						break
+					}
+				}
+			case len(n.args) == 1 && n.args[0] == "server" && n.children != nil:
+				servers = append(servers, n)
+			case len(n.args) == 1 && n.args[0] == "http":
+				scan(n.children)
+			}
+		}
+	}
+	scan(tree)
+	var out []proxyRoute
+	for _, s := range servers {
+		var hosts []string
+		for _, d := range s.children {
+			if len(d.args) > 1 && d.args[0] == "server_name" {
+				for _, h := range d.args[1:] {
+					h = strings.ToLower(h)
+					switch {
+					case h == "_" || strings.HasPrefix(h, "~") || h == "":
+					case strings.HasPrefix(h, "."):
+						hosts = append(hosts, h[1:], "*"+h)
+					default:
+						hosts = append(hosts, h)
+					}
+				}
+			}
+		}
+		if len(hosts) == 0 {
+			continue
+		}
+		for _, loc := range s.children {
+			if len(loc.args) < 2 || loc.args[0] != "location" {
+				continue
+			}
+			path := loc.args[1]
+			if (path == "=" || path == "^~") && len(loc.args) > 2 {
+				path = loc.args[2]
+			}
+			if !strings.HasPrefix(path, "/") {
+				continue // regex-локации не разбираем
+			}
+			for _, d := range loc.children {
+				if len(d.args) < 2 || d.args[0] != "proxy_pass" {
+					continue
+				}
+				pp := d.args[1]
+				scheme, rest := "http", pp
+				if i := strings.Index(pp, "://"); i > 0 {
+					scheme, rest = pp[:i], pp[i+3:]
+				}
+				if i := strings.Index(rest, "/"); i >= 0 {
+					rest = rest[:i]
+				}
+				if a, ok := ups[rest]; ok {
+					rest = a
+				}
+				if strings.HasPrefix(rest, "unix:") {
+					continue
+				}
+				if r, ok := upstreamAddr("nginx", scheme+"://"+rest, cs, nil, "", false); ok {
+					r.hosts, r.path = hosts, path
+					if r.path == "/" {
+						r.path = ""
+					}
+					out = append(out, r)
+				}
+			}
+		}
+	}
+	return out
+}
+
+// probeSiteProxy - проверка бэкенда прокси напрямую. ok=false: на сервере не нашлось прокси,
+// который знает этот домен. front - адрес, где прокси принял соединение (localhost или свой
+// адрес сервера): с него снимаем сертификат
+func probeSiteProxy(p siteProbe, front string) (siteProbeResult, bool) {
+	u, err := url.Parse(p.URL)
+	if err != nil || u.Hostname() == "" {
+		return siteProbeResult{}, false
+	}
+	path := u.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	rt, ok := matchProxyRoute(proxyRoutes(), u.Hostname(), path)
+	if !ok {
+		return siteProbeResult{}, false
+	}
+	res := siteProbeResult{ID: p.ID, KwUpFound: true, Via: "proxy:" + rt.proxy + " " + rt.name}
+	timeout := probeTimeout(p)
+	req, err := probeRequest(p, rt.scheme+"://"+rt.addr+u.RequestURI())
+	if err != nil {
+		res.Error = err.Error()
+		return res, true
+	}
+	req.Host = u.Host // бэкенд видит тот же Host, что пришел бы через прокси
+	client := &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{Timeout: timeout}).DialContext,
+			// бэкенд за прокси по https обычно со своим внутренним сертификатом
+			TLSClientConfig:   &tls.Config{ServerName: u.Hostname(), InsecureSkipVerify: true}, //nolint:gosec // сертификат сайта проверяется на прокси
+			DisableKeepAlives: true,
+			Proxy:             nil,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	res.LatencyMs = int(time.Since(start).Milliseconds())
+	if err != nil {
+		res.Error = err.Error()
+		return res, true
+	}
+	defer resp.Body.Close()
+	res.Code = resp.StatusCode
+	probeKeywords(p, resp, &res)
+	if u.Scheme != "https" {
+		return res, true
+	}
+	port := u.Port()
+	if port == "" {
+		port = "443"
+	}
+	addr := net.JoinHostPort(front, port)
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		// бэкенд жив, а прокси не принимает соединения - посетители сайт не видят
+		res.Code = 0
+		res.Error = "front " + addr + ": " + err.Error()
+		return res, true
+	}
+	tc := tls.Client(conn, &tls.Config{ServerName: u.Hostname(), InsecureSkipVerify: true}) //nolint:gosec // нужны только срок и издатель
+	_ = tc.SetDeadline(time.Now().Add(timeout))
+	// рукопожатие не прошло (белый список уже на уровне TLS) - просто без срока сертификата
+	if tc.Handshake() == nil {
+		if cs := tc.ConnectionState(); len(cs.PeerCertificates) > 0 {
+			res.CertExpires = cs.PeerCertificates[0].NotAfter.Unix()
+			res.CertIssuer = cs.PeerCertificates[0].Issuer.CommonName
+		}
+	}
+	tc.Close()
 	return res, true
 }
 

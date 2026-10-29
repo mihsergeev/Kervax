@@ -1,9 +1,9 @@
 import type { ReactNode } from 'react'
-import type { Server } from './api'
+import type { Server, VpnSvc } from './api'
 import type { TFn } from './mutes'
 
 // Роли сервера рядом с именем в списке и в шапке карточки: бэкап-сервер, ретранслятор (и нода за
-// ним), Kubernetes, LLM. Вид как у плашки GPU: рамка и заливка своего спокойного цвета с иконкой.
+// ним), Kubernetes, LLM, VPN. Вид как у плашки GPU: рамка и заливка своего спокойного цвета с иконкой.
 // Цвета не статусные (зеленый, желтый, красный) и не синий групп, стили .role-* в App.css
 
 const svg = (body: ReactNode) => (
@@ -38,6 +38,14 @@ const ICON = {
       <path d="M12 2.5v7.5M12 14v7.5M2.5 12H10M14 12h7.5M5.3 5.3l5.3 5.3M13.4 13.4l5.3 5.3M18.7 5.3l-5.3 5.3M10.6 13.4l-5.3 5.3" />
     </>,
   ),
+  // щит с замком: раздает VPN или прокси
+  vpn: svg(
+    <>
+      <path d="M12 2.5l7.5 3v5.5c0 4.7-3.2 8.6-7.5 10.5C7.7 19.6 4.5 15.7 4.5 11V5.5z" />
+      <rect x="9" y="10.5" width="6" height="5" rx="1" />
+      <path d="M10.3 10.5V9a1.7 1.7 0 0 1 3.4 0v1.5" />
+    </>,
+  ),
   // искра: языковая модель
   llm: svg(<path d="M12 3l1.9 5.6L19.5 10.5l-5.6 1.9L12 18l-1.9-5.6L4.5 10.5l5.6-1.9z" />),
 }
@@ -52,16 +60,30 @@ function Chip({ role, icon, title, onClick, children }: {
       onClick={onClick && ((e) => { e.stopPropagation(); onClick() })}
     >
       {icon}
-      {children}
+      <span className="role-chip-t">{children}</span>
     </span>
   )
 }
 
-export function RoleChips({ s, servers, t, onRelay }: {
+// Строка подсказки про один VPN-сервис: где стоит, порты, клиенты
+function vpnLine(m: VpnSvc, t: TFn): string {
+  const where = [m.src.join(', '), m.ports.map((p) => p.toUpperCase().split('/').reverse().join(' ')).join(', ')]
+    .filter(Boolean).join(', ')
+  const head = m.short !== m.label ? `${m.label} (${m.short})` : m.label
+  const cl = m.n != null
+    ? t('клиентов {n}, на связи {on}', { n: m.n, on: m.on })
+    : m.helper ? t('на связи {on}', { on: m.on }) : ''
+  const extra = m.exit ? t('выход в интернет для меша (exit node)') : m.routes?.length ? t('отдает в меш: {list}', { list: m.routes.join(', ') }) : ''
+  return [`${head}: ${where}`, cl, extra].filter(Boolean).join(', ')
+}
+
+export function RoleChips({ s, servers, t, onRelay, onVpn, mesh }: {
   s: Server
   servers: Server[] // все серверы: имена нод за ретранслятором
   t: TFn
   onRelay?: () => void // клик по "ретранслятор": к его настройкам и состоянию
+  onVpn?: () => void // клик по VPN: к разделу "VPN" карточки с клиентами
+  mesh?: boolean // и участие в меше (Tailscale на обычной ноде): только в карточке, в списке шумит
 }) {
   const out: ReactNode[] = []
   if (s.last_report?.backup_server?.present)
@@ -103,5 +125,27 @@ export function RoleChips({ s, servers, t, onRelay }: {
         LLM
       </Chip>,
     )
+  // VPN и прокси, которые сервер раздает (app/vpn.py) - одной плашкой: AmneziaWG, VLESS, OpenVPN
+  const vs = s.vpn?.svc ?? []
+  const serve = vs.filter((m) => m.role === 'server')
+  if (serve.length) {
+    const tip = [...serve.map((m) => vpnLine(m, t)), onVpn ? t('Нажмите: раздел VPN в карточке') : ''].filter(Boolean).join('\n')
+    out.push(
+      <Chip key="vpn" role="vpn" icon={ICON.vpn} title={tip} onClick={onVpn}>
+        {[...new Set(serve.map((m) => m.short))].join(', ')}
+      </Chip>,
+    )
+  }
+  // сам в меше или туннеле: VPN не раздает, тише - пунктиром, как нода за ретранслятором
+  if (mesh)
+    for (const m of vs.filter((x) => x.role === 'mesh'))
+      out.push(
+        <Chip key={`mesh-${m.k}`} role="mesh" icon={ICON.vpn} onClick={onVpn}
+          title={m.guess
+            ? t('Туннель {name} ({list}): раздает ли он VPN, скажет helper vpn-setup', { name: m.label, list: m.src.join(', ') })
+            : t('{name} ({list}): сервер сам в меше или туннеле, VPN клиентам не раздает', { name: m.label, list: m.src.join(', ') })}>
+          {m.label}
+        </Chip>,
+      )
   return <>{out}</>
 }

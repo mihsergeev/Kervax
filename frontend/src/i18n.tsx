@@ -1992,6 +1992,28 @@ const EN: Record<string, string> = {
   'pm.max_children = 5 - значение по умолчанию: пул никто не настраивал': 'pm.max_children = 5 is the default: nobody has tuned the pool',
   'не алертить об этом пуле:': 'no alerts on this pool:',
   'Не алертить о пуле PHP-FPM: на день, неделю или постоянно': 'No alerts on this PHP-FPM pool: for a day, a week or for good',
+  'Похоже, клиент VPN качает торрент': 'A VPN client seems to be torrenting',
+  'Клиент VPN качает очень много': 'A VPN client downloads a lot',
+  'торрент через VPN': 'torrent over VPN',
+  'много трафика через VPN': 'heavy traffic over VPN',
+  'Клиенты VPN: торрент и трафик': 'VPN clients: torrent and traffic',
+  'за {n} ч': 'over {n} h',
+  'потоков {n}': 'flows {n}',
+  'UDP {p}%': 'UDP {p}%',
+  'адресов {n}': 'addresses {n}',
+  'на высоких портах {n}': 'on high ports {n}',
+  'на портах BitTorrent {n}': 'on BitTorrent ports {n}',
+  'с {ip}': 'from {ip}',
+  'прокачал {v} за {h} ч': 'moved {v} in {h} h',
+  'похоже на торрент: {n} мин из 15 к сотням разных адресов на высоких портах': 'looks like torrent: {n} min of 15 to hundreds of addresses on high ports',
+  'много пиров {n} мин из 15, алерт от {m} мин': 'many peers {n} min of 15, alert from {m} min',
+  'качает очень много: больше {v} за {h} ч': 'downloads a lot: over {v} in {h} h',
+  'не алертить об этом клиенте:': 'no alerts on this client:',
+  'Не алертить о клиенте VPN: на день, неделю или постоянно': 'No alerts on this VPN client: for a day, a week or for good',
+  '{w}: conntrack не прочитан, в таблице {n} потоков': '{w}: conntrack not read, {n} flows in the table',
+  '{w}: conntrack не прочитан ({why})': '{w}: conntrack not read ({why})',
+  'Признаки торрента не видны: на сервере нет helper vpnflow-setup. Видно только трафик клиентов.': 'Torrent signs are not visible: the vpnflow-setup helper is not on the server. Only client traffic is shown.',
+  'Торрент виден по таблице conntrack внутри VPN: у клиента сотни разных адресов на случайных высоких портах, в основном UDP. У браузера и мессенджеров десятки адресов, почти все на 443. Алерт - когда так держится {m} минут из 15. Клиентов Xray так не видно (соединения открывает сам xray), у них только трафик.': 'Torrent shows in the conntrack table inside the VPN: the client has hundreds of addresses on random high ports, mostly UDP. A browser or a messenger has tens of addresses, almost all on 443. The alert fires when it holds {m} minutes of 15. Xray clients are not visible this way (xray opens the connections itself), only their traffic.',
   'Конфиг не найден: {w}': 'Config not found: {w}',
   'Пулы PHP-FPM: сколько воркеров занято и сколько запросов ждет, упоры в pm.max_children, медленные и убитые по таймауту запросы и падения воркеров из лога FPM, падения php по журналу ядра. Алерт, когда пул не справляется подолгу: запросы ждали воркера от 15 минут из часа, пул упирался в предел от 60 раз за час, по таймауту убито от 20 запросов за час или воркеры упали от 3 раз за час.':
     'PHP-FPM pools: how many workers are busy and how many requests wait, hits of pm.max_children, slow requests, requests killed on timeout and crashed workers from the FPM log, php crashes from the kernel journal. An alert when a pool cannot keep up for long: requests waited for a worker 15 minutes of an hour or more, the pool hit its limit 60 times an hour or more, 20 requests or more an hour were killed on timeout, or workers crashed 3 times an hour or more.',
@@ -4760,6 +4782,7 @@ const EN: Record<string, string> = {
   'порт закрыт': 'port closed',
   'нет ответа': 'no response',
   'обрыв связи': 'conn. reset',
+  'изнутри: {via}': 'from inside: {via}',
   'нет связи': 'can\'t connect',
   'нода офлайн': 'node offline',
   'агент молчит': 'agent silent',
@@ -5465,8 +5488,8 @@ const EN: Record<string, string> = {
     'Only sites can be checked from inside a server.',
   'Домен не нашелся на серверах с агентом: проверять изнутри некому.':
     'The domain was not found on servers with the agent: nobody can check it from inside.',
-  'Агент откроет сайт на самом сервере, через localhost. Для сайтов за белым списком.':
-    'The agent opens the site on the server itself, via localhost. For sites behind an allowlist.',
+  'Агент откроет сайт на самом сервере: через localhost или адрес сервера, а если белый список прокси не пускает и его, то бэкенд сайта напрямую. Для сайтов за белым списком.':
+    'The agent opens the site on the server itself: via localhost or a server address, and if the proxy allowlist blocks the server too, the site backend directly. For sites behind an allowlist.',
   'домен есть в {web} на {srv}':
     'the domain is in {web} on {srv}',
   'Как с панели, и еще через прокси из других стран и сетей: видно, если сайт не открывается из какой-то сети.':
@@ -6469,6 +6492,67 @@ const EN: Record<string, string> = {
     'Kubernetes node',
   'Сервисы LLM: {list}':
     'LLM services: {list}',
+  // VPN (Vpn.tsx, RoleChips.tsx)
+  'Нажмите: раздел VPN в карточке':
+    'Click: the VPN section of the card',
+  'клиентов {n}, на связи {on}':
+    '{n} clients, {on} online',
+  'на связи {on}':
+    '{on} online',
+  'выход в интернет для меша (exit node)':
+    'internet exit for the mesh (exit node)',
+  'отдает в меш: {list}':
+    'routes into the mesh: {list}',
+  'Туннель {name} ({list}): раздает ли он VPN, скажет helper vpn-setup':
+    'Tunnel {name} ({list}): whether it serves a VPN, the vpn-setup helper will tell',
+  '{name} ({list}): сервер сам в меше или туннеле, VPN клиентам не раздает':
+    '{name} ({list}): the server itself is in a mesh or a tunnel, it serves no VPN clients',
+  'по контейнерам и интерфейсам':
+    'by containers and interfaces',
+  'клиенты устарели: снимок {when}':
+    'clients are stale: snapshot {when}',
+  'helper vpn-setup, раз в 2 минуты':
+    'vpn-setup helper, every 2 minutes',
+  'Раздает: {list}':
+    'Serves: {list}',
+  'VPN клиентам не раздает.':
+    'Serves no VPN clients.',
+  'Сам в меше или туннеле: {list}':
+    'Itself in a mesh or a tunnel: {list}',
+  'Раздает ли VPN туннель WireGuard, панель узнает от helper vpn-setup: пир без Endpoint в конфиге подключается к серверу.':
+    'Whether a WireGuard tunnel serves a VPN, the panel learns from the vpn-setup helper: a peer without Endpoint in the config connects to the server.',
+  '{src}: клиентов не прочитать ({err})':
+    '{src}: clients cannot be read ({err})',
+  'Клиентов показывает helper vpn-setup, на сервере его нет: он есть в "Требует действий".':
+    'Clients come from the vpn-setup helper, it is not on the server: see "Action needed".',
+  'Клиентов этого сервиса helper не читает: видно только, что он работает.':
+    'The helper does not read clients of this service: only that it runs is seen.',
+  'Клиентов нет.':
+    'No clients.',
+  'клиент':
+    'client',
+  'адрес в туннеле':
+    'tunnel address',
+  'был на связи':
+    'last seen',
+  'скачал':
+    'downloaded',
+  'отдал':
+    'uploaded',
+  'откуда':
+    'from',
+  'без имени':
+    'no name',
+  'показать всех: {n}':
+    'show all: {n}',
+  'клиентов: {n}':
+    'clients: {n}',
+  'на связи: {n}':
+    'online: {n}',
+  '{names}: клиентов {n}, на связи {on}':
+    '{names}: {n} clients, {on} online',
+  'сам в меше, VPN не раздает':
+    'itself in a mesh, serves no VPN',
   'Алерт по ним молчит, пока не станет хуже. Снимите отметку, если надо снова получать алерты.':
     'Alerts stay silent until it gets worse. Unmark to get alerts again.',
   '{name}: идет подключение - посмотрите, что нашлось, и закройте его в карточке':

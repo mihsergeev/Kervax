@@ -207,6 +207,10 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "log_errors": ("Всплеск ошибок в логах", "{detail}"),
     # пул PHP-FPM подолгу упирается в pm.max_children или рвет запросы по таймауту (helper fpm-setup)
     "fpm": ("PHP-FPM не справляется", "{detail}"),
+    # клиент VPN 10 минут из 15 ходит к сотням разных адресов на высоких портах (helper vpnflow-setup)
+    "vpn_torrent": ("Похоже, клиент VPN качает торрент", "{detail}"),
+    # клиент VPN прокачал за 3 часа больше 30гб (счетчики из списка клиентов helper'а vpn-setup)
+    "vpn_heavy": ("Клиент VPN качает очень много", "{detail}"),
     # GitLab отстал от патча своей минорной или от обязательной остановки, автообновление
     # заблокировано или сломано, упали фоновые миграции (helper gitlab-setup)
     "gitlab": ("GitLab устарел", "{detail}"),

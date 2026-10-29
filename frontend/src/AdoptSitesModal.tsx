@@ -786,6 +786,12 @@ export function AdoptSitesModal({
                                   </button>
                                 )}
                               </div>
+                              {r.status === 'new' && probes[r.domain]?.local_via && works(probes[r.domain].local_status) && (
+                                // изнутри открылось не через localhost: видно, мимо чего прошла проверка
+                                <div className="adopt-via muted small">
+                                  {t('изнутри: {via}', { via: probes[r.domain].local_via! })}
+                                </div>
+                              )}
                               {r.status === 'new' && probes[r.domain] && (
                                 <PathHintPick
                                   hint={hintOf(r.domain)}

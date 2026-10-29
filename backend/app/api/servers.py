@@ -29,12 +29,14 @@ from app import install_watch
 from app import panel_errors
 from app import db_health
 from app import gpu as gpu_mod
+from app import vpn as vpn_mod
 from app import queue_watch
 from app import workers as workers_mod
 from app import cron_watch
 from app import going_down
 from app import log_errors
 from app import fpm_pools
+from app import vpn_flow
 from app import gitlab as gitlab_mod
 from app import mem_trend
 from app import mem_limit
@@ -364,6 +366,10 @@ def _out(
     o.gpu_sum = gpu_mod.summary(server.last_report or {}, now)
     o.llm = gpu_mod.llm_view(server.last_report or {}, (server.alert_state or {}).get("llm_base"),
                              (server.alert_state or {}).get("llm_lat"), now) or None
+    o.vpn = vpn_mod.view(server.last_report or {}, now.timestamp())
+    if o.vpn and isinstance(o.last_report, dict) and "vpn" in (o.last_report.get("extras") or {}):
+        # клиенты уже разобраны в o.vpn: сырой блок helper'а второй раз в списке серверов не нужен
+        o.last_report = {**o.last_report, "extras": {k: v for k, v in o.last_report["extras"].items() if k != "vpn"}}
     o.queue_watch = queue_watch.view(server, now) or None
     o.queue_brokers = queue_watch.helper_view(server) or None
     o.queue_skipped = queue_watch.redis_skipped(server.last_report or {}) or None
@@ -375,6 +381,7 @@ def _out(
     o.cron = cron_watch.view(server, now)
     o.log_errors = log_errors.view(server, now)
     o.fpm = fpm_pools.view(server, now)
+    o.vpn_flow = vpn_flow.view(server, now)
     o.gitlab = gitlab_mod.view(server, now)
     o.web_config = web_config.view(server.last_report or {}, now)
     o.web_certs = web_certs.view(server.last_report or {}, now)
@@ -766,6 +773,7 @@ _SETUP_LABEL = {
     "cron-setup": "Кроны на хосте и в контейнерах",
     "logerr-setup": "Ошибки в логах контейнеров",
     "fpm-setup": "Пулы PHP-FPM",
+    "vpnflow-setup": "Клиенты VPN: торрент и трафик",
     "gitlab-setup": "GitLab: версия, бэкап, миграции",
     "sockfix-setup": "Compose внешнего прокси: сокет и образ",
     "relay-setup": "Ретранслятор для агентов",
@@ -773,6 +781,7 @@ _SETUP_LABEL = {
     "webfiles-setup": "Файлы сайтов: признаки взлома",
     "autoban-setup": "Автобан сканеров",
     "mirror-setup": "Резервный сервер бэкапов",
+    "vpn-setup": "Клиенты VPN",
 }
 
 
