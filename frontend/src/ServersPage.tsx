@@ -5963,7 +5963,7 @@ function ServerRow({
           )}
           <RoleChips s={s} servers={servers} t={t} onVpn={() => onOpenSec('vpn')} />
           {s.gpu_sum && (
-            <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
+            <GpuChip sum={s.gpu_sum} bad={issues.some((i) => (i.kind === 'gpu' || i.kind === 'gpu_heat') && i.tone === 't-down')} t={t} />
           )}
           {/* заглушки в списке не показываем: чип со сроком без состава читался как отключенный
               мониторинг сервера, а речь об одном-двух алертах. Что именно заглушено - в карточке */}
@@ -7189,7 +7189,7 @@ function ServerDetail({
             {/* роли как в списке; состояние ретранслятора живет в настройках сервера: клик туда */}
             <RoleChips s={s} servers={servers} t={t} onRelay={isViewer ? undefined : editRelay} onVpn={() => go('vpn')} mesh />
             {s.gpu_sum && (
-              <GpuChip sum={s.gpu_sum} bad={issues.some((i) => i.kind === 'gpu' || i.kind === 'gpu_heat')} t={t} />
+              <GpuChip sum={s.gpu_sum} bad={issues.some((i) => (i.kind === 'gpu' || i.kind === 'gpu_heat') && i.tone === 't-down')} t={t} />
             )}
             {/* что заглушено - значком, сами заглушки в разделе "Алерты" */}
             {muteItems.length > 0 && (

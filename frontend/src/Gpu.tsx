@@ -30,6 +30,11 @@ function xidTime(ts: number, old?: boolean): string {
   return old ? `${d.toLocaleDateString([], { day: '2-digit', month: '2-digit' })} ${hm}` : hm
 }
 
+// красная точка: аппаратный Xid уровня 2 (lv - как в app/gpu.py problems; одиночный Xid 62 желтый)
+const xidBad = (x: { hw: boolean; lv?: number }) => (x.lv ?? (x.hw ? 2 : 0)) >= 2
+const VM_RESET = (t: TFn) =>
+  t('На ВМ с пробросом карту сбрасывает только перезагрузка хоста гипервизора: nvidia-smi -r или перезагрузка изнутри роняет ВМ')
+
 const KIND: Record<string, string> = { container: 'контейнер', pod: 'под', unit: 'юнит', user: 'пользователь' }
 
 // Плашка в списке серверов: средняя загрузка карт полосой, красная - если GPU не в порядке
@@ -41,7 +46,7 @@ export function GpuChip({ sum, bad, t }: { sum: GpuSum; bad: boolean; t: TFn }) 
     sum.mem != null ? t('память {a} из {b} ГБ', { a: sum.mem, b: sum.memt ?? 0 }) : '',
     !sum.helper ? t('нет helper gpu-setup: загрузка не видна') : sum.smi === false ? t('драйвер NVIDIA не установлен')
       : !sum.ok ? t('драйвер NVIDIA не отвечает') : '',
-    sum.frozen ? t('показания nvidia-smi застыли') : '',
+    sum.blind ? t('Xid 62: упал микроконтроллер GPU, показания застыли до сброса карты') : sum.frozen ? t('показания nvidia-smi застыли') : '',
   ].filter(Boolean).join(', ')
   return (
     <span className={`gpu-chip${bad || lost ? ' gpu-chip-bad' : ''}`} title={tip}>
@@ -90,7 +95,7 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
   const seen = gpus.length
   const onBus = pci.filter((p) => p.drv !== 'vfio-pci').length
   const pm = [...new Set(gpus.map((x) => x.pm).filter(Boolean))]
-  const pills: { text: string; lv?: 'bad' | 'warn' }[] = []
+  const pills: { text: string; lv?: 'bad' | 'warn'; tip?: string }[] = []
   const models = [...new Set(gpus.map((x) => x.name).filter(Boolean))]
   if (models.length) pills.push({ text: `${gpus.length} x ${models.join(', ')}` })
   if (g.driver) pills.push({ text: `${t('драйвер')} ${g.driver}` })
@@ -98,8 +103,15 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
   if (g.ok) pills.push({ text: t('видно GPU {a} из {b} на шине PCI', { a: seen, b: Math.max(onBus, seen) }), lv: onBus > seen ? 'bad' : undefined })
   const xidDay = xid.filter((x) => !x.old)
   const xidHeld = [...new Set(xid.filter((x) => x.held).map((x) => x.code))]
-  pills.push({ text: t('Xid за сутки: {n}', { n: xidDay.length }), lv: xidDay.some((x) => x.hw) ? 'bad' : xidDay.length ? 'warn' : undefined })
-  if (xidHeld.length) pills.push({ text: t('ждет сброса GPU: Xid {list}', { list: xidHeld.join(', ') }), lv: 'bad' })
+  pills.push({ text: t('Xid за сутки: {n}', { n: xidDay.length }), lv: xidDay.some(xidBad) ? 'bad' : xidDay.length ? 'warn' : undefined })
+  // одиночный Xid 62 - мониторинг слеп, карта работает: плашка желтая. На ВМ с пробросом сброс из
+  // гостя роняет ВМ, поэтому сказано прямо, чем сбрасывать
+  if (xidHeld.length)
+    pills.push({
+      text: g.vm ? t('ждет сброса GPU: Xid {list}, из гостя не сбрасывать', { list: xidHeld.join(', ') }) : t('ждет сброса GPU: Xid {list}', { list: xidHeld.join(', ') }),
+      lv: xid.some((x) => x.held && xidBad(x)) ? 'bad' : 'warn',
+      tip: g.vm ? VM_RESET(t) : undefined,
+    })
   if (pm.length === 1) pills.push({ text: `persistence mode ${pm[0] === 'Enabled' ? t('вкл') : t('выкл')}` })
   const vm = pci.filter((p) => p.drv === 'vfio-pci')
   return (
@@ -113,7 +125,7 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
       <OvRows rows={rows} />
       <div className="dh-sum">
         {pills.map((p, i) => (
-          <span key={i} className={`dh-pill${p.lv ? ` dh-pill-${p.lv}` : ''}`}>
+          <span key={i} className={`dh-pill${p.lv ? ` dh-pill-${p.lv}` : ''}`} title={p.tip}>
             <span className={p.lv ? `lk-dot lk-dot-${p.lv}` : 'lk-dot lk-dot-ok'} />
             {p.text}
           </span>
@@ -146,8 +158,8 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
             const hot = x.thermal || (x.temp != null && x.slow != null && x.temp >= x.slow)
             const warm = !hot && x.temp != null && x.slow != null && x.temp >= (x.maxop && x.maxop < x.slow ? x.maxop : x.slow - 5)
             return (
-              <div key={x.i ?? x.bus} className={`gpu-tr${x.frozen ? ' gpu-tr-frozen' : ''}`}
-                title={x.frozen ? t('показания nvidia-smi застыли: им нельзя верить') : undefined}>
+              <div key={x.i ?? x.bus} className={`gpu-tr${x.frozen || x.blind ? ' gpu-tr-frozen' : ''}`}
+                title={x.blind ? t('Xid 62: упал микроконтроллер GPU, показания застыли до сброса карты') : x.frozen ? t('показания nvidia-smi застыли: им нельзя верить') : undefined}>
                 <span title={x.name}>
                   <b>GPU {x.i}</b>
                 </span>
@@ -212,14 +224,14 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
           </div>
           {xid.map((x, n) => (
             <div key={n} className="gpu-xid-row">
-              <span className={`lk-dot ${x.hw ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
+              <span className={`lk-dot ${xidBad(x) ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
               <span className="mono">{xidTime(x.ts, x.old)}</span>
               <span className="mono">{x.gpu != null ? `GPU ${x.gpu}` : x.bus}</span>
               <span>
                 Xid {x.code}
                 {x.desc ? ` - ${x.desc}` : ''}
                 {x.held && (
-                  <span className="type-chip off" title={t('держится до перезагрузки сервера или драйвера NVIDIA')}>
+                  <span className="type-chip off" title={g.vm ? VM_RESET(t) : t('держится до перезагрузки сервера или драйвера NVIDIA')}>
                     {t('ждет сброса')}
                   </span>
                 )}
