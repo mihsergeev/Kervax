@@ -855,7 +855,7 @@ const SECTION_LABEL: Record<string, string> = { services: 'Сервисы', kube
 const SEC_OF_CARD: Record<string, string> = {
   cores: 'cpu', freq: 'cpu', throttle: 'cpu', temp: 'cpu', cpueat: 'cpu',
   swap: 'mem', memwb: 'mem', oom: 'mem', memleak: 'mem', memlimit: 'mem',
-  netifrx: 'net', netiftx: 'net', neterr: 'net', nethealth: 'net', links: 'net', traffic: 'net', netusers: 'net', vpnflow: 'vpn',
+  netifrx: 'net', netiftx: 'net', neterr: 'net', nethealth: 'net', links: 'net', gre: 'net', traffic: 'net', netusers: 'net', vpnflow: 'vpn',
   conntrack: 'net', sockets: 'net',
   diskio: 'disk', diskiops: 'disk', diskutil: 'disk', disklat: 'disk', disktemp: 'disk', diskfill: 'disk',
   diskhealth: 'disk', du: 'disk', diskwrite: 'disk',

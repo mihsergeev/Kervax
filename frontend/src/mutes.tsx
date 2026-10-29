@@ -69,6 +69,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'fpm', label: 'PHP-FPM не справляется' },
   { k: 'vpn_torrent', label: 'Похоже, клиент VPN качает торрент' },
   { k: 'vpn_heavy', label: 'Клиент VPN качает очень много' },
+  { k: 'gre_down', label: 'GRE до панели не работает' },
   { k: 'gitlab', label: 'GitLab устарел' },
   { k: 'autoban', label: 'Автобан сканеров не в порядке' },
   { k: 'cpu_spin', label: 'CPU: процессы в пустом цикле' },

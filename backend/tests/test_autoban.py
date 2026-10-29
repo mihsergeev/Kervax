@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy import select
 
-from app import alerts, autoban, collector, srv_short
+from app import alerts, autoban, collector, setup_scripts, srv_short
 from app.db import Base, create_engine_and_factory
 from app.models import AutobanBan, BackupCommand, Location, Server
 
@@ -65,6 +65,26 @@ def test_helper_header():
     assert "WINDOW=600" in SRC and "TRAPS=3" in SRC
     # Cloudflare и свои сети вшиты
     assert "172.64.0.0/13" in SRC and "100.64.0.0/10" in SRC and "2606:4700::/32" in SRC
+
+
+def test_needed_where_nginx_runs():
+    """Условие на ноде - процесс nginx, а не карта логов webserver-setup: ее таймер пишет через минуты
+    после установки, и свежая нода оставалась без autoban, пока панель его просила. Панель смотрит
+    то же: nginx у агента (comm, как pgrep -x), логи nginx в web-rate или уже присланный блок"""
+    when = re.search(r'^KERVAX_SETUP_WHEN="([^"]*)"', SRC, re.M).group(1)
+    assert when == "pgrep -x nginx >/dev/null 2>&1"
+    need = lambda rep: setup_scripts.setup_needed("autoban-setup", rep)
+    # свежая нода: агент видит nginx, web-rate и карты еще нет
+    assert need({"web_services": [{"kind": "nginx"}]})
+    # ingress-nginx: отдельного "nginx" агент не показывает, логи подов уже в web-rate
+    assert need({"web_services": [{"kind": "ingress-nginx"}],
+                 "extras": {"web-rate": {"logs": [{"log": "/var/log/pods/ing_ingress-nginx-a/0.log"}]}}})
+    assert need({"extras": {"autoban": {"mode": "watch"}}})
+    # только Caddy: у него метрики, а не логи, autoban читать нечего и pgrep -x nginx на ноде ложен
+    assert not need({"web_services": [{"kind": "Caddy"}],
+                     "extras": {"web-rate": {"logs": [{"log": "caddy:host", "sites": ["web-a.example.com"]}]}}})
+    assert not need({"web_services": [{"kind": "Apache"}, {"kind": "Traefik"}]})
+    assert not need({})
 
 
 def test_allow_sha_matches_helper():

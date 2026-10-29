@@ -373,6 +373,72 @@ INSTALL_FAIL_MSG = "GRE: интерфейс kervax-gre не поднялся, н
 NODE_IFACE = "kervax-gre"
 
 
+# Алерт gre_down: у живого сервера GRE до панели не работает. Сервер на связи, а туннель лежит: агент
+# откатился напрямую, где DPI режет соединения, и отчеты могут теряться. Одиночный срыв - не повод:
+# агент уходит напрямую через 4 с без ответа и 2 минуты туннель не пробует, helper поднимает его
+# снова раз в минуту. Алерт - когда так держится DOWN_HOLD
+DOWN_HOLD = 10 * 60
+DOWN_KIND = "gre_down"
+
+# почему агент не в туннеле, для панели и истории алертов (в Telegram - короче, tg_short)
+_DOWN_WHY = {
+    "connect_down": "туннель не ответил агенту",
+    "host": "хост панели не отвечает (ops/gre-sync.sh)",
+    "stale": "helper gre-setup на сервере давно не обращался к панели",
+    "nat": "у сервера нет публичного адреса на интерфейсе, GRE через NAT не проходит",
+    "up": "туннель поднят, а агент в него не перешел",
+    "ok": "агент то и дело уходит напрямую",
+}
+DOWN_CHECK = ("проверьте kervax-gre на сервере, gre-sync на хосте панели и не режет ли провайдер GRE"
+              " (proto 47)")
+
+
+def down(server: Server, now: datetime, host: dict | None = None) -> dict | None:
+    """Лежит ли GRE до панели: {"level", "why", "text", "direct"}. None - работает или еще не про это.
+
+    Два случая. Агент ходит напрямую, хотя GRE включен и туннель уже работал (отчет через туннель
+    был после включения, gre_agent_at): не работавший ни разу туннель - это настройка, его видно в
+    карточке. И хостовый ops/gre-sync.sh ответил err по интерфейсу этого сервера: сторону хоста
+    чинить на хосте панели, даже если агент пока ходит туннелем (поднятое раньше держится до
+    первой перезагрузки) - тогда это предупреждение. Путь отчета - тот же, что у пометки в
+    карточке (_path). Молчит сервер целиком - решает вызывающий: про него алерт offline."""
+    if not getattr(server, "gre_enabled", False):
+        return None
+    host = host if host is not None else host_state()
+    hi = (host.get("ifaces") or {}).get(iface_of(server)) or {}
+    via, _since = _path(server)
+    direct = via == "direct"
+    if hi and not hi.get("ok") and time.time() - (host.get("ts") or 0) < HOST_STALE:
+        err = str(hi.get("error") or "").strip()[:200]
+        why = f"хост панели не поднял свою сторону туннеля ({iface_of(server)})" + (f": {err}" if err else "")
+        return {"level": 2 if direct else 1, "why": "host_error", "direct": direct,
+                "text": f"GRE до панели не работает: {why}" if direct
+                else f"GRE до панели: {why}, агент пока ходит туннелем"}
+    if not direct or server.gre_agent_at is None:
+        return None
+    v = view(server, now, host) or {}
+    rep = server.last_report or {}
+    code = "connect_down" if rep.get("connect_down") else str(v.get("state") or "")
+    if code == "error":
+        why = f"ошибка GRE: {v.get('error') or '?'}"
+    else:
+        why = _DOWN_WHY.get(code, "панель не отвечает через туннель")
+    return {"level": 2, "why": code, "direct": True,
+            "text": f"GRE до панели не работает, агент ходит напрямую: {why}"}
+
+
+def tg_short(items) -> tuple[str, list[str]] | None:
+    """Алерт gre_down в Telegram: что случилось и что это значит для отчетов; причина и что
+    проверить - в панели по ссылке."""
+    if not isinstance(items, dict):
+        return None
+    if items.get("why") == "host_error":
+        what = "GRE до панели: ошибка на хосте панели"
+        return what, ["Агент ходит напрямую, отчеты могут теряться" if items.get("direct")
+                      else "Агент пока ходит туннелем"]
+    return "GRE до панели не работает", ["Сервер жив, агент ходит напрямую, отчеты могут теряться"]
+
+
 def install_cmd(remote: str, node_net: str, peer: str) -> str:
     """Начало команды установки: поднять kervax-gre на ноде и открыть GRE от хоста панели.
 

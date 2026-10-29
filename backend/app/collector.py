@@ -44,6 +44,7 @@ from app import cron_watch
 from app import log_errors
 from app import fpm_pools
 from app import vpn_flow
+from app import gre as gre_mod
 from app import gitlab as gitlab_mod
 from app import web_upstream
 from app import listen_watch
@@ -352,7 +353,7 @@ _SRV_SECTION = {
     "cpu_spin": "cpueat",
     "exposed": "exposure", "port_new": "exposure", "cf_realip": "exposure", "pressure": "pressure",
     "net_health": "nethealth",
-    "link": "links", "traffic": "traffic", "vpn_torrent": "vpnflow", "vpn_heavy": "vpnflow",
+    "link": "links", "traffic": "traffic", "vpn_torrent": "vpnflow", "vpn_heavy": "vpnflow", "gre_down": "gre",
     "access_change": "changes", "mem_leak": "memleak", "mem_limit": "memlimit", "ssh_risk": "ssh", "access_risk": "access",
     "listen_gone": "exposure", "disk_slow": "disklat", "gpu": "gpu", "gpu_heat": "gpu", "autoban": "web",
 }
@@ -2106,6 +2107,7 @@ _SRV_LABEL = {
     "pressure": "давление на ресурсы",
     "net_health": "сеть ноды",
     "link": "связь между серверами",
+    "gre_down": "GRE до панели",
     "traffic": "трафик",
     "kube_node": "ноды kubernetes",
     "backup_restore": "проверка восстановления",
@@ -2195,6 +2197,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "PHP-FPM снова в норме: запросы не ждут воркеров и не убиваются по таймауту, воркеры не падают"
     if key == "vpn_torrent":
         return "клиенты VPN больше не похожи на торрент: сотен пиров на высоких портах нет"
+    if key == "gre_down":
+        return "GRE до панели снова работает: агент ходит в панель через туннель"
     if key == "vpn_heavy":
         return "клиенты VPN больше не качают помногу: за 3 часа меньше половины порога"
     if key == "disk_forecast":
@@ -4573,6 +4577,10 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     lk = netlinks.problems(getattr(s, "links_state", None))
     if lk and _held_long(s, state, "link", now):
         add("link", lk[0][0], "; ".join(t for _l, _i, t in lk[:3]), "links", "link", state.get("link_since"))
+    # GRE до панели лежит у живого сервера: как и у алерта, когда держится дольше выдержки
+    gd = gre_mod.down(s, now)
+    if gd and _held_long(s, state, gre_mod.DOWN_KIND, now, gre_mod.DOWN_HOLD):
+        add("gre_down", gd["level"], gd["text"], "gre", "gre_down", state.get("gre_down_since"))
     tl, tt = traffic_mod.problem(getattr(s, "traffic_sum", None), now)
     if tl and _held_long(s, state, "traffic", now):
         add("traffic", tl, tt, "traffic", "traffic", state.get("traffic_since"))
@@ -6956,6 +6964,16 @@ def _server_conditions(s: Server, now: datetime,
         sustain_lvl("link", lk[0][0] if lk else 0, {"detail": "; ".join(t for _l, _i, t in lk[:4]),
                                                     "sig": sorted(sig), "items": lk,
                                                     "parts": [(str(i), t) for _l, i, t in lk]}, cool_s=_CALM_S)
+    # GRE до панели (app/gre.py): сервер на связи, а агент ходит напрямую или хост панели не поднял
+    # свою сторону - дольше DOWN_HOLD. Разовый откат агента (4 с без ответа, 2 минуты напрямую) не
+    # в счет. Выключили GRE - явный ноль, чтобы висевший алерт закрылся. Молчит сервер целиком - сюда
+    # не доходит: про него offline, а состояние замирает, как у остальных
+    if online and (getattr(s, "gre_enabled", False) or state.get(gre_mod.DOWN_KIND)):
+        gd = gre_mod.down(s, now)
+        sustain_lvl(gre_mod.DOWN_KIND, gd["level"] if gd else 0,
+                    {"detail": gd["text"] + "\n↳ сервер жив, лежит только GRE: на прямом пути DPI режет"
+                                            f" соединения, отчеты могут теряться; {gre_mod.DOWN_CHECK}" if gd else "",
+                     "items": gd}, hold_s=gre_mod.DOWN_HOLD)
     # Трафик против лимита тарифа (app/traffic.py): прогноз ходит у границы, поэтому отбой только
     # после полусуток спокойствия
     tl, tt = traffic_mod.problem(getattr(s, "traffic_sum", None), now)

@@ -38,6 +38,10 @@ async def set_gre(server_id: int, body: GreUpdate, user: CurrentUser, session: S
         except ValueError as e:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e)) from e
     was = server.gre_enabled
+    if body.enabled and not was:
+        # отметка отчета через туннель - с этого включения: пока туннель ни разу не заработал, это
+        # настройка, а не "туннель лег" (алерт gre_down)
+        server.gre_agent_at = None
     server.gre_enabled = body.enabled
     try:
         await session.commit()

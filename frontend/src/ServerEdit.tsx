@@ -44,7 +44,7 @@ const AREAS: { id: string; label: string; kinds: string[] }[] = [
   { id: 'srv', label: 'Сервер', kinds: ['offline', 'reboot', 'listen_gone'] },
   { id: 'load', label: 'Нагрузка и память', kinds: ['cpu', 'mem', 'temp', 'throttle', 'pressure', 'cpu_spin', 'oom', 'mem_leak', 'mem_limit'] },
   { id: 'disk', label: 'Диск', kinds: ['disk', 'disk_forecast', 'inode', 'disk_health', 'disk_slow', 'disktemp'] },
-  { id: 'net', label: 'Сеть', kinds: ['conntrack', 'net_health', 'link', 'traffic', 'vpn_torrent', 'vpn_heavy', 'port_new', 'exposed', 'cf_realip'] },
+  { id: 'net', label: 'Сеть', kinds: ['conntrack', 'net_health', 'link', 'traffic', 'vpn_torrent', 'vpn_heavy', 'gre_down', 'port_new', 'exposed', 'cf_realip'] },
   { id: 'svc', label: 'Службы и очереди', kinds: ['units', 'unit_loop', 'workers', 'cron_stuck', 'queue_stuck', 'queue_failed', 'log_errors', 'fpm'] },
   { id: 'k8s', label: 'Docker и Kubernetes', kinds: ['docker_restarts', 'kube_restarts', 'kube_pod'] },
   { id: 'web', label: 'Веб', kinds: ['web_5xx', 'web_config', 'web_cert', 'gitlab'] },

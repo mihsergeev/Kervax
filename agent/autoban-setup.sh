@@ -23,7 +23,11 @@
 set -euo pipefail
 
 KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
-KERVAX_SETUP_WHEN="[ -s /var/lib/kervax/web-logs.tsv ]"
+# Where nginx runs (on the host, in a container or a pod: pgrep sees them all) - the same sign
+# webserver-setup builds its log map by, and caddy:* lines have no log to read anyway. Not the map
+# itself: its timer writes it only minutes after the install, and a node installed in one pass got
+# no autoban and then a panel asking for it.
+KERVAX_SETUP_WHEN="pgrep -x nginx >/dev/null 2>&1"
 
 HELPER_DIR=/lib65/kervax
 HELPER="$HELPER_DIR/kervax-autoban"
