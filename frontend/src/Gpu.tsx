@@ -110,7 +110,10 @@ export function GpuCard({ server: s, rows }: { server: Server; rows: OvRow[] }) 
   if (g.ok) pills.push({ text: t('видно GPU {a} из {b} на шине PCI', { a: seen, b: Math.max(onBus, seen) }), lv: onBus > seen ? 'bad' : undefined })
   const xidDay = xid.filter((x) => !x.old)
   const xidHeld = [...new Set(xid.filter((x) => x.held).map((x) => x.code))]
-  pills.push({ text: t('Xid за сутки: {n}', { n: xidDay.length }), lv: xidDay.some(xidBad) ? 'bad' : xidDay.length ? 'warn' : undefined })
+  // цвет - только по живым: ошибка после последней загрузки драйвера или карта ждет сброса. Сброшенные
+  // и прошлые ошибки приложений остаются в счетчике истории, но плашку не красят
+  const xidLive = xidDay.filter((x) => x.hw || x.held)
+  pills.push({ text: t('Xid за сутки: {n}', { n: xidDay.length }), lv: xidLive.some(xidBad) ? 'bad' : xidLive.length ? 'warn' : undefined })
   // одиночный Xid 62 - мониторинг слеп, карта работает: плашка желтая, лечится перезагрузкой модуля
   // nvidia. Остальные на ВМ с пробросом: сброс из гостя роняет ВМ, поэтому сказано прямо, чем сбрасывать
   const only62 = xidHeld.length > 0 && xidHeld.every((c) => c === 62)
