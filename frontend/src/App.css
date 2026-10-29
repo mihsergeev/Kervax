@@ -2979,6 +2979,9 @@ tr.mt-off button.mt-what-btn { color: var(--text-muted); text-decoration: line-t
 /* серийник шире: по нему диск меняют в ЦОД, обрезать его нельзя */
 .dh-stats .dh-wide { flex-grow: 2; }
 .dh-cnt { font-size: 0.78rem; }
+/* заглушенный диск (app/drive_mute.py): не красный, рамка пунктиром; строка с кнопкой внизу плитки */
+.dh-tile-mute { border-style: dashed; }
+.dh-mute { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap; margin-top: auto; font-size: 0.78rem; }
 @media (max-width: 760px) {
   .dh-tiles { grid-template-columns: 1fr; }
   .dh-arrstate { margin-left: 0; width: 100%; justify-content: flex-start; }

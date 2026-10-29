@@ -2452,6 +2452,8 @@ export type Server = {
   mute_live?: Record<string, MuteLive>
   // временные, которые кончились при живой проблеме: панель держит их, пока не стало хуже (at - исходный срок)
   mute_over?: Record<string, { at: string }>
+  // заглушенные поштучно диски (app/drive_mute.py): {серийник: базовая линия}; пусто - базу еще не записали
+  drive_mutes?: Record<string, DriveMute>
   // бэкап по http: на какой сервер бэкапов переводить на https и что мешает (только в списке серверов)
   backup_https?: { bs_id: number | null; blockers: string[] } | null
   // версии без поддержки (app/software.py): строка на продукт, 2 - без поддержки, 1 - скоро
@@ -2550,6 +2552,8 @@ export type Server = {
   onboard_done_at?: string | null
   // недоступен: что ответил сервер панели в момент алерта (backend app/liveness.py)
   offline_probe?: { state: 'alive' | 'refused' | 'silent' | 'blind'; where?: string; tried?: string[]; was?: string; ts?: string } | null
+  // что было перед пропажей, если было не так: "перед этим кончилась память: ..." (backend app/mem_starve.py)
+  offline_before?: string
   // агент предупредил о штатной остановке; wait - панель еще ждет сервер (backend app/going_down.py)
   going_down?: { kind: 'reboot' | 'poweroff' | 'shutdown' | 'stop'; at: string; wait: boolean } | null
   // прогноз износа SSD (backend app/disk_wear.py): d90/d100 - даты ISO, src - замер или средняя за жизнь
@@ -3177,6 +3181,16 @@ export function updateServer(
   },
 ): Promise<Server> {
   return api<Server>(`/api/servers/${id}`, { method: 'PATCH', body: JSON.stringify(body) })
+}
+// Заглушенный диск (app/drive_mute.py): что у него было, когда глушили. c - счетчики (media, realloc,
+// pending, uncorr, crc, ioerr), keys - признаки поломок (media:<серийник>, spare:..., crit:...)
+export interface DriveMute {
+  dev?: string
+  at?: string
+  c?: Record<string, number>
+  spare?: number | null
+  crit?: number
+  keys?: string[]
 }
 // Мьюты сервера хранятся списком, а PATCH заменяет его целиком. Два быстрых клика "не алертить" у
 // разных пунктов слали каждый свой список из устаревшего s.alert_mutes, и второй затирал первый.

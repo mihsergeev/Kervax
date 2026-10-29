@@ -120,6 +120,8 @@ export const CRON_MUTE = 'cron:'
 export const LOGERR_MUTE = 'logerr:'
 // Один пул PHP-FPM: fpm:<где>|<пул>
 export const FPM_MUTE = 'fpm:'
+// Один диск сервера по серийнику: drive:<серийник> (app/drive_mute.py) - этот диск с тем, что у него есть
+export const DRIVE_MUTE = 'drive:'
 // Один GitLab: gitlab:<хост из external_url или имя контейнера>
 export const GITLAB_MUTE = 'gitlab:'
 // Одна беда автобана: autoban:self:<адрес> | autoban:cant | autoban:noeffect | autoban:avalanche
@@ -193,6 +195,7 @@ export function swDecisionLabel(state: string, done: boolean, t: TFn): string {
 // ушел или появилось новое (app/home_mute.py)
 export function muteAutoNote(k: string, t: TFn): string | null {
   if (k.startsWith(HOME_MUTE)) return k.includes('@') ? t('снимется сам, если появится новое или пункт уйдет') : t('снимется сам, когда пункт уйдет')
+  if (k.startsWith(DRIVE_MUTE)) return t('вернется сам, если диску станет хуже; снимется после замены')
   return k === 'disk_health' ? t('снимется сам после замены диска и сборки массива') : null
 }
 export function muteKindLabel(k: string, t: TFn): string | null {
@@ -253,6 +256,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
       : `${t('перезапуски контейнера')}: ${key.replace(/^docker:/, '')}`
   }
   if (k.startsWith(UNIT_MUTE)) return `${t('юнит')}: ${k.slice(UNIT_MUTE.length)}`
+  if (k.startsWith(DRIVE_MUTE)) return `${t('диск с серийником')} ${k.slice(DRIVE_MUTE.length)}`
   // одна вещь кластера или Docker (кнопки Telegram глушат ее, а не вид целиком): kube_cron:<ns>/<имя>,
   // kube_job:<ns>/<имя>, kube_pod:<ns>/<ворклоад>, docker_down:<контейнер>, docker_loop:<контейнер>, kube_expiry:<что>
   const one: [string, string][] = [

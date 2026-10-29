@@ -49,6 +49,7 @@ from app import listen_watch
 from app import podnames
 from app import mem_trend
 from app import mem_limit
+from app import mem_starve
 from app import oom as oom_mod
 from app import restarts as srv_restarts
 from app import ssh_audit
@@ -58,6 +59,7 @@ from app import onboard as onboard_mod
 from app import liveness
 from app import disk_wear
 from app import disk_mute
+from app import drive_mute
 from app import kube_expiry as kube_expiry_mod
 from app import expiry_snooze
 from app import fill_alert
@@ -2442,9 +2444,11 @@ _OFFLINE_ALERT_EXTRA = 180
 _OFFLINE_RELAY_EXTRA = 180
 
 
-def offline_extra(s) -> int:
-    """Выдержка алерта "недоступен" сверх offline_after."""
-    return _OFFLINE_ALERT_EXTRA + (_OFFLINE_RELAY_EXTRA if getattr(s, "relay_via_id", None) else 0)
+def offline_extra(s, quick: bool = False) -> int:
+    """Выдержка алерта "недоступен" сверх offline_after. quick - в последнем отчете кончалась
+    память (mem_starve.on_edge): молчание - не перегруженный канал, а встающий сервер, ждать
+    лишние три минуты незачем."""
+    return (0 if quick else _OFFLINE_ALERT_EXTRA) + (_OFFLINE_RELAY_EXTRA if getattr(s, "relay_via_id", None) else 0)
 
 
 # Замолчали разом больше _GAP_SHARE нод (не меньше _GAP_MIN): это не беда на нодах, а сбой приема
@@ -3905,9 +3909,11 @@ def pressure_hint(rep: dict) -> str:
     return ""
 
 
-def pressure_problems(rep: dict) -> list[tuple[int, str, str]]:
+def pressure_problems(rep: dict, going: bool = False) -> list[tuple[int, str, str]]:
     """(уровень, ресурс, текст) по свежему отчету: память и диск по PSI, зависшие процессы,
-    файловые дескрипторы. Пусто - все в норме или агент старше 2.26."""
+    файловые дескрипторы. Пусто - все в норме или агент старше 2.26.
+    Память кончилась на всем сервере (app/mem_starve.py) - ресурс "thrash" вместо "mem", у него
+    своя короткая выдержка; going - такой эпизод уже идет (pressure_res), пороги ниже."""
     out: list[tuple[int, str, str]] = []
     psi = rep.get("psi") if isinstance(rep.get("psi"), dict) else {}
 
@@ -3918,7 +3924,9 @@ def pressure_problems(rep: dict) -> list[tuple[int, str, str]]:
             return 0.0
 
     mf, ms = val("mem_full_60"), val("mem_some_60")
-    if mf >= _PSI_MEM_FULL:
+    if mem_starve.starving(rep, going):
+        out.append((2, "thrash", mem_starve.text(rep)))
+    elif mf >= _PSI_MEM_FULL:
         out.append((2, "mem", f"не хватает памяти: все процессы разом стоят {mf:.0f}% времени"))
     elif ms >= _PSI_MEM_SOME:
         out.append((1, "mem", f"не хватает памяти: процессы ждут память {ms:.0f}% времени"))
@@ -3970,7 +3978,11 @@ def backup_busy(rep: dict) -> str:
 
 def pressure_hold_s(rep: dict, pr: list[tuple[int, str, str]], s: Server | None = None) -> float | None:
     """Своя выдержка алерта о давлении: на сервере бэкапов и пока на сервере идет бэкап, когда ждут
-    только диск (см. _BSRV_IO_HOLD_S). None - общая выдержка сервера."""
+    только диск (см. _BSRV_IO_HOLD_S); кончилась память на всем сервере - mem_starve.HOLD_S, если общая
+    выдержка сервера не короче. None - общая выдержка сервера."""
+    if any(r == "thrash" for _l, r, _t in pr):
+        ss = getattr(s, "alert_sustain_seconds", None)
+        return float(min(mem_starve.HOLD_S, _SUSTAIN_DEFAULT if ss is None else max(int(ss), 0)))
     if pr and all(r == "io" for _l, r, _t in pr) and (_bsrv_role(rep, s) or backup_busy(rep)):
         return _BSRV_IO_HOLD_S
     return None
@@ -4266,7 +4278,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
 
     hb = disk_health_block(rep)
     if hb is not None:
-        for lvl, _key, txt in disk_health_problems(hb, short=True):
+        # заглушенный диск (app/drive_mute.py), пока не стало хуже, - не поломка: он виден в карточке
+        for lvl, _key, txt in drive_mute.split(s.alert_mutes, state.get(drive_mute.STATE), hb,
+                                               disk_health_problems(hb, short=True), now).kept:
             if txt:
                 add("disk_health", lvl, txt, "diskhealth", "disk_health")
         n = _int((hb.get("io") or {}).get("count"))
@@ -4536,11 +4550,11 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
         add("backup_mirror", lvl, "; ".join(txt[:2]) + (f" и еще {len(txt) - 2}" if len(txt) > 2 else ""),
             _BSRV_SEC["backup_mirror"], "backup_mirror", section="backups", srv=True)
     # Сервер задыхается: как и у алерта, только то, что держится дольше выдержки
-    pr = pressure_problems(rep)
+    pr = pressure_problems(rep, state.get("pressure_res") == "thrash")
     pr_hold = pressure_hold_s(rep, pr, s)
     if pr and _held_long(s, state, "pressure", now, pr_hold):
         add("pressure", pr[0][0], "; ".join(t for _l, _r, t in pr[:3])
-            + (f" ({bsrv_io_note(pr_hold, rep, s)})" if pr_hold else "") + _routine_tail(state, "pressure", now),
+            + (f" ({bsrv_io_note(pr_hold, rep, s)})" if pr_hold and pr[0][1] != "thrash" else "") + _routine_tail(state, "pressure", now),
             "pressure", "pressure", state.get("pressure_since"))
     nets = net_problems(rep)
     if nets and _held_long(s, state, "net_health", now):
@@ -4928,7 +4942,9 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
     if key == "mem_limit":
         return all(podnames.muted(mem_limit.decided(s), k) for k in sig)
     if key == "disk_health":
-        return bool(sig) and sig <= _disk_wear_keys(s, sig)
+        # износ без ошибок или диск заглушили поштучно (app/drive_mute.py)
+        wear, drives = _disk_wear_keys(s, sig), drive_mute.serials(s.alert_mutes)
+        return bool(sig) and all(k in wear or k.split(":", 1)[-1] in drives for k in sig)
     return False
 
 
@@ -4967,7 +4983,8 @@ def _closed_tail(key: str, st: dict) -> list[tuple[str, object]]:
         if st.get(key + suf):
             out.append((key + suf, None))
     if key == "offline":
-        out += [("offline_said", 0), ("offline_probe", None), ("offline_kids", None), ("offline_back", None)]
+        out += [("offline_said", 0), ("offline_probe", None), ("offline_kids", None), ("offline_back", None),
+                ("offline_before", None)]
     return out
 
 
@@ -4988,6 +5005,52 @@ def units_hold(s: Server, bad: list[dict], now: datetime, muted: set[str]) -> di
         if (now - gone).total_seconds() < _UNIT_RECOVER_HOLD:
             out[name] = [gone.isoformat(), int(p[1] or 1)]
     return out
+
+
+# Упавший юнит алертит, только когда лег всерьез, а не на первое падение: задание по таймеру
+# webservices-autodeploy упало один раз, следующий прогон прошел, а в чат ушли "упал" и через 20
+# минут "упавших юнитов нет". По истории продов сами проходили только задания по таймеру (через
+# 7-11 минут, со следующим прогоном), лежащие демоны поднимали руками через 49 минут и позже.
+# Алерт, когда юнит в failed дольше выдержки (демон, маунт, сокет - _UNIT_DOWN_S, задание -
+# _UNIT_RUN_S) или упал второй раз подряд: не пробыл вне failed _UNIT_GAP_S и упал снова (новый
+# since). Не может стартовать вообще (start-limit-hit) - сразу, как раньше. Раздел и "Что сломано"
+# показывают упавший юнит сразу. Эпизоды - alert_state units_eps: {юнит: {from, runs, since,
+# gone}}, время по часам сервера (since и clock_unix отчета).
+_UNIT_DOWN_S = 10 * 60
+_UNIT_RUN_S = 30 * 60
+_UNIT_GAP_S = 30 * 60
+_UNIT_NOW_RESULTS = frozenset({"start-limit-hit"})
+
+
+def units_confirm(prev: object, cands: list[dict], ref: float, told: set[str]) -> tuple[list[dict], dict]:
+    """Какие из упавших юнитов уже для алерта и новые эпизоды. told - о каких алерт уже ушел:
+    они остаются в нем, пока лежат."""
+    prev = prev if isinstance(prev, dict) else {}
+    eps: dict[str, dict] = {}
+    ok: list[dict] = []
+    for u in cands:
+        name, since = str(u["unit"]), float(u.get("since") or 0)
+        p = prev.get(name) if isinstance(prev.get(name), dict) else None
+        if p is None:
+            e = {"from": since or ref, "runs": 1, "since": since, "gone": None}
+        else:
+            e = {**p, "gone": None}
+            if since and since != float(p.get("since") or 0):
+                e.update(runs=int(p.get("runs") or 1) + 1, since=since)
+        eps[name] = e
+        hold = _UNIT_DOWN_S if unit_level(u) >= 2 else _UNIT_RUN_S
+        if (name in told or u.get("result") in _UNIT_NOW_RESULTS or e["runs"] >= 2
+                or ref - float(e["from"]) >= hold):
+            ok.append(u)
+    # пропал из упавших: прогон прошел, юнит подняли или сбросили. Вернулся в failed раньше
+    # _UNIT_GAP_S - то же падение подряд
+    for name, p in prev.items():
+        if name in eps or not isinstance(p, dict):
+            continue
+        gone = float(p.get("gone") or ref)
+        if ref - gone < _UNIT_GAP_S:
+            eps[name] = {**p, "gone": gone}
+    return ok, eps
 
 
 # Перезапуски считаются за сутки по каждому поду, а на выкладке старые поды уходят вместе со своей
@@ -6316,7 +6379,8 @@ def _server_conditions(s: Server, now: datetime,
         # 8 сообщений за 30 минут по одной ноде. Для АЛЕРТА молчание должно продержаться
         # ещё _OFFLINE_ALERT_EXTRA сверх порога.
         silent = (now - _aware(s.last_seen)).total_seconds()
-        alert_off = silent > max(s.offline_after_seconds, 30) + offline_extra(s)
+        starve = mem_starve.on_edge(mem_starve.signs(s.last_report), state.get("pressure_res") == "thrash")
+        alert_off = silent > max(s.offline_after_seconds, 30) + offline_extra(s, starve)
         # агент предупредил о штатной перезагрузке (app/going_down.py): сервер грузится, ждем его
         # до going_down.WAIT, а не обычную выдержку. Не вернулся - алерт, что не вернулся
         if alert_off and going_down.holds(s.last_report, now):
@@ -6573,6 +6637,15 @@ def _server_conditions(s: Server, now: datetime,
     hb = disk_health_block(rep) if online else None
     if hb is not None:
         probs = disk_health_problems(hb)
+        # Заглушенные поштучно диски (app/drive_mute.py): пока не хуже, их поломки не алертят. Стало
+        # хуже - поломки идут как обычно, а сборщик снимает заглушку
+        drv = drive_mute.split(s.alert_mutes, state.get(drive_mute.STATE), hb, probs, now)
+        probs = drv.kept
+        for ser, why in drv.worse.items():
+            dev = str(((state.get(drive_mute.STATE) or {}).get(ser) or {}).get("dev") or ser)
+            lv_w = max((p[0] for p in probs if p[1].endswith(":" + ser)), default=2)
+            probs.append((lv_w, "", f"диск {dev} был заглушен, стало хуже: {why}"))
+        probs.sort(key=lambda p: -p[0])
         # Ошибки ввода-вывода: окно helper'а 10 минут, сверху держим час с последней пачки
         # (since), чтобы пачки внутри часа были одной историей. Момент пачки обновляем раз
         # в 5 минут: иначе alert_state переписывался бы каждый тик, пока сыплются ошибки.
@@ -6600,6 +6673,7 @@ def _server_conditions(s: Server, now: datetime,
             # что именно сломано: новая поломка при том же уровне - повод для сообщения
             "sig": sorted({k for _l, k, _t in probs if k}),
             "since": io_since,
+            "drive": drv,
         })
 
     # Прогноз заполнения (планировщик, раз в полчаса по истории): место или inode кончатся
@@ -6643,12 +6717,14 @@ def _server_conditions(s: Server, now: datetime,
                and not own_helper_unit(str(u["unit"])) and not benign_unit(str(u["unit"])) and u["unit"] not in covered
                and ref - float(u.get("since") or 0) >= _UNIT_MIN_AGE and oom_mod.unit_link(u, oom_eps) is None
                and not oom_mod.unit_pending(u, oom_b, ref)]
+        # в алерт - только лежащие всерьез (units_confirm); раздел и "Что сломано" видят всех
+        bad, u_eps = units_confirm(state.get("units_eps"), bad, ref, set(state.get("units_sig") or []))
         hold = units_hold(s, bad, now, muted_u)
         u_lvl = max((h[1] for h in hold.values()), default=0)
         out["units"] = (u_lvl, {
             "detail": units_text(bad, ref) if bad else "", "level": u_lvl, "items": bad,
             # какие юниты лежат: новый упавший при том же уровне - повод для сообщения
-            "sig": sorted(hold), "hold": hold,
+            "sig": sorted(hold), "hold": hold, "eps": u_eps,
         })
 
     # Одинаковые процессы, которые давно крутят по ядру каждый (агент 2.21). На k8s-a-prc 47
@@ -6839,11 +6915,11 @@ def _server_conditions(s: Server, now: datetime,
                                              "sig": [f["key"] for f in cr], "items": cr})
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
-        pr = pressure_problems(rep)
+        pr = pressure_problems(rep, state.get("pressure_res") == "thrash")
         pr_hold = pressure_hold_s(rep, pr, s)
         pctx = {"detail": "; ".join(t for _l, _r, t in pr[:3]), "res": pr[0][1] if pr else "", "cause": "",
                 "hint": pressure_hint(rep), "items": pr}
-        if pr_hold:
+        if pr_hold and pr[0][1] != "thrash":
             pctx["_note"] = bsrv_io_note(pr_hold, rep, s)
         sustain_lvl("pressure", pr[0][0] if pr else 0, cool_s=_CALM_S, ctx=pctx, hold_s=pr_hold)
     # Сеть ноды: потери TCP, очередь accept, conntrack, ошибки и дропы интерфейсов
@@ -7078,6 +7154,11 @@ def mute_present(s: Server, now: datetime, cur: dict[str, str | None]) -> dict[s
             out["kube_job:"] = {k: "упал Job: " + failed_jobs_text(v, 2) for k, v in jobs.items()}
         if "kube_cron:" in need:
             out["kube_cron:"] = {n: f"CronJob {n}: {why}" for n, why in cron_job_issues(rep, now, False, st).items()}
+    if drive_mute.PREFIX in need:
+        hb = disk_health_block(rep)
+        if hb is not None:
+            drv = drive_mute.split(s.alert_mutes, st.get(drive_mute.STATE), hb, disk_health_problems(hb, short=True), now)
+            out[drive_mute.PREFIX] = {ser: drive_mute.hidden_text(ps) for ser, ps in drv.hidden.items() if ps}
     if (rep.get("docker") or {}).get("access") and need & {"docker_down:", "docker_loop:"}:
         ds = {n: cs for n, cs in (st.get("docker") or {}).items() if isinstance(cs, dict)}
         out["docker_down:"] = {n: f"контейнер {n} лежит" for n, cs in ds.items() if cs.get("down")}
@@ -7451,6 +7532,9 @@ async def evaluate_servers(
             # выдержка отбоя упавших юнитов: с какого момента юнита нет среди упавших
             if "hold" in cx and (st.get(f"{k}_hold") or {}) != cx["hold"]:
                 apply(s.id, f"{k}_hold", cx["hold"] or None)
+            # эпизоды упавших юнитов до алерта: с какого момента лежит и сколько раз упал подряд
+            if "eps" in cx and (st.get(f"{k}_eps") or {}) != cx["eps"]:
+                apply(s.id, f"{k}_eps", cx["eps"] or None)
             # с какого момента проблема видна - для "Что сломано" ("sda изношен - 2 дня");
             # ведем для любого вида и до проверки мьютов: заглушенное тоже остается проблемой
             frm = st.get(f"{k}_from")
@@ -7494,6 +7578,22 @@ async def evaluate_servers(
                     apply(s.id, disk_mute.KEY + dk, dv)
             if dm_anc != st.get(disk_mute.STATE):
                 apply(s.id, disk_mute.STATE, dm_anc)
+        # Заглушки отдельных дисков (app/drive_mute.py): базовая линия пишется на первом тике, стало хуже -
+        # заглушка снимается (алерт уже идет в этом тике), диск заменили - уходит молча
+        drv = conds.get("disk_health", (0, {}))[1].get("drive") if talking else None
+        if isinstance(drv, drive_mute.Split):
+            bases = st.get(drive_mute.STATE) or {}
+            if (drv.state or None) != (bases or None):
+                apply(s.id, drive_mute.STATE, drv.state or None)
+            for ser, why in drv.worse.items():
+                dev = str((bases.get(ser) or {}).get("dev") or ser)
+                mute_lift.append((s.id, drive_mute.PREFIX + ser, f"заглушка диска {dev} ({ser}) снята: стало хуже - {why}"))
+            for ser in drv.gone:
+                dev = str((bases.get(ser) or {}).get("dev") or "")
+                mute_lift.append((s.id, drive_mute.PREFIX + ser,
+                                  f"заглушка диска {dev + ' ' if dev else ''}({ser}) снята: диск заменен"))
+        elif st.get(drive_mute.STATE) and not drive_mute.serials(s.alert_mutes):
+            apply(s.id, drive_mute.STATE, None)
         # Сроки кластера "не следить" (app/kube_expiry.py): секрет обновили - снова следим,
         # удалили - отметка тихо уходит. Только по живому отчету: у молчащего сервера он старый
         if s.kube_expiry_ignored and talking:
@@ -7734,8 +7834,15 @@ async def evaluate_servers(
                     rec_apply.append((s.id, sk, []))
                     rec_apply.append((s.id, tk, []))
                     rec_apply.append((s.id, lvk, None))
-            if key in _ROUTINE_KINDS:
+            thrash = key == "pressure" and ctx.get("res") == "thrash"
+            if thrash and st.get("pressure_quiet"):
+                # придержанный распорядком эпизод перешел в нехватку памяти: это уже не распорядок,
+                # сервер вот-вот встанет
+                apply(s.id, "pressure_quiet", None)
+                prev = 0
+            if key in _ROUTINE_KINDS and not thrash:
                 # Распорядок (см. _ROUTINE_KINDS): тот же эпизод в то же время каждый день не алертит.
+                # Кончившуюся память (thrash) не придерживаем: сервер встает и каждый день
                 # До проверки "уровень тот же": придержанный эпизод, который затянулся, - новость
                 now_ts = now.timestamp()
                 quiet = st.get(f"{key}_quiet")
@@ -7814,7 +7921,10 @@ async def evaluate_servers(
                     ctx["value_now"], ctx["value"] = ctx.get("value"), ctx["avg"]["v"]
                 if key == "pressure":
                     # кто ест память или какой диск занят: главное, что спросит инженер
-                    if ctx.get("res") == "mem":
+                    if ctx.get("res") == "thrash":
+                        top = mem_starve.eaters_text(mem_starve.eaters(s.last_report))
+                        ctx["cause"] = f" - больше всех едят {top}" if top else ""
+                    elif ctx.get("res") == "mem":
                         ctx["cause"] = await cause_for(s, "mem")
                     elif ctx.get("res") == "io":
                         ctx["cause"] = io_cause(s.last_report or {})
@@ -7863,6 +7973,17 @@ async def evaluate_servers(
                         fmsg = fmsg.tail("\n↳ " + html.escape(liveness.text(live)),
                                          "\n" + html.escape(tg_fmt.cap(ls)) if ls else "")
                         fire_apply.append((s.id, "offline_probe", live | {"ts": now.isoformat()}))
+                if key == "offline":
+                    # что было в последнем отчете перед пропажей: замолчал без памяти - так и сказать.
+                    # Снимок держится до отбоя, по нему отбой назовет причину (last_report к тому
+                    # времени перепишет новый отчет)
+                    seen_at = _aware(s.last_seen) if s.last_seen else None
+                    sn = mem_starve.snapshot(s.last_report, seen_at, st.get("pressure_res") == "thrash")
+                    if sn:
+                        at = tg_buttons.hhmm(seen_at, cfg.get("tz") or "Europe/Moscow", now) if seen_at else ""
+                        fmsg = fmsg.tail("\n↳ " + html.escape(mem_starve.before_full(sn, at)),
+                                         "\n" + html.escape(mem_starve.before_short(sn)))
+                        fire_apply.append((s.id, "offline_before", sn))
                 if key in ("offline", "web_5xx"):
                     # что менялось на сервере за час до сбоя: деплой, перезагрузка, пакеты
                     fmsg = await _with_before(session_factory, fmsg, s,
@@ -7915,6 +8036,9 @@ async def evaluate_servers(
                     if down:
                         lines.append("Еще поднимаются: " + kid_links(down))
                     kids_tail = "".join("\n" + x for x in lines)
+                    # почему молчал: кончилась память, был ли OOM, кто ее ел (снимок при алерте)
+                    kids_tail = "".join("\n" + html.escape(x) for x in mem_starve.back_lines(
+                        st.get("offline_before"), s.last_report)) + kids_tail
                 # отбой одной строкой (app/srv_short.py RECOVERY); подробный _recovery_detail -
                 # для раздела и тестов
                 detail = _recovery_short(key, st, ctx, s)
@@ -7932,6 +8056,7 @@ async def evaluate_servers(
                     rec_apply.append((s.id, "offline_probe", None))
                     rec_apply.append((s.id, "offline_kids", None))
                     rec_apply.append((s.id, "offline_back", None))
+                    rec_apply.append((s.id, "offline_before", None))
             else:  # де-эскалация (crit→problem): без алерта, просто снижаем уровень
                 apply(s.id, key, level)
         # перезагрузка (аптайм сброшен) — одноразовый алерт на новый rebooted_at. Плановая (после
