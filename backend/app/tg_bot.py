@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from sqlalchemy import delete, select
 
-from app import alerts, audit, known, maint, settings_store, tg_buttons
+from app import alerts, audit, fixed, known, maint, settings_store, tg_buttons
 from app import kube_expiry as kube_expiry_mod
 from app.config import Settings, get_settings
 from app.models import Check, MaintenanceWindow, Server, TgAlert, User
@@ -297,6 +297,26 @@ async def apply(session, row: TgAlert, op: str, who: str, user: User | None,
         undo["us"], undo["us_by"] = True, who[:64]
         row.undo = undo
         return "Отмечено: это мы", "changes_ack"
+    if op == tg_buttons.OP_FIX:
+        obj, ids = _ref(row)
+        if row.kind not in fixed.KINDS or obj != "srv" or not ids:
+            return "Не к чему применить", ""
+        if undo.get("fix"):
+            return "Уже отмечено", ""
+        left = []
+        for sid in ids:
+            s = await session.get(Server, sid)
+            if s is None:
+                continue
+            still = await fixed.mark(session, s, row.kind, who, "", now)
+            if still:
+                left.append(f"{s.name}: {still}" if len(ids) > 1 else still)
+        if left:
+            # Telegram показывает во всплывашке до 200 знаков
+            return ("Еще не починено: " + "; ".join(left))[:190], ""
+        undo["fix"], undo["fix_by"] = True, who[:64]
+        row.undo = undo
+        return "Отмечено: починили, алерт закроется", "alert_fixed"
     if op == tg_buttons.OP_UNDO:
         how = undo.pop("mute", None)
         if how is None:

@@ -53,7 +53,7 @@ from app import web_upstream
 from app import web_config
 from app import webfiles as webfiles_mod
 from app import changes as srv_changes
-from app import known
+from app import fixed, known
 from app import kube_expiry
 from app import dev_mode
 from app import onboard
@@ -105,6 +105,7 @@ from app.schemas import (
     agent_ip_valid,
     dump_dir_default,
     safe_hostname,
+    FixedIn,
     KnownIn,
     NoteIn,
     AgentConfigOut,
@@ -668,7 +669,7 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
     names = pod_uid_names(every)
     panel = panel_server_names(every)
     # ошибки 5xx за 15 минут по всем нодам - двумя запросами на весь список, для "Что сломано"
-    web_err = await web_error_window(session, now)
+    web_err = await web_error_window(session, now, fixed.web_after(servers))
     bogus = await request_watch.server_issues(session)
     # выпуски GitLab собирает планировщик, веб берет их из app_settings (раз в 5 минут)
     await gitlab_mod.load_feed(session)
@@ -1630,6 +1631,28 @@ async def set_server_known(
     await session.commit()
     await session.refresh(server)
     await audit.record(session, user.username, "known_set", server.name, f"{kind}: {body.text[:200]}")
+    return _out(server, now)
+
+
+@router.post("/{server_id}/fixed/{kind}", response_model=ServerOut)
+async def set_server_fixed(
+    server_id: int, kind: str, body: FixedIn, user: CurrentUser, session: SessionDep
+) -> ServerOut:
+    """Починили: алерт закрывается сейчас, счет по окну (перезапуски за сутки, OOM, 5xx) - с
+    отметки. Беда по состоянию (диск полон, юнит лежит) еще видна - 409 с тем, что видно, отметки
+    нет (app/fixed.py)."""
+    server = await _get_or_404(server_id, session, user)
+    if kind not in fixed.KINDS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Этот алерт так не закрывается")
+    now = datetime.now(timezone.utc)
+    still = await fixed.mark(session, server, kind, user.username, body.text, now)
+    if still:
+        raise HTTPException(status.HTTP_409_CONFLICT, fixed.NOT_FIXED.format(left=still))
+    await session.commit()
+    await session.refresh(server)
+    label = fixed.label(kind)
+    await audit.record(session, user.username, "alert_fixed", server.name,
+                       f"{label} - {body.text.strip()[:200]}" if body.text.strip() else label)
     return _out(server, now)
 
 

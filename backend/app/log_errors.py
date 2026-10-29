@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app import podnames, tg_fmt
+from app import fixed, podnames, tg_fmt
 from app.models import Server
 from app.queue_watch import times_usual, where_short, where_text
 
@@ -182,6 +182,8 @@ def muted_keys(s: Server, now: datetime) -> set[str]:
 
 
 def _held(s: Server) -> set[str]:
+    if fixed.pending(s, "log_errors"):
+        return set()  # отметили "починили": объявленное больше не держит пониженный порог
     return {norm_key(str(k)) for k in ((s.alert_state or {}).get("log_errors_sig") or [])}
 
 
@@ -275,6 +277,9 @@ def update(st: dict | None, rep: dict, now: datetime) -> dict:
 def _hot_for(s: Server, k: str, now: datetime) -> float:
     """Сколько секунд держится авария в логе (по update)"""
     since = _ts((((s.alert_state or {}).get("logerr_ev") or {}).get(k) or {}).get("hot"))
+    at = fixed.after(s, "log_errors")
+    if since and at and at > since:
+        since = at  # отметили "починили" (app/fixed.py): авария считается с отметки
     return (now - since).total_seconds() if since else 0.0
 
 

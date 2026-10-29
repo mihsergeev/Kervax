@@ -53,6 +53,7 @@ from app import mem_trend
 from app import mem_limit
 from app import mem_starve
 from app import oom as oom_mod
+from app import fixed as fixed_mod
 from app import restarts as srv_restarts
 from app import ssh_audit
 from app import known as known_mod
@@ -4261,7 +4262,19 @@ def _metric_row(s: Server, state: dict, now: datetime, kind: str, value: float) 
 
 
 def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None,
-                    web_err: tuple[float, float, int, dict, float] | None = None) -> list[dict]:
+                    web_err: tuple[float, float, int, dict, float] | None = None,
+                    keep_fixed: bool = False) -> list[dict]:
+    """См. _server_problems. Вид, который отметили "починили" и сборщик еще не закрыл (app/fixed.py),
+    уже не показываем: отметку принимают, только когда беды нет, а объявленный алерт держит строку
+    до отбоя. keep_fixed - показать (проверка самой отметки)"""
+    out = _server_problems(s, now, pod_names, web_err)
+    if keep_fixed or not getattr(s, "alert_fixed", None):
+        return out
+    return [p for p in out if not fixed_mod.pending(s, p.get("kind") or "")]
+
+
+def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None,
+                     web_err: tuple[float, float, int, dict, float] | None = None) -> list[dict]:
     """Что сломано на сервере коротко, для сводки "Что сломано" на главной и значков в списке
     серверов: все, о чем шлют алерты, кроме того, что главная считает сама (заполнение диска,
     Docker, поды, бэкапы клиентов и репозитории). Уровни те же, что у
@@ -4293,7 +4306,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             if txt:
                 add("disk_health", lvl, txt, "diskhealth", "disk_health")
         n = _int((hb.get("io") or {}).get("count"))
-        if n >= _DISK_IO_MIN:
+        if n >= _DISK_IO_MIN and fixed_mod.io_counts(s, now)[0]:
             add("disk_health", 2, f"ошибки ввода-вывода: {n} за 10 минут", "diskhealth", "disk_health")
     ub = units_block(rep)
     if ub is not None:
@@ -4324,7 +4337,7 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     loops = state.get("unit_loops") if isinstance(state.get("unit_loops"), dict) else {}
     for u in rs or []:
         name = str(u["unit"])
-        hits = unit_loop_hits(loops.get(name), now)
+        hits = unit_loop_hits(loops.get(name), now, fixed_mod.after(s, "unit_loop"))
         if len(hits) < _UNIT_LOOP_MIN or name in units_muted(s, now):
             continue
         count, why = unit_loop_text(u, hits)
@@ -4543,7 +4556,9 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
             add("kube_pod", 2, ("под не работает: " if len(bp) == 1 else "поды не работают: ") + bad_pods_text(bp, 3),
                 "pods", "kube_pod", state.get("kube_pod_since"), section="kuber")
         jm = item_mutes(s, now, "kube_job:")
-        fj = [j for j in kube_failed_jobs(rep, now, 24) if job_item(j) not in jm]
+        # отметили "починили" (app/fixed.py): упавшие до отметки больше не беда
+        j_after = fixed_mod.after_ts(s, "kube_job")
+        fj = [j for j in kube_failed_jobs(rep, now, 24) if job_item(j) not in jm and (not j_after or _int(j.get("ts")) > j_after)]
         if fj:
             add("kube_job", 1, ("упал Job: " if len(fj) == 1 else "упали Job: ") + failed_jobs_text(fj),
                 "cron", "kube_job", section="kuber")
@@ -5130,13 +5145,14 @@ def units_restarting(rep: dict) -> list[dict] | None:
     return [u for u in ub["restarting"] if isinstance(u, dict) and u.get("unit")]
 
 
-def unit_loop_hits(cs: dict | None, now: datetime) -> list[list]:
-    """Приросты счетчика перезапусков за окно: [[время, сколько перезапусков], ...]."""
+def unit_loop_hits(cs: dict | None, now: datetime, after: datetime | None = None) -> list[list]:
+    """Приросты счетчика перезапусков за окно: [[время, сколько перезапусков], ...]. after - отметка
+    "починили" (app/fixed.py): что до нее, не в счет."""
     out = []
     for h in (cs or {}).get("hits") or []:
         if isinstance(h, list) and len(h) == 2:
             t = _parse_iso(str(h[0]))
-            if t is not None and (now - t).total_seconds() <= _UNIT_LOOP_WINDOW:
+            if t is not None and (now - t).total_seconds() <= _UNIT_LOOP_WINDOW and (after is None or t > after):
                 out.append(h)
     return out
 
@@ -5808,19 +5824,34 @@ def metric_avg(hist: list[tuple[float, dict[str, float]]] | None, kind: str, sin
     return {"v": round(sum(vals) / len(vals)), "min": max(1, round((now.timestamp() - t0) / 60))}
 
 
-async def web_error_window(session: AsyncSession,
-                           now: datetime) -> dict[int, tuple[float, float, int, dict, float]]:
+async def web_error_window(session: AsyncSession, now: datetime, after: dict[int, datetime] | None = None
+                           ) -> dict[int, tuple[float, float, int, dict, float]]:
     """{server_id: (запросов, ошибок 5xx, минут с данными, {ключ лога: {минута: ошибок}},
     ошибок не в счет)} за последние 15 минут. Три запроса на тик, а не по запросу на ноду.
     Разбивка по логам - чтобы вычесть заглушенные и посчитать минуты с ошибками без них.
     Минуты, где ошибки только на пробах (probe_only) или от выкладки (restart_blip), в
     разбивку не попадают, их ошибки идут отдельной суммой: ее вычитают из общего числа так
-    же, как заглушенные."""
+    же, как заглушенные.
+    after - {server_id: отметка "починили"} (app/fixed.py): у этих серверов окно начинается с нее.
+    Пустое окно - нули, а не пропуск: без ключа сборщик заморозил бы объявленный алерт"""
     since = now - _WEB_ERR_WINDOW
+    out = await _web_window(session, since)
+    for sid, at in (after or {}).items():
+        if at > since:
+            one = await _web_window(session, at, sid)
+            out[sid] = one.get(sid) or (0.0, 0.0, 0, {}, 0.0)
+    return out
+
+
+async def _web_window(session: AsyncSession, since: datetime, sid_only: int | None = None
+                      ) -> dict[int, tuple[float, float, int, dict, float]]:
+    """Окно ошибок 5xx с since: всех серверов или одного (sid_only)."""
+    one_m = [ServerMetric.server_id == sid_only] if sid_only is not None else []
+    one_s = [WebErrorSample.server_id == sid_only] if sid_only is not None else []
     rows = await session.execute(
         select(ServerMetric.server_id, func.sum(ServerMetric.web_rpm),
                func.sum(ServerMetric.web_5xx), func.count())
-        .where(ServerMetric.ts >= since, ServerMetric.web_5xx.is_not(None))
+        .where(ServerMetric.ts >= since, ServerMetric.web_5xx.is_not(None), *one_m)
         .group_by(ServerMetric.server_id)
     )
     deploys = await web_deploys(session, since)
@@ -5832,7 +5863,7 @@ async def web_error_window(session: AsyncSession,
         select(WebErrorSample.server_id, WebErrorSample.label, WebErrorSample.log,
                WebErrorSample.src_ts, WebErrorSample.e5, WebErrorSample.paths, WebErrorSample.ups,
                WebErrorSample.ts)
-        .where(WebErrorSample.ts >= since, WebErrorSample.e5 > 0)
+        .where(WebErrorSample.ts >= since, WebErrorSample.e5 > 0, *one_s)
     )).all()
     by_sid: dict[int, list] = {}
     for sid, _label, _log, src, e5, _paths, ups, _ts in samples:
@@ -6677,10 +6708,13 @@ def _server_conditions(s: Server, now: datetime,
         prev_io = state.get("disk_health_since")
         last_io = _parse_iso(prev_io or "")
         io_since = None
-        if io_n >= _DISK_IO_MIN:
+        # отметили "починили" (app/fixed.py): окно helper'а в счет, когда оно целиком после отметки,
+        # пачка до отметки часа не держит
+        io_win, io_hold = fixed_mod.io_counts(s, now, last_io)
+        if io_n >= _DISK_IO_MIN and io_win:
             fresh = last_io is not None and now - last_io < timedelta(minutes=5)
             io_since = prev_io if fresh else now.isoformat()
-        elif last_io is not None and now - last_io < _DISK_IO_HOLD:
+        elif last_io is not None and now - last_io < _DISK_IO_HOLD and io_hold:
             io_since = prev_io
         if io_since:
             txt = (f"ошибки ввода-вывода в журнале ядра: {io_n} за 10 минут" if io_n >= _DISK_IO_MIN
@@ -7254,7 +7288,7 @@ async def evaluate_servers(
         cfg = await settings_store.get_alert_config(session, settings)
         muted = await settings_store.get_muted(session)
         rules = await settings_store.get_server_alert_rules(session)
-        web_err = await web_error_window(session, now)
+        web_err = await web_error_window(session, now, fixed_mod.web_after(servers))
         fill_hist = await fill_history(session, servers, now)
         metric_hist = await metric_history(session, servers, now)
         windows = list(await session.scalars(select(MaintenanceWindow)))
@@ -7438,6 +7472,8 @@ async def evaluate_servers(
     snooze_put: list[tuple[int, str, str | None, str | None, str]] = []
     # отметки "не следить" у сроков кластера: секрет обновили или удалили (sid, ключ, at, новая|None)
     kexp_upd: list[tuple[int, str, str, dict | None]] = []
+    # отметки "починили" (app/fixed.py): закрыта, не подтвердилась или отслужила (sid, вид, at, новая|None)
+    fixed_upd: list[tuple[int, str, str | None, dict | None]] = []
     # где в очередях начинается каждый сервер: у серверов на подключении после цикла
     # отправляется только офлайн и критичный диск (onboard_mod.split)
     marks: list[tuple[int | None, int, int, int, int]] = []
@@ -7532,6 +7568,28 @@ async def evaluate_servers(
         # "снова в норме" ровно тогда, когда нода пропала (и после каждого деплоя панели).
         talking = seen_online(s, now)
         warm = talking and boot_warmup.server_warming(s, now)
+        # Починили (app/fixed.py): отметка, которую сборщик еще не закрыл. Беды по виду нет (или ее
+        # держит только выдержка отбоя) - уровень в ноль в этом же тике и отбой сразу, с тем, кто
+        # отметил. Беда есть: у состояния отметка снимается (не подтвердилась), у счетчика остается
+        # началом счета - это уже повтор после отметки, алерт идет как обычно. Отслужившие уходят
+        fix_now: dict[str, dict] = {}
+        for fk, ent in (s.alert_fixed or {}).items():
+            if not isinstance(ent, dict):
+                continue
+            if fixed_mod.expired(ent, now):
+                fixed_upd.append((s.id, fk, ent.get("at"), None))
+                continue
+            if ent.get("done") or not talking:
+                continue
+            if fk in conds:
+                f_lvl, f_ctx = conds[fk]
+                if fixed_mod.broken(fk, f_lvl, f_ctx):
+                    fixed_upd.append((s.id, fk, ent.get("at"),
+                                      {**ent, "done": now.isoformat()} if fk in fixed_mod.WINDOW else None))
+                    continue
+                conds[fk] = (0, {**f_ctx, "items": [], "hold": {}, "cool": None, "since": None, "sig": []})
+            fix_now[fk] = ent
+            fixed_upd.append((s.id, fk, ent.get("at"), {**ent, "done": now.isoformat()}))
         # Жизнь заглушек (app/mute_watch.py): есть ли сейчас то, что глушит каждая, тихие временные
         # снимаются, кончившиеся при живой проблеме держатся. Стало хуже - заглушка снимается в этом
         # же тике, и алерт идет как обычно
@@ -7595,7 +7653,8 @@ async def evaluate_servers(
                 if level or key in _SILENT_RECOVERY or (key in _FLAP_METRIC_KINDS and st.get(f"flap_{key}_muted")):
                     apply(s.id, key, level)
                     continue
-                recoveries.append(_server_alert_text(key, s.name, _recovery_short(key, st, ctx, s), srv_url(s, key),
+                rec = fixed_mod.recovery_text(key, fix_now[key]) if key in fix_now else _recovery_short(key, st, ctx, s)
+                recoveries.append(_server_alert_text(key, s.name, rec, srv_url(s, key),
                                                      recovery=True, group=s.group_name or ""))
                 rec_apply.extend((s.id, k, v) for k, v in _closed_tail(key, st))
             return
@@ -7745,6 +7804,20 @@ async def evaluate_servers(
                 # сломано"; что останется к закрытию, станет известной проблемой
                 continue
             prev = int(st.get(key, 0))
+            if key in fix_now:
+                # отметили "починили" (app/fixed.py): закрываем сейчас, без выдержки отбоя. Отбой в чат -
+                # если о беде говорили (придержанное распорядком и тихий повтор прошли без сообщения).
+                # Прошлый отбой не помним: повтор после отметки - новая тревога, а не "продолжение"
+                tail = _closed_tail(key, st) + [(f"{key}{suf}", None) for suf in ("_was", "_quiet", "_said")
+                                                if st.get(f"{key}{suf}") is not None]
+                if prev and not st.get(f"{key}_quiet") and not st.get(f"{key}_hush"):
+                    recoveries.append(_server_alert_text(key, s.name, fixed_mod.recovery_text(key, fix_now[key]),
+                                                         srv_url(s, key), recovery=True, group=s.group_name or ""))
+                    rec_apply.extend((s.id, k2, v2) for k2, v2 in tail)
+                elif prev or len(tail) > 1:
+                    for k2, v2 in tail:
+                        apply(s.id, k2, v2)
+                continue
             if key not in _NO_SETTLE:
                 # дребезг тревога-отбой (см. _SETTLE_S): отбой после устойчивой нормы, повтор после
                 # отбоя - продолжение прежней тревоги
@@ -8174,6 +8247,13 @@ async def evaluate_servers(
         # какие юниты упали; без helper'а - по росту счетчика ядра (oom_total копится в
         # ingest'е). Событие, отбоя нет; повторы за час - одним сообщением (app/oom.py)
         om = rules.get("oom")
+        if "oom" in fix_now:
+            # отметили "починили" (app/fixed.py): что было до отметки, не придет и повтором через час,
+            # следующий OOM - сразу новым алертом
+            o_at = fixed_mod.after_ts(s, "oom")
+            for k, v in (("oom_sent", None), ("oom_held", []), ("oom_end", max(float(st.get("oom_end") or 0), o_at))):
+                if st.get(k) != v:
+                    apply(s.id, k, v)
         # заглушенное (весь OOM или виновник, app/oom.py) учитывается молча: после мьюта старое не придет
         o_fire, o_done, o_now = oom_mod.alert_step(s, st, s.last_report or {}, now,
                                                    tg_buttons.zone(cfg.get("tz") or "Europe/Moscow"), mutes,
@@ -8222,6 +8302,10 @@ async def evaluate_servers(
                     # контейнер падал, пока не встала база, - это загрузка, не цикл
                     loops.append(now.isoformat())
                 cs["rc"], cs["loops"] = rc, loops
+                # отметили "починили" (app/fixed.py): перезапуски до отметки не в счет
+                dl_at = fixed_mod.after(s, "docker_loop")
+                if dl_at is not None:
+                    loops = [x for x in loops if (p := _parse_iso(x)) is not None and p > dl_at]
                 looping = len(loops) >= _DOCKER_LOOP_MIN
                 # состояние "в цикле" - без оглядки на правило и мьют: главная (docker_alerts) показывает
                 # беду и тогда, когда сообщение о ней не ушло
@@ -8239,7 +8323,8 @@ async def evaluate_servers(
                     # заглушенный посреди алерта, навсегда оставался "в цикле" на главной.
                     if loop_ok:
                         recoveries.append(_server_alert_text(
-                            "docker_loop", s.name, f"{name} больше не перезапускается",
+                            "docker_loop", s.name, fixed_mod.recovery_text("docker_loop", fix_now["docker_loop"])
+                            if "docker_loop" in fix_now else f"{name} больше не перезапускается",
                             srv_url(s, "docker_loop"), recovery=True, group=s.group_name or ""))
                     cs["alerted_loop"] = False
                 # «упал»: не работает и это авария (docker_down_why: не остановлен руками),
@@ -8296,7 +8381,8 @@ async def evaluate_servers(
                 cs = unit_loop_step(ustate.get(name), _int(u.get("n")), now)
                 if warm and not cs["alerted"]:
                     cs["hits"] = []  # перезапуски на прогреве - загрузка, не цикл (как у контейнеров)
-                hits = cs["hits"]
+                # отметили "починили" (app/fixed.py): перезапуски до отметки не в счет
+                hits = unit_loop_hits(cs, now, fixed_mod.after(s, "unit_loop"))
                 quiet = name in muted_u or not ul_ok
                 if len(hits) >= _UNIT_LOOP_MIN and not cs["alerted"] and not quiet:
                     count, why = unit_loop_text(u, hits)
@@ -8307,7 +8393,8 @@ async def evaluate_servers(
                     # отметку снимаем всегда, отбой шлем только по живому правилу
                     if not quiet:
                         recoveries.append(_server_alert_text(
-                            "unit_loop", s.name, f"{name} больше не перезапускается",
+                            "unit_loop", s.name, fixed_mod.recovery_text("unit_loop", fix_now["unit_loop"])
+                            if "unit_loop" in fix_now else f"{name} больше не перезапускается",
                             srv_url(s, "unit_loop"), recovery=True, group=s.group_name or ""))
                     cs["alerted"] = False
                 ustate[name] = cs
@@ -8643,7 +8730,8 @@ async def evaluate_servers(
     failed: list[str] = []
     for s in servers:
         lens = (len(fires), len(fire_apply), len(recoveries), len(rec_apply), len(known_upd), len(known_add),
-                len(mute_lift), len(kexp_upd), len(marks), len(quiet_closed), len(mute_swap), len(known_remind))
+                len(mute_lift), len(kexp_upd), len(marks), len(quiet_closed), len(mute_swap), len(known_remind),
+                len(fixed_upd))
         st0, was_changed = dict(cur_by_id[s.id]), s.id in changed_ids
         try:
             await one_server(s)
@@ -8651,7 +8739,7 @@ async def evaluate_servers(
             log.exception("серверные алерты: оценка сервера %s упала, сервер пропущен", s.name)
             failed.append(s.name)
             for lst, n in zip((fires, fire_apply, recoveries, rec_apply, known_upd, known_add, mute_lift,
-                               kexp_upd, marks, quiet_closed, mute_swap, known_remind), lens):
+                               kexp_upd, marks, quiet_closed, mute_swap, known_remind, fixed_upd), lens):
                 del lst[n:]
             marks.append((s.id, *lens[:4]))
             cur_by_id[s.id] = st0
@@ -8709,7 +8797,7 @@ async def evaluate_servers(
             apply(sid, key, value)
 
     if changed_ids or known_upd or known_add or onboard_closed or mute_lift or kexp_upd or quiet_closed or mute_swap \
-            or snooze_put:
+            or snooze_put or fixed_upd:
         async with session_factory() as session:
             for qs, qk, why in quiet_closed:
                 if any(sid == qs.id and k == qk for sid, k, _v in rec_apply if k == qk) and int(
@@ -8777,6 +8865,16 @@ async def evaluate_servers(
                 row = await session.get(Server, sid)
                 if row is not None and old in (row.alert_mutes or []):
                     row.alert_mutes = list(dict.fromkeys(new if m == old else m for m in row.alert_mutes))
+            for sid, fk, at, new_f in fixed_upd:
+                row = await session.get(Server, sid)
+                cur = dict((row.alert_fixed if row is not None else None) or {})
+                if not isinstance(cur.get(fk), dict) or cur[fk].get("at") != at:
+                    continue  # отметку успели поставить заново - их версия главнее
+                if new_f is None:
+                    cur.pop(fk)
+                else:
+                    cur[fk] = new_f
+                row.alert_fixed = cur or None
             for sid, kk, at, new_e in kexp_upd:
                 row = await session.get(Server, sid)
                 cur = dict((row.kube_expiry_ignored if row is not None else None) or {})

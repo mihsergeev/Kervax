@@ -6911,6 +6911,16 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
   box-sizing: border-box;
   resize: vertical;
 }
+.fixed-still {
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--degraded, #d29922) 45%, var(--border));
+  background: color-mix(in srgb, var(--degraded, #d29922) 8%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  overflow-wrap: anywhere;
+}
 .known-bar {
   border-color: color-mix(in srgb, var(--text) 18%, var(--border));
   background: color-mix(in srgb, var(--text) 4%, transparent);

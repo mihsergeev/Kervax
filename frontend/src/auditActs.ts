@@ -55,6 +55,7 @@ export const ACT: Record<string, string> = {
   server_dev_on: 'пометил сервер разработкой',
   server_dev_off: 'пометил сервер продом',
   known_set: 'отметил известную проблему',
+  alert_fixed: 'отметил: починили',
   known_drop: 'снял известную проблему',
   known_closed: 'известная проблема прошла',
   mute_lifted: 'мьют снят сам',

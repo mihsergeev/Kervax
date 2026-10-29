@@ -771,6 +771,9 @@ class Server(Base):
     # известные проблемы: {вид алерта: {text, by, at, until, level, sig, worse, gone_at,
     # reminded_at}} - алерт молчит, пока не стало хуже, само закрывается (app/known.py)
     known_issues: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # починили: {вид алерта: {at, by, text, done}} - алерт закрывается сейчас, счет по окну начинается
+    # с отметки (app/fixed.py)
+    alert_fixed: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # сервер, за которым стоит этот (шлюз, VPN, гипервизор): пока тот молчит, "недоступен" про
     # этот не шлем, он строкой в сообщении про родителя (app/parents.py)
     parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

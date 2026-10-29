@@ -114,6 +114,7 @@ export type OvRow = {
   since?: string | null
   act?: { label: string; onClick: () => void }
   dev?: boolean // сервер разработки, вид приложения: серым с пометкой (backend app/dev_mode.py)
+  fix?: () => void // починили: закрыть алерт сейчас (FixedDialog.tsx)
 }
 export function OvRows({ rows }: { rows: OvRow[] }) {
   const { t } = useI18n()
@@ -125,6 +126,12 @@ export function OvRows({ rows }: { rows: OvRow[] }) {
           <span className={`lk-dot ${i.dev ? 'lk-dot-idle' : i.tone === 't-down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
           <span className={`ov-issue-text${i.dev ? ' muted' : ''}`}>{i.dev ? t('разработка: {text}', { text: i.text }) : i.text}</span>
           {sinceShort(i.since, t) && <span className="muted small">{sinceShort(i.since, t)}</span>}
+          {i.fix && (
+            <button className="ghost small row-act" title={t('Починили: убрать алерт сейчас и считать заново')}
+              onClick={i.fix}>
+              ✅ {t('Починили')}
+            </button>
+          )}
           {i.act && (
             <button className="ghost small row-act" onClick={i.act.onClick}>
               {i.act.label} ›

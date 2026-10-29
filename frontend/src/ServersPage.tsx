@@ -7,6 +7,8 @@ import {
   agentUpdateCancel,
   ApiError,
   dropServerKnown,
+  setServerFixed,
+  setServerKnown,
   setServerNote,
   backupCommand,
   backupCommandStatus,
@@ -133,7 +135,8 @@ import { GpuCard, GpuChip } from './Gpu'
 import { RoleChips } from './RoleChips'
 import { GreCard, GreChip } from './Gre'
 import { VpnCards, vpnSearch, vpnSecLine } from './Vpn'
-import { KnownServerList, knownItems, knownTitle } from './KnownDialog'
+import { KnownDialog, KnownServerList, knownItems, knownTitle } from './KnownDialog'
+import { FixedDialog, FIX_KINDS } from './FixedDialog'
 import { AgentUpdRow, agentBehind, hostOf, useFleetRollout } from './FleetUpdate'
 import { MaintBanner, MaintChip } from './MaintModal'
 import { ServerEditModal, type ServerEditForm } from './ServerEdit'
@@ -6724,6 +6727,9 @@ function ServerDetail({
   const { isViewer } = useAuth()
   const [updBusy, setUpdBusy] = useState(false)
   const [snoozing, setSnoozing] = useState(false)
+  // починили и, если еще видно, известная проблема по строке сводки (FixedDialog.tsx)
+  const [fixFor, setFixFor] = useState<{ kind: string; title: string; known: boolean } | null>(null)
+  const [knownFor, setKnownFor] = useState<{ kind: string; title: string } | null>(null)
   const [histOpen, setHistOpen] = useState(false)
   // команда установки заново (чек-лист подключения): новый токен, старая команда не сработает
   const [enroll, setEnroll] = useState<ServerEnroll | null>(null)
@@ -7157,8 +7163,37 @@ function ServerDetail({
           act: i.section && onOpenSection
             ? { label: t(SECTION_LABEL[i.section] ?? i.section), onClick: () => onOpenSection(i.section!, i.srv, i.sec) }
             : undefined,
+          fix: !isViewer && !i.dev && i.kind && FIX_KINDS.has(i.kind)
+            ? () => setFixFor({ kind: i.kind!, title: i.text, known: !!s.alert_since?.[i.kind!] })
+            : undefined,
         }))}
       />
+      {fixFor && (
+        <FixedDialog
+          title={`${s.name} - ${fixFor.title}`}
+          onClose={() => setFixFor(null)}
+          onKnown={fixFor.known ? () => {
+            setKnownFor({ kind: fixFor.kind, title: fixFor.title })
+            setFixFor(null)
+          } : undefined}
+          onSave={async (text) => {
+            await setServerFixed(s.id, fixFor.kind, text)
+            setFixFor(null)
+            onChanged()
+          }}
+        />
+      )}
+      {knownFor && (
+        <KnownDialog
+          title={`${s.name} - ${knownFor.title}`}
+          onClose={() => setKnownFor(null)}
+          onSave={async (text, days) => {
+            await setServerKnown(s.id, knownFor.kind, text, days)
+            setKnownFor(null)
+            onChanged()
+          }}
+        />
+      )}
       <DayBlock day={day} onMore={() => go('timeline')} />
       <SrvTiles r={r} M={M} info={info} onGo={go} gpu={s.gpu_sum} oom={s.oom} />
       <OvAreas
