@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.72] - 2026-10-30
+
+### Fixed
+- Ложное "конфиг caddy не проходит проверку" (helper webserver-setup 0.29): проверка конфига повторяет
+  работающий сервер. Helper находит процесс caddy, nginx или haproxy на хосте или в контейнере и берет
+  окружение из его /proc/<pid>/environ, путь конфига и флаги из командной строки (caddy --config/--adapter/
+  --envfile, nginx -c/-p/-e, haproxy -f/-C). В docker exec передаются только имена переменных, значения в
+  argv не попадают. Хостовый сервер проверяется, только если он запущен на самом хосте, caddy без
+  --config (docker-proxy, file-server) не проверяется.
+- Тест алерта GRE падал в зависимости от времени суток.
+
+### Changed
+- Privileged-контейнер, внутри которого работает docker (CI собирает образы), больше не дает совета убрать
+  privileged, алерта и пункта в "Требует действий". Вместо него серая заметка "Docker внутри контейнера" с
+  цифрами и советом sysbox-runc или отдельной ВМ, кнопка "знаю, так надо". Если dockerd поднят, но без дела,
+  совет остается с цифрами, если docker внутри нет - сразу убрать privileged. Агент 2.60 отдает поле dind:
+  dockerd в cgroup контейнера, его CPU, контейнеры внутри сейчас и раньше. Со старым агентом как раньше.
+
 ## [1.8.71] - 2026-10-30
 
 ### Fixed

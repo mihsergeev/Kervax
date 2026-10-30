@@ -36,7 +36,12 @@ set -euo pipefail
 #       "limiting requests" lines in the same stream it is "limit" (limit_req) instead. The
 #       upstream name gets the namespace, service, Ingress and hosts from the controller's
 #       nginx.conf, so the alert names the service instead of all domains of the controller
-KERVAX_SETUP_VERSION=0.28  # MAJOR.MINOR; compared component-wise
+# 0.29: the config test repeats the running server instead of fixed paths: the config, adapter
+#       and envfile (caddy), -c/-p/-e (nginx), -f/-C (haproxy) come from the command line of the
+#       process, the environment from its /proc/<pid>/environ (an entrypoint that computes
+#       {$VAR} before exec caddy no longer makes a working Caddyfile "fail"). The values go to
+#       docker exec through the environment, not argv. No server process - no verdict
+KERVAX_SETUP_VERSION=0.29  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -415,7 +420,9 @@ CFG_NA='executable file not found|reading config (from )?file: open /etc/caddy/C
 cfg_run() { # server where command...
   local srv="$1" where="$2" out rc err
   shift 2
-  out=$(timeout 30 "$@" 2>&1); rc=$?
+  # the environment and the working directory of the server under test (cfg_test), only for it
+  out=$([ "${#CFG_ENVS[@]}" -eq 0 ] || export "${CFG_ENVS[@]}"; [ -z "$CFG_CWD" ] || cd "$CFG_CWD" 2>/dev/null
+        timeout 30 "$@" 2>&1); rc=$?
   [ "$rc" -eq 124 ] && return 0  # the test did not finish in time: no verdict
   [ "$rc" -ne 0 ] && printf '%s\n' "$out" | grep -qiE "$CFG_NA" && return 0
   err=""
@@ -425,26 +432,153 @@ cfg_run() { # server where command...
   fi
   CFG="$CFG${CFG:+,}{\"server\":\"$srv\",\"where\":\"$(cesc "$where")\",\"ok\":$([ "$rc" -eq 0 ] && echo true || echo false),\"err\":\"$(cesc "$err")\"}"
 }
+# The test repeats the running server: the config path and flags come from the command line of
+# its process, the environment from /proc/<pid>/environ. docker exec gets only Config.Env, while
+# an entrypoint may compute variables and then exec the server (a bcrypt hash for basic_auth):
+# without them {$VAR} is empty and a working Caddyfile "fails". The values reach the test only
+# through the environment (docker exec -e NAME takes the value from its own environment), never
+# through argv that anyone on the node can read. The server process not found, or its command
+# line says nothing about the config - no test, no verdict: a false "fails" is worse than none.
+# Not taken over: the shell's and the docker client's own variables, the systemd ones (a test with
+# NOTIFY_SOCKET would report to the unit of the server) and HAPROXY_* that the haproxy master
+# sets for itself on re-exec (with HAPROXY_MWORKER_* haproxy -c finds "no listener")
+CFG_ENV_SKIP='^(PATH|HOME|PWD|OLDPWD|SHLVL|IFS|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|CDPATH|GLOBIGNORE|PS[0-9]|TMPDIR|_|BASH_.*|LD_.*|DOCKER_.*|NOTIFY_SOCKET|LISTEN_.*|WATCHDOG_.*|INVOCATION_ID|JOURNAL_STREAM|SYSTEMD_.*|HAPROXY_.*)$'
+CFG_PID="" CFG_CWD=""
+CFG_ARGV=() CFG_ENVS=() CFG_EARGS=() CFG_CMD=()
+# cfg_find COMM PID: the topmost process named COMM (its parent is named otherwise: the nginx
+# or haproxy master, not a worker) in the pid namespace of PID (1 = the host, or pid 1 of a
+# container) -> CFG_PID, CFG_ARGV
+cfg_find() {
+  local ns p c pp pc
+  CFG_PID="" CFG_ARGV=()
+  ns=$(readlink "/proc/$2/ns/pid" 2>/dev/null) || return 1
+  for p in /proc/[0-9]*; do
+    p=${p#/proc/}
+    read -r c 2>/dev/null < "/proc/$p/comm" || continue
+    [ "$c" = "$1" ] || continue
+    [ "$(readlink "/proc/$p/ns/pid" 2>/dev/null)" = "$ns" ] || continue
+    pp=$(awk '/^PPid:/ { print $2; exit }' "/proc/$p/status" 2>/dev/null)
+    pc=""
+    [ -n "$pp" ] && [ "$pp" != 0 ] && { read -r pc 2>/dev/null < "/proc/$pp/comm" || pc=""; }
+    [ "$pc" = "$1" ] && continue
+    CFG_PID=$p
+    break
+  done
+  [ -n "$CFG_PID" ] || return 1
+  mapfile -d '' -t CFG_ARGV 2>/dev/null < "/proc/$CFG_PID/cmdline" || return 1
+  [ "${#CFG_ARGV[@]}" -gt 0 ]
+}
+# the environment of CFG_PID -> CFG_ENVS (NAME=value) and CFG_EARGS (-e NAME for docker exec)
+cfg_env() {
+  local kv n envs=()
+  CFG_ENVS=() CFG_EARGS=()
+  mapfile -d '' -t envs 2>/dev/null < "/proc/$CFG_PID/environ" || return 0
+  for kv in ${envs[@]+"${envs[@]}"}; do
+    [[ $kv == *=* ]] || continue
+    n=${kv%%=*}
+    [[ $n =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    [[ $n =~ $CFG_ENV_SKIP ]] && continue
+    CFG_ENVS+=("$kv")
+    CFG_EARGS+=(-e "$n")
+  done
+}
+# caddy run [--config F] [--adapter A] [--envfile F] -> CFG_CMD: caddy validate with the same.
+# Not "run" (caddy-docker-proxy runs "caddy docker-proxy" with a config from labels) or no
+# --config (a Caddyfile in the working directory of the process) - nothing to test
+cfg_caddy() {
+  local i a k v cfg="" extra=()
+  CFG_CMD=()
+  [ "${CFG_ARGV[1]:-}" = run ] || return 1
+  for ((i = 2; i < ${#CFG_ARGV[@]}; i++)); do
+    a=${CFG_ARGV[i]}
+    k=${a#--}
+    k=${k#-}
+    case "$k" in
+      config=*|adapter=*|envfile=*) v=${k#*=}; k=${k%%=*} ;;
+      config|c|adapter|a|envfile) v=${CFG_ARGV[i + 1]:-}; i=$((i + 1)) ;;
+      *) continue ;;
+    esac
+    case "$k" in
+      config|c) cfg=$v ;;
+      adapter|a) extra+=(--adapter "$v") ;;
+      envfile) extra+=(--envfile "$v") ;;
+    esac
+  done
+  [ -n "$cfg" ] || return 1
+  a=caddy
+  case "${CFG_ARGV[0]}" in /*) a=${CFG_ARGV[0]} ;; esac
+  CFG_CMD=("$a" validate --config "$cfg" ${extra[@]+"${extra[@]}"})
+}
+# The nginx master shows "nginx: master process /usr/sbin/nginx -c F -g daemon off;" as one
+# string -> CFG_CMD: nginx -t with the same binary, -c, -p and -e. -g is left out: its value has
+# spaces, and directives from it do not change the test. nginx writes its title over the
+# environment, so the environment is not taken over (the nginx config does not read it anyway)
+cfg_nginx() {
+  local t i toks bin=nginx extra=()
+  CFG_CMD=()
+  read -ra toks <<< "${CFG_ARGV[*]}"
+  [ "${toks[0]:-}" = "nginx:" ] && [ "${toks[1]:-}" = master ] && [ "${toks[2]:-}" = process ] || return 1
+  case "${toks[3]:-}" in /*) bin=${toks[3]} ;; esac
+  for ((i = 4; i < ${#toks[@]}; i++)); do
+    t=${toks[i]}
+    case "$t" in
+      -c|-p|-e) [ -n "${toks[i + 1]:-}" ] && extra+=("$t" "${toks[i + 1]}"); i=$((i + 1)) ;;
+      -g) while [ $i -lt ${#toks[@]} ] && [[ ${toks[i]} != *';' ]]; do i=$((i + 1)); done ;;
+    esac
+  done
+  CFG_CMD=("$bin" -t ${extra[@]+"${extra[@]}"})
+}
+# haproxy -W -f F [-f F2] [-C DIR] ... -> CFG_CMD: haproxy -c with the same -f and -C
+cfg_haproxy() {
+  local i a bin=haproxy extra=()
+  CFG_CMD=()
+  case "${CFG_ARGV[0]}" in /*) bin=${CFG_ARGV[0]} ;; esac
+  for ((i = 1; i < ${#CFG_ARGV[@]}; i++)); do
+    a=${CFG_ARGV[i]}
+    case "$a" in
+      -f|-C) [ -n "${CFG_ARGV[i + 1]:-}" ] && extra+=("$a" "${CFG_ARGV[i + 1]}"); i=$((i + 1)) ;;
+    esac
+  done
+  [ "${#extra[@]}" -gt 0 ] || return 1
+  CFG_CMD=("$bin" -c "${extra[@]}")
+}
+# cfg_test SERVER CONTAINER|"" : the test of the running SERVER on the host or in the container
+cfg_test() {
+  local srv="$1" c="$2" pid1=1
+  CFG_ENVS=() CFG_EARGS=() CFG_CWD=""
+  if [ -n "$c" ]; then
+    pid1=$(docker inspect -f '{{.State.Pid}}' "$c" 2>/dev/null) || return 0
+    case "$pid1" in ''|0|*[!0-9]*) return 0 ;; esac
+  fi
+  cfg_find "$srv" "$pid1" || return 0
+  "cfg_$srv" || return 0
+  [ "$srv" = nginx ] || cfg_env
+  if [ -z "$c" ]; then
+    # a relative path is relative to the working directory of the server
+    CFG_CWD=$(readlink "/proc/$CFG_PID/cwd" 2>/dev/null) || CFG_CWD=""
+    cfg_run "$srv" host "${CFG_CMD[@]}"
+  else
+    cfg_run "$srv" "$c" docker exec ${CFG_EARGS[@]+"${CFG_EARGS[@]}"} "$c" "${CFG_CMD[@]}"
+  fi
+  CFG_ENVS=() CFG_EARGS=() CFG_CWD=""
+}
 check_configs() {
   local a c
-  command -v nginx >/dev/null 2>&1 && pgrep -x nginx >/dev/null 2>&1 && cfg_run nginx host nginx -t
+  command -v nginx >/dev/null 2>&1 && cfg_test nginx ""
   for a in apache2ctl apachectl; do
     if command -v "$a" >/dev/null 2>&1; then
       { pgrep -x apache2 || pgrep -x httpd; } >/dev/null 2>&1 && cfg_run apache host "$a" -t
       break
     fi
   done
-  command -v caddy >/dev/null 2>&1 && [ -f /etc/caddy/Caddyfile ] && pgrep -x caddy >/dev/null 2>&1 \
-    && cfg_run caddy host caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-  command -v haproxy >/dev/null 2>&1 && [ -f /etc/haproxy/haproxy.cfg ] && pgrep -x haproxy >/dev/null 2>&1 \
-    && cfg_run haproxy host haproxy -c -f /etc/haproxy/haproxy.cfg
+  command -v caddy >/dev/null 2>&1 && cfg_test caddy ""
+  command -v haproxy >/dev/null 2>&1 && cfg_test haproxy ""
   command -v docker >/dev/null 2>&1 || return 0
   while read -r c; do
-    [ -n "$c" ] && cfg_run nginx "$c" docker exec "$c" nginx -t
+    [ -n "$c" ] && cfg_test nginx "$c"
   done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/nginx/{print $1}' | sort -u)
-  # Caddy with its own Caddyfile (caddy-docker-proxy has none: CFG_NA skips it)
   while read -r c; do
-    [ -n "$c" ] && cfg_run caddy "$c" docker exec "$c" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    [ -n "$c" ] && cfg_test caddy "$c"
   done < <(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | awk '/caddy/{print $1}' | sort -u)
 }
 check_configs

@@ -103,6 +103,9 @@ async def _env(tmp_path, monkeypatch, host=None):
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     monkeypatch.setattr(gre, "host_state", lambda data_dir=None: host or {})
+    # T0 - фиксированная дата: старт панели ставим до нее, иначе после T0 + 1 ч реального времени
+    # panel_just_started(T0) истинно и оффлайн не считается
+    monkeypatch.setattr(collector, "_PANEL_STARTED", T0 - timedelta(hours=1))
     return engine, factory, Settings(alert_webhook="http://hook"), sent
 
 

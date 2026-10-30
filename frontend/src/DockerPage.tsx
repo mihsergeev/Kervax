@@ -10,6 +10,7 @@ import {
   type DockerCommand,
   type DockerContainer,
   type DockerInfo,
+  type DindInfo,
   type DockerRiskStart,
   type MemLimitItem,
   type RiskStep,
@@ -401,6 +402,7 @@ function riskFixText(st: RiskStep, a: Record<string, string>, t: (k: string, p?:
   const need = [a.cap_add && `cap_add: [${a.cap_add}]`, a.devices && `devices: [${a.devices}]`].filter(Boolean).join(', ')
   switch (st.id) {
     case 'ci_check': return t('CI-агент: сколько образов у docker внутри, 0 или ошибка - privileged можно убрать')
+    case 'ci_idle': return t('Docker внутри поднят, но без дела: за {days} дн. ни одного контейнера внутри, CPU {cpu} с. Проверить образы: 0 или ошибка - privileged можно убрать', { days: a.idle_days ?? '', cpu: a.idle_cpu ?? '' })
     case 'bak': return t('Копия compose рядом')
     case 'priv_off': return t('В {file} у {svc} заменить privileged: true на privileged: false', a)
       + (a.dind_env ? ', ' + t('строку {env} тоже убрать', { env: a.dind_env }) : '')
@@ -450,11 +452,65 @@ function StartCapsNote({ items }: { items: DockerRiskStart[] }) {
   )
 }
 
+// privileged ради живого docker внутри (dind): совет убрать сломает сборки, поэтому не тревога, а
+// пометка с тем, что безопаснее; "знаю, так надо" - тот же мут dockrisk:<имя>, что "по назначению"
+function DindNote({ server: s, canAct, onChanged }: { server: Server; canAct: boolean; onChanged: () => void }) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState('')
+  const items = (s.docker_risk ?? []).filter((x) => x.note && !x.muted)
+  const facts = (d: DindInfo) => [
+    d.run ? t('сейчас контейнеров внутри: {n}', { n: d.run }) : d.ran ? t('внутри запускались контейнеры') : '',
+    d.cpu >= 60 ? t('dockerd съел {m} мин CPU за {d} дн.', { m: Math.round(d.cpu / 60), d: Math.max(1, Math.round(d.up / 86400)) }) : '',
+    !d.run && !d.ran && d.cpu < 60 ? t('docker внутри запущен {h} ч назад, судить рано', { h: Math.round(d.up / 3600) }) : '',
+  ].filter(Boolean).join(', ')
+  const mute = (name: string) => {
+    setBusy(name)
+    muteServerKeys(s.id, [DOCKRISK_MUTE + name], [])
+      .then(onChanged)
+      .catch(toastError)
+      .finally(() => setBusy(''))
+  }
+  return (
+    <div className="chart-card net-card net-card-wide">
+      <div className="net-head">
+        <div className="chart-cap">{t('Docker внутри контейнера')}</div>
+      </div>
+      <div className="loc-results">
+        {items.map((x) => (
+          <div key={x.name} className="loc-res hs-warn-row">
+            <span className="lk-dot lk-dot-info" />
+            <div className="hs-warn-main">
+              <span className="mono">{x.name}</span> <span className="muted small">({x.image})</span>
+              <div className="small">
+                {x.dind?.ci
+                  ? t('внутри работает docker (CI собирает образы) - privileged тут нужен')
+                  : t('внутри работает docker - privileged тут нужен')}
+                {x.dind && facts(x.dind) ? ': ' + facts(x.dind) : ''}
+              </div>
+              <div className="small muted">
+                {x.dind?.ci
+                  ? t('Безопаснее sysbox-runc runtime вместо privileged или вынести агентов на отдельную ВМ: взлом сборки в privileged-контейнере дает root на сервере.')
+                  : t('Безопаснее sysbox-runc runtime вместо privileged или отдельная ВМ: взлом в privileged-контейнере дает root на сервере.')}
+              </div>
+            </div>
+            {canAct && (
+              <button className="ghost small" disabled={busy === x.name} onClick={() => mute(x.name)}
+                title={t('Убрать пометку: privileged здесь оставлен намеренно')}>
+                {t('знаю, так надо')}
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct: boolean; onChanged: () => void }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState('')
   const items = s.docker_risk ?? []
-  const live = items.filter((x) => !x.muted)
+  const live = items.filter((x) => !x.muted && !x.note)
   const muted = items.filter((x) => x.muted)
   // блок шагов общий у контейнеров одного проекта: показать один раз
   const blocks = [...new Map(live.flatMap((x) => (x.fix ? [[x.fix.key, x.fix] as const] : []))).values()]
@@ -1036,7 +1092,7 @@ function DockerHostModal({
         count: exposed.length,
         text: t('docker-сокет у {list} - взлом прокси даст root на хосте', { list: exposed.map((e) => e.name).join(', ') }),
       })
-    const risk = (s.docker_risk ?? []).filter((x) => !x.muted)
+    const risk = (s.docker_risk ?? []).filter((x) => !x.muted && !x.note)
     if (risk.length && !mutes.has('docker_risk'))
       add('host', {
         level: 1,
@@ -1080,7 +1136,7 @@ function DockerHostModal({
   if (!s.docker_risk && !info.host.level) info.host.idle = true
   if (!policyKnown && !info.boot.level) info.boot.idle = true
   if (live) {
-    const riskAll = (s.docker_risk ?? []).filter((x) => !x.muted)
+    const riskAll = (s.docker_risk ?? []).filter((x) => !x.muted && !x.note)
     markMuted(info, [
       ...(devDown.length
         ? [{ sec: 'containers', dev: true, text: t('не работают или крутятся по кругу: {list}', { list: shortList(devDown, t, 3) }) }] : []),
@@ -1252,7 +1308,8 @@ function DockerHostModal({
                   {sockDone.bars}
                   {riskDone.bars}
                   {exposed.length > 0 && <SockWarning items={exposed} server={s} />}
-                  {(s.docker_risk?.length ?? 0) > 0 && <RiskWarning server={s} canAct={canAct} onChanged={onChanged} />}
+                  {(s.docker_risk ?? []).some((x) => x.muted || !x.note) && <RiskWarning server={s} canAct={canAct} onChanged={onChanged} />}
+                  {(s.docker_risk ?? []).some((x) => x.note && !x.muted) && <DindNote server={s} canAct={canAct} onChanged={onChanged} />}
                   {!exposed.length && !(s.docker_risk?.length ?? 0) && !sockDone.done.length && !riskDone.done.length && (
                     <div className="srv-empty">
                       {s.docker_risk
@@ -1358,9 +1415,9 @@ function HostRow({
               🔁 {shortList((s.noboot?.docker ?? []).filter((x) => !x.muted).map((x) => x.name), t, 2)}
             </span>
           )}
-          {(s.docker_risk ?? []).some((x) => !x.muted) && (
+          {(s.docker_risk ?? []).some((x) => !x.muted && !x.note) && (
             <span className="type-chip off" title={t('у контейнеров ключи от хоста: взлом приложения в них даст root на сервере')}>
-              🔑 {(s.docker_risk ?? []).filter((x) => !x.muted).map((x) => x.name).join(', ')}
+              🔑 {(s.docker_risk ?? []).filter((x) => !x.muted && !x.note).map((x) => x.name).join(', ')}
             </span>
           )}
           {(s.proxy_outdated ?? []).some((p) => !p.muted) && (

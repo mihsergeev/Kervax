@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.59"
+const version = "2.60"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -770,6 +770,9 @@ type dockerContainer struct {
 	// права и тому, кто на старте сбрасывает их и переходит на uid приложения (setpriv, gosu,
 	// su-exec). Нет поля - не прочитали, панель судит по cap_add.
 	Proc *procPrivs `json:"proc,omitempty"`
+	// Docker внутри работающего privileged-контейнера (dindScan): privileged у CI-агента часто ради
+	// docker build в сборках, и совет убрать его ломает CI. Нет поля - процессы не видны (hidepid).
+	Dind *dindInfo `json:"dind,omitempty"`
 	// Откуда запущен (метки compose) и тома на запись: по ним панель пишет шаги "как исправить"
 	// с готовыми путями (cd в папку проекта, имя сервиса, что копировать перед обновлением), без
 	// поиска по меткам на самой ноде. Пустой объект - контейнер запущен не из compose
@@ -794,6 +797,20 @@ type procPrivs struct {
 	Uid  int      `json:"uid"`
 	Caps []string `json:"caps,omitempty"`
 	NNP  bool     `json:"nnp"`
+}
+
+// Docker внутри контейнера по процессам и cgroup: агенту без root не прочитать /var/lib/docker
+// контейнера и не достучаться до его сокета, а /proc/<pid>/stat и cgroup открыты всем. Dockerd -
+// внутри есть процесс dockerd; Up и CPU - сколько он работает и сколько съел вместе с дочерними
+// (pull, распаковка и push слоев идут в нем самом); Run - контейнеров внутри сейчас (по
+// containerd-shim); Ran - внутри уже запускались контейнеры или шаги сборки (cgroup v2:
+// подкаталоги docker/buildkit в cgroup контейнера остаются и после их выхода).
+type dindInfo struct {
+	Dockerd bool  `json:"dockerd"`
+	Up      int64 `json:"up,omitempty"`
+	CPU     int64 `json:"cpu,omitempty"`
+	Run     int   `json:"run,omitempty"`
+	Ran     bool  `json:"ran,omitempty"`
 }
 
 // метки com.docker.compose.* контейнера; files - через запятую, как в метке
@@ -5018,6 +5035,9 @@ func collect(prev sample) (report, sample) {
 	memTotal := mi["MemTotal"]
 	memUsed := memTotal - mi["MemAvailable"]
 	dk := collectDocker() // один раз: нужен и для Docker, и для детекта бэкап-сервера
+	if dk != nil && procFullyVisible() {
+		dindScan(dk.Containers, cur.procs, "/proc", "/sys/fs/cgroup", procUptime())
+	}
 	r := report{
 		Hostname: host, OS: osName(), AgentVersion: version, LocalIP: localIP(), Proxy: agentProxy,
 		Connect: connectAddr(), ConnectDown: connectDown(), NetProbe: netProbeLatest.Load(),
@@ -5879,6 +5899,88 @@ func collectDocker() *dockerInfo {
 		dockerUnits(di.Containers, "/proc", "/etc/systemd/system")
 	}
 	return di
+}
+
+// dindScan - docker внутри работающих privileged-контейнеров (dindInfo). Читаются cgroup только
+// процессов dockerd и containerd-shim (имена уже в снимке procs) и stat найденного dockerd.
+// Процессы dockerd и shim хоста лежат в cgroup docker.service и containerd.service - не контейнер.
+func dindScan(cs []dockerContainer, procs map[int]procSample, proc, cgRoot string, uptime float64) {
+	need := map[string]int{}
+	for i, c := range cs {
+		if c.State == "running" && c.Priv && c.id != "" {
+			need[c.id] = i
+			cs[i].Dind = &dindInfo{}
+		}
+	}
+	if len(need) == 0 {
+		return
+	}
+	dpid := map[int]int{} // контейнер -> pid его dockerd (самый старый, если их несколько)
+	for pid, p := range procs {
+		shim := strings.HasPrefix(p.comm, "containerd-shim")
+		if p.comm != "dockerd" && !shim {
+			continue
+		}
+		b, err := os.ReadFile(proc + "/" + strconv.Itoa(pid) + "/cgroup")
+		if err != nil {
+			continue
+		}
+		kind, id := procOwner(string(b))
+		i, ok := need[id]
+		if kind != "container" || !ok {
+			continue
+		}
+		if shim {
+			cs[i].Dind.Run++
+		} else if old, ok := dpid[i]; !ok || p.start < procs[old].start {
+			dpid[i] = pid
+		}
+	}
+	for id, i := range need {
+		d := cs[i].Dind
+		pid, ok := dpid[i]
+		if !ok {
+			d.Run = 0 // shim без dockerd - не docker внутри (containerd сам по себе)
+			continue
+		}
+		d.Dockerd = true
+		if b, err := os.ReadFile(proc + "/" + strconv.Itoa(pid) + "/stat"); err == nil {
+			if f := statFields(string(b)); len(f) >= 20 {
+				var t uint64
+				for _, k := range []int{11, 12, 13, 14} { // utime, stime, cutime, cstime
+					v, _ := strconv.ParseUint(f[k], 10, 64)
+					t += v
+				}
+				d.CPU = int64(float64(t) / clkTck)
+				if st, _ := strconv.ParseUint(f[19], 10, 64); uptime > float64(st)/clkTck {
+					d.Up = int64(uptime - float64(st)/clkTck)
+				}
+			}
+		}
+		d.Ran = d.Run > 0 || nestedCgroups(cgRoot, id)
+	}
+}
+
+// statFields - поля /proc/<pid>/stat начиная с state (поле 3): comm в скобках бывает с пробелами
+func statFields(s string) []string {
+	cl := strings.LastIndexByte(s, ')')
+	if cl < 0 || cl+2 >= len(s) {
+		return nil
+	}
+	return strings.Fields(s[cl+2:])
+}
+
+// nestedCgroups - в cgroup v2 контейнера есть docker или buildkit: так их называют dockerd и
+// BuildKit внутри, runc при выходе контейнера убирает только его собственный каталог
+func nestedCgroups(root, id string) bool {
+	for _, dir := range []string{root + "/system.slice/docker-" + id + ".scope", root + "/docker/" + id} {
+		for _, sub := range []string{"docker", "buildkit"} {
+			if fi, err := os.Stat(dir + "/" + sub); err == nil && fi.IsDir() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // dockerUnits проставляет юнит systemd контейнерам, которые докер после перезагрузки сам не

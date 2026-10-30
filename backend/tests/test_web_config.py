@@ -56,8 +56,25 @@ def test_alert_and_home():
 
 def test_helper_checks_configs():
     src = (Path(__file__).resolve().parents[2] / "agent" / "webserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.28" in src and "check_configs()" in src and "report.d/web-config.json" in src
+    assert "KERVAX_SETUP_VERSION=0.29" in src and "check_configs()" in src and "report.d/web-config.json" in src
     assert "nginx -t" in src and "caddy validate" in src and "\r" not in src
+
+
+def test_helper_tests_like_running_server():
+    """0.29: проверка повторяет работающий сервер. Entrypoint образа вычислял {$VAR} (хеш пароля
+    для basic_auth) и делал exec caddy run, а docker exec получал только Config.Env - рабочий
+    Caddyfile "не проходил проверку". Окружение берется из /proc/<pid>/environ и уходит в docker
+    exec только именами (-e NAME), значения не попадают в argv; путь конфига - из cmdline процесса"""
+    src = (Path(__file__).resolve().parents[2] / "agent" / "webserver-setup.sh").read_text(encoding="utf-8")
+    body = src[src.index("cfg_run() {"):src.index("\ncheck_configs\n")]
+    assert '/proc/$CFG_PID/environ' in body and '/proc/$CFG_PID/cmdline' in body
+    assert 'CFG_EARGS+=(-e "$n")' in body and 'export "${CFG_ENVS[@]}"' in body
+    assert '"${CFG_ENVS[@]}" "$c"' not in body and "docker exec -e \"$kv\"" not in body
+    # ни одного жесткого пути конфига: только то, с чем сервер запущен
+    assert "/etc/caddy/Caddyfile" not in body and "/etc/haproxy/haproxy.cfg" not in body
+    # caddy docker-proxy и прочие без run - не проверяем; служебные переменные haproxy и systemd не берем
+    assert '[ "${CFG_ARGV[1]:-}" = run ] || return 1' in body
+    assert "NOTIFY_SOCKET" in body and "HAPROXY_.*" in body
 
 
 def test_installers_swap_helpers_in_with_mv():

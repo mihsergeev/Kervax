@@ -1544,7 +1544,8 @@ class ServerOut(BaseModel):
     # внешние прокси (caddy-docker-proxy, traefik) с docker-сокетом: [{"name", "image", "kind"}]
     docker_exposed: list[dict] = Field(default_factory=list)
     # контейнеры с ключами от хоста сверх положенного (docker_risk.view):
-    # [{"name", "image", "flags", "caps", "text", "muted", "fix"?}], fix - шаги, общие у контейнеров проекта
+    # [{"name", "image", "flags", "caps", "text", "muted", "fix"?, "dind"?, "note"?}], fix - шаги, общие у
+    # контейнеров проекта; note - privileged ради живого docker внутри (dind): заметка, не тревога
     docker_risk: list[dict] = Field(default_factory=list)
     # опасные caps только на старт: главный процесс без них (docker_risk.start_caps, агент 2.57):
     # [{"name", "image", "caps", "uid"}] - заметка, не тревога
