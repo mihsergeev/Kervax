@@ -12,8 +12,15 @@ slow", "execution timed out", по пулам, в 10-минутных корзи
 {"v": 1, "ts", "pools": [{"where", "pool", "listen", "pm", "max", "children", "conns", "queue",
 "sat", "span", "reached", "reached_d", "slow", "slow_d", "tout", "tout_d", "slowlog",
 "terminate", "status", "slow_last", "slow_ts", "tout_last", "tout_ts", "crash", "crash_d",
-"crash_last", "crash_ts"}], "skipped", "kern": {"n", "n_d", "last", "ts"}}. sat - минут за последний
-час, когда запросы ждали свободного воркера; reached/slow/tout/crash - за час, *_d - за сутки.
+"crash_last", "crash_ts", "reached_last", "reached_ts"}], "skipped", "kern": {"n", "n_d", "last", "ts"}}.
+sat - минут за последний час, когда запросы ждали свободного воркера; reached/slow/tout/crash - за час,
+*_d - за сутки, *_ts - время последней такой строки лога (по ее собственной метке).
+
+Позиция чтения (helper 0.3) - по контейнеру и пути: у двух контейнеров один и тот же
+/var/log/php7.4-fpm.log внутри, и общая позиция заставляла каждую минуту перечитывать лог второго с
+начала, старые "reached" считались заново и давали ложный алерт. Строка идет в корзину своего
+времени и только если она новее последней посчитанной из этого лога; новый лог читается с конца.
+Время последнего упора пишется в текст беды, чтобы старое было видно сразу.
 
 Падения (helper 0.2): воркер, убитый сигналом сбоя ("child N exited on signal 11 (SIGSEGV)", еще 4,
 6, 7, 8) - по логу FPM у пула; php-процессы, убитые segfault или general protection, - по журналу
@@ -104,7 +111,20 @@ def _crashing(p: dict, held: bool = False) -> bool:
     return _i(p, "crash") >= CRASH_MIN * (0.5 if held else 1)
 
 
-def why(p: dict, held: bool = False) -> str:
+def _ago(sec: int) -> str:
+    if sec < 3600:
+        return f"{max(1, sec // 60)} мин назад"
+    return f"{sec // 3600} ч назад" if sec < 86400 else f"{sec // 86400} дн назад"
+
+
+def last_reached(p: dict, ref: int) -> str:
+    """Когда пул уперся последний раз, от времени отчета: "5 мин назад"; helper до 0.3 не пишет"""
+    ts = _i(p, "reached_ts")
+    return _ago(max(0, ref - ts)) if ts > 0 and ref > 0 else ""
+
+
+def why(p: dict, held: bool = False, ref: int = 0) -> str:
+    """ref - время отчета (block ts), от него "последний раз N мин назад" у упоров"""
     k = 0.5 if held else 1
     mx, parts = _i(p, "max"), []
     if _i(p, "sat") >= SAT_MIN * k:
@@ -112,7 +132,9 @@ def why(p: dict, held: bool = False) -> str:
                      + (f" (воркеров {mx})" if mx else ""))
     n = _i(p, "reached")
     if n >= REACHED_MIN * k:
-        parts.append(f"за час пул {n} {_plural(n, 'раз', 'раза', 'раз')} уперся в pm.max_children = {mx}")
+        last = last_reached(p, ref)
+        parts.append(f"за час пул {n} {_plural(n, 'раз', 'раза', 'раз')} уперся в pm.max_children = {mx}"
+                     + (f", последний раз {last}" if last else ""))
     n, tt = _i(p, "tout"), _i(p, "terminate")
     if n >= TOUT_MIN * k:
         parts.append(f"запросов, убитых по таймауту{f' {tt} с' if tt else ''}, за час: {n}")
@@ -162,6 +184,7 @@ def problems(s: Server, now: datetime) -> list[dict]:
     """Пулы, которые не справляются, без заглушенных: {"key", "label", "level", "why", "text"}"""
     held, muted = _held(s), _muted(s, now)
     out, crash = [], False
+    ref = _i(block(s.last_report or {}) or {}, "ts")
     for x in pools(s.last_report or {}):
         k = key(x)
         h = k in held
@@ -169,7 +192,7 @@ def problems(s: Server, now: datetime) -> list[dict]:
         crash = crash or _crashing(x, h)
         if not lvl or k in muted:
             continue
-        w = why(x, h)
+        w = why(x, h, ref)
         text = f"PHP-FPM {label(x)}: {w}"
         ex = CRASH_HINT if _crashing(x, h) else str(x.get("tout_last") or x.get("slow_last") or "").strip()
         if ex:
@@ -177,7 +200,8 @@ def problems(s: Server, now: datetime) -> list[dict]:
         out.append({"key": k, "label": label(x), "level": lvl, "why": w, "text": text,
                     # для короткого алерта: где, пул, предел воркеров, что сработало, сигнал падения
                     "where": where_text(str(x.get("where") or "")), "pool": str(x.get("pool") or ""),
-                    "max": _i(x, "max"), "causes": _causes(x, h), "sig": _signal(str(x.get("crash_last") or ""))})
+                    "max": _i(x, "max"), "causes": _causes(x, h), "sig": _signal(str(x.get("crash_last") or "")),
+                    "last": last_reached(x, ref)})
     # журнал ядра: падения, которые не объясняет пул (лог FPM не нашелся, падает не FPM)
     kx = kern(s.last_report or {})
     h = KERN_KEY in held
@@ -246,6 +270,8 @@ def tg_short(fp: list[dict]) -> tuple[str, list[str]] | None:
         mx = int(x.get("max") or 0)
         busy = ("занят единственный воркер" if mx == 1 else
                 f"заняты все {mx} {_plural(mx, 'воркер', 'воркера', 'воркеров')}" if mx else "заняты все воркеры")
+        if "reached" in causes and x.get("last"):
+            busy += f", последний упор {x['last']}"
         what, facts = "PHP-FPM не справляется", [tg_fmt.fact("Пул", f"{_pool_where(x)}, {busy}")]
         if "crash" in causes:
             facts.append("воркеры еще и падают" + (f" ({x['sig']})" if x.get("sig") else ""))
@@ -265,7 +291,7 @@ def _kern_why(kx: dict) -> str:
 
 
 _INT = ("max", "children", "conns", "queue", "sat", "span", "reached", "reached_d", "slow", "slow_d", "tout",
-        "tout_d", "crash", "crash_d", "slowlog", "terminate", "status", "slow_ts", "tout_ts", "crash_ts")
+        "tout_d", "crash", "crash_d", "slowlog", "terminate", "status", "slow_ts", "tout_ts", "crash_ts", "reached_ts")
 
 
 def view(s: Server, now: datetime) -> dict | None:
@@ -287,7 +313,7 @@ def view(s: Server, now: datetime) -> dict | None:
         row.update({f: _i(x, f) for f in _INT})
         lvl = level(x, k in held)
         if lvl:
-            row["level"], row["why"] = lvl, why(x, k in held)
+            row["level"], row["why"] = lvl, why(x, k in held, int(b.get("ts") or 0))
         rows.append(row)
     # падения по журналу ядра - строкой в конце, когда за сутки были
     kx = kern(s.last_report or {})
