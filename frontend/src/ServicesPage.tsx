@@ -1740,7 +1740,7 @@ function FpmList({ server, pools, onChanged, onlyProblems }: {
                     {subOf(
                       x.crash_d > 0 && `${t('падения (SIGSEGV и др.)')}: ${dh(x.crash, x.crash_d)}`,
                       x.sat > 0 && t('запросы ждали {n} мин за час', { n: x.sat }),
-                      x.reached_d > 0 && `${t('упоры в pm.max_children')}: ${dh(x.reached, x.reached_d)}`,
+                      x.reached_d > 0 && `${t('упоры в pm.max_children')}: ${dh(x.reached, x.reached_d)}${x.reached_ts > 0 ? `, ${t('последний')} ${fmtRel(new Date(x.reached_ts * 1000).toISOString())}` : ''}`,
                       x.tout_d > 0 && `${t('убито по таймауту')}: ${dh(x.tout, x.tout_d)}`,
                       x.slow_d > 0 && `${t('медленных')}${x.slowlog > 0 ? ` (${t('от {n} с', { n: x.slowlog })})` : ''}: ${dh(x.slow, x.slow_d)}`,
                     )}

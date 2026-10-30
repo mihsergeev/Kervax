@@ -1,7 +1,16 @@
 """PHP-FPM (fpm_pools, helper fpm-setup): пул подолгу упирается в pm.max_children или рвет запросы по
 таймауту, мьют, "Что сломано", алерт, раздел."""
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import pytest
 
 from app import collector, fpm_pools as fp
 from app.models import Server
@@ -171,7 +180,7 @@ def test_kernel_crashes():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "fpm-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.2" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.3 " in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
     # падение - сигнал сбоя, а не убийство: 9 и 15 - таймаут, OOM и перезагрузка
     assert "exited on signal (4|6|7|8|11) " in src and "-e \\047exited on signal\\047" in src
     # журнал ядра по курсору, без курсора - с прошлого прогона; курсор из состояния - только своими символами
@@ -187,3 +196,170 @@ def test_helper_script():
     assert src.count("*..*|*[!A-Za-z0-9._/@+-]*") >= 2 and "elog !~ /\\.\\./" in src
     # конфиг с CRLF: имена секций без \r
     assert '{ gsub(/\\r/, "") }' in src
+
+
+def test_last_reached_in_text():
+    # время последнего упора - от времени отчета: старые строки видно сразу
+    x = _pool("container shop-php", reached=80, reached_ts=TS - 300)
+    s = _srv(_rep([x]))
+    p = fp.problems(s, NOW)
+    assert p[0]["why"] == "за час пул 80 раз уперся в pm.max_children = 5, последний раз 5 мин назад"
+    assert p[0]["last"] == "5 мин назад"
+    assert fp.tg_short(p)[1][0] == "Пул: www в shop-php, заняты все 5 воркеров, последний упор 5 мин назад"
+    row = fp.view(s, NOW)["pools"][0]
+    assert row["reached_ts"] == TS - 300 and row["why"].endswith("последний раз 5 мин назад")
+    assert fp.last_reached(_pool("a", reached_ts=TS - 6 * 86400), TS) == "6 дн назад"
+    assert fp.last_reached(_pool("a", reached_ts=TS - 7200), TS) == "2 ч назад"
+    # helper до 0.3 времени не пишет - текст прежний
+    assert fp.why(_pool("container a", reached=62)) == "за час пул 62 раза уперся в pm.max_children = 5"
+
+
+# ---- helper целиком: фальшивый /proc с двумя контейнерами, у обоих один путь лога ----
+
+SRC = (Path(__file__).resolve().parents[2] / "agent" / "fpm-setup.sh").read_text(encoding="utf-8")
+BODY = re.search(r"<<'HELPER_EOF'\n(.*?)\nHELPER_EOF\n", SRC, re.S).group(1)
+LOG = "/var/log/php7.4-fpm.log"
+APP, APP2 = "a" * 64, "b" * 64
+W1, W2 = "container " + APP[:12], "container " + APP2[:12]
+MON = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def _bash() -> str:
+    bash = shutil.which("bash")
+    if not bash or not shutil.which("awk") or (os.name == "nt" and "system32" in bash.lower()):
+        pytest.skip("нет bash или awk")
+    return bash
+
+
+def _posix(p) -> str:
+    """Путь для bash: C:/x -> /c/x (двоеточие в PATH делит каталоги)"""
+    s = str(p).replace("\\", "/")
+    return f"/{s[0].lower()}{s[2:]}" if re.match(r"^[A-Za-z]:/", s) else s
+
+
+def _fpm_line(ts: float, tzo: int = 0, what="server reached pm.max_children setting (5), consider raising it") -> str:
+    d = datetime.fromtimestamp(ts + tzo, timezone.utc)
+    return f"[{d.day:02d}-{MON[d.month - 1]}-{d.year} {d:%H:%M:%S}] WARNING: [pool www] {what}\n"
+
+
+def _write(p: Path, text: str, mode="w"):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, mode, encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+class _Node:
+    """Две копии одного образа: мастер php-fpm 101 в контейнере app, 202 в app2 (TZ=EST5, -5 ч),
+    error_log у обоих /var/log/php7.4-fpm.log внутри своего корня"""
+
+    def __init__(self, d: Path):
+        self.d, self.proc, stubs = d, d / "proc", d / "stubs"
+        for pid, cid, env in (("101", APP, "HOSTNAME=app\0"), ("202", APP2, "TZ=EST5\0HOSTNAME=app2\0")):
+            _write(self.proc / pid / "cmdline", "php-fpm: master process (/usr/local/etc/php-fpm.conf)\0")
+            _write(self.proc / pid / "cgroup", f"0::/system.slice/docker-{cid}.scope\n")
+            _write(self.proc / pid / "environ", env)
+            _write(self.proc / pid / "root/usr/local/etc/php-fpm.conf",
+                   f"[global]\nerror_log = {LOG}\n\n[www]\nlisten = 9000\npm = dynamic\npm.max_children = 5\n")
+        stub = {"ps": "case \"$*\" in\n*ppid*) printf '  111   101 php-fpm: pool www\\n  211   202 php-fpm: pool www\\n' ;;\n"
+                      "*) printf '  101 php-fpm: master process (x)\\n  202 php-fpm: master process (x)\\n' ;;\nesac\n",
+                "docker": "exit 1\n", "journalctl": "exit 1\n"}
+        for n, body in stub.items():
+            _write(stubs / n, "#!/bin/sh\n" + body)
+            os.chmod(stubs / n, 0o755)
+        body = BODY.replace("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                            'export PATH="$KVX_STUBS:/usr/bin:/bin"')
+        body = body.replace("exec 9>/run/kervax-fpm.lock\nflock -n 9 || exit 0\n", "")
+        body = body.replace('"/proc/$', '"$KVX_PROC/$').replace("printf '/proc/%s/root%s' \"$p\"",
+                                                                  "printf '%s/%s/root%s' \"$KVX_PROC\" \"$p\"")
+        assert "/proc/$" not in body and "flock" not in body
+        _write(d / "helper.sh", body)
+        self.env = {**os.environ, "KVX_PROC": _posix(self.proc), "KVX_STUBS": _posix(stubs),
+                    "KERVAX_FPM_OUT": _posix(d / "fpm.json"), "KERVAX_FPM_STATE": _posix(d / "fpm.state")}
+
+    def log(self, pid: str) -> Path:
+        return self.proc / pid / "root" / LOG.lstrip("/")
+
+    def run(self) -> dict:
+        out = subprocess.run([_bash(), _posix(self.d / "helper.sh")], env=self.env, capture_output=True, text=True,
+                             timeout=60, encoding="utf-8")
+        assert out.returncode == 0, out.stderr
+        rep = json.loads((self.d / "fpm.json").read_text(encoding="utf-8"))
+        return {p["where"]: p for p in rep["pools"]}
+
+    def state(self) -> str:
+        return (self.d / "fpm.state").read_text(encoding="utf-8")
+
+
+def test_helper_two_containers_one_log_path(tmp_path):
+    _bash()
+    n = _Node(tmp_path)
+    now = time.time()
+    week = now - 7 * 86400
+    old = _fpm_line(week) + _fpm_line(week + 60)
+    _write(n.log("101"), "[x] NOTICE: ready to handle connections\n" + old)
+    _write(n.log("202"), "[x] NOTICE: fpm is running, pid 1\n[x] NOTICE: ready to handle connections\n" + old)
+    # состояние 0.2: одна строка O на оба файла и насчитанные по ней упоры
+    ino = os.stat(n.log("101")).st_ino
+    _write(tmp_path / "fpm.state", f"O\t{LOG}\t{ino}\t0\nF\t{W1}|www\t{int(week)}\n"
+                                   f"B\t{W1}|www\t{int(now) // 600}:68\t\t\t\n")
+    p = n.run()
+    # миграция: позиции и корзины 0.2 выброшены, новые логи с конца - старые строки не в счет
+    assert p[W1]["reached"] == 0 and p[W2]["reached"] == 0 and p[W1]["reached_d"] == 0
+    st = n.state()
+    assert st.startswith("V\t2\n") and f"O\t{LOG}\t" not in st
+    assert f"O\t{W1}|{LOG}\t" in st and f"O\t{W2}|{LOG}\t" in st
+    # новые упоры: у app по UTC, у app2 по его местному времени (-5 ч)
+    t1 = time.time()
+    _write(n.log("101"), _fpm_line(t1) * 3, "a")
+    _write(n.log("202"), _fpm_line(t1, -5 * 3600), "a")
+    p = n.run()
+    assert p[W1]["reached"] == 3 and p[W2]["reached"] == 1
+    assert abs(p[W1]["reached_ts"] - t1) < 5 and abs(p[W2]["reached_ts"] - t1) < 5
+    assert p[W1]["reached_last"].startswith("server reached pm.max_children setting (5)")
+    # прогон без новых строк: ни один лог не перечитан с начала (раньше - каждую минуту)
+    p = n.run()
+    assert (p[W1]["reached"], p[W2]["reached"]) == (3, 1) and (p[W1]["reached_d"], p[W2]["reached_d"]) == (3, 1)
+    # app2 пересоздал лог (новый inode): с начала, но только строки новее последней посчитанной
+    t2 = time.time()
+    tmp = n.log("202").with_name("new.log")
+    _write(tmp, old + _fpm_line(t1 - 600, -5 * 3600) + _fpm_line(t2, -5 * 3600))
+    os.replace(tmp, n.log("202"))
+    p = n.run()
+    assert (p[W1]["reached"], p[W2]["reached"]) == (3, 2)
+
+
+def test_helper_line_time():
+    bash = _bash()
+    fn = re.search(r"\nAWKFN='\n(.*?)\n'\n", BODY, re.S).group(1)
+    msg = "WARNING: [pool www] server reached pm.max_children setting (5), consider raising it"
+    lines = [
+        # Docker json-file: время "time" (UTC), а не местное в тексте
+        '{"log":"[30-Oct-2026 10:15:02] ' + msg + '\\n","stream":"stderr","time":"2026-10-30T07:15:02.123456789Z"}',
+        # строка лога пода (CRI) со своим поясом
+        "2026-10-30T10:15:02.123+03:00 stderr F [30-Oct-2026 10:15:02] " + msg,
+        # файл FPM в контейнере: местное время, пояс +3
+        "[30-Oct-2026 10:15:02] " + msg,
+        "[01-Mar-2028 03:00:01.123456] NOTICE: fpm is running",
+        "no time here",
+    ]
+    d = Path(tempfile.mkdtemp())
+    try:
+        _write(d / "f.awk", fn + "\n{ print ltime($0, msg($0), tzo) }\n")
+        _write(d / "in.txt", "\n".join(lines) + "\n")
+        out = subprocess.run([bash, "-c", 'LC_ALL=C awk -v tzo=10800 -f "$1" "$2"', "x", _posix(d / "f.awk"),
+                              _posix(d / "in.txt")], capture_output=True, text=True, timeout=30)
+        assert out.returncode == 0, out.stderr
+        t = int(datetime(2026, 10, 30, 7, 15, 2, tzinfo=timezone.utc).timestamp())
+        leap = int(datetime(2028, 3, 1, 0, 0, 1, tzinfo=timezone.utc).timestamp())
+        assert [int(float(x)) for x in out.stdout.split()] == [t, t, t, leap, -1]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_helper_offset_key_and_state():
+    # позиция - по месту и пути, старое состояние без V 2 теряет позиции и корзины
+    assert 'printf \'%s|%s\\t%s\\t%s\\t%s\\t%s\\n\' "$w" "$f" "$ff" "$st" "$tzo" "$w"' in BODY
+    assert "if (!(f in off)) { nl[f] = now; next }" in BODY and "if (tl < lw || tl <= now - 86400) continue" in BODY
+    assert "grep -q '^V\t2$' \"$STATE\"" in BODY and "$1 != \"O\" && $1 != \"B\"" in BODY
+    # строки времени без mktime (его нет в mawk)
+    assert "mktime(" not in BODY and "strftime(" not in BODY

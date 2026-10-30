@@ -16,9 +16,14 @@
 # logs them for every container and pod of the node, also where the FPM log is not found. Workers
 # crashing in a row is how an attempt on a memory bug of PHP looks (php2shell, October 2026).
 # Writes /var/lib/kervax/report.d/fpm.json; the agent hands report.d to the panel as is. Read only.
+# 0.3: the offset of a log is kept per container and path (two containers with the same
+# /var/log/php-fpm.log inside used to share one offset and reread each other from the start), a
+# line counts in the bucket of its own time and only if it is newer than the last one counted
+# from that log, a log seen for the first time is read from its end, the time of the last
+# "reached pm.max_children" goes to the report.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2 # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3 # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without php-fpm it runs one ps and exits
 
 HELPER_DIR=/lib65/kervax
@@ -92,9 +97,26 @@ in_root() {
   fi
   printf '/proc/%s/root%s' "$p" "$path"
 }
+# seconds east of UTC of the local time a master writes in its own log file: FPM stamps lines with
+# localtime, which is TZ of the process or /etc/localtime of its root (none - UTC)
+tzoff_of() {
+  local p=$1 z f o
+  z=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^TZ=//p' | head -1); z=${z#:}
+  case "$z" in *..*|*[!A-Za-z0-9._/@+,-]*) z="" ;; esac
+  if [ -n "$z" ]; then
+    case "$z" in /*) f=$(in_root "$p" "$z") ;; *) f=$(in_root "$p" "/usr/share/zoneinfo/$z"); [ -f "$f" ] || f="/usr/share/zoneinfo/$z" ;; esac
+    [ -n "$f" ] && [ -f "$f" ] && z=":$f"  # else a POSIX string as it is: MSK-3, UTC0
+  else
+    f=$(in_root "$p" /etc/localtime)
+    if [ -n "$f" ] && [ -f "$f" ]; then z=":$f"; else z=UTC0; fi
+  fi
+  o=$(TZ="$z" date +%z 2>/dev/null)
+  case "$o" in [+-][0-9][0-9][0-9][0-9]) ;; *) o=+0000 ;; esac
+  echo $(( (10#${o:1:2} * 3600 + 10#${o:3:2} * 60) * ${o:0:1}1 ))
+}
 
 # -- each master: where, config, pools. Rows: "P master where pool listen pm max slow term status"
-# and "L master logfile"; children per pool from ps --
+# and "L master logfile how where"; children per pool from ps --
 ps -e -o pid=,ppid=,args= 2>/dev/null | awk '{ a = $0; sub(/^ *[0-9]+ +[0-9]+ /, "", a) }
   a ~ /^php-fpm[0-9.]*: pool / { sub(/^php-fpm[0-9.]*: pool /, "", a); sub(/ .*/, "", a); print $2 "\t" a }' \
   | sort | uniq -c | awk '{ print $2 "\t" $3 "\t" $1 }' > "$TMPD/kids"
@@ -169,10 +191,10 @@ for P in $MASTERS; do
       # where FPM writes: stderr in a container is the container log, syslog is not read; the
       # path goes into a command later, so only the plain characters
       if (elog == "" || elog ~ /^\/proc\/self\/fd\/[12]$|^\/dev\/std(err|out)$/) {
-        if (logp != "") print "L", m, logp, "host"
+        if (logp != "") print "L", m, logp, "host", w
       } else if (elog !~ /^syslog/) {
         if (elog !~ /^\//) elog = pre "/var/" elog
-        if (elog !~ /\.\./ && elog ~ /^[A-Za-z0-9._\/@+-]+$/) print "L", m, elog, "root"
+        if (elog !~ /\.\./ && elog ~ /^[A-Za-z0-9._\/@+-]+$/) print "L", m, elog, "root", w
       }
     }' "$TMPD/conf" 2>/dev/null >> "$TMPD/pools"
 done
@@ -197,13 +219,20 @@ done
           for (x in lq) { split(x, b, SUBSEP); print smp, b[1], b[2], "q", lq[x] } }' "${args[@]}" >> "$TMPD/conn"
 done
 
-# -- the logs: FPM lines in the new bytes, by offset; lines of the container log are json --
-awk -F'\t' '$1 == "L" { print $3 "\t" $2 "\t" $4 }' "$TMPD/pools" | sort -u > "$TMPD/logs"
+# -- the logs: FPM lines in the new bytes, by offset; lines of the container log are json. The
+# offset is kept by "where|path": the same /var/log/php7.4-fpm.log of two containers is two files.
+# Two masters of one container writing one file - one read. Rows: key file inode size tz where --
+awk -F'\t' '$1 == "L" { print $5 "\t" $3 "\t" $2 "\t" $4 }' "$TMPD/pools" | sort -u > "$TMPD/logs"
 : > "$TMPD/lstat"
-while IFS=$'\t' read -r f m how; do
-  case "$how" in root) ff=$(in_root "$m" "$f") ;; *) ff=$f ;; esac
+declare -A LSEEN=()
+while IFS=$'\t' read -r w f m how; do
+  [ -z "${LSEEN["$w|$f"]:-}" ] || continue
+  tzo=0
+  case "$how" in root) ff=$(in_root "$m" "$f"); tzo=$(tzoff_of "$m") ;; *) ff=$f ;; esac
+  [ -n "$ff" ] || continue
   st=$(stat -c '%i	%s' "$ff" 2>/dev/null) || continue
-  printf '%s\t%s\t%s\t%s\n' "$m" "$f" "$ff" "$st" >> "$TMPD/lstat"
+  LSEEN["$w|$f"]=1
+  printf '%s|%s\t%s\t%s\t%s\t%s\n' "$w" "$f" "$ff" "$st" "$tzo" "$w" >> "$TMPD/lstat"
 done < "$TMPD/logs"
 
 AWKFN='
@@ -218,6 +247,27 @@ function msg(l,   q, s) {
   s = substr(l, 9); q = index(s, "\",\"stream\":"); if (q) s = substr(s, 1, q - 1)
   gsub(/\\n/, " ", s); gsub(/\\t/, " ", s); gsub(/\\"/, "\"", s); gsub(/\\u0026/, "\\&", s)
   return s }
+# days since 1970-01-01 of a civil date (no mktime in mawk)
+function days(y, mo, d,   era, yoe, doy) { y -= (mo <= 2); era = int(y / 400); yoe = y - era * 400
+  doy = int((153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5) + d - 1
+  return era * 146097 + yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy - 719468 }
+# "2026-10-30T10:15:02.123456789Z" or "...+03:00" -> unix time
+function rfc(x,   t, r, z) { t = days(substr(x, 1, 4) + 0, substr(x, 6, 2) + 0, substr(x, 9, 2) + 0) * 86400 \
+    + substr(x, 12, 2) * 3600 + substr(x, 15, 2) * 60 + substr(x, 18, 2)
+  r = substr(x, 20); sub(/^\.[0-9]+/, "", r)
+  if (r ~ /^[+-][0-9][0-9]:[0-9][0-9]/) { z = substr(r, 2, 2) * 3600 + substr(r, 5, 2) * 60; t -= (substr(r, 1, 1) == "-" ? -z : z) }
+  return t }
+# the time of a log line, unix: "time" of Docker json-file, the time of a CRI pod log line, or the
+# "[30-Oct-2026 10:15:02]" of FPM in the local time of the container (tzo east of UTC); -1 - none
+function ltime(l, s, tzo,   D, x, a) {
+  D = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]"
+  if (match(l, "\"time\":\"" D)) return rfc(substr(l, RSTART + 8))
+  if (match(l, "^" D)) return rfc(l)
+  if (match(s, /^\[[0-9][0-9]?-[A-Z][a-z][a-z]-[0-9][0-9][0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]/)) {
+    x = substr(s, 2, RLENGTH - 1); split(x, a, /[- :]/)
+    return days(a[3] + 0, (index("JanFebMarAprMayJunJulAugSepOctNovDec", a[2]) + 2) / 3, a[1] + 0) * 86400 \
+      + a[4] * 3600 + a[5] * 60 + a[6] - tzo }
+  return -1 }
 '
 
 # -- the kernel journal since the last run: php processes killed by a fault (the kernel prints
@@ -245,13 +295,18 @@ if command -v journalctl >/dev/null 2>&1; then
 fi
 
 # -- together: pools, children, connections, log counts and history. State rows:
-# O file inode offset | F key first-seen | S key saturated-minutes | B key reached slow timeout
-# crash (per 10-minute bucket "b:n,b:n") | X key kind ts example | KB kernel crashes per bucket |
-# KX ts example | KC journal cursor | KT time of the run --
+# V 2 | O where|file inode offset last-line-time | F key first-seen | S key saturated-minutes |
+# B key reached slow timeout crash (per 10-minute bucket "b:n,b:n") | X key kind ts example |
+# KB kernel crashes per bucket | KX ts example | KC journal cursor | KT time of the run.
+# A state of 0.2 (no V): offsets were per path only, and the counts of a log shared by two
+# containers were the same old lines counted again every minute - both go, the history starts over --
+if ! grep -q '^V	2$' "$STATE"; then
+  awk -F'\t' '$1 != "O" && $1 != "B"' "$STATE" > "$TMPD/st0" 2>/dev/null && cat "$TMPD/st0" > "$STATE"
+fi
 awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$TMPD/state" -v jout="$TMPD/rows" -v kout="$TMPD/kern.json" "$AWKFN"'
   BEGIN { nowm = int(now / 60); nowb = int(now / 600) }
   t == "state" {
-    if ($1 == "O") { ino[$2] = $3; off[$2] = $4 }
+    if ($1 == "O") { ino[$2] = $3; off[$2] = $4; lt[$2] = $5 + 0 }
     else if ($1 == "F") first[$2] = $3
     else if ($1 == "S") sat[$2] = $3
     else if ($1 == "B") { br[$2] = $3; bs[$2] = $4; bt[$2] = $5; bc[$2] = $6 }
@@ -266,7 +321,7 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
   t == "kids" { kid[$1 SUBSEP $2] = $3; next }
   t == "pools" && $1 == "P" {
     m = $2; k = $3 "|" $4; np++; pk[np] = k; pm_[k] = m; pw[k] = $3; pn[k] = $4; pl[k] = $5; ppm[k] = $6
-    pmx[k] = $7 + 0; psl[k] = $8 + 0; ptt[k] = $9 + 0; pst[k] = $10 + 0; poolof[m SUBSEP $4] = k
+    pmx[k] = $7 + 0; psl[k] = $8 + 0; ptt[k] = $9 + 0; pst[k] = $10 + 0
     if (!(k in first)) first[k] = now
     # the listen key in /proc/net: a port number, or the socket path
     l = $5; if (l ~ /^\//) lk[k] = l; else { sub(/.*:/, "", l); lk[k] = l + 0 }
@@ -275,10 +330,13 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
     if ($4 == "e") ce[$1 SUBSEP $2 SUBSEP $3] = $5; else cq[$1 SUBSEP $2 SUBSEP $3] = $5
     smps[$1] = 1; next }
   t == "lstat" {
-    m = $1; f = $2; ff = $3; size = $5 + 0; o = 0
-    no[f] = $4; nf[f] = size
-    if (!(f in off)) next
-    if (ino[f] == $4 && size >= off[f] + 0) o = off[f] + 0
+    f = $1; ff = $2; size = $4 + 0; tzo = $5 + 0; w = $6; o = 0
+    no[f] = $3; nf[f] = size
+    # a log seen for the first time: from its end, and no line older than now counts from it later
+    if (!(f in off)) { nl[f] = now; next }
+    lw = lt[f]; nl[f] = lw
+    # else rotated, truncated or recreated: from the start, but only the lines after the last counted
+    if (ino[f] == $3 && size >= off[f] + 0) o = off[f] + 0
     n = size - o; if (n <= 0) next
     if (used >= budget) { nf[f] = o; next }  # read next time
     rd = n > cap ? cap : n; from = size - rd
@@ -287,33 +345,44 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
     while ((cmd | getline l) > 0) {
       s = msg(l)
       if (!match(s, /\[pool [^]]+\]/)) continue
-      pool = substr(s, RSTART + 6, RLENGTH - 7); k = poolof[m SUBSEP pool]; if (k == "") continue
-      if (index(s, "server reached pm.max_children")) nr[k]++
-      else if (index(s, "executing too slow") || index(s, "execution timed out")) {
+      pool = substr(s, RSTART + 6, RLENGTH - 7); k = w "|" pool; if (!(k in pm_)) continue
+      # a line counts in the 10-minute bucket of its own time; older than the last counted from
+      # this log or than a day - already counted or out of every window
+      tl = ltime(l, s, tzo); if (tl < 0) tl = now
+      if (tl < lw || tl <= now - 86400) continue
+      if (tl > now) tl = now
+      if (tl > nl[f]) nl[f] = tl
+      kind = ""
+      if (index(s, "server reached pm.max_children")) {
+        kind = "reached"; x = s; if (match(x, /server reached/)) x = substr(x, RSTART)
+      } else if (index(s, "executing too slow") || index(s, "execution timed out")) {
         kind = index(s, "executing too slow") ? "slow" : "tout"
-        if (kind == "slow") nsl[k]++; else nto[k]++
         x = s; if (match(x, /script \047/)) x = substr(x, RSTART); sub(/, (logging|terminating)$/, "", x)
-        xts[k SUBSEP kind] = now; xtx[k SUBSEP kind] = mask(x)
       } else if (match(s, /exited on signal (4|6|7|8|11) /)) {
         # a crash, not a kill: 9 and 15 are the terminate timeout, OOM and reloads
-        ncr[k]++
-        x = s; if (match(x, /child [0-9]+ exited/)) x = substr(x, RSTART)
-        xts[k SUBSEP "crash"] = now; xtx[k SUBSEP "crash"] = mask(x)
+        kind = "crash"; x = s; if (match(x, /child [0-9]+ exited/)) x = substr(x, RSTART)
       }
+      if (kind == "") continue
+      cnt[kind SUBSEP k SUBSEP int(tl / 600)]++
+      if (!((k SUBSEP kind) in xts) || tl >= xts[k SUBSEP kind]) { xts[k SUBSEP kind] = tl; xtx[k SUBSEP kind] = mask(x) }
     }
     close(cmd); used += rd
     next }
-  function merge(old, add,   a, n, i, p, b, c, res) {
+  # old buckets, add in the current one and the lines of this run counted under ck (kind SUBSEP key)
+  function merge(old, add, ck,   a, n, i, p, b, c, res) {
     n = split(old, a, ","); for (i = 1; i <= n; i++) { p = index(a[i], ":"); if (!p) continue; b = substr(a[i], 1, p - 1) + 0
       if (b > nowb - 150) c[b] += substr(a[i], p + 1) }
     if (add > 0) c[nowb] += add
-    res = ""; for (b = nowb - 149; b <= nowb; b++) if (c[b] > 0) res = res (res == "" ? "" : ",") b ":" c[b]
+    res = ""; for (b = nowb - 149; b <= nowb; b++) {
+      if (ck != "" && ((ck SUBSEP b) in cnt)) c[b] += cnt[ck SUBSEP b]
+      if (c[b] > 0) res = res (res == "" ? "" : ",") b ":" c[b] }
     return res }
   function sum(bk, from,   a, n, i, p, s) { s = 0; n = split(bk, a, ",")
     for (i = 1; i <= n; i++) { p = index(a[i], ":"); if (p && substr(a[i], 1, p - 1) + 0 > from) s += substr(a[i], p + 1) }
     return s }
   END {
-    for (f in nf) printf "O\t%s\t%s\t%.0f\n", f, no[f], nf[f] > ns
+    printf "V\t2\n" > ns
+    for (f in nf) printf "O\t%s\t%s\t%.0f\t%d\n", f, no[f], nf[f], nl[f] > ns
     rows = ""
     for (i = 1; i <= np; i++) {
       k = pk[i]; m = pm_[k]; ch = kid[m SUBSEP pn[k]] + 0
@@ -331,13 +400,14 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
       for (j = 1; j <= n; j++) if (a[j] + 0 > nowm - 60) { s = s (s == "" ? "" : ",") a[j]; if (a[j] + 0 == nowm) had = 1 }
       if (satn > 0 && !had) s = s (s == "" ? "" : ",") nowm
       sm = (s == "" ? 0 : split(s, a, ","))
-      r = merge(br[k], nr[k]); sl = merge(bs[k], nsl[k]); to = merge(bt[k], nto[k]); cr = merge(bc[k], ncr[k])
+      r = merge(br[k], 0, "reached" SUBSEP k); sl = merge(bs[k], 0, "slow" SUBSEP k)
+      to = merge(bt[k], 0, "tout" SUBSEP k); cr = merge(bc[k], 0, "crash" SUBSEP k)
       printf "F\t%s\t%d\n", k, first[k] > ns
       if (s != "") printf "S\t%s\t%s\n", k, s > ns
       if (r != "" || sl != "" || to != "" || cr != "") printf "B\t%s\t%s\t%s\t%s\t%s\n", k, r, sl, to, cr > ns
       ex = ""
       for (kind in kk) delete kk[kind]
-      kk["slow"] = 1; kk["tout"] = 1; kk["crash"] = 1
+      kk["reached"] = 1; kk["slow"] = 1; kk["tout"] = 1; kk["crash"] = 1
       for (kind in kk) if ((k SUBSEP kind) in xts && xts[k SUBSEP kind] > now - 86400) {
         printf "X\t%s\t%s\t%d\t%s\n", k, kind, xts[k SUBSEP kind], xtx[k SUBSEP kind] > ns
         ex = ex sprintf(",\"%s_last\":\"%s\",\"%s_ts\":%d", kind, e(xtx[k SUBSEP kind]), kind, xts[k SUBSEP kind]) }
@@ -349,7 +419,7 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
     }
     printf "%s", rows > jout
     if (kread) {
-      kbs = merge(kb, kn); if (kxt <= now - 86400) kxx = ""
+      kbs = merge(kb, kn, ""); if (kxt <= now - 86400) kxx = ""
       if (kbs != "") printf "KB\t%s\n", kbs > ns
       if (kxx != "") printf "KX\t%d\t%s\n", kxt, kxx > ns
       if (kcur != "") printf "KC\t%s\n", kcur > ns

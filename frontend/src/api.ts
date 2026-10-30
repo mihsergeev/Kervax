@@ -2843,6 +2843,7 @@ export type FpmPool = {
   span: number
   reached: number
   reached_d: number
+  reached_ts: number // время последнего "reached pm.max_children" по метке строки (helper fpm-setup 0.3+)
   slow: number
   slow_d: number
   tout: number
