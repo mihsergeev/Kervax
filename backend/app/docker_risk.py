@@ -18,6 +18,13 @@ Amnezia, docker-in-docker), разрешено ровно то, что им ну
 promtail в privileged - нет. Внешние прокси с сокетом (traefik, caddy-docker-proxy) уже флагает
 docker_exposure: их сокет здесь не повторяем, чтобы одна дыра не висела двумя пунктами.
 
+Docker внутри privileged-контейнера (dind, агент 2.60): CI-агенту privileged нужен ради docker build и
+шагов в контейнере, совет убрать его ломает CI. Агент без root видит это по процессам: dockerd в
+cgroup контейнера, containerd-shim - контейнеры внутри сейчас, подкаталоги docker/buildkit в cgroup -
+внутри уже что-то запускалось, CPU dockerd - pull и push образов. Живой docker внутри - не ключ, а
+заметка (note): решение за человеком, кнопка "знаю, так надо" - тот же мут dockrisk:<имя>. Dockerd
+есть, но без дела - совет как раньше, с проверкой образов внутри.
+
 Контейнер, который так устроен намеренно, глушится точечно (alert_mutes "dockrisk:<имя>"), весь
 пункт - ключом "docker_risk".
 
@@ -99,6 +106,35 @@ def allowed(name: str, image: str) -> frozenset[str]:
     return frozenset(out)
 
 
+# CPU dockerd с запуска, секунд, после которого docker внутри точно работал: pull, распаковка и push
+# образов по сотне мегабайт съедают его за несколько сборок, пустой dockerd за месяц - единицы секунд
+DIND_CPU = 60
+# dockerd моложе этого без дела судить рано: контейнер могли только что перезапустить
+DIND_YOUNG = 2 * 86400
+
+
+def dind(c: dict) -> dict | None:
+    """Docker внутри privileged-контейнера: {"state", "run", "up", "cpu", "ran"}, state - live
+    (работает), idle (dockerd поднят, но без дела), none (docker внутри нет). None - не знаем:
+    старый агент или процессы не видны (hidepid)."""
+    d = c.get("dind")
+    if not isinstance(d, dict):
+        return None
+
+    def num(k: str) -> int:
+        v = d.get(k)
+        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+
+    run, up, cpu, ran = num("run"), num("up"), num("cpu"), d.get("ran") is True
+    if d.get("dockerd") is not True:
+        state = "none"
+    elif run or ran or cpu >= DIND_CPU or up < DIND_YOUNG:
+        state = "live"
+    else:
+        state = "idle"
+    return {"state": state, "run": run, "up": up, "cpu": cpu, "ran": ran}
+
+
 def _new_agent(rep: dict) -> bool:
     try:
         v = tuple(int(x) for x in str(rep.get("agent_version") or "0").split(".")[:2])
@@ -148,8 +184,10 @@ def describe(c: dict, fl: list[str]) -> str:
 
 def view(srv: Server, fix: bool = False) -> list[dict]:
     """Работающие контейнеры с ключами сверх положенного:
-    [{"name", "image", "flags", "caps", "text", "muted"}]; заглушенные тоже, с muted=True. fix -
-    незаглушенным еще "fix": блок шагов (fixes), один на контейнеры одного проекта."""
+    [{"name", "image", "flags", "caps", "text", "muted", "dind"?, "note"?}]; заглушенные тоже, с
+    muted=True. dind - docker внутри у privileged (dind()). Живой docker внутри - privileged не
+    ключ: других ключей нет - заметка (note=True, flags ["priv"]), есть - privileged из flags убран.
+    fix - незаглушенным ключам еще "fix": блок шагов (fixes), один на контейнеры одного проекта."""
     rep = srv.last_report or {}
     dk = rep.get("docker") or {}
     if not dk.get("access"):
@@ -165,6 +203,12 @@ def view(srv: Server, fix: bool = False) -> list[dict]:
         name = str(c.get("name") or "")
         ok = allowed(name, str(c.get("image") or ""))
         fl = [f for f in flags(c, new) if f not in ok and not (f == SOCK and name in edge)]
+        dd = dind(c) if PRIV in fl else None
+        if dd:
+            dd["ci"] = is_ci(str(c.get("image") or ""))  # в заметке: "CI собирает образы"
+        note = bool(dd and dd["state"] == "live")
+        if note and fl != [PRIV]:
+            fl, note = [f for f in fl if f != PRIV], False
         if fl:
             # svc - сервис compose (агент 2.41): короче имени контейнера, по нему алерт в чате
             cp = c.get("compose") if isinstance(c.get("compose"), dict) else {}
@@ -172,9 +216,13 @@ def view(srv: Server, fix: bool = False) -> list[dict]:
                         "caps": [str(x) for x in c.get("caps") or []] if CAPS in fl else [],
                         "text": describe(c, fl), "muted": MUTE_PREFIX + name in mutes,
                         "svc": str(cp.get("service") or "")})
+            if dd:
+                out[-1]["dind"] = dd
+            if note:
+                out[-1]["note"] = True
             cs[name] = c
     if fix:
-        live = [x for x in out if not x["muted"]]
+        live = [x for x in out if not x["muted"] and not x.get("note")]
         for blk in fixes(live, cs):
             for x in live:
                 if x["name"] in blk["names"]:
@@ -202,10 +250,10 @@ def start_caps(srv: Server) -> list[dict]:
 
 
 def advice(srv: Server) -> list[dict]:
-    """Для "Требует действий": незаглушенные, пока не заглушен весь пункт."""
+    """Для "Требует действий": незаглушенные, пока не заглушен весь пункт. Заметки (note) - нет."""
     if MUTE_ALL in set(srv.alert_mutes or []):
         return []
-    return [x for x in view(srv) if not x["muted"]]
+    return [x for x in view(srv) if not x["muted"] and not x.get("note")]
 
 
 def text(items: list[dict]) -> str:
@@ -382,22 +430,27 @@ def _compose_steps(fl: list[str], c0: dict, image: str, names: list[str], svcs: 
 def _block(items: list[dict], cs: dict[str, dict], w: dict | None) -> dict:
     """Шаги для контейнеров одного проекта с одними ключами: {"key", "names", "args", "steps"}.
     Тексты во фронте по id шага, args - подстановки (names, flags, file, dir, svc, caps, paths, cap_add,
-    devices, dind_env). w - откуда запущены (compose_cmd.where): {} - docker run, None - старый агент."""
+    devices, dind_env, idle_days, idle_cpu). w - откуда запущены (compose_cmd.where): {} - docker run, None - старый агент."""
     q = shlex.quote
     names = [x["name"] for x in items]
     fl, image = items[0]["flags"], items[0]["image"]
     c0 = cs[names[0]]
     ci = PRIV in fl and is_ci(image)
+    # docker внутри по агенту: нет его - проверять образы нечего, без дела - сказать, сколько
+    dd = items[0].get("dind") if PRIV in fl else None
+    st = dd["state"] if dd else ""
     cap_add, devices = needs(image) if PRIV in fl else ("", "")
     args = {k: v for k, v in {
         "names": ", ".join(names), "flags": ",".join(fl), "cap_add": cap_add, "devices": devices,
         "caps": ", ".join(str(x) for x in c0.get("caps") or []) if CAPS in fl else "",
         "paths": ", ".join(_host_binds(c0)) if HOST in fl else "",
         # агент TeamCity поднимает docker внутри по DOCKER_IN_DOCKER=start: без privileged он не нужен
-        "dind_env": "DOCKER_IN_DOCKER=start" if ci and _image_keys(image)[0] == "teamcity-agent" else ""}.items() if v}
+        "dind_env": "DOCKER_IN_DOCKER=start" if ci and _image_keys(image)[0] == "teamcity-agent" else "",
+        "idle_days": str(dd["up"] // 86400) if st == "idle" else "",
+        "idle_cpu": str(dd["cpu"]) if st == "idle" else ""}.items() if v}
     steps: list[dict] = []
-    if ci:
-        steps.append({"id": "ci_check", "cmd": "\n".join(f"sudo docker exec {q(n)} docker images -q | wc -l" for n in names)})
+    if ci and st != "none":
+        steps.append({"id": "ci_idle" if st == "idle" else "ci_check", "cmd": "\n".join(f"sudo docker exec {q(n)} docker images -q | wc -l" for n in names)})
     if w is None:
         # агент не присылает метки compose: где файл, покажет команда, что поменять - словами
         steps += [{"id": "find", "cmd": compose_cmd.find_cmd(names)}] + [{"id": "hand_" + f} for f in fl]
@@ -408,7 +461,7 @@ def _block(items: list[dict], cs: dict[str, dict], w: dict | None) -> dict:
         svcs = [str(cs[n]["compose"]["service"]) for n in names]
         args.update({"file": ", ".join(w["files"]), "dir": w["dir"], "svc": ", ".join(svcs)})
         steps += _compose_steps(fl, c0, image, names, svcs, compose_cmd.Cmd(w))
-    if ci:
+    if ci and st != "none":
         steps.append({"id": "alt_ci", "alt": True})
     elif SOCK in fl:
         steps.append({"id": "alt_sock", "alt": True})
@@ -427,7 +480,7 @@ def fixes(items: list[dict], cs: dict[str, dict]) -> list[dict]:
             src: tuple = (w["dir"], tuple(w["files"]), w["flags"])
         else:
             src = ("old",) if w is None else ("run", x["name"])
-        k = src + (tuple(x["flags"]), tuple(x["caps"]), _image_keys(x["image"])[1],
+        k = src + (tuple(x["flags"]), tuple(x["caps"]), _image_keys(x["image"])[1], (x.get("dind") or {}).get("state", ""),
                    _sock_bind(c) if SOCK in x["flags"] else "", tuple(_host_binds(c)) if HOST in x["flags"] else ())
         groups.setdefault(k, []).append(x)
         where[k] = w

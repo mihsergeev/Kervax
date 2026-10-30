@@ -147,7 +147,7 @@ def _dockrisk(s: Server, now: datetime, ctx: dict) -> str | None:
         # заглушен вид алерта целиком: пункт есть, просто не алертит - заглушку не снимаем
         return None
     return _h(f"{x['name']}:{'+'.join(map(str, x.get('flags') or []))}:{'+'.join(map(str, x.get('caps') or []))}"
-              for x in docker_risk.view(s) if not x.get("muted"))
+              for x in docker_risk.view(s) if not x.get("muted") and not x.get("note"))
 
 
 def _noboot(part: str) -> Sig:

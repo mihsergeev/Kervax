@@ -3728,6 +3728,21 @@ const EN: Record<string, string> = {
   'Ни у одного контейнера нет ключей от хоста: ни docker-сокета, ни privileged, ни опасных capabilities, ни корня хоста на запись.': 'No container has host keys: no docker socket, no privileged, no dangerous capabilities, no writable host root.',
   'Агент этой ноды еще не отдает ключи контейнеров от хоста: обновите агент.': 'The agent on this node does not report container host keys yet: update the agent.',
   'Права только на старт': 'Rights only for startup',
+  'Docker внутри контейнера': 'Docker inside a container',
+  'внутри работает docker (CI собирает образы) - privileged тут нужен': 'Docker runs inside (CI builds images) - privileged is needed here',
+  'внутри работает docker - privileged тут нужен': 'Docker runs inside - privileged is needed here',
+  'сейчас контейнеров внутри: {n}': 'containers inside now: {n}',
+  'внутри запускались контейнеры': 'containers have run inside',
+  'dockerd съел {m} мин CPU за {d} дн.': 'dockerd used {m} min of CPU in {d} days',
+  'docker внутри запущен {h} ч назад, судить рано': 'Docker inside started {h} h ago, too early to judge',
+  'Безопаснее sysbox-runc runtime вместо privileged или вынести агентов на отдельную ВМ: взлом сборки в privileged-контейнере дает root на сервере.':
+    'Safer: the sysbox-runc runtime instead of privileged, or move the agents to a separate VM: a compromised build in a privileged container gets root on the server.',
+  'Безопаснее sysbox-runc runtime вместо privileged или отдельная ВМ: взлом в privileged-контейнере дает root на сервере.':
+    'Safer: the sysbox-runc runtime instead of privileged, or a separate VM: a compromise in a privileged container gets root on the server.',
+  'Убрать пометку: privileged здесь оставлен намеренно': 'Hide the note: privileged is kept here on purpose',
+  'знаю, так надо': 'I know, it is intended',
+  'Docker внутри поднят, но без дела: за {days} дн. ни одного контейнера внутри, CPU {cpu} с. Проверить образы: 0 или ошибка - privileged можно убрать':
+    'Docker inside is up but idle: no container inside in {days} days, CPU {cpu} s. Check the images: 0 or an error - privileged can be removed',
   '{name} (cap {caps}): права выдаются только на старт, процесс работает без них (uid {uid}, no-new-privileges)':
     '{name} (cap {caps}): the rights are only for startup, the process runs without them (uid {uid}, no-new-privileges)',
   'Внешний прокси {list}: образ собран меньше года назад.': 'External proxy {list}: the image was built less than a year ago.',

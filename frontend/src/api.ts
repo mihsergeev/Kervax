@@ -3229,7 +3229,12 @@ export interface DockerRisk {
   text: string
   muted: boolean
   fix?: RiskFix // у незаглушенных: шаги, общие у контейнеров одного проекта
+  dind?: DindInfo // docker внутри у privileged (агент 2.60)
+  note?: boolean // privileged ради живого docker внутри: заметка, не тревога
 }
+// docker внутри privileged-контейнера (docker_risk.dind): live - работает, idle - dockerd без дела,
+// none - docker внутри нет; run - контейнеров внутри сейчас, ran - запускались, up и cpu - секунды dockerd
+export type DindInfo = { state: 'live' | 'idle' | 'none'; run: number; up: number; cpu: number; ran: boolean; ci?: boolean }
 // cap_add опасный, но главный процесс сбросил права: uid не 0, CapEff пуст, no_new_privs (docker_risk.start_caps)
 export type DockerRiskStart = { name: string; image: string; caps: string[]; uid: number }
 // как исправить (docker_risk.fixes): тексты шагов во фронте по id, args - подстановки
