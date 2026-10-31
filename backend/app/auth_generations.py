@@ -45,12 +45,18 @@ async def merge_revocation(session, key: str, value: str) -> None:
     ))
 
 
-async def retire(session, user: User) -> None:
+async def retire(session, user: User) -> bool:
     # Читаем и увеличиваем именно текущую версию в БД, а не снимок ORM-объекта:
     # смена пароля/logout могли успеть увеличить ее после чтения delete-запросом.
     # UPDATE блокирует запись до конца этой же транзакции с сохранением seed и DELETE.
-    version = await session.scalar(update(User).where(User.id == user.id).values(
+    # Между SELECT и UPDATE SQLite мог отдать тот же id совершенно другой учетке.
+    # Ее нельзя ни отзывать под чужим именем, ни удалять через устаревший ORM-объект.
+    version = await session.scalar(update(User).where(
+        User.id == user.id, User.username == user.username,
+    ).values(
         token_version=User.token_version + 1,
     ).returning(User.token_version).execution_options(synchronize_session=False))
-    if version is not None:
-        await merge_revocation(session, _key(user.username), str(version))
+    if version is None:
+        return False
+    await merge_revocation(session, _key(user.username), str(version))
+    return True

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 
 from app import alerts, audit, client_ip, impersonate, ratelimit, settings_store, tg_bot, tg_fmt, totp
 from app.config import get_settings
@@ -158,22 +158,31 @@ async def change_password(
     body: PasswordChangeRequest, request: Request, user: CurrentUser, session: SessionDep
 ) -> TokenResponse:
     """Смена пароля из UI: проверяет текущий, инвалидирует все старые токены."""
+    user_id, username, previous_version = user.id, user.username, user.token_version
     # С украденным токеном текущий пароль подбирали без ограничений: тот же счетчик неудач
     # и блокировка адреса, что у входа
-    await _guarded(session, request, user.username, "password_fail",
+    await _guarded(session, request, username, "password_fail",
                    verify_password(body.current_password, user.password_hash), "Неверный текущий пароль")
-    user.password_hash = hash_password(body.new_password)
-    user.token_version += 1  # все ранее выданные токены становятся недействительны
+    # После проверки старая учетка могла исчезнуть, а ее id получить новая. Не меняем
+    # пароль новой личности и не выпускаем для нее токен по старому паролю.
+    version = await session.scalar(update(User).where(
+        User.id == user_id, User.username == username, User.token_version == previous_version,
+    ).values(
+        password_hash=hash_password(body.new_password), token_version=User.token_version + 1,
+    ).returning(User.token_version).execution_options(synchronize_session=False))
+    if version is None:
+        await session.rollback()
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Недействительный или отсутствующий токен")
     await session.commit()
-    await audit.record(session, user.username, "password_change", user.username)
+    await audit.record(session, username, "password_change", username)
     settings = get_settings()
     await alerts.security_alert(
         session, settings,
-        f"⚠️🔑 Kervax\nСменили пароль {user.username}\nС адреса {_client_key(request)}",
+        f"⚠️🔑 Kervax\nСменили пароль {username}\nС адреса {_client_key(request)}",
     )
     token = create_access_token(
-        user.username, settings.jwt_secret, settings.jwt_ttl_minutes,
-        user.token_version, user.id,
+        username, settings.jwt_secret, settings.jwt_ttl_minutes,
+        version, user_id,
     )
     return TokenResponse(access_token=token)
 

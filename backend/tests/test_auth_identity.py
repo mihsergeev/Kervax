@@ -1,5 +1,9 @@
 """Удаленная учетная запись не возвращается вместе с повторно использованным SQLite id."""
 
+import asyncio
+
+import pytest
+
 from app import auth_generations, backup, config
 from app.bootstrap import ensure_admin
 from app.models import User
@@ -159,3 +163,106 @@ async def test_revocation_merge_never_decreases_known_version(client):
         await auth_generations.merge_revocation(session, key, "3")
         await session.commit()
         assert await auth_generations.initial_version(session, "reused-viewer") == 9
+
+
+async def _overlapping_delete_recreate(client, auth_headers, monkeypatch):
+    old_id, _ = await _create(client, auth_headers, name="old-viewer")
+    entered = asyncio.Event()
+    proceed = asyncio.Event()
+    original = auth_generations.retire
+    paused = False
+
+    async def delayed(session, user):
+        nonlocal paused
+        if user.username == "old-viewer" and not paused:
+            paused = True
+            entered.set()
+            await proceed.wait()
+        return await original(session, user)
+
+    monkeypatch.setattr(auth_generations, "retire", delayed)
+    pending = asyncio.create_task(client.delete(f"/api/users/{old_id}", headers=auth_headers))
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        assert (await client.delete(f"/api/users/{old_id}", headers=auth_headers)).status_code == 204
+        new_id, new_headers = await _create(client, auth_headers, name="new-viewer")
+        _assert_sqlite_reuses_id(client, new_id, old_id)
+        proceed.set()
+        response = await asyncio.wait_for(pending, 10)
+        return response, new_id, new_headers
+    finally:
+        proceed.set()
+        if not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_delayed_delete_cannot_remove_different_account_with_reused_id(client, auth_headers, monkeypatch):
+    response, _, headers = await _overlapping_delete_recreate(client, auth_headers, monkeypatch)
+    assert response.status_code == 404, response.text
+    current = await client.get("/api/auth/me", headers=headers)
+    assert current.status_code == 200 and current.json()["username"] == "new-viewer"
+
+
+async def test_overlapping_delete_cannot_lose_other_accounts_revocation(client, auth_headers, monkeypatch):
+    _, new_id, stale = await _overlapping_delete_recreate(client, auth_headers, monkeypatch)
+    # Если новый пользователь сохранился, удаляем его штатно. Старый баг удалял его
+    # от имени old-viewer и не оставлял seed для new-viewer.
+    current = await client.get("/api/auth/me", headers=stale)
+    if current.status_code == 200:
+        assert (await client.delete(f"/api/users/{new_id}", headers=auth_headers)).status_code == 204
+    await _create(client, auth_headers, name="new-viewer", role="admin")
+    response = await client.get("/api/auth/me", headers=stale)
+    assert response.status_code == 401, response.text
+
+
+@pytest.mark.parametrize("replacement_name", ["reused-viewer", "replacement-admin"])
+async def test_password_change_cannot_take_over_recreated_account(client, auth_headers, monkeypatch, replacement_name):
+    from app.api import auth
+
+    uid, stale = await _create(client, auth_headers)
+    original = auth._guarded
+    replaced = False
+
+    async def replace_after_check(session, request, username, action, ok, error):
+        nonlocal replaced
+        await original(session, request, username, action, ok, error)
+        if action == "password_fail" and not replaced:
+            replaced = True
+            assert (await client.delete(f"/api/users/{uid}", headers=auth_headers)).status_code == 204
+            new_id, _ = await _create(client, auth_headers, name=replacement_name, role="admin",
+                                      password="fakepass-owner")
+            _assert_sqlite_reuses_id(client, new_id, uid)
+
+    monkeypatch.setattr(auth, "_guarded", replace_after_check)
+    response = await client.post("/api/auth/password", headers=stale, json={
+        "current_password": PW, "new_password": "fakepass-attacker",
+    })
+    stolen = await client.post("/api/auth/login", json={
+        "username": replacement_name, "password": "fakepass-attacker",
+    })
+    assert stolen.status_code == 401, f"stale change={response.status_code}, replacement login={stolen.status_code}"
+    assert response.status_code == 401, response.text
+    owner = await client.post("/api/auth/login", json={"username": replacement_name, "password": "fakepass-owner"})
+    assert owner.status_code == 200
+
+
+async def test_password_change_cannot_reissue_token_revoked_by_concurrent_logout(client, auth_headers, monkeypatch):
+    from app.api import auth
+
+    _, stale = await _create(client, auth_headers)
+    original = auth._guarded
+
+    async def logout_after_check(session, request, username, action, ok, error):
+        await original(session, request, username, action, ok, error)
+        if action == "password_fail":
+            assert (await client.post("/api/auth/logout", headers=stale)).status_code == 204
+
+    monkeypatch.setattr(auth, "_guarded", logout_after_check)
+    response = await client.post("/api/auth/password", headers=stale, json={
+        "current_password": PW, "new_password": "fakepass-attacker",
+    })
+    assert response.status_code == 401
+    assert (await client.get("/api/auth/me", headers=stale)).status_code == 401
+    owner = await client.post("/api/auth/login", json={"username": "reused-viewer", "password": PW})
+    assert owner.status_code == 200

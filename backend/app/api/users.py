@@ -229,7 +229,9 @@ async def delete_user(
                 status.HTTP_400_BAD_REQUEST, "Нельзя удалить последнего администратора"
             )
     name = user.username
-    await auth_generations.retire(session, user)
+    if not await auth_generations.retire(session, user):
+        await session.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Учётка не найдена")
     # Закрываем и старые входы, привязанные только к имени. Это важно и для SQLite,
     # где после удаления последней учетки ее id может достаться новой.
     await session.execute(update(Impersonation).where(
