@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import Settings
 from app.models import AppSetting, Location, User
+from app import auth_generations
 from app.security import MIN_PASSWORD_LEN, hash_password
 
 log = logging.getLogger("kervax.bootstrap")
@@ -81,6 +82,7 @@ async def ensure_admin(
                 User(
                     username=settings.admin_user,
                     password_hash=hash_password(settings.admin_password),
+                    token_version=await auth_generations.initial_version(session, settings.admin_user),
                 )
             )
             try:

@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, or_, select, update
 
-from app import audit, impersonate
+from app import audit, auth_generations, impersonate
 from app.api.auth import _client_key
 from app.config import get_settings
 from app.deps import AdminUser, SessionDep
@@ -126,6 +126,7 @@ async def create_user(
         username=body.username,
         password_hash=hash_password(body.password),
         role=body.role,
+        token_version=await auth_generations.initial_version(session, body.username),
         # пустой список храним как есть: он и означает «без ограничений»
         sections=body.sections,
         server_groups=body.server_groups,
@@ -228,6 +229,7 @@ async def delete_user(
                 status.HTTP_400_BAD_REQUEST, "Нельзя удалить последнего администратора"
             )
     name = user.username
+    await auth_generations.retire(session, user)
     # Закрываем и старые входы, привязанные только к имени. Это важно и для SQLite,
     # где после удаления последней учетки ее id может достаться новой.
     await session.execute(update(Impersonation).where(

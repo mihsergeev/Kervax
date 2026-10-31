@@ -33,6 +33,7 @@ from sqlalchemy import DateTime, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
+from app import auth_generations
 from app.models import (
     AppSetting,
     BackupVaultItem,
@@ -205,12 +206,20 @@ async def import_data(session: AsyncSession, data: dict, settings: Settings) -> 
 
     # чистим существующие (в обратном порядке) и вставляем заново
     for _name, model in reversed(present):
-        await session.execute(delete(model))
+        statement = delete(model)
+        if model is AppSetting:
+            # Эти строки относятся к личности учетки, а не конфигурации панели:
+            # старый бэкап не должен возвращать работоспособность отозванным JWT.
+            statement = statement.where(~AppSetting.key.startswith(auth_generations.PREFIX))
+        await session.execute(statement)
     counts: dict = {}
     for name, model in present:
         rows = tables[name]
         for row in rows:
-            session.add(model(**_deserialize(row, model)))
+            if model is AppSetting and str(row.get("key", "")).startswith(auth_generations.PREFIX):
+                await auth_generations.merge_revocation(session, row["key"], row["value"])
+            else:
+                session.add(model(**_deserialize(row, model)))
         counts[name] = len(rows)
 
     # Postgres: после вставки явных id надо подвинуть sequence, иначе следующая
