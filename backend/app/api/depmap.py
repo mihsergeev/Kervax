@@ -14,6 +14,7 @@ from app import parents as parents_mod
 from app.collector import seen_online
 from app.deps import CurrentUser, SessionDep, group_allowed, scope_query, user_sections
 from app.models import Check
+from app.secret_masks import mask_target
 
 router = APIRouter(prefix="/depmap", tags=["depmap"])
 
@@ -53,7 +54,8 @@ async def depmap(user: CurrentUser, session: SessionDep) -> dict:
         for r, c in zip(rows, cs):
             # mode: off - отвязан руками (ни от какого сервера не зависит), иначе auto или server
             out_c.append({
-                "id": r.id, "name": r.name, "type": r.type, "target": r.target or "",
+                "id": r.id, "name": r.name, "type": r.type,
+                "target": (r.target or "") if user.role in ("admin", "editor") else mask_target(r.target),
                 "status": r.last_status or "unknown", "mode": r.parent_mode or "auto",
                 "parents": [{"id": pid, "why": why} for pid, why in parents_mod.parents_of(c, idx) if pid in vis],
             })

@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app import audit, maint, settings_store
 from app.config import get_settings
-from app.deps import CurrentUser, SessionDep, group_allowed
+from app.deps import CurrentUser, SessionDep, group_allowed, section_allowed
 from app.models import Check, MaintenanceWindow, Server
 from app.schemas import MaintIn, MaintOut
 
@@ -17,11 +17,11 @@ _WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
 
 async def _visible(session, user) -> tuple[set[int], set[int]]:
-    """Серверы и мониторы, которые учетка видит: группы у них свои."""
+    """Видимые объекты: открытый раздел и своя группа обязательны одновременно."""
     srv = {i for i, g in (await session.execute(select(Server.id, Server.group_name))).all()
-           if group_allowed(user, g, "servers")}
+           if section_allowed(user, "/api/servers") and group_allowed(user, g, "servers")}
     chk = {i for i, g in (await session.execute(select(Check.id, Check.group_name))).all()
-           if group_allowed(user, g, "sites")}
+           if section_allowed(user, "/api/checks") and group_allowed(user, g, "sites")}
     return srv, chk
 
 

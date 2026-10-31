@@ -1,7 +1,7 @@
 {
   "name": "kervax-frontend",
   "private": true,
-  "version": "1.8.73",
+  "version": "1.8.74",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -25,6 +25,6 @@
     "oxlint": "^1.85.0",
     "playwright-core": "^1.63.0",
     "typescript": "~7.0.2",
-    "vite": "^8.3.1"
+    "vite": "^8.3.5"
   }
 }

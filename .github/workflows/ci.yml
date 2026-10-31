@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -11,6 +12,10 @@ permissions:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"] # минимальная версия и версия runtime-образа
     defaults:
       run:
         working-directory: backend
@@ -18,13 +23,15 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - name: Install
         run: pip install .[dev]
       - name: Tests
         run: pytest -q -n auto
+      # Реальные uid/права/симлинки: установщик пишет только в изолированное дерево теста.
+      - name: Backup installer security regression
+        run: sudo env PATH="$PATH" "$(command -v python)" -m pytest --noconftest -q tests/test_backup_dump_paths_security.py
       - name: Dependency audit (pip-audit)
-        continue-on-error: true # информативно, не блокирует
         run: |
           pip install pip-audit
           pip-audit
@@ -58,7 +65,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install
         run: pip install .[dev]
       - name: Upgrade from scratch
@@ -72,7 +79,7 @@ jobs:
           KERVAX_TEST_PG: postgresql+asyncpg://kervax:kervax@localhost:5432/kervax_tests
         run: |
           PGPASSWORD=kervax psql -h localhost -U kervax -d kervax -c 'create database kervax_tests'
-          pytest -q tests/test_backup.py tests/test_auth.py tests/test_users.py tests/test_checks.py tests/test_servers.py tests/test_maint.py tests/test_check_edit_roundtrip.py tests/test_audit_view.py tests/test_home_mute.py
+          pytest -q tests/test_backup.py tests/test_auth.py tests/test_users.py tests/test_checks.py tests/test_servers.py tests/test_maint.py tests/test_check_edit_roundtrip.py tests/test_audit_view.py tests/test_home_mute.py tests/test_api_scope_regressions.py
 
   # Проверка «панель не молчит»: рядом с кодом живут списки, написанные руками
   # (виды алертов, подписи helper'ов, разделы, переводы). Код уходит вперёд —
@@ -100,7 +107,6 @@ jobs:
       - name: Install
         run: npm ci
       - name: Dependency audit (npm audit)
-        continue-on-error: true # информативно, не блокирует
         run: npm audit --audit-level=high
       - name: Build
         run: npm run build
@@ -117,7 +123,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.27.1"
+          go-version: "1.27.3"
+          cache: false # агент не имеет внешних модулей и go.sum
       - name: Vet
         run: go vet ./...
       - name: Tests
@@ -127,18 +134,28 @@ jobs:
 
   image-scan:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: backend
+            dockerfile: backend/Dockerfile
+            context: .
+          - image: frontend
+            dockerfile: frontend/Dockerfile
+            context: ./frontend
     steps:
       - uses: actions/checkout@v7
       # Контекст — КОРЕНЬ репозитория, а не backend/: образ бэкенда собирает ещё
       # и Go-агента (agent/main.go) и подхватывает подписанный манифест из
       # agent-dist/. С контекстом ./backend сборка падает на первом же COPY.
-      - name: Build backend image
-        run: docker build -f backend/Dockerfile -t kervax-backend .
-      - name: Trivy scan (backend image)
-        continue-on-error: true # отчёт по CVE в образе, не блокирует
-        uses: aquasecurity/trivy-action@master
+      - name: Build image
+        run: docker build -f "${{ matrix.dockerfile }}" -t "kervax-${{ matrix.image }}" "${{ matrix.context }}"
+      - name: Trivy scan (image)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: kervax-backend
+          image-ref: kervax-${{ matrix.image }}
+          scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
-          exit-code: "0"
+          exit-code: "1"

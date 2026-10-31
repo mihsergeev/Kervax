@@ -131,6 +131,10 @@ async def _check_impersonation(payload: dict, user: User, session: AsyncSession,
     if (
         admin is None
         or admin.role != "admin"
+        # Имена можно завести заново после удаления: старый вход не относится к новым учеткам.
+        # Токены прежнего формата без id безопасно закрываются; админ может начать вход заново.
+        or payload.get("uid") != user.id
+        or payload.get("imp_uid") != admin.id
         or payload.get("imp_ver", 0) != admin.token_version
         or user.role == "admin"
         or row is None

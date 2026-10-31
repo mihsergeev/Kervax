@@ -7,6 +7,7 @@ from sqlalchemy import select
 from app import search as search_mod
 from app.deps import CurrentUser, SessionDep, scope_query, user_sections
 from app.models import Check, Server
+from app.secret_masks import mask_target
 
 router = APIRouter(prefix="/search", tags=["search"])
 
@@ -25,7 +26,9 @@ async def search(user: CurrentUser, session: SessionDep, q: str = Query("", max_
         if "servers" in sections:
             entries += await search_mod.package_entries(session, rows)
     if "sites" in sections:
-        entries += [search_mod.check_entry(c) for c in (await session.execute(
+        entries += [search_mod.check_entry(
+            c, target=c.target if user.role in ("admin", "editor") else mask_target(c.target),
+        ) for c in (await session.execute(
             scope_query(user, select(Check.id, Check.name, Check.type, Check.target, Check.group_name, Check.note),
                         Check, "sites")
         )).all()]

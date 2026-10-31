@@ -5,7 +5,7 @@
 # панель раздает бинарь этой сборки, а подписан бинарь сборки release.py, и sha256
 # совпадают, только пока их собирает один Go. Менять оба места вместе и выпускать новый
 # релиз агента (ops/selfcheck.py это проверяет).
-FROM golang:1.27.1-alpine AS agent
+FROM golang:1.27.3-alpine AS agent
 ARG AGENT_PUBKEY=
 WORKDIR /agent
 COPY agent/go.mod ./
@@ -56,7 +56,10 @@ RUN echo "dependencies, week ${DEPS_EPOCH:-none}" \
 
 COPY backend/pyproject.toml ./
 COPY backend/app ./app
-RUN pip install --no-cache-dir --no-deps --no-build-isolation .
+# pip нужен только при сборке. Его vendored-библиотеки не участвуют в работе
+# панели, но иначе остаются в образе со своим независимым циклом обновлений.
+RUN pip install --no-cache-dir --no-deps --no-build-isolation . \
+ && python -m pip uninstall --yes pip
 
 COPY backend/alembic.ini ./
 COPY backend/alembic ./alembic
