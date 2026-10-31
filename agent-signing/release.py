@@ -72,7 +72,9 @@ def build_remote(pubkey: str, out: str, host: str, keyfile: str):
     print(f"! Локальный Docker недоступен → сборка на build-хосте {host}")
     print("  ВНИМАНИЕ: build-хост в цепочке доверия (собирает подписываемые байты).")
     print("  Для максимума доверия подними локальный Docker.")
-    base = ["-i", keyfile, "-o", "StrictHostKeyChecking=no"]
+    base = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
+    if keyfile:
+        base[:0] = ["-i", keyfile, "-o", "IdentitiesOnly=yes"]
     ssh = lambda c: subprocess.run(["ssh", *base, host, c], check=True)  # noqa: E731
     scp = lambda a, cwd=None: subprocess.run(["scp", *base, *a], check=True, cwd=cwd)
     ssh("rm -rf /tmp/kervax-rel && mkdir -p /tmp/kervax-rel/src /tmp/kervax-rel/out")
@@ -104,9 +106,8 @@ def build_all(pubkey: str, out: str):
             "  → запусти Docker Desktop (безопаснее), ИЛИ\n"
             f"  → впиши ssh-цель в {BUILD_HOST_FILE} (напр. root@203.0.113.10)"
         )
-    keyfile = os.path.expanduser(
-        os.environ.get("KERVAX_BUILD_SSH_KEY", "~/.ssh/ms_dev_ed25519")
-    )
+    keyfile = os.environ.get("KERVAX_BUILD_SSH_KEY", "")
+    keyfile = os.path.expanduser(keyfile) if keyfile else ""
     build_remote(pubkey, out, host, keyfile)
 
 

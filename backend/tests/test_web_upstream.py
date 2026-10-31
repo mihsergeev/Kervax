@@ -252,15 +252,16 @@ def _rate_body() -> str:
 
 
 def test_helper_version_and_wiring():
-    assert "KERVAX_SETUP_VERSION=0.29" in SRC and "\r" not in SRC
+    assert "KERVAX_SETUP_VERSION=0.30" in SRC and "\r" not in SRC
     body = _rate_body()
     # строки ошибок nginx в потоке контейнера: не в счет запросов, но причина берется
     assert "\\[(emerg|alert|crit|error|warn|notice|info|debug)\\]/ { if ($0 ~ /limiting requests/) lim++; up_take($0); next }" in body
     assert '"$UPFN"' in body and "up_out(el, kk) }" in body
     # error-лог хостового nginx - пятой колонкой карты, читается раз за запуск
     assert "errlog_chunk \"$ef\"" in body and 'uj=",\\"up\\":$up"' in body
+    assert 'case "$elog" in *"$TAB"*) elog=${elog%%"$TAB"*} ;; esac' in body
     helper = re.search(r"<<'HELPER_EOF'\n(.*?)\nHELPER_EOF\n", SRC, re.S).group(1)
-    assert "--error-log-path=" in helper and 'er[lg]=$5' in helper
+    assert "--error-log-path=" in helper and 'er[lg]=$5' in helper and 'if ($6 != 1) xb[lg]=1' in helper
 
 
 def _run(script: str) -> str:
@@ -356,6 +357,7 @@ def test_helper_map_gets_error_log_column():
     conf = "\n".join([
         "error_log /var/log/nginx/error.log warn;",
         "http {",
+        "  log_format prox '$remote_addr - $remote_user [$time_local] \"$request\" $status \"$http_x_forwarded_for\"';",
         "  access_log /var/log/nginx/access.log;",
         "  server {",
         "    server_name a.example;",
@@ -367,17 +369,30 @@ def test_helper_map_gets_error_log_column():
         "  }",
         "  server {",
         "    server_name c.example;",
-        "    access_log /var/log/nginx/c.access.log;",
+        "    access_log /var/log/nginx/c.access.log prox;",
         "    error_log stderr;",
         "  }",
         "}",
     ])
     out = _run(helper[a:b] + f"\ncat <<'C_EOF' | extract_logs /var/log/nginx/default-error.log\n{conf}\nC_EOF\n")
     rows = [line.split("\t") for line in out.splitlines()]
-    assert ["/var/log/nginx/access.log", "a.example", "", "", "/var/log/nginx/error.log"] in rows
-    assert ["/var/log/nginx/b.access.log", "b.example", "", "", "/var/log/nginx/b.error.log"] in rows
-    assert ["/var/log/nginx/c.access.log", "c.example", "", "", ""] in rows
+    assert ["/var/log/nginx/access.log", "a.example", "", "", "/var/log/nginx/error.log", "0"] in rows
+    assert ["/var/log/nginx/b.access.log", "b.example", "", "", "/var/log/nginx/b.error.log", "0"] in rows
+    assert ["/var/log/nginx/c.access.log", "c.example", "", "", "", "1"] in rows
     # без error_log вовсе - путь по умолчанию из nginx -V
     out = _run(helper[a:b] + "\nprintf 'http {\\n server {\\n  server_name d.example;\\n  access_log /x.log;\\n }\\n}\\n'"
                " | extract_logs /var/log/nginx/default-error.log\n")
-    assert out.split("\n")[0].split("\t") == ["/x.log", "d.example", "", "", "/var/log/nginx/default-error.log"]
+    assert out.split("\n")[0].split("\t") == ["/x.log", "d.example", "", "", "/var/log/nginx/default-error.log", "0"]
+
+
+def test_helper_map_trusts_xff_only_when_every_shared_format_does():
+    helper = re.search(r"<<'HELPER_EOF'\n(.*?)\nHELPER_EOF\n", SRC, re.S).group(1)
+    a = helper.index("merge_logs() {")
+    b = helper.index("# Путь лога внутри контейнера")
+    rows = ("/safe.log\ta.example\t\t\t\t1\n"
+            "/safe.log\tb.example\t\t\t\t1\n"
+            "/mixed.log\ta.example\t\t\t\t1\n"
+            "/mixed.log\tb.example\t\t\t\t0\n")
+    out = _run(helper[a:b] + "\ncat <<'M_EOF' | merge_logs\n" + rows + "M_EOF\n")
+    got = {line.split("\t")[0]: line.split("\t")[-1] for line in out.splitlines()}
+    assert got == {"/safe.log": "1", "/mixed.log": "0"}

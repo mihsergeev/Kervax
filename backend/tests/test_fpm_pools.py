@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -180,7 +181,19 @@ def test_kernel_crashes():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "fpm-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.3 " in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.4 " in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert 'fpm_master "$P" || continue' in src
+    assert '[[ ${exe##*/} =~ ^php-fpm([0-9]+([.][0-9]+)*)?$ ]]' in src
+    assert '[ -L "$cur" ] && return 0' in src
+    assert '../usr/share/zoneinfo/*) f=$(in_root "$p" "/${t#../}")' in src
+    assert 'os.open(part, os.O_RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC, dir_fd=fd)' in src
+    assert 'os.open(parts[-1], os.O_RDONLY | NOFOLLOW | CLOEXEC, dir_fd=dfd)' in src
+    assert 'pidfd = os.open(pid, os.O_RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC, dir_fd=procfd)' in src
+    assert 'os.open("root", os.O_RDONLY | DIRECTORY | CLOEXEC, dir_fd=pidfd)' in src
+    assert 'os.path.join(PROC, pid, "root")' not in src
+    assert 'safe_cat "$P" "$conf" > "$cf"' in src and 'safe_snap "$m" "$f" "$ff" "$CAP"' in src
+    assert 'safe_zone "$p" /etc/localtime "$zf"' in src and 'os.readlink(parts[-1], dir_fd=dfd)' in src
+    assert 'printf \'%s\\tnopython\\n\'' in src
     # падение - сигнал сбоя, а не убийство: 9 и 15 - таймаут, OOM и перезагрузка
     assert "exited on signal (4|6|7|8|11) " in src and "-e \\047exited on signal\\047" in src
     # журнал ядра по курсору, без курсора - с прошлого прогона; курсор из состояния - только своими символами
@@ -189,13 +202,78 @@ def test_helper_script():
     # обратный слэш в строке лога удваивается так, что mawk его не теряет: иначе отчет не JSON
     assert '_jn = split(s, _jp, "\\\\")' in src
     # смещения больше 2 ГиБ: mawk пишет 7.1983e+09 в строке и режет %d на 2^31; strtonum в mawk нет
-    assert 'sprintf("%.0f", from + 1)' in src and 'function hex(s,' in src and "strtonum" not in src
+    assert 'sprintf("%.0f", localfrom + 1)' in src and 'function hex(s,' in src and "strtonum" not in src
     # include разворачивается на своем месте: [www] после include перекрывает пулы из include
-    assert 'for f in "$d"/${inc##*/}; do [ -f "$f" ] && { cat "$f"; echo; } >> "$TMPD/conf"; done' in src
+    assert 'for f in "$d"/${inc##*/}; do [ -f "$f" ] && [ ! -L "$f" ] && { cat "$f"; echo; } >> "$TMPD/conf"; done' in src
     # путь из конфига контейнера не уводит за его корень и не попадает в команду как есть
-    assert src.count("*..*|*[!A-Za-z0-9._/@+-]*") >= 2 and "elog !~ /\\.\\./" in src
+    assert 'case "$path" in *..*|*[!A-Za-z0-9._/@+-]*|"") return 0' in src
+    assert "elog !~ /\\.\\./" in src
     # конфиг с CRLF: имена секций без \r
     assert '{ gsub(/\\r/, "") }' in src
+
+
+def test_rootio_never_follows_a_container_symlink(tmp_path):
+    if os.name != "posix":
+        pytest.skip("dir_fd + O_NOFOLLOW проверяется на Linux")
+    rootio = re.search(r'cat > "\$TMPD/rootio.py" <<\'PY\'\n(.*?)\nPY\n', SRC, re.S).group(1)
+    script = tmp_path / "rootio.py"
+    script.write_text(rootio, encoding="utf-8")
+    proc = tmp_path / "proc"
+    root = proc / "101" / "root"
+    outside = tmp_path / "host"
+    root.mkdir(parents=True)
+    outside.mkdir()
+    (outside / "secret").write_text("HOST-SECRET", encoding="utf-8")
+    (root / "etc").symlink_to(outside, target_is_directory=True)
+    env = {**os.environ, "KERVAX_FPM_PROC_ROOT": str(proc)}
+    bad = subprocess.run([sys.executable, script, "cat", "101", "/etc/secret", "4096"], env=env,
+                         capture_output=True, text=True, timeout=15)
+    assert bad.returncode != 0 and "HOST-SECRET" not in bad.stdout
+    (root / "etc").unlink()
+    (root / "etc").mkdir()
+    (root / "etc" / "safe.conf").write_text("[www]", encoding="utf-8")
+    good = subprocess.run([sys.executable, script, "cat", "101", "/etc/safe.conf", "4096"], env=env,
+                          capture_output=True, text=True, timeout=15)
+    assert good.returncode == 0 and good.stdout == "[www]"
+
+
+def test_rootio_copies_only_a_container_zoneinfo_target(tmp_path):
+    if os.name != "posix":
+        pytest.skip("readlinkat + O_NOFOLLOW проверяется на Linux")
+    rootio = re.search(r'cat > "\$TMPD/rootio.py" <<\'PY\'\n(.*?)\nPY\n', SRC, re.S).group(1)
+    script = tmp_path / "rootio.py"
+    script.write_text(rootio, encoding="utf-8")
+    proc = tmp_path / "proc"
+    root = proc / "101" / "root"
+    host_zone = Path("/usr/share/zoneinfo/Europe/Moscow")
+    if not host_zone.is_file():
+        pytest.skip("нет системной зоны Europe/Moscow")
+    zone = root / "usr/share/zoneinfo/Europe/Moscow"
+    zone.parent.mkdir(parents=True)
+    zone.write_bytes(host_zone.read_bytes())
+    (root / "etc").mkdir()
+    localtime = root / "etc/localtime"
+    localtime.symlink_to("../usr/share/zoneinfo/Europe/Moscow")
+    env = {**os.environ, "KERVAX_FPM_PROC_ROOT": str(proc)}
+    copied = tmp_path / "copied.tz"
+    ok = subprocess.run([sys.executable, script, "zone", "101", "/etc/localtime", str(copied), "1048576"],
+                        env=env, capture_output=True, text=True, timeout=15)
+    assert ok.returncode == 0 and copied.read_bytes() == host_zone.read_bytes()
+    off = subprocess.run(["date", "+%z"], env={**os.environ, "TZ": f":{copied}"},
+                         capture_output=True, text=True, timeout=15)
+    assert off.returncode == 0 and off.stdout.strip() == "+0300"
+    localtime.unlink()
+    (root / "etc/shadow").write_text("HOST-SECRET", encoding="utf-8")
+    localtime.symlink_to("/etc/shadow")
+    copied.unlink()
+    bad = subprocess.run([sys.executable, script, "zone", "101", "/etc/localtime", str(copied), "1048576"],
+                         env=env, capture_output=True, text=True, timeout=15)
+    assert bad.returncode != 0 and not copied.exists()
+    localtime.unlink()
+    localtime.write_bytes(host_zone.read_bytes())
+    regular = subprocess.run([sys.executable, script, "zone", "101", "/etc/localtime", str(copied), "1048576"],
+                             env=env, capture_output=True, text=True, timeout=15)
+    assert regular.returncode == 0 and copied.read_bytes() == host_zone.read_bytes()
 
 
 def test_last_reached_in_text():
@@ -269,11 +347,27 @@ class _Node:
         body = BODY.replace("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                             'export PATH="$KVX_STUBS:/usr/bin:/bin"')
         body = body.replace("exec 9>/run/kervax-fpm.lock\nflock -n 9 || exit 0\n", "")
+        # Этот тест подменяет /proc обычными файлами, где нет magic-link exe; проверка exe отдельно выше.
+        body = body.replace('  fpm_master "$P" || continue\n', "")
         body = body.replace('"/proc/$', '"$KVX_PROC/$').replace("printf '/proc/%s/root%s' \"$p\"",
                                                                   "printf '%s/%s/root%s' \"$KVX_PROC\" \"$p\"")
+        if os.name == "nt":
+            marker = 'safe_snap() { [ -n "$SAFE_PY" ] && "$SAFE_PY" -I "$TMPD/rootio.py" snap "$1" "$2" "$3" "$4"; }\n'
+            fake = r'''safe_cat() { cat "$KVX_PROC/$1/root$2"; }
+safe_glob() { for f in "$KVX_PROC/$1/root$2"/$3; do [ -f "$f" ] && { cat "$f"; echo; }; done; }
+safe_snap() {
+  src="$KVX_PROC/$1/root$2"; ino=$(stat -c %i "$src") || return; size=$(stat -c %s "$src") || return
+  if [ "$size" -gt "$4" ]; then base=$((size - $4)); else base=0; fi
+  tail -c "$((size - base))" "$src" > "$3" || return
+  printf '%s\t%s\t%s\n' "$ino" "$size" "$base"
+}
+'''
+            assert marker in body
+            body = body.replace(marker, marker + fake + 'safe_zone() { return 1; }\n')
         assert "/proc/$" not in body and "flock" not in body
         _write(d / "helper.sh", body)
         self.env = {**os.environ, "KVX_PROC": _posix(self.proc), "KVX_STUBS": _posix(stubs),
+                    "KERVAX_FPM_PROC_ROOT": _posix(self.proc), "KERVAX_FPM_PY": _posix(Path(sys.executable)),
                     "KERVAX_FPM_OUT": _posix(d / "fpm.json"), "KERVAX_FPM_STATE": _posix(d / "fpm.state")}
 
     def log(self, pid: str) -> Path:
@@ -358,7 +452,7 @@ def test_helper_line_time():
 
 def test_helper_offset_key_and_state():
     # позиция - по месту и пути, старое состояние без V 2 теряет позиции и корзины
-    assert 'printf \'%s|%s\\t%s\\t%s\\t%s\\t%s\\n\' "$w" "$f" "$ff" "$st" "$tzo" "$w"' in BODY
+    assert 'printf \'%s|%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n\' "$w" "$f" "$ff" "$st" "$tzo" "$w" "$base"' in BODY
     assert "if (!(f in off)) { nl[f] = now; next }" in BODY and "if (tl < lw || tl <= now - 86400) continue" in BODY
     assert "grep -q '^V\t2$' \"$STATE\"" in BODY and "$1 != \"O\" && $1 != \"B\"" in BODY
     # строки времени без mktime (его нет в mawk)

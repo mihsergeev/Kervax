@@ -68,11 +68,15 @@
 # inside it as its user: through /proc/PID/root an absolute symlink led root to a file of the host,
 # and its first line went to the container's client.
 #
+# 0.6: schema and table names from the database catalogs are quoted as SQL identifiers. A tenant
+# allowed to create a table could otherwise put a quote, a second statement and a queue suffix in
+# its name; the helper would run that statement with the database account it uses for inventory.
+#
 # Only queue names, numbers, job class names and the first line of the last error leave the node:
 # no job arguments, no other keys or rows.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x redis-server >/dev/null 2>&1 || pgrep -x valkey-server >/dev/null 2>&1 || pgrep -x postgres >/dev/null 2>&1 || pgrep -x postmaster >/dev/null 2>&1 || pgrep -x mysqld >/dev/null 2>&1 || pgrep -x mariadbd >/dev/null 2>&1"
 
 HELPER_DIR=/lib65/kervax
@@ -672,6 +676,18 @@ my_login() {
 
 # A time column as epoch seconds: PostgreSQL's timestamp without a zone is taken as UTC (Rails, Oban,
 # Symfony and Hangfire keep UTC there), MySQL's datetime too
+db_ident() { # catalog value -> one quoted identifier for the current engine
+  local s=$1
+  case "$s" in *$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+  if [ "$ENG" = pg ]; then printf '"%s"' "$(printf '%s' "$s" | sed 's/"/""/g')"
+  else printf '`%s`' "$(printf '%s' "$s" | sed 's/`/``/g')"; fi
+}
+db_table() {
+  local s t
+  s=$(db_ident "$1") || return 1
+  t=$(db_ident "$2") || return 1
+  printf '%s.%s' "$s" "$t"
+}
 epsql() { if [ "$ENG" = pg ]; then printf 'extract(epoch from %s)::bigint' "$1"; else printf "timestampdiff(second, '1970-01-01', %s)" "$1"; fi; }
 QEND="select 'END', '', 0, 0, 0"
 
@@ -679,9 +695,10 @@ QEND="select 'END', '', 0, 0, 0"
 # when the longest waiting ready job became due, epoch seconds; delayed jobs (their time has not
 # come) and finished or failed ones are not counted
 qsql() { # idx schema table system variant
-  local i=$1 t tq q w r x u tx oc oi="" o
-  if [ "$ENG" = pg ]; then t="\"$2\".\"$3\""; u="(now() at time zone 'utc')"; tx="::text"
-  else t="\`$2\`.\`$3\`"; u="utc_timestamp()"; tx=""; fi
+  local i=$1 t tc tj q w r x u tx oc oi="" o
+  t=$(db_table "$2" "$3") || return 1
+  if [ "$ENG" = pg ]; then u="(now() at time zone 'utc')"; tx="::text"
+  else u="utc_timestamp()"; tx=""; fi
   case "$4" in
     yii) q=channel w="done_at is null" r="reserved_at is null and pushed_at + coalesce(delay, 0) <= $NOW" x="reserved_at is not null"
       oc="pushed_at + coalesce(delay, 0)" oi=1 ;;
@@ -697,9 +714,10 @@ qsql() { # idx schema table system variant
     # Hangfire's queue table keeps no time
     hangfire) q=queue w="1 = 1" r="fetchedat is null" x="fetchedat is not null" oc="" ;;
     solid_queue)
-      if [ "$ENG" = pg ]; then tq="\"$2\".\"${5}"; else tq="\`$2\`.\`${5}"; fi
-      printf "select '%s'%s, coalesce(queue_name%s, 'default'), count(*), 0, %s from %s group by 2 union all select '%s'%s, coalesce(j.queue_name%s, 'default'), 0, count(*), null from %sclaimed_executions%s c join %sjobs%s j on j.id = c.job_id group by 2" \
-        "$i" "$tx" "$tx" "$(epsql "min(created_at)")" "$t" "$i" "$tx" "$tx" "$tq" "${tq:0:1}" "$tq" "${tq:0:1}"
+      tc=$(db_table "$2" "${5}claimed_executions") || return 1
+      tj=$(db_table "$2" "${5}jobs") || return 1
+      printf "select '%s'%s, coalesce(queue_name%s, 'default'), count(*), 0, %s from %s group by 2 union all select '%s'%s, coalesce(j.queue_name%s, 'default'), 0, count(*), null from %s c join %s j on j.id = c.job_id group by 2" \
+        "$i" "$tx" "$tx" "$(epsql "min(created_at)")" "$t" "$i" "$tx" "$tx" "$tc" "$tj"
       return ;;
     *) return 1 ;;
   esac
@@ -717,12 +735,13 @@ qsql() { # idx schema table system variant
 # ids an hour and a day ago, FID1 and FID24, come from the history). Nothing - the system keeps no
 # failed jobs (Yii, Laravel's jobs table, Hangfire)
 fsql() { # idx schema table system variant failvariant
-  local i=$1 t f q c e o c1 c24 u1 u24 n1 n24 tq sn fl tx
+  local i=$1 t f q c e o c1 c24 u1 u24 n1 n24 tf tj sn fl tx
+  t=$(db_table "$2" "$3") || return 1
   if [ "$ENG" = pg ]; then
-    t="\"$2\".\"$3\""; u1="((now() at time zone 'utc') - interval '1 hour')"; u24="((now() at time zone 'utc') - interval '1 day')"
+    u1="((now() at time zone 'utc') - interval '1 hour')"; u24="((now() at time zone 'utc') - interval '1 day')"
     n1="(now() - interval '1 hour')"; n24="(now() - interval '1 day')"
   else
-    t="\`$2\`.\`$3\`"; u1="(utc_timestamp() - interval 1 hour)"; u24="(utc_timestamp() - interval 1 day)"; n1=$u1; n24=$u24
+    u1="(utc_timestamp() - interval 1 hour)"; u24="(utc_timestamp() - interval 1 day)"; n1=$u1; n24=$u24
   fi
   f=$t
   case "$4" in
@@ -752,8 +771,9 @@ fsql() { # idx schema table system variant failvariant
       o=${6%%:*} q=name c=name e="''"; [ "${6#*:}" = o ] && e="output->>'message'"
       c1="state = 'failed' and $o > $n1" c24="state = 'failed' and $o > $n24" ;;
     solid_queue)
-      if [ "$ENG" = pg ]; then tq="\"$2\".\"${5}"; else tq="\`$2\`.\`${5}"; fi
-      f="${tq}failed_executions${tq:0:1} f join ${tq}jobs${tq:0:1} j on j.id = f.job_id"
+      tf=$(db_table "$2" "${5}failed_executions") || return 1
+      tj=$(db_table "$2" "${5}jobs") || return 1
+      f="$tf f join $tj j on j.id = f.job_id"
       q=j.queue_name c=j.class_name e=f.error o=f.created_at c1="f.created_at > $u1" c24="f.created_at > $u24" ;;
     *) return 1 ;;
   esac
@@ -883,7 +903,7 @@ while IFS=$'\t' read -r P W ENG HOST PORT TPORT SPEC EXE; do
   while IFS=$'\t' read -r base sch tbl rows sys var fv; do
     if [ "$sys" = laravel_failed ]; then
       # failed jobs are read by row id: a big table is no trouble
-      if [ "$ENG" = pg ]; then t="\"$sch\".\"$tbl\""; else t="\`$sch\`.\`$tbl\`"; fi
+      t=$(db_table "$sch" "$tbl") || continue
       out=$(dbrun "$base" "select 'END', max(id) from $t" < /dev/null | tail -1)
     else
       [ "${rows:-0}" -le $MAX_ROWS ] 2>/dev/null || { printf 'B\t%s\t%s\t%s\t%s\t%s\t%s\n' "$INST" "$base" "$sch" "$tbl" "$sys" "$rows" >> "$TMPD/dbcache"; continue; }

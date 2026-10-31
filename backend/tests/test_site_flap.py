@@ -85,8 +85,8 @@ async def test_first_outage_alerts_and_recovers_at_once(tmp_path, monkeypatch):
     assert out == [(12, "down"), (13, "up")]
 
 
-async def test_cfm_night_one_alert_one_recovery(tmp_path, monkeypatch):
-    # ночь 24.10 с прода: тормоза, падение, 6 минут ответов, снова падение. Было три сообщения
+async def test_demo_night_one_alert_one_recovery(tmp_path, monkeypatch):
+    # тестовая ночь 24.10: тормоза, падение, 6 минут ответов, снова падение. Было три сообщения
     # ("недоступен", "снова отвечает", "через раз") и шло к серии, теперь одна тревога и один
     # отбой, когда сайт продержится полчаса
     night = [U, G, U, G, U, U, U, U, U, U, G, U, G, U, D, G, D, D, U, D, U, U, D, U, D, D, U, U]

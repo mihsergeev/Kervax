@@ -1,7 +1,9 @@
-"""Автобан сканеров (helper autoban-setup 0.1): блок отчета, где бан не работает, беды для алерта,
+"""Автобан сканеров (helper autoban-setup 0.2): блок отчета, где бан не работает, беды для алерта,
 история банов, команды режима и разбана, белый список панели и сводка банов."""
 import hashlib
 import re
+import shutil
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -48,7 +50,7 @@ def _srv(block: dict | None, exposure=None, mutes=None, web=None, agent="2.55") 
 # --- helper ---
 
 def test_helper_header():
-    assert "KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR" in SRC and "\r" not in SRC
+    assert "KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR" in SRC and "\r" not in SRC
     when = re.search(r'^KERVAX_SETUP_WHEN="([^"]*)"', SRC, re.M).group(1)
     assert not set(when) & set("{}';")
     assert 'chmod 0644 "$STATE_DIR/versions/autoban-setup.ver"' in SRC
@@ -60,6 +62,34 @@ def test_helper_header():
     # ловушки без security.txt и graphql
     parse = SRC[SRC.index("PARSE='"):SRC.index("# Hits within the window")]
     assert "\\/\\.well-known\\/" in parse and "graphql" not in parse
+    assert 'c == "priv" && xff && match' in parse
+    assert 'xff=${rest%%"$TAB"*}; [ "$xff" = 1 ] || xff=0' in SRC
+    assert "printf '\\001L\\t%s\\t%s\\t%s\\n'" in SRC
+
+
+def test_private_source_uses_last_ip_only_for_explicit_xff_format(tmp_path):
+    awk = shutil.which("awk")
+    if not awk:
+        pytest.skip("нет awk")
+    parse = re.search(r"\nPARSE='\n(.*?\n})'\n", SRC, re.S).group(1)
+    program = r'''
+function load_allow(f) {}
+function allowed(ip) { return (ip == "127.0.0.1") ? "local" : "" }
+function addr(ip) { return ip }
+''' + parse
+    bans = tmp_path / "bans.tsv"
+    bans.write_text("", encoding="utf-8")
+    line = '127.0.0.1 - - [31/Oct/2026:10:00:00 +0300] "GET /.env HTTP/1.1" 404 0 "-" "203.0.113.77"\n'
+
+    def run(trusted: int) -> str:
+        data = f"\x01L\t/access.log\tsite\t{trusted}\n" + line
+        out = subprocess.run([awk, "-v", "allowf=x", "-v", f"bansf={bans.as_posix()}", "-v", "now=1",
+                              "-v", "grace=0", program], input=data, capture_output=True, text=True, timeout=15)
+        assert out.returncode == 0, out.stderr
+        return out.stdout
+
+    assert "\t203.0.113.77\t" not in run(0)
+    assert "T\t203.0.113.77\t/.env\tsite\t" in run(1)
     # сроки: сутки, неделя, месяц; порог 3 разных ловушки за 10 минут
     assert "return n <= 1 ? 86400 : n == 2 ? 604800 : 2592000" in SRC
     assert "WINDOW=600" in SRC and "TRAPS=3" in SRC

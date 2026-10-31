@@ -428,7 +428,7 @@ EOF
 
 # What runs the dumps is chosen once, when a dump is enabled: the file backup service if the node
 # has one, our own timer otherwise. When the backup service disappears later, the dumps stay
-# attached to a unit that no longer exists and nothing runs them. On mon-a the dump of the
+# attached to a unit that no longer exists and nothing runs them. On demo-node-a the dump of the
 # panel's own database stood still from 22.07 to 17.09.2026, and nobody knew. A backup set up
 # after the dumps is the mirror case. So the trigger is checked on every refresh and rebuilt when
 # it no longer matches the node.
@@ -2471,7 +2471,7 @@ cb_cron_line() {
 # was seen saving into - job ids only, no command lines.
 CB_RUNS="${KERVAX_CB_RUNS:-/var/lib/kervax/custom-runs.tsv}"
 # A week and a day: daily and weekly jobs are seen at once. Reading further back is expensive on a
-# busy node (35 days of a per-minute cron took 34 s on mon-a); a monthly job shows its start
+# busy node (35 days of a per-minute cron took 34 s on demo-node-a); a monthly job shows its start
 # after its next run, and the start is kept from then on.
 CB_RUNS_DAYS=8
 

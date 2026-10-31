@@ -2395,8 +2395,8 @@ _FLUX_STRIP = (
     re.compile(r"^reconciliation failed:\s*"),
 )
 
-# «[Job/k8s-b-prod/k8s-b-migrations status: 'Failed']» — так Flux называет объект,
-# который не поднялся. Человеку нужнее «Job k8s-b-migrations: Failed».
+# «[Job/demo-cluster-prod/demo-cluster-migrations status: 'Failed']» — так Flux называет объект,
+# который не поднялся. Человеку нужнее «Job demo-cluster-migrations: Failed».
 _FLUX_OBJ = re.compile(r"\[(\w+)/[^/\]]+/([^\s\]]+) status: '([^']+)'\]")
 
 
@@ -3565,7 +3565,7 @@ def wear_only_failed(d: dict) -> bool:
 
 
 def _disk_title(d: dict) -> str:
-    """Имя диска с моделью и серийником: nvme1n1 (Samsung SSD 990 PRO 2TB, S7DNNU0Y719359D).
+    """Имя диска с моделью и серийником: nvme1n1 (Samsung SSD 990 PRO 2TB, DEMO-NVME-DEAD-01).
     В ЦОД диск меняют по серийнику, а имя устройства после перезагрузки может уехать на
     соседний."""
     extra = ", ".join(x for x in (str(d.get("model") or "").strip(),
