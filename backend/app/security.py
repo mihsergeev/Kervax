@@ -54,15 +54,17 @@ def create_access_token(
 
 def create_impersonation_token(
     username: str, token_version: int, admin: str, admin_version: int, imp_id: int,
-    secret: str, expires: datetime,
+    secret: str, expires: datetime, *, user_id: int, admin_id: int,
 ) -> str:
     """Токен входа админа под учеткой username (app/impersonate.py): sub - пользователь, чьими
     правами отвечает сервер, imp - админ, imp_id - строка impersonations (ее закрытие отзывает
     токен до срока). Версии обеих учеток: смена пароля любой из них гасит такой вход."""
     payload = {
         "sub": username,
+        "uid": user_id,
         "ver": token_version,
         "imp": admin,
+        "imp_uid": admin_id,
         "imp_ver": admin_version,
         "imp_id": imp_id,
         "iat": datetime.now(timezone.utc),

@@ -230,8 +230,8 @@ def _no_userinfo(target: str) -> str:
     return re.sub(r"^([a-z][a-z0-9+.-]*://)[^/@]*@", r"\1", target, flags=re.I)
 
 
-def check_entry(c) -> Entry:
-    target = _no_userinfo(_s(c.target))
+def check_entry(c, *, target: str | None = None) -> Entry:
+    target = _no_userinfo(_s(c.target if target is None else target))
     return Entry("check", c.name, c.id, _sub(c.type, target),
                  fields=[("", c.name), ("addr", target), ("group", _s(c.group_name)), ("note", _s(c.note))])
 

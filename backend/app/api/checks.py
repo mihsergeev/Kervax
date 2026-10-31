@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse, urlsplit, urlunsplit
+from urllib.parse import urlparse
 
 import ipaddress
 import re
@@ -23,6 +23,7 @@ from app.collector import (
 )
 from app.config import get_settings
 from app.deps import CurrentUser, SessionDep, group_allowed, scope_query
+from app.secret_masks import mask_target
 from app.models import (
     AgentPathProbe,
     AgentProbe,
@@ -94,33 +95,6 @@ def _hide_secrets(check: Check, user) -> Check:
     check.auth_user = ""
     check.target = mask_target(check.target)
     return check
-
-
-# параметры адреса, в которых обычно лежит секрет (?token=, ?key=, ?sig=...)
-_SECRET_PARAM = re.compile(r"(?i)(token|key|secret|pass|pwd|auth|sig|signature|session|sid|code|hash|jwt)")
-
-
-def mask_target(target: str) -> str:
-    """Адрес монитора для учетки только для просмотра: без user:pass@ и значений секретных
-    параметров. Пароль и заголовки ей и так не отдаем, а логин с паролем в самом адресе и
-    ?token= отдавались."""
-    t = target or ""
-    try:
-        parts = urlsplit(t if "://" in t else "//" + t)
-    except ValueError:
-        return t
-    netloc = parts.netloc
-    if "@" in netloc:
-        netloc = "***@" + netloc.rsplit("@", 1)[1]
-    query = parts.query
-    if query:
-        query = "&".join(
-            (k + "=***") if (sep and _SECRET_PARAM.search(k)) else (k + sep + v)
-            for k, sep, v in (x.partition("=") for x in query.split("&")))
-    if (netloc, query) == (parts.netloc, parts.query):
-        return t
-    out = urlunsplit(parts._replace(netloc=netloc, query=query))
-    return out if "://" in t else out.removeprefix("//")
 
 
 async def _get_or_404(

@@ -3213,10 +3213,17 @@ async def backup_server_to_https(
 async def backup_setup_status(
     server_id: int, job_id: int, user: CurrentUser, session: SessionDep
 ) -> BackupSetupJobOut:
+    await _get_or_404(server_id, session, user)
     job = await session.get(BackupSetupJob, job_id)
     if job is None or job.server_id != server_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Задача не найдена")
-    return BackupSetupJobOut.model_validate(job)
+    out = BackupSetupJobOut.model_validate(job)
+    if user.role == "viewer" and not user.can_read_logs:
+        # detail и сообщения ошибок содержат stdout/stderr helper'ов: это те же логи,
+        # что закрыты в /backup/command. Статус и названия шагов оставляем видимыми.
+        out.steps = [{"step": x.get("step", ""), "ok": x.get("ok"), "detail": ""} for x in out.steps]
+        out.message = ""
+    return out
 
 
 async def _backup_server_for(session, repo_url: str):

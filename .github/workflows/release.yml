@@ -10,13 +10,65 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
+  # Тег не обходит проверки main/PR: тот же набор тестов и обязательных сканов.
+  checks:
+    uses: ./.github/workflows/ci.yml
+
   images:
+    needs: checks
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v7
+
+      - name: Compute owner (lowercase) and version
+        id: meta
+        run: |
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Собираем локально: в GHCR попадут именно проверенные ниже образы.
+      - name: Build backend
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: backend/Dockerfile
+          load: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/kervax-backend:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/kervax-backend:latest
+
+      - name: Build frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          load: true
+          tags: |
+            ghcr.io/${{ steps.meta.outputs.owner }}/kervax-frontend:${{ steps.meta.outputs.version }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/kervax-frontend:latest
+
+      - name: Scan release backend
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ steps.meta.outputs.owner }}/kervax-backend:${{ steps.meta.outputs.version }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Scan release frontend
+        if: ${{ !cancelled() && steps.meta.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ steps.meta.outputs.owner }}/kervax-frontend:${{ steps.meta.outputs.version }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -25,27 +77,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute owner (lowercase) and version
-        id: meta
+      - name: Publish verified images
+        env:
+          OWNER: ${{ steps.meta.outputs.owner }}
+          VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-          echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Build & push backend
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: backend/Dockerfile
-          push: true
-          tags: |
-            ghcr.io/${{ steps.meta.outputs.owner }}/kervax-backend:${{ steps.meta.outputs.version }}
-            ghcr.io/${{ steps.meta.outputs.owner }}/kervax-backend:latest
-
-      - name: Build & push frontend
-        uses: docker/build-push-action@v7
-        with:
-          context: ./frontend
-          push: true
-          tags: |
-            ghcr.io/${{ steps.meta.outputs.owner }}/kervax-frontend:${{ steps.meta.outputs.version }}
-            ghcr.io/${{ steps.meta.outputs.owner }}/kervax-frontend:latest
+          docker push "ghcr.io/$OWNER/kervax-backend:$VERSION"
+          docker push "ghcr.io/$OWNER/kervax-frontend:$VERSION"
+          docker push "ghcr.io/$OWNER/kervax-backend:latest"
+          docker push "ghcr.io/$OWNER/kervax-frontend:latest"

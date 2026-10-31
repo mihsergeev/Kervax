@@ -34,7 +34,7 @@ from _signing import (  # noqa: E402
 
 # тот же образ, что в backend/Dockerfile (стадия agent), с точным патчем - иначе бинарь
 # панели разойдется с подписанным по sha256; сверяет ops/selfcheck.py
-GO_IMAGE = "golang:1.27.1-alpine"
+GO_IMAGE = "golang:1.27.3-alpine"
 ARCHES = ("amd64", "arm64")
 BUILD_HOST_FILE = os.path.join(HERE, "build-host.txt")
 

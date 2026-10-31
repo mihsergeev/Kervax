@@ -19,6 +19,15 @@ RUN npm run build
 # Этот образ — тот же nginx, собранный под работу от uid 101 и порт 8080.
 FROM nginxinc/nginx-unprivileged:1.31-alpine
 
+# Тег nginx может отставать от исправлений Alpine: обновляем runtime-пакеты,
+# затем возвращаем штатного непривилегированного пользователя образа.
+USER root
+# Как и backend, пересобираем слой минимум раз в неделю через ops/deploy.sh.
+ARG DEPS_EPOCH=
+RUN echo "runtime packages, week ${DEPS_EPOCH:-none}" \
+ && apk upgrade --no-cache
+USER 101
+
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /build/dist /usr/share/nginx/html
 EXPOSE 8080

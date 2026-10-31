@@ -13,7 +13,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
 
 from app import audit, impersonate
 from app.api.auth import _client_key
@@ -228,6 +228,12 @@ async def delete_user(
                 status.HTTP_400_BAD_REQUEST, "Нельзя удалить последнего администратора"
             )
     name = user.username
+    # Закрываем и старые входы, привязанные только к имени. Это важно и для SQLite,
+    # где после удаления последней учетки ее id может достаться новой.
+    await session.execute(update(Impersonation).where(
+        or_(Impersonation.admin == name, Impersonation.target == name),
+        Impersonation.ended_at.is_(None),
+    ).values(ended_at=datetime.now(timezone.utc)))
     await session.delete(user)
     await session.commit()
     await audit.record(session, admin.username, "user_delete", name)
@@ -275,7 +281,7 @@ async def impersonate_start(
     await session.refresh(row)
     token = create_impersonation_token(
         user.username, user.token_version, admin.username, admin.token_version, row.id,
-        settings.jwt_secret, expires,
+        settings.jwt_secret, expires, user_id=user.id, admin_id=admin.id,
     )
     await audit.record(
         session, admin.username, "impersonate_start", user.username,
