@@ -7,7 +7,7 @@ import secrets
 from types import SimpleNamespace
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
-from sqlalchemy import case, delete as sa_delete, func, select
+from sqlalchemy import case, delete as sa_delete, func, select, true
 
 from app import allowlist_hint, audit, domain_probe, expiry_snooze, known, manual_probe, net_guard, try_probe
 from app import parents as parents_mod
@@ -239,6 +239,20 @@ async def _recent_beats(session, n: int = 30) -> dict[int, list[str]]:
     slowest = await session.scalar(select(func.max(Check.interval_seconds))) or 60
     window = min(int(slowest) * (n + 5), 7 * 24 * 3600)
     since = datetime.now(timezone.utc) - timedelta(seconds=window)
+    if session.bind.dialect.name == "postgresql":
+        # Одна редкая проверка расширяет общее окно и для минутных мониторов.
+        # Берем top-n по (check_id, ts), не сортируя все их снимки за это окно.
+        latest = select(CheckSample.status, CheckSample.ts).where(
+            CheckSample.check_id == Check.id, CheckSample.ts >= since,
+        ).order_by(CheckSample.ts.desc()).limit(n).lateral()
+        rows = await session.execute(
+            select(Check.id, latest.c.status).select_from(Check).join(latest, true())
+            .order_by(Check.id, latest.c.ts)
+        )
+        beats: dict[int, list[str]] = {}
+        for cid, status in rows.all():
+            beats.setdefault(cid, []).append(status)
+        return beats
     rn = func.row_number().over(
         partition_by=CheckSample.check_id, order_by=CheckSample.ts.desc()
     ).label("rn")

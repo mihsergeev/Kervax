@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, IMP_ADMIN_KEY, getPanelErrorCount, getToken, impersonating, me, setReadOnly, setToken, stopImpersonation, type Role } from './api'
+import { ApiError, IMP_ADMIN_KEY, getPanelErrorCount, getToken, impersonating, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
 import { AuthProvider } from './auth'
 import { useI18n, type Lang } from './i18n'
 import { useUrlSection } from './deeplink'
@@ -315,6 +315,17 @@ export default function App() {
     setModal(null)
   }, [returnToSelf])
 
+  const logoutFromMenu = useCallback(async () => {
+    if (impersonating() || leaving.current) return returnToSelf()
+    try {
+      // Сначала отзываем JWT на панели, пока он еще доступен запросу.
+      await revokeSession()
+    } catch {
+      // При потере связи все равно закрываем локальный вход.
+    }
+    logout()
+  }, [logout, returnToSelf])
+
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark'
     setThemeState(next)
@@ -613,7 +624,7 @@ export default function App() {
                     {t('Сообщить о проблеме')}
                   </button>
                   <div className="menu-divider" />
-                  <button className="menu-item menu-item-danger" onClick={logout}>
+                  <button className="menu-item menu-item-danger" onClick={logoutFromMenu}>
                     {imp ? t('Вернуться к себе') : t('Выйти')}
                   </button>
                 </div>

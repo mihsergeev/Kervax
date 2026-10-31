@@ -30,7 +30,7 @@ jobs:
         run: pytest -q -n auto
       # Реальные uid/права/симлинки: установщик пишет только в изолированное дерево теста.
       - name: Backup installer security regression
-        run: sudo env PATH="$PATH" "$(command -v python)" -m pytest --noconftest -q tests/test_backup_dump_paths_security.py
+        run: sudo env PATH="$PATH" "$(command -v python)" -m pytest --noconftest -q tests/test_backup_dump_paths_security.py tests/test_backup_pg_dump_runner.py
       - name: Dependency audit (pip-audit)
         run: |
           pip install pip-audit
@@ -79,7 +79,7 @@ jobs:
           KERVAX_TEST_PG: postgresql+asyncpg://kervax:kervax@localhost:5432/kervax_tests
         run: |
           PGPASSWORD=kervax psql -h localhost -U kervax -d kervax -c 'create database kervax_tests'
-          pytest -q tests/test_backup.py tests/test_auth.py tests/test_users.py tests/test_checks.py tests/test_servers.py tests/test_maint.py tests/test_check_edit_roundtrip.py tests/test_audit_view.py tests/test_home_mute.py tests/test_api_scope_regressions.py tests/test_auth_identity.py
+          pytest -q tests/test_backup.py tests/test_auth.py tests/test_users.py tests/test_checks.py tests/test_servers.py tests/test_maint.py tests/test_check_edit_roundtrip.py tests/test_audit_view.py tests/test_home_mute.py tests/test_api_scope_regressions.py tests/test_auth_identity.py tests/test_recent_beats.py
 
   # Проверка «панель не молчит»: рядом с кодом живут списки, написанные руками
   # (виды алертов, подписи helper'ов, разделы, переводы). Код уходит вперёд —

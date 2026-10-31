@@ -16,6 +16,7 @@
 # Run it on the panel host as root, monthly or after anything changed in how dumps are made.
 # Exit code 0 - the dump restores and matches, 1 - it does not.
 set -uo pipefail
+umask 077
 
 DIR="${KERVAX_DIR:-/app/kervax}"
 SRC="${1:-}"
@@ -28,56 +29,80 @@ envval() { sed -n "s/^$1=//p" "$DIR/.env" | tail -1; }
 PW=$(envval KERVAX_DB_PASSWORD)
 DBUSER=$(envval KERVAX_DB_USER); DBUSER=${DBUSER:-kervax}
 DBNAME=$(envval KERVAX_DB_NAME); DBNAME=${DBNAME:-kervax}
+if [ -d "$SRC" ]; then
+    f="$SRC/$DBNAME.sql.gz"
+    [ -f "$f" ] || { echo "no $DBNAME.sql.gz in $SRC"; exit 1; }
+    for archive in "$f" "$SRC/globals.sql.gz"; do
+        [ -f "$archive" ] || continue
+        gzip -t "$archive" || { echo "corrupt gzip archive: $archive"; exit 1; }
+    done
+fi
 IMAGE=$(docker inspect -f '{{.Config.Image}}' "$DB_CT" 2>/dev/null || echo postgres:18-alpine)
+# Restore roles onto a clean cluster without a duplicate of its bootstrap user.
+# This account exists only in the throwaway container; the dump supplies DBUSER.
+RESTOREUSER="$DBUSER"
+if [ -d "$SRC" ] && [ -f "$SRC/globals.sql.gz" ]; then
+    RESTOREUSER="kv_restore_${RANDOM}_${RANDOM}_$$"
+fi
 
 Q="select (select version_num from alembic_version), (select count(*) from servers), (select count(*) from checks), (select count(*) from users), (select count(*) from server_metrics)"
 
-cleanup() { docker rm -fv "$T" >/dev/null 2>&1 || true; }
+cleanup() {
+    docker rm -fv "$T" >/dev/null 2>&1 || true
+    [ -z "${LOG:-}" ] || rm -f -- "$LOG"
+}
 trap cleanup EXIT
 cleanup
+LOG=$(mktemp /tmp/kervax-restore-test.XXXXXX) || { echo "could not create restore log"; exit 1; }
 
 echo "dump:  $SRC"
 echo "image: $IMAGE"
 docker run -d --name "$T" --network none -v /var/lib/postgresql \
-    -e POSTGRES_PASSWORD=restore-test -e POSTGRES_USER="$DBUSER" -e POSTGRES_DB=postgres \
+    -e POSTGRES_PASSWORD=restore-test -e POSTGRES_USER="$RESTOREUSER" -e POSTGRES_DB=postgres \
     "$IMAGE" >/dev/null || { echo "could not start $IMAGE"; exit 1; }
 for _ in $(seq 60); do
-    docker exec "$T" pg_isready -U "$DBUSER" -d postgres >/dev/null 2>&1 && break
+    docker exec "$T" pg_isready -U "$RESTOREUSER" -d postgres >/dev/null 2>&1 && break
     sleep 1
 done
 # the entrypoint restarts postgres once after init: wait for the final one
 sleep 3
 for _ in $(seq 30); do
-    docker exec "$T" psql -U "$DBUSER" -d postgres -tAc 'select 1' >/dev/null 2>&1 && break
+    docker exec "$T" psql -U "$RESTOREUSER" -d postgres -tAc 'select 1' >/dev/null 2>&1 && break
     sleep 1
 done
 
 t0=$(date +%s)
 if [ -d "$SRC" ]; then
     # the helper's pg_dumpall-style set: roles first, then the database itself
-    [ -f "$SRC/globals.sql.gz" ] && zcat "$SRC/globals.sql.gz" | docker exec -i "$T" psql -q -U "$DBUSER" -d postgres >/dev/null 2>&1
+    if [ -f "$SRC/globals.sql.gz" ]; then
+        if ! zcat "$SRC/globals.sql.gz" | docker exec -i "$T" psql -q -v ON_ERROR_STOP=1 -U "$RESTOREUSER" -d postgres > "$LOG" 2>&1; then
+            # globals may contain password hashes: never print its SQL diagnostics.
+            echo "the restore failed: could not restore database roles"
+            exit 1
+        fi
+    fi
     f="$SRC/$DBNAME.sql.gz"
     [ -f "$f" ] || { echo "no $DBNAME.sql.gz in $SRC"; exit 1; }
-    if zcat "$f" | head -c 20000 | grep -q '^CREATE DATABASE'; then
-        zcat "$f" | docker exec -i "$T" psql -q -v ON_ERROR_STOP=1 -U "$DBUSER" -d postgres > /tmp/$T.log 2>&1
+    if zcat "$f" | grep '^CREATE DATABASE' >/dev/null; then
+        zcat "$f" | docker exec -i "$T" psql -q -v ON_ERROR_STOP=1 -U "$RESTOREUSER" -d postgres > "$LOG" 2>&1
     else
-        docker exec "$T" createdb -U "$DBUSER" "$DBNAME"
-        zcat "$f" | docker exec -i "$T" psql -q -v ON_ERROR_STOP=1 -U "$DBUSER" -d "$DBNAME" > /tmp/$T.log 2>&1
+        docker exec "$T" createdb -U "$RESTOREUSER" -O "$DBUSER" "$DBNAME" || exit 1
+        zcat "$f" | docker exec -i "$T" psql -q -v ON_ERROR_STOP=1 -U "$RESTOREUSER" -d "$DBNAME" > "$LOG" 2>&1
     fi
     rc=$?
 else
-    docker exec "$T" createdb -U "$DBUSER" "$DBNAME"
-    docker exec -i "$T" pg_restore -U "$DBUSER" -d "$DBNAME" --no-owner --exit-on-error < "$SRC" > /tmp/$T.log 2>&1
+    docker exec "$T" createdb -U "$RESTOREUSER" "$DBNAME" || exit 1
+    docker exec -i "$T" pg_restore -U "$RESTOREUSER" -d "$DBNAME" --no-owner --exit-on-error < "$SRC" > "$LOG" 2>&1
     rc=$?
 fi
 if [ "$rc" != 0 ]; then
-    echo "✗ the restore failed (rc=$rc):"; tail -20 /tmp/$T.log
+    echo "✗ the restore failed (rc=$rc):"; tail -20 "$LOG"
     exit 1
 fi
 echo "restored in $(( $(date +%s) - t0 )) s"
 
-got=$(docker exec "$T" psql -U "$DBUSER" -d "$DBNAME" -tAc "$Q" 2>&1)
-live=$(docker exec -e PGPASSWORD="$PW" "$DB_CT" psql -U "$DBUSER" -d "$DBNAME" -tAc "$Q" 2>&1)
+got=$(docker exec "$T" psql -U "$RESTOREUSER" -d "$DBNAME" -tAc "$Q" 2>&1) || { echo "the restored panel schema is not readable"; exit 1; }
+live=$(docker exec -e PGPASSWORD="$PW" "$DB_CT" psql -U "$DBUSER" -d "$DBNAME" -tAc "$Q" 2>&1) || { echo "the live panel schema is not readable"; exit 1; }
 echo "             migration|servers|monitors|users|metric rows"
 echo "  restored:  $got"
 echo "  live:      $live"
@@ -97,5 +122,4 @@ for pair in "servers $s1 $s2" "monitors $c1 $c2" "users $u1 $u2"; do
     [ "$d" -le $(( $3 / 10 + 2 )) ] || { echo "✗ $1: $2 restored against $3 live"; bad=1; }
 done
 [ "${x1:-0}" -gt 0 ] || [ "${x2:-0}" = 0 ] || { echo "✗ no metrics restored"; bad=1; }
-rm -f /tmp/$T.log
 if [ "$bad" = 0 ]; then echo "✓ the dump restores and matches the live panel"; else exit 1; fi

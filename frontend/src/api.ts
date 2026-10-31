@@ -289,6 +289,10 @@ export function me(): Promise<UserOut> {
   return api<UserOut>('/api/auth/me')
 }
 
+export function revokeSession(): Promise<void> {
+  return api<void>('/api/auth/logout', { method: 'POST', signal: AbortSignal.timeout(5000) })
+}
+
 // своя учетка: последние входы с адресами, неудачные попытки за сутки, когда менялся пароль
 export type MyActivity = {
   logins: { ts: string; action: string; ip: string }[]
