@@ -1,6 +1,12 @@
 """Очередь растет и не разбирается (queue_watch): ход очереди, правило без порога, алерт, "Что сломано",
 карточка."""
 from datetime import datetime, timedelta, timezone
+import os
+import re
+import shutil
+import subprocess
+
+import pytest
 
 from app import collector, queue_watch as qw
 from app.models import Server
@@ -262,7 +268,7 @@ def test_snooze_accepts_a_queue_key():
 def test_helper_script():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "queues-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.5" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
+    assert "KERVAX_SETUP_VERSION=0.6" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
     # 0.5: клиенты в чужих namespace только от пользователя экземпляра, root контейнера - nobody
     assert 'nsenter -t "$P" -n -m' not in src and 'nsenter -t "$P" -m -n --' not in src
     assert src.count('nsenter -t "$P" $') >= 4 and "u=65534; g=65534" in src and '"/proc/$1/root$f"' not in src
@@ -281,6 +287,33 @@ def test_helper_script():
     assert "-N -B -r --force" in src
     # секреты в строке ошибки прячутся
     assert "function mask(" in src and '"***"' in src
+
+
+def test_helper_quotes_catalog_identifiers():
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "agent" / "queues-setup.sh").read_text(encoding="utf-8")
+    funcs = re.search(r"\n(db_ident\(\).*?\n}\ndb_table\(\).*?\n})\nepsql\(\)", src, re.S).group(1)
+    assert src.count('t=$(db_table "$2" "$3") || return 1') == 2
+    assert 't=$(db_table "$sch" "$tbl") || continue' in src
+    bash = shutil.which("bash")
+    if not bash or "system32" in bash.lower():
+        pytest.skip("нет обычного bash")
+    code = funcs + """
+ENG=pg
+    db_table "$PG_SCHEMA" "$PG_TABLE"
+printf '\\n'
+ENG=mysql
+    db_table "$MY_SCHEMA" "$MY_TABLE"
+printf '\\n'
+"""
+    env = {**os.environ, "PG_SCHEMA": 'tenant"schema', "PG_TABLE": 'q";select 1;-- _jobs',
+           "MY_SCHEMA": 'tenant`schema', "MY_TABLE": 'q`;select 1;-- _jobs'}
+    out = subprocess.run([bash, "-c", code], env=env, capture_output=True, text=True, timeout=15)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.splitlines() == [
+        '"tenant""schema"."q"";select 1;-- _jobs"',
+        '`tenant``schema`.`q``;select 1;-- _jobs`',
+    ]
 
 
 # ---- 0.4: очередь стоит (самая старая задача), гистерезис, упавшие задачи ----

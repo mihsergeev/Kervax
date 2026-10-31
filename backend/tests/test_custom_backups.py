@@ -1,6 +1,6 @@
 """Свои бэкапы ноды: заданные без панели cron, systemd-таймеры и скрипты с метриками.
 
-Данные — как их прислал helper с живой ноды web-b-prod (сентябрь 2026): ансибл-роль
+Данные — как их прислал helper с тестовой ноды demo-web-b (сентябрь 2026): ансибл-роль
 pg-backup по крону с метриками, таймер дампа Neo4j и таймер бэкапа SQLite n8n, который
 в ту ночь упал по таймауту. Панель их не видела и звала «нужен отдельный дамп».
 """
@@ -49,7 +49,7 @@ def _server(jobs=None, **kw):
     }
     rep.update(kw.pop("report", {}))
     kw.setdefault("backup_not_required", True)
-    return Server(name="web-b-prod", token_hash="x", enabled=True, last_seen=NOW,
+    return Server(name="demo-web-b", token_hash="x", enabled=True, last_seen=NOW,
                   offline_after_seconds=120, last_report=rep, **kw)
 
 

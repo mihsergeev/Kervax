@@ -185,7 +185,7 @@ def render(icon: str, name_html: str, what: str, facts: list[str] | None = None)
     """Формат A в HTML Telegram. name_html - уже готовая ссылка или экранированное имя;
     what и facts - обычный текст, экранируются здесь."""
     lines = [f"{icon} {name_html}".strip(), f"<b>{html.escape(field(clean(cap(what)), FACT_LEN))}</b>"]
-    # строки конкретики как есть: заглавная портила бы имена (caddy-proxy, ms-dev, tech1/...);
+    # строки конкретики как есть: заглавная портила бы имена (caddy-proxy, deploy-user, tech1/...);
     # каждая - одной строкой: перенос в значении от агента подделал бы строку алерта
     for f in (facts or [])[:FACTS_MAX]:
         f = field(clean(f), FACT_LEN)

@@ -270,8 +270,10 @@ def test_web_cert():
     assert _clean(*web_certs.tg_short(web_certs.problems(rep, NOW))) == (
         "Истекли сертификаты, продление не настроено",
         ["admin.example.com, bp.example.com, example.org"])
-    soon = {"extras": {"web-certs": {"v": 1, "ts": TS, "certs": [_cert("artportret.ru", 5.5, "/home/lem/ssl/a.pem")]}}}
-    assert web_certs.tg_short(web_certs.problems(soon, NOW)) == ("Сертификат истекает через 5 дней", ["artportret.ru"])
+    soon = {"extras": {"web-certs": {"v": 1, "ts": TS, "certs": [
+        _cert("web.example.com", 5.5, "/etc/ssl/example/cert.pem")]}}}
+    assert web_certs.tg_short(web_certs.problems(soon, NOW)) == (
+        "Сертификат истекает через 5 дней", ["web.example.com"])
     assert web_certs.tg_short([]) is None
 
 

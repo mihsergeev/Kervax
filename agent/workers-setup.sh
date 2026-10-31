@@ -38,9 +38,13 @@
 # of another container as nobody; root on the host only when the node is root's and nobody else
 # can change it or a directory above it. A host without curl 7.40 asks supervisord the old way,
 # under the same rule.
+#
+# 0.5: all numeric fields returned by supervisord or pm2 are normalized before bash arithmetic.
+# A daemon controlled by an unprivileged user could otherwise put a command substitution in
+# "now" or "start", and the root helper would execute it while evaluating $((...)).
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without supervisord or pm2 it runs one ps and exits
 
 HELPER_DIR=/lib65/kervax
@@ -235,6 +239,11 @@ END { if (fault || !got) exit; s = un(s); gsub(sprintf("%c", 27) "\\[[0-9;?]*[A-
   n = split(s, L, "\n"); for (j = n; j >= 1; j--) { y = L[j]; gsub(/^[ \t\r]+|[ \t\r]+$/, "", y); if (y != "") break }
   if (y != "") print mask(y) }'
 SUP_ALL='<?xml version="1.0"?><methodCall><methodName>supervisor.getAllProcessInfo</methodName><params></params></methodCall>'
+uint() { # untrusted XML-RPC integer -> canonical decimal that is safe in bash arithmetic
+  local v=${1:-}
+  case "$v" in ''|*[!0-9]*|???????????????????*) printf 0 ;; *) printf '%s' "$((10#$v))" ;; esac
+}
+uint_or_empty() { [ -n "${1:-}" ] && uint "$1"; }
 sup_ask() { # pid conf -> rows like SUP_PY prints, from the host
   local p=$1 conf=$2 url user pw r why=down norpc="" ok="" tag full st start now pid ex desc line m t0=$SECONDS nlog=0
   while IFS=$'\t' read -r url user pw; do
@@ -249,6 +258,7 @@ sup_ask() { # pid conf -> rows like SUP_PY prints, from the host
   fi
   while IFS=$'\t' read -r tag full st start now pid ex desc; do
     [ "$tag" = P ] || continue
+    start=$(uint "$start"); now=$(uint "$now"); pid=$(uint "$pid"); ex=$(uint_or_empty "$ex")
     line=""
     case "$st" in FATAL|BACKOFF|EXITED|UNKNOWN) m=1 ;; *) m=$(( ${now:-0} - ${start:-0} < 900 )) ;; esac
     # the last line of its log, the time of one daemon and 30 programs at most

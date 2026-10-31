@@ -41,7 +41,9 @@ set -euo pipefail
 #       process, the environment from its /proc/<pid>/environ (an entrypoint that computes
 #       {$VAR} before exec caddy no longer makes a working Caddyfile "fail"). The values go to
 #       docker exec through the environment, not argv. No server process - no verdict
-KERVAX_SETUP_VERSION=0.29  # MAJOR.MINOR; compared component-wise
+# 0.30: the sixth map column says whether nginx log_format ends in $http_x_forwarded_for.
+#       autoban uses it to distinguish a real final X-Forwarded-For field from User-Agent.
+KERVAX_SETUP_VERSION=0.30  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: the refresh is a no-op without a web server
 
 HELPER_DIR=/lib65/kervax
@@ -175,14 +177,17 @@ extract_logs() {
     # Только файл: stderr, syslog: и memory: не читаем.
     # Четвертая колонка - формат лога, если в нем есть домен ($host, $http_host,
     # $server_name): по нему счетчик разложит общий лог по сайтам. Формат с табуляцией не
-    # берем - он сломал бы колонки карты. Третья колонка (имя для показа) тут пустая.
+    # берем - он сломал бы колонки карты. Шестая - безопасный флаг для autoban: последнее
+    # поле действительно X-Forwarded-For. Третья колонка (имя для показа) тут пустая.
     function hostfmt(f) {
       if (index(f, "\t")) return ""
       return (f ~ /\$(host|http_host|server_name)([^A-Za-z0-9_]|$)/ || f ~ /\$\{(host|http_host|server_name)\}/) ? f : ""
     }
+    function xfflast(f) { sub(/[ \t]+$/, "", f)
+      return (f ~ /\$http_x_forwarded_for\"?$/ || f ~ /\$\{http_x_forwarded_for\}\"?$/) ? 1 : 0 }
     # лог печатаем и без доменов: общий access.log ловит всё, что не разложено по
     # виртуальным хостам, и его поток тоже надо видеть
-    function flush() { if (slog!="") print slog "\t" names "\t\t" hostfmt(fmtdef[sfmt]) "\t" selog }
+    function flush() { if (slog!="") print slog "\t" names "\t\t" hostfmt(fmtdef[sfmt]) "\t" selog "\t" xfflast(fmtdef[sfmt]) }
     function elogof(   p) { p=$2; sub(/;$/,"",p); return (p ~ /^\//) ? p : "" }
     # формат у access_log: третье слово, если это не параметр (buffer=, if=...); по умолчанию combined
     function fmtname(   f) { f=$3; sub(/;$/,"",f); if (f=="" || f ~ /=/) f="combined"; return f }
@@ -241,14 +246,15 @@ extract_logs() {
 # переменной падает синтаксической ошибкой. Карта уезжала пустой, а с ней молчал счётчик.
 merge_logs() {
   awk -F'\t' '
-    { lg=$1; if (!(lg in seen_log)) { seen_log[lg]=1; a[lg]=""; nm[lg]=$3; fm[lg]=$4; er[lg]=$5 }
+    { lg=$1; if (!(lg in seen_log)) { seen_log[lg]=1; a[lg]=""; nm[lg]=$3; fm[lg]=$4; er[lg]=$5; xb[lg]=0 }
       if (nm[lg]=="" && $3!="") nm[lg]=$3
       if (fm[lg]=="" && $4!="") fm[lg]=$4
       if (er[lg]=="" && $5!="") er[lg]=$5
+      if ($6 != 1) xb[lg]=1
       n=split($2, w, " ")
       for (i=1;i<=n;i++) if (w[i]!="" && !((lg SUBSEP w[i]) in seen)) {
         seen[lg SUBSEP w[i]]=1; a[lg]=a[lg] (a[lg]==""?"":" ") w[i] } }
-    END { for (k in a) printf "%s\t%s\t%s\t%s\t%s\n", k, a[k], nm[k], fm[k], er[k] }'
+    END { for (k in a) printf "%s\t%s\t%s\t%s\t%s\t%d\n", k, a[k], nm[k], fm[k], er[k], (xb[k] ? 0 : 1) }'
 }
 
 # Путь лога внутри контейнера -> путь на хосте по его bind-mount'ам.
@@ -287,7 +293,7 @@ container_logs() {
     # (0.26: extract_logs печатает пятую колонку - error-лог; у контейнера она не нужна, его
     # stderr и так лежит в json-логе докера, поэтому формат берем именно четвертой колонкой)
     lg=${line%%"$T"*}; rest=${line#*"$T"}; names=${rest%%"$T"*}
-    hf=${rest#*"$T"}; hf=${hf#*"$T"}; hf=${hf%%"$T"*}
+    hf=${rest#*"$T"}; hf=${hf#*"$T"}; hf=${hf%%"$T"*}; xf=${line##*"$T"}
     [ "$hf" = "$rest" ] && hf=""
     # Обычный файл - берём его путь, иначе это поток: в образе nginx access.log ведёт в
     # /dev/stdout, а оттуда в pipe, и readlink -f отвечает то /dev/..., то /proc/...,
@@ -302,16 +308,16 @@ container_logs() {
             # меняется при каждом пересоздании (деплой, рестарт), а карта обновляется раз
             # в 15 минут. Нода «слепла» до следующего обновления. Путь разрешает счётчик.
             if [ -n "$cname" ]; then
-              printf 'docker:%s\t%s\t%s\t%s\n' "$cname" "$names" "$label" "$hf"
+              printf 'docker:%s\t%s\t%s\t%s\t\t%s\n' "$cname" "$names" "$label" "$hf" "$xf"
             elif [ -n "$logpath" ] && [ -f "$logpath" ]; then
-              printf '%s\t%s\t%s\t%s\n' "$logpath" "$names" "$label" "$hf"
+              printf '%s\t%s\t%s\t%s\t\t%s\n' "$logpath" "$names" "$label" "$hf" "$xf"
             fi
             ;;
         esac
         ;;
       *)
         hp=$(printf '%s\n' "$mounts" | host_path "$real")
-        [ -n "$hp" ] && printf '%s\t%s\t%s\t%s\n' "$hp" "$names" "$label" "$hf"
+        [ -n "$hp" ] && printf '%s\t%s\t%s\t%s\t\t%s\n' "$hp" "$names" "$label" "$hf" "$xf"
         ;;
     esac
   done
@@ -1343,10 +1349,12 @@ if [ -s "$MAP" ]; then
     names=${rest%%"$TAB"*}
     name=${rest#*"$TAB"}
     [ "$name" = "$rest" ] && name=""
-    # четвертая колонка (0.21) - формат лога с доменом, пятая (0.26) - error-лог
+    # четвертая колонка (0.21) - формат лога с доменом, пятая (0.26) - error-лог,
+    # шестая (0.30) - последнее поле формата X-Forwarded-For
     fmt=""; elog=""
     case "$name" in *"$TAB"*) fmt=${name#*"$TAB"}; name=${name%%"$TAB"*} ;; esac
     case "$fmt" in *"$TAB"*) elog=${fmt#*"$TAB"}; fmt=${fmt%%"$TAB"*} ;; esac
+    case "$elog" in *"$TAB"*) elog=${elog%%"$TAB"*} ;; esac
     [ -n "$lg" ] || continue
     case "$lg" in
       caddy:*)

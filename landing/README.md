@@ -14,9 +14,9 @@ python landing/build-shots.py      # перегнать их в webp для са
 
 ## Как развёрнут
 
-Сейчас сайт живёт на хостинге под HestiaCP, где nginx раздаёт статику из
-`/home/ms-web/web/kervax.ru/public_html`. Домен и сертификат заводятся её
-средствами:
+Сейчас сайт живёт на хостинге под HestiaCP, где nginx раздаёт статику из типового
+`/home/<user>/web/<domain>/public_html`. Конкретные значения хранятся в приватной
+конфигурации, домен и сертификат заводятся средствами HestiaCP:
 
 ```bash
 v-add-web-domain <user> kervax.ru

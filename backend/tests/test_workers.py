@@ -2,6 +2,11 @@
 алерт, карточка."""
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import re
+import shutil
+import subprocess
+
+import pytest
 
 from app import collector, workers as wk
 from app.models import Server
@@ -102,7 +107,7 @@ def test_own_unit_does_not_alert():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "workers-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.4" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.5" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
     # 0.4: ничего, на что указал процесс, не запускается от root: supervisord спрашивает curl хоста,
     # node pm2 - от владельца демона, root контейнера - docker exec или nobody
     assert '-m -n -- "$py"' not in src and '-m -n -- "$exe"' not in src
@@ -117,6 +122,25 @@ def test_helper_script():
     assert src.count("***") >= 2
     # 0.2: обратный слэш в логе (App\Jobs\Mail) удваивается так, что mawk его не теряет: иначе отчет не JSON
     assert '_jn = split(s, _jp, "\\\\")' in src
+
+
+def test_helper_normalizes_supervisor_numbers_before_arithmetic():
+    src = (Path(__file__).resolve().parents[2] / "agent" / "workers-setup.sh").read_text(encoding="utf-8")
+    normalize = 'start=$(uint "$start"); now=$(uint "$now"); pid=$(uint "$pid"); ex=$(uint_or_empty "$ex")'
+    assert src.index(normalize) < src.index('m=$(( ${now:-0} - ${start:-0} < 900 ))')
+    funcs = re.search(r"\n(uint\(\).*?\nuint_or_empty\(\).*?)\nsup_ask\(\)", src, re.S).group(1)
+    bash = shutil.which("bash")
+    if not bash or "system32" in bash.lower():
+        pytest.skip("нет обычного bash")
+    code = funcs + """
+payload='st[$(printf PWNED >&2)]'
+start=$(uint "$payload")
+now=$(uint 1000)
+printf '%s\\n' "$((now - start < 900))"
+printf '%s %s %s %s\\n' "$(uint 08)" "$(uint 00009)" "$(uint 1234567890123456789)" "$(uint_or_empty '')"
+"""
+    out = subprocess.run([bash, "-c", code], capture_output=True, text=True, timeout=15)
+    assert out.returncode == 0 and out.stdout == "0\n8 9 0 \n" and "PWNED" not in out.stderr
 
 
 def test_alert_condition():

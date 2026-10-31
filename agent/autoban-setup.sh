@@ -20,9 +20,12 @@
 # itself: either a trap matches real traffic or a proxy hides the clients.
 #
 # Writes /var/lib/kervax/report.d/autoban.json; the agent hands report.d to the panel as is.
+# 0.2: a private source address is replaced from the last X-Forwarded-For field only when the
+# webserver-setup's map says that field is last. In the standard combined format the last quoted
+# field is User-Agent, which a remote scanner controls and could use to ban somebody else's IP.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 # Where nginx runs (on the host, in a container or a pod: pgrep sees them all) - the same sign
 # webserver-setup builds its log map by, and caddy:* lines have no log to read anyway. Not the map
 # itself: its timer writes it only minutes after the install, and a node installed in one pass got
@@ -190,7 +193,7 @@ nft_drops() { "$NFT" list chain $TABLE pre 2>/dev/null | awk '{ for (i = 1; i < 
 # Map columns: log, domains, name, format, error log. docker:<name> -> the json log of the
 # container; caddy:* has no log (Caddy counts by its metrics) and is skipped here.
 collect() {
-  local line lg rest names name src ino size prev pino psize from dpaths dnames where
+  local line lg rest rest2 names name fmt elog xff src ino size prev pino psize from dpaths dnames where
   local first=0
   [ -s "$D/offsets" ] || first=1
   : > "$D/offsets.new"
@@ -204,7 +207,15 @@ collect() {
   fi
   while IFS= read -r line; do
     lg=${line%%"$TAB"*}; rest=${line#*"$TAB"}; [ "$rest" = "$line" ] && rest=""
-    names=${rest%%"$TAB"*}; name=${rest#*"$TAB"}; [ "$name" = "$rest" ] && name=""; name=${name%%"$TAB"*}
+    names=${rest%%"$TAB"*}
+    rest2=${rest#*"$TAB"}; [ "$rest2" = "$rest" ] && rest2=""
+    name=${rest2%%"$TAB"*}
+    rest=${rest2#*"$TAB"}; [ "$rest" = "$rest2" ] && rest=""
+    fmt=${rest%%"$TAB"*}
+    rest2=${rest#*"$TAB"}; [ "$rest2" = "$rest" ] && rest2=""
+    elog=${rest2%%"$TAB"*}
+    rest=${rest2#*"$TAB"}; [ "$rest" = "$rest2" ] && rest=""
+    xff=${rest%%"$TAB"*}; [ "$xff" = 1 ] || xff=0
     case "$lg" in ''|caddy:*) continue ;; esac
     src=$lg
     case "$lg" in docker:*) src=$(printf '%s\n' "$dpaths" | awk -F'|' -v n="${lg#docker:}" '$1 == n { print $2; exit }') ;; esac
@@ -230,7 +241,7 @@ collect() {
     [ "$size" -gt "$from" ] || continue
     [ $((size - from)) -le "$CAP" ] || from=$((size - CAP))
     where=${names%% *}; [ -n "$where" ] || where=${name:-${lg##*/}}
-    printf '\001L\t%s\t%s\n' "$lg" "$where"
+    printf '\001L\t%s\t%s\t%s\n' "$lg" "$where" "$xff"
     tail -c "+$((from + 1))" "$src" 2>/dev/null | head -c "$CAP"
     printf '\n'
   done < "$MAP"
@@ -263,7 +274,7 @@ function cls(ip,   l) { if (ip in CL) return CL[ip]; l = allowed(ip)
 BEGIN { load_allow(allowf)
   while ((getline l < bansf) > 0) { split(l, t, "\t"); if (t[9] == 0 && t[2] + grace <= now) BANNED[t[1]] = 1 }
   close(bansf) }
-substr($0, 1, 1) == "\001" { split($0, t, "\t"); lg = t[2]; where = t[3]; next }
+substr($0, 1, 1) == "\001" { split($0, t, "\t"); lg = t[2]; where = t[3]; xff = t[4] + 0; next }
 {
   l = $0
   # CRI (containerd): "2026-10-27T11:59:40.1Z stdout F <line>"
@@ -275,7 +286,7 @@ substr($0, 1, 1) == "\001" { split($0, t, "\t"); lg = t[2]; where = t[3]; next }
   sp = index(l, " "); ip = addr(sp ? substr(l, 1, sp - 1) : l)
   if (ip == "") next
   c = cls(ip)
-  if (c == "priv" && match(l, /"[0-9A-Fa-f.:, ]+"$/)) {
+  if (c == "priv" && xff && match(l, /"[0-9A-Fa-f.:, ]+"$/)) {
     # nginx behind a proxy on this node: the last X-Forwarded-For hop is the one the proxy saw
     x = substr(l, RSTART + 1, RLENGTH - 2); n = split(x, xs, ","); y = xs[n]; gsub(/ /, "", y); y = addr(y)
     if (y != "") { ip = y; c = cls(ip) } }

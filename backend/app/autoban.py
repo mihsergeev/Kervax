@@ -1,4 +1,4 @@
-"""Автобан сканеров (helper autoban-setup 0.1).
+"""Автобан сканеров (helper autoban-setup 0.2).
 
 Сканеры, пришедшие за новым сертификатом по логам CT, перебирают /.env, /.git/config, дампы *.sql,
 /actuator/heapdump, /@vite/env и подобное. Банит сама нода: helper раз в минуту читает access-логи

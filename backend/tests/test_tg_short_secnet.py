@@ -89,35 +89,35 @@ def _ev(text, kind="key"):
     return {"kind": kind, "act": "add", "alert": True, "text": text, "ts": NOW.isoformat()}
 
 
-KEY_ORANGE = _ev("добавлен SSH-ключ пользователю agent_orange: ED25519 SHA256:nI15gi1/FoHgbmt191sAWANCwHMtZBzNsnSIRuJ"
-                 "diM4 (agent_orange@shop)")
-KEY_MSDEV = _ev("добавлен SSH-ключ пользователю ms-dev: ED25519 SHA256:wrnYGgfnTXVB1XppFv3Ppmk/kDdt9GF2b0LSguLm5lY "
-                "(tg-archive deploy mon-a)")
+KEY_APPOPS = _ev("добавлен SSH-ключ пользователю appops: ED25519 "
+                 "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA (ci@example.com)")
+KEY_OPS = _ev("добавлен SSH-ключ пользователю ops: ED25519 "
+              "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB (backup deploy web-a)")
 
 
 def test_access_change_new_sudo_user():
-    ev = [KEY_ORANGE, _ev("новый пользователь agent_orange (uid 1002, /bin/bash)", "user"),
-          _ev("agent_orange добавлен в группу sudo", "sudo"), _ev("добавлен /etc/sudoers.d/agent_orange", "sudo")]
+    ev = [KEY_APPOPS, _ev("новый пользователь appops (uid 1002, /bin/bash)", "user"),
+          _ev("appops добавлен в группу sudo", "sudo"), _ev("добавлен /etc/sudoers.d/appops", "sudo")]
     # все про одного пользователя - одна строка, без отпечатков
     assert _ok(changes.tg_short(ev)) == ("Новый пользователь с sudo",
-                                         ["agent_orange, вход по ключу agent_orange@shop"])
+                                         ["appops, вход по ключу ci@example.com"])
 
 
 def test_access_change_key():
-    assert _ok(changes.tg_short([KEY_MSDEV])) == ("Добавлен SSH-ключ", ["ms-dev: tg-archive deploy mon-a"])
-    two = [KEY_MSDEV, _ev("добавлен SSH-ключ пользователю root: RSA SHA256:bbbb")]
-    assert _ok(changes.tg_short(two)) == ("Добавлены SSH-ключи", ["ms-dev: tg-archive deploy mon-a, root"])
+    assert _ok(changes.tg_short([KEY_OPS])) == ("Добавлен SSH-ключ", ["ops: backup deploy web-a"])
+    two = [KEY_OPS, _ev("добавлен SSH-ключ пользователю root: RSA SHA256:bbbb")]
+    assert _ok(changes.tg_short(two)) == ("Добавлены SSH-ключи", ["ops: backup deploy web-a, root"])
     assert changes.tg_short([]) is None
 
 
 def test_access_change_worst_first_rest_by_name():
-    ev = [KEY_MSDEV, _ev("пользователь svc получил uid 0", "user"), _ev("deploy добавлен в группу sudo", "sudo"),
+    ev = [KEY_OPS, _ev("пользователь svc получил uid 0", "user"), _ev("deploy добавлен в группу sudo", "sudo"),
           _ev("добавлен /etc/sudoers.d/90-cloud-init-users", "sudo")]
     assert _ok(changes.tg_short(ev)) == (
-        "Пользователь получил uid 0", ["svc", "Еще: ключ ms-dev, sudo у deploy, /etc/sudoers.d/90-cloud-init-users"])
+        "Пользователь получил uid 0", ["svc", "Еще: ключ ops, sudo у deploy, /etc/sudoers.d/90-cloud-init-users"])
     login = _ev("вход по паролю: root с 198.51.100.9, раньше с этого адреса не входил", "login")
-    assert _ok(changes.tg_short([KEY_MSDEV, login])) == (
-        "Вход по паролю с нового адреса", ["root с 198.51.100.9", "Еще: ключ ms-dev"])
+    assert _ok(changes.tg_short([KEY_OPS, login])) == (
+        "Вход по паролю с нового адреса", ["root с 198.51.100.9", "Еще: ключ ops"])
     # sudoers.d не по имени нового пользователя - это файл, а не "выдали sudo"
     assert _ok(changes.tg_short([_ev("изменен /etc/sudoers", "sudo")])) == (
         "Изменились права sudo", ["/etc/sudoers"])

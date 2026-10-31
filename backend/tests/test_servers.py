@@ -1658,8 +1658,8 @@ async def test_flux_chart_repo_down_is_a_warning_with_a_hint():
 async def test_flux_alert_points_at_the_root_of_the_cascade():
     """Одна упавшая сборка тянет за собой зависимые — алертить надо о причине.
 
-    Поймано на живом парке: в ленте висело «Kustomization k8s-b-prod-backend —
-    DependencyNotReady: dependency k8s-b-prod-migrations is not ready», то есть
+    Тестовый сценарий: в ленте висело «Kustomization demo-cluster-prod-backend —
+    DependencyNotReady: dependency demo-cluster-prod-migrations is not ready», то есть
     следствие, выбранное по алфавиту. Инженеру приходилось самому идти искать,
     что же именно упало.
     """
@@ -1670,27 +1670,27 @@ async def test_flux_alert_points_at_the_root_of_the_cascade():
     now = datetime.now(timezone.utc)
     s = _kube_server(now, last_report={"flux": [
         # по алфавиту первый — и это следствие
-        {"kind": "Kustomization", "where": "flux-system/k8s-b-prod-backend",
+        {"kind": "Kustomization", "where": "flux-system/demo-cluster-prod-backend",
          "ready": False, "reason": "DependencyNotReady",
-         "message": "dependency 'flux-system/k8s-b-prod-migrations' is not ready"},
-        {"kind": "Kustomization", "where": "flux-system/k8s-b-prod-migrations",
+         "message": "dependency 'flux-system/demo-cluster-prod-migrations' is not ready"},
+        {"kind": "Kustomization", "where": "flux-system/demo-cluster-prod-migrations",
          "ready": False, "reason": "HealthCheckFailed",
          "message": "health check failed after 33.9ms: failed early due to stalled "
-                    "resources: [Job/k8s-b-prod/k8s-b-migrations status: 'Failed']"},
-        {"kind": "Kustomization", "where": "flux-system/k8s-b-prod-processing",
+                    "resources: [Job/demo-cluster-prod/demo-cluster-migrations status: 'Failed']"},
+        {"kind": "Kustomization", "where": "flux-system/demo-cluster-prod-processing",
          "ready": False, "reason": "DependencyNotReady",
-         "message": "dependency 'flux-system/k8s-b-prod-migrations' is not ready"},
+         "message": "dependency 'flux-system/demo-cluster-prod-migrations' is not ready"},
     ]})
     s.alert_state = {"flux_down_since": (now - timedelta(minutes=20)).isoformat()}
     lvl, ctx = collector._server_conditions(s, now)["flux_down"]
     assert lvl == 1
-    assert ctx["where"] == "flux-system/k8s-b-prod-migrations", "показали следствие вместо причины"
+    assert ctx["where"] == "flux-system/demo-cluster-prod-migrations", "показали следствие вместо причины"
     # ждущие посчитаны отдельно: масштаб виден, но список не раздут
     assert "2 ждут этого" in ctx["more"]
     # объект, который не поднялся, назван по-человечески
-    assert ctx["message"] == "Job k8s-b-migrations: Failed"
+    assert ctx["message"] == "Job demo-cluster-migrations: Failed"
     # подсказка подставлена с реальными namespace и именем
-    assert "kubectl -n flux-system describe kustomization k8s-b-prod-migrations" in ctx["hint"]
+    assert "kubectl -n flux-system describe kustomization demo-cluster-prod-migrations" in ctx["hint"]
 
 
 async def test_expiry_alert_explains_what_to_do():

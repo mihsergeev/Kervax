@@ -28,10 +28,10 @@ def _k8sd(ts: int) -> dict:
     """Как было на k8s-d 05.10.2026: NVMe умер, оба RAID1 на одном диске."""
     return {"v": 1, "ts": ts, "virt": "none", "container": False, "smart": True,
             "raid": [_raid("md42", "nvme0n1p3"), _raid("md43", "nvme0n1p4")],
-            "disks": [_disk("nvme1n1", "S7DNNU0Y719359D", size=0, ok=False, err="dead", health="",
+            "disks": [_disk("nvme1n1", "DEMO-NVME-DEAD-01", size=0, ok=False, err="dead", health="",
                             temp=None, wear=None, spare=None, spare_thr=None, media=None, crit="",
                             poh=None),
-                      _disk("nvme0n1", "S7HENU0Y566831J")],
+                      _disk("nvme0n1", "DEMO-NVME-OK-01")],
             "missing": [],
             "io": {"count": 40, "last": ["nvme nvme1: Identify namespace failed (-5)"]}}
 
@@ -40,11 +40,11 @@ def test_degraded_raid_and_dead_disk_are_critical():
     probs = disk_health_problems(_k8sd(1000))
     assert {p[0] for p in probs} == {3}
     keys = sorted(k for _l, k, _t in probs if k)
-    assert keys == ["dead:S7DNNU0Y719359D", "raid:md42", "raid:md43"]
+    assert keys == ["dead:DEMO-NVME-DEAD-01", "raid:md42", "raid:md43"]
     text = disk_health_text(probs)
     # одна беда двух массивов - одной строкой, умерший диск - с моделью и серийником
     assert text.splitlines()[0] == "RAID md42, md43 (raid1): работает 1 из 2 дисков"
-    assert "диск nvme1n1 (Samsung SSD 990 PRO 2TB, S7DNNU0Y719359D) не определяется (размер 0)" in text
+    assert "диск nvme1n1 (Samsung SSD 990 PRO 2TB, DEMO-NVME-DEAD-01) не определяется (размер 0)" in text
 
 
 def test_rebuild_progress_and_spare():
@@ -62,15 +62,15 @@ def test_rebuild_progress_and_spare():
 
 
 def test_smart_failed_worn_out_ssd_is_not_critical():
-    """mon-a 05.10.2026: Micron 1100 выработал ресурс (202 = 0), SMART говорит FAILED.
+    """Тестовая нода 05.10.2026: SSD выработал ресурс (202 = 0), SMART говорит FAILED.
     helper до 0.5 не говорит, какой атрибут провален: менять надо, но диск работает - проблема,
     а не авария."""
-    worn = _disk("sda", "170516095C98", type="sata", health="FAILED!", failing=True, wear=100,
+    worn = _disk("sda", "DEMO-SATA-WORN-01", type="sata", health="FAILED!", failing=True, wear=100,
                  realloc=1, pending=0, uncorr=0, crc=0)
     dying = _disk("sdb", "X1", type="sata", health="FAILED!", failing=True, wear=None)
     probs = disk_health_problems({"v": 1, "ts": 1, "disks": [worn, dying]})
-    assert (2, "smart:170516095C98",
-            "диск sda (Samsung SSD 990 PRO 2TB, 170516095C98): SMART считает диск неисправным, "
+    assert (2, "smart:DEMO-SATA-WORN-01",
+            "диск sda (Samsung SSD 990 PRO 2TB, DEMO-SATA-WORN-01): SMART считает диск неисправным, "
             "ресурс выработан (износ 100%)") in probs
     assert probs[0] == (3, "smart:X1", "диск sdb (Samsung SSD 990 PRO 2TB, X1): SMART считает диск неисправным")
 
@@ -226,7 +226,7 @@ async def test_disk_health_alert_lifecycle(tmp_path, monkeypatch):
 
     # у последнего живого диска пошли ошибки: уровень тот же, но об этом надо сказать
     second = _k8sd(0)
-    second["disks"][1] = _disk("nvme0n1", "S7HENU0Y566831J", grow={"media": 2})
+    second["disks"][1] = _disk("nvme0n1", "DEMO-NVME-OK-01", grow={"media": 2})
     await tick(second)
     assert len(sent) == 2 and "за сутки выросли ошибки - ошибки носителя +2" in full_text(sent[1])
     assert "nvme0n1" in sent[1].split("\n")[1]  # новое - первым, в строке "что случилось"
@@ -241,7 +241,7 @@ async def test_disk_health_alert_lifecycle(tmp_path, monkeypatch):
 
     fixed = _k8sd(0)
     fixed["raid"] = [_raid("md42", "nvme0n1p3 nvme1n1p3", active=2), _raid("md43", "nvme0n1p4 nvme1n1p4", active=2)]
-    fixed["disks"] = [_disk("nvme1n1", "NEW1"), _disk("nvme0n1", "S7HENU0Y566831J")]
+    fixed["disks"] = [_disk("nvme1n1", "NEW1"), _disk("nvme0n1", "DEMO-NVME-OK-01")]
     fixed["io"] = {"count": 0, "last": []}
     await tick(fixed)
     # ошибки ядра держатся час после последней пачки - отбоя еще нет

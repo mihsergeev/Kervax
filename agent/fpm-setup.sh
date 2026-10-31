@@ -21,9 +21,14 @@
 # line counts in the bucket of its own time and only if it is newer than the last one counted
 # from that log, a log seen for the first time is read from its end, the time of the last
 # "reached pm.max_children" goes to the report.
+# 0.4: a process is accepted as a master only when /proc/PID/exe is a php-fpm-named binary and it
+# is root on the host or belongs to a container. Container config and log paths are opened by host
+# Python one component at a time with dir_fd + O_NOFOLLOW. A rename/symlink race therefore cannot
+# turn a read by the root helper into a read from the host root. Without host Python container FPM
+# is skipped fail-closed; host FPM and container stderr logs keep working.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.3 # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4 # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without php-fpm it runs one ps and exits
 
 HELPER_DIR=/lib65/kervax
@@ -50,6 +55,7 @@ STATE=${KERVAX_FPM_STATE:-/var/lib/kervax/fpm.state}
 SAMPLES=3        # connection counts per run, a second apart
 CAP=8388608      # bytes of one log read in a run; more - only the last CAP
 BUDGET=67108864  # bytes of logs read in a run in all
+CONF_CAP=4194304 # bytes of one container's main config or one include expansion
 
 exec 9>/run/kervax-fpm.lock
 flock -n 9 || exit 0
@@ -66,9 +72,229 @@ TMPD=$(mktemp -d /tmp/kervax-fpm.XXXXXX) || exit 0
 trap 'rm -rf "$TMPD"' EXIT
 [ -f "$STATE" ] || : > "$STATE"
 
+# A container controls its own mount tree and can rename a checked directory to an absolute
+# symlink between a shell test and cat/stat.  Open every component relative to an already opened
+# directory fd and with O_NOFOLLOW: the kernel, not a path pre-check, makes the decision.  These
+# are host Python and host syscalls; no executable from the container is ever run.  On a minimal
+# host without Python container configs are skipped fail-closed, while host FPM still works.
+SAFE_PY=${KERVAX_FPM_PY:-$(command -v python3 2>/dev/null || true)}
+[ -n "$SAFE_PY" ] || [ ! -x /usr/libexec/platform-python ] || SAFE_PY=/usr/libexec/platform-python
+cat > "$TMPD/rootio.py" <<'PY'
+import fnmatch
+import os
+import posixpath
+import re
+import stat
+import sys
+
+PLAIN = re.compile(r"^[A-Za-z0-9._@+-]+$")
+PATTERN = re.compile(r"^[A-Za-z0-9._@+*?-]+$")
+PROC = os.environ.get("KERVAX_FPM_PROC_ROOT", "/proc")
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+if not NOFOLLOW or not DIRECTORY or not hasattr(os, "supports_dir_fd"):
+    raise SystemExit(1)
+
+
+def split_path(path):
+    if not path.startswith("/") or "\x00" in path:
+        raise ValueError("absolute path required")
+    out = [part for part in path.split("/") if part]
+    if any(part in (".", "..") or not PLAIN.fullmatch(part) for part in out):
+        raise ValueError("unsafe path")
+    return out
+
+
+def root_fd(pid):
+    if not pid.isdigit():
+        raise ValueError("bad pid")
+    procfd = os.open(PROC, os.O_RDONLY | DIRECTORY | CLOEXEC)
+    try:
+        pidfd = os.open(pid, os.O_RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC, dir_fd=procfd)
+    finally:
+        os.close(procfd)
+    try:
+        # proc owns this magic link. Opening it relative to the pinned PID directory cannot jump
+        # to a process that later reused the numeric PID; a dead process makes this open fail.
+        return os.open("root", os.O_RDONLY | DIRECTORY | CLOEXEC, dir_fd=pidfd)
+    finally:
+        os.close(pidfd)
+
+
+def dir_fd(pid, path):
+    fd = root_fd(pid)
+    try:
+        for part in split_path(path):
+            nxt = os.open(part, os.O_RDONLY | DIRECTORY | NOFOLLOW | CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def file_fd(pid, path):
+    parts = split_path(path)
+    if not parts:
+        raise ValueError("file required")
+    dfd = dir_fd(pid, "/" + "/".join(parts[:-1]))
+    try:
+        fd = os.open(parts[-1], os.O_RDONLY | NOFOLLOW | CLOEXEC, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ValueError("regular file required")
+    return fd
+
+
+def zone_fd(pid, path):
+    """Resolve /etc/localtime and final zoneinfo symlinks without leaving zoneinfo."""
+    if path != "/etc/localtime" and not path.startswith("/usr/share/zoneinfo/"):
+        raise ValueError("timezone path outside zoneinfo")
+    for _ in range(8):
+        parts = split_path(path)
+        if not parts:
+            raise ValueError("timezone file required")
+        dfd = dir_fd(pid, "/" + "/".join(parts[:-1]))
+        try:
+            st = os.stat(parts[-1], dir_fd=dfd, follow_symlinks=False)
+            if stat.S_ISREG(st.st_mode):
+                fd = os.open(parts[-1], os.O_RDONLY | NOFOLLOW | CLOEXEC, dir_fd=dfd)
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    os.close(fd)
+                    raise ValueError("regular timezone file required")
+                return fd
+            if not stat.S_ISLNK(st.st_mode):
+                raise ValueError("timezone is not a file")
+            target = os.readlink(parts[-1], dir_fd=dfd)
+        finally:
+            os.close(dfd)
+        path = posixpath.normpath(target if target.startswith("/")
+                                  else posixpath.join(posixpath.dirname(path), target))
+        if not path.startswith("/usr/share/zoneinfo/"):
+            raise ValueError("timezone symlink outside zoneinfo")
+    raise ValueError("too many timezone symlinks")
+
+
+def copy_fd(fd, out, limit=None):
+    left = limit
+    total = 0
+    while left is None or left > 0:
+        chunk = os.read(fd, 131072 if left is None else min(131072, left))
+        if not chunk:
+            break
+        os.write(out, chunk)
+        total += len(chunk)
+        if left is not None:
+            left -= len(chunk)
+    return total
+
+
+def cat(pid, path, cap):
+    fd = file_fd(pid, path)
+    try:
+        size = os.fstat(fd).st_size
+        if size > cap:
+            raise ValueError("config too large")
+        copy_fd(fd, 1, size)
+    finally:
+        os.close(fd)
+
+
+def glob_cat(pid, path, pattern, cap):
+    if not PATTERN.fullmatch(pattern) or "/" in pattern:
+        raise ValueError("unsafe pattern")
+    dfd = dir_fd(pid, path)
+    opened = []
+    try:
+        for name in sorted(n for n in os.listdir(dfd) if fnmatch.fnmatchcase(n, pattern)):
+            try:
+                fd = os.open(name, os.O_RDONLY | NOFOLLOW | CLOEXEC, dir_fd=dfd)
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode):
+                    os.close(fd)
+                    continue
+                opened.append((fd, st.st_size))
+            except OSError:
+                continue
+        if len(opened) > 256 or sum(size + 1 for _, size in opened) > cap:
+            raise ValueError("include expansion too large")
+        for fd, size in opened:
+            copy_fd(fd, 1, size)
+            os.write(1, b"\n")
+    finally:
+        for fd, _ in opened:
+            os.close(fd)
+        os.close(dfd)
+
+
+def snap(pid, path, target, cap):
+    fd = file_fd(pid, path)
+    try:
+        st = os.fstat(fd)
+        start = max(0, st.st_size - cap)
+        os.lseek(fd, start, os.SEEK_SET)
+        out = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | CLOEXEC, 0o600)
+        try:
+            copy_fd(fd, out, st.st_size - start)
+        finally:
+            os.close(out)
+        print(f"{st.st_ino}\t{st.st_size}\t{start}")
+    finally:
+        os.close(fd)
+
+
+def zone(pid, path, target, cap):
+    fd = zone_fd(pid, path)
+    try:
+        size = os.fstat(fd).st_size
+        if size > cap:
+            raise ValueError("timezone file too large")
+        out = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | CLOEXEC, 0o600)
+        try:
+            copy_fd(fd, out, size)
+        finally:
+            os.close(out)
+    finally:
+        os.close(fd)
+
+
+try:
+    mode = sys.argv[1]
+    if mode == "cat":
+        cat(sys.argv[2], sys.argv[3], int(sys.argv[4]))
+    elif mode == "glob":
+        glob_cat(sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5]))
+    elif mode == "snap":
+        snap(sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5]))
+    elif mode == "zone":
+        zone(sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5]))
+    else:
+        raise ValueError("bad mode")
+except (OSError, ValueError, IndexError):
+    raise SystemExit(1)
+PY
+safe_cat() { [ -n "$SAFE_PY" ] && "$SAFE_PY" -I "$TMPD/rootio.py" cat "$1" "$2" "$CONF_CAP"; }
+safe_glob() { [ -n "$SAFE_PY" ] && "$SAFE_PY" -I "$TMPD/rootio.py" glob "$1" "$2" "$3" "$CONF_CAP"; }
+safe_snap() { [ -n "$SAFE_PY" ] && "$SAFE_PY" -I "$TMPD/rootio.py" snap "$1" "$2" "$3" "$4"; }
+safe_zone() { [ -n "$SAFE_PY" ] && "$SAFE_PY" -I "$TMPD/rootio.py" zone "$1" "$2" "$3" 1048576; }
+
 cid_of() { # pid -> container id from its cgroup
   sed 's#.*/##' "/proc/$1/cgroup" 2>/dev/null | sed 's/^docker-//; s/^cri-containerd-//; s/^crio-//; s/\.scope$//' \
     | grep -m1 -E '^[0-9a-f]{64}$'
+}
+fpm_master() { # pid -> true only for a real host/container FPM master
+  local p=$1 exe uid id
+  exe=$(readlink "/proc/$p/exe" 2>/dev/null) || return 1
+  exe=${exe% (deleted)}
+  [[ ${exe##*/} =~ ^php-fpm([0-9]+([.][0-9]+)*)?$ ]] || return 1
+  uid=$(awk '$1 == "Uid:" { print $2; exit }' "/proc/$p/status" 2>/dev/null)
+  [ "$uid" = 0 ] && return 0
+  id=$(cid_of "$p")
+  [ -n "$id" ]
 }
 spec_of() { # container id -> its OCI config.json
   ls -d /run/containerd/io.containerd.runtime.v2.task/*/"$1"/config.json \
@@ -85,29 +311,53 @@ if command -v docker >/dev/null 2>&1; then
 else
   : > "$TMPD/dps"
 fi
-# a path inside the root of process $1; an absolute symlink there points into ITS root. The paths
-# come from the process and its config, so a ".." or a character outside the plain set gives
-# nothing: a container must not steer reads outside its root, nor into a shell command
+# A path inside the root of process $1. Every component must be a plain non-symlink path: following
+# an absolute symlink through /proc/PID/root would resolve it in the host root. The paths come from
+# the process and its config, so ".." or a character outside the plain set gives nothing too.
 in_root() {
-  local p=$1 path=$2 t
+  local p=$1 path=$2 cur part
+  cur="/proc/$p/root"
+  case "$path" in /*) ;; *) return 0 ;; esac
   case "$path" in *..*|*[!A-Za-z0-9._/@+-]*|"") return 0 ;; esac
-  if [ -L "/proc/$p/root$path" ]; then
-    t=$(readlink "/proc/$p/root$path" 2>/dev/null)
-    case "$t" in *..*|*[!A-Za-z0-9._/@+-]*|"") return 0 ;; /*) path=$t ;; *) path="${path%/*}/$t" ;; esac
-  fi
-  printf '/proc/%s/root%s' "$p" "$path"
+  path=${path#/}
+  while [ -n "$path" ]; do
+    part=${path%%/*}
+    if [ "$part" = "$path" ]; then path=""; else path=${path#*/}; fi
+    case "$part" in ''|.) continue ;; ..) return 0 ;; esac
+    cur="$cur/$part"
+    [ -L "$cur" ] && return 0
+  done
+  printf '%s' "$cur"
 }
 # seconds east of UTC of the local time a master writes in its own log file: FPM stamps lines with
 # localtime, which is TZ of the process or /etc/localtime of its root (none - UTC)
 tzoff_of() {
-  local p=$1 z f o
+  local p=$1 z f o t id zf
   z=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | sed -n 's/^TZ=//p' | head -1); z=${z#:}
   case "$z" in *..*|*[!A-Za-z0-9._/@+,-]*) z="" ;; esac
-  if [ -n "$z" ]; then
+  id=$(cid_of "$p")
+  if [ -n "$id" ]; then
+    # /etc/localtime may be a regular file or a symlink into zoneinfo. rootio resolves the final
+    # link with readlinkat semantics and copies the regular zone file through O_NOFOLLOW fds.
+    zf="$TMPD/tz.$p"
+    if [ -z "$z" ]; then
+      if safe_zone "$p" /etc/localtime "$zf"; then z=":$zf"; else z=UTC0; fi
+    elif [[ "$z" = /* ]]; then
+      if safe_zone "$p" "$z" "$zf"; then z=":$zf"; else z=UTC0; fi
+    elif safe_zone "$p" "/usr/share/zoneinfo/$z" "$zf"; then z=":$zf"
+    # No such zone file: keep a POSIX TZ string such as EST5 or MSK-3.
+    fi
+  elif [ -n "$z" ]; then
     case "$z" in /*) f=$(in_root "$p" "$z") ;; *) f=$(in_root "$p" "/usr/share/zoneinfo/$z"); [ -f "$f" ] || f="/usr/share/zoneinfo/$z" ;; esac
     [ -n "$f" ] && [ -f "$f" ] && z=":$f"  # else a POSIX string as it is: MSK-3, UTC0
   else
-    f=$(in_root "$p" /etc/localtime)
+    # /etc/localtime normally is an absolute or ../usr/share/zoneinfo symlink. Read its target as
+    # data and resolve that path again under the process root; never follow the proc-root symlink.
+    if [ -L "/proc/$p/root/etc/localtime" ]; then
+      t=$(readlink "/proc/$p/root/etc/localtime" 2>/dev/null)
+      case "$t" in /usr/share/zoneinfo/*) f=$(in_root "$p" "$t") ;;
+        ../usr/share/zoneinfo/*) f=$(in_root "$p" "/${t#../}") ;; *) f="" ;; esac
+    else f=$(in_root "$p" /etc/localtime); fi
     if [ -n "$f" ] && [ -f "$f" ]; then z=":$f"; else z=UTC0; fi
   fi
   o=$(TZ="$z" date +%z 2>/dev/null)
@@ -124,6 +374,7 @@ ps -e -o pid=,ppid=,args= 2>/dev/null | awk '{ a = $0; sub(/^ *[0-9]+ +[0-9]+ /,
 : > "$TMPD/skip"
 for P in $MASTERS; do
   [ -r "/proc/$P/cmdline" ] || continue
+  fpm_master "$P" || continue
   id=$(cid_of "$P")
   W=host
   if [ -n "$id" ]; then
@@ -148,8 +399,14 @@ for P in $MASTERS; do
   fi
   conf=$(tr '\0' ' ' < "/proc/$P/cmdline" | sed -n 's/.*master process (\([^)]*\)).*/\1/p')
   [ -n "$conf" ] || { printf '%s\tnoconf\n' "$W" >> "$TMPD/skip"; continue; }
-  cf=$(in_root "$P" "$conf")
-  [ -n "$cf" ] && [ -f "$cf" ] || { printf '%s\tnoconf\n' "$W" >> "$TMPD/skip"; continue; }
+  if [ -n "$id" ]; then
+    [ -n "$SAFE_PY" ] || { printf '%s\tnopython\n' "$W" >> "$TMPD/skip"; continue; }
+    cf="$TMPD/main.$P"
+    safe_cat "$P" "$conf" > "$cf" || { printf '%s\tunsafeconf\n' "$W" >> "$TMPD/skip"; continue; }
+  else
+    cf=$(in_root "$P" "$conf")
+    [ -n "$cf" ] && [ -f "$cf" ] || { printf '%s\tnoconf\n' "$W" >> "$TMPD/skip"; continue; }
+  fi
   # one stream in the order FPM reads it: the main file cut at its include lines, each piece
   # followed by the files of that include; a relative include is relative to the prefix
   # (/usr/local for /usr/local/etc/php-fpm.conf)
@@ -166,11 +423,15 @@ for P in $MASTERS; do
     [ -f "$TMPD/i.$j" ] || continue
     inc=$(head -1 "$TMPD/i.$j")
     case "$inc" in *..*|*[!A-Za-z0-9._/@+*?-]*|"") continue ;; /*) ;; *) inc="$pre/$inc" ;; esac
-    d=$(in_root "$P" "${inc%/*}")
-    [ -n "$d" ] || continue
-    for f in "$d"/${inc##*/}; do [ -f "$f" ] && { cat "$f"; echo; } >> "$TMPD/conf"; done
+    if [ -n "$id" ]; then
+      safe_glob "$P" "${inc%/*}" "${inc##*/}" >> "$TMPD/conf" || continue
+    else
+      d=$(in_root "$P" "${inc%/*}")
+      [ -n "$d" ] || continue
+      for f in "$d"/${inc##*/}; do [ -f "$f" ] && [ ! -L "$f" ] && { cat "$f"; echo; } >> "$TMPD/conf"; done
+    fi
   done
-  awk -v OFS='\t' -v m="$P" -v w="$W" -v pre="$pre" -v logp="$LOGP" '
+  awk -v OFS='\t' -v m="$P" -v w="$W" -v pre="$pre" -v logp="$LOGP" -v inside="${id:+1}" '
     function v(s) { sub(/^[^=]*=[ \t]*/, "", s); sub(/[ \t]*;.*$/, "", s); gsub(/^"|"$/, "", s); return s }
     function secs(s) { if (s ~ /m$/) return s * 60; if (s ~ /h$/) return s * 3600; return s + 0 }
     { gsub(/\r/, "") }  # configs written on Windows
@@ -194,7 +455,7 @@ for P in $MASTERS; do
         if (logp != "") print "L", m, logp, "host", w
       } else if (elog !~ /^syslog/) {
         if (elog !~ /^\//) elog = pre "/var/" elog
-        if (elog !~ /\.\./ && elog ~ /^[A-Za-z0-9._\/@+-]+$/) print "L", m, elog, "root", w
+        if (elog !~ /\.\./ && elog ~ /^[A-Za-z0-9._\/@+-]+$/) print "L", m, elog, (inside ? "safe" : "root"), w
       }
     }' "$TMPD/conf" 2>/dev/null >> "$TMPD/pools"
 done
@@ -225,14 +486,22 @@ done
 awk -F'\t' '$1 == "L" { print $5 "\t" $3 "\t" $2 "\t" $4 }' "$TMPD/pools" | sort -u > "$TMPD/logs"
 : > "$TMPD/lstat"
 declare -A LSEEN=()
+ln=0
 while IFS=$'\t' read -r w f m how; do
   [ -z "${LSEEN["$w|$f"]:-}" ] || continue
-  tzo=0
-  case "$how" in root) ff=$(in_root "$m" "$f"); tzo=$(tzoff_of "$m") ;; *) ff=$f ;; esac
-  [ -n "$ff" ] || continue
-  st=$(stat -c '%i	%s' "$ff" 2>/dev/null) || continue
+  tzo=0; base=0
+  case "$how" in
+    safe)
+      ln=$((ln + 1)); ff="$TMPD/log.$ln"
+      meta=$(safe_snap "$m" "$f" "$ff" "$CAP") || continue
+      IFS=$'\t' read -r lino lsize base <<< "$meta"
+      st="$lino"$'\t'"$lsize"; tzo=$(tzoff_of "$m") ;;
+    root) ff=$(in_root "$m" "$f"); tzo=$(tzoff_of "$m"); [ -n "$ff" ] || continue
+      st=$(stat -c '%i	%s' "$ff" 2>/dev/null) || continue ;;
+    *) ff=$f; st=$(stat -c '%i	%s' "$ff" 2>/dev/null) || continue ;;
+  esac
   LSEEN["$w|$f"]=1
-  printf '%s|%s\t%s\t%s\t%s\t%s\n' "$w" "$f" "$ff" "$st" "$tzo" "$w" >> "$TMPD/lstat"
+  printf '%s|%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$f" "$ff" "$st" "$tzo" "$w" "$base" >> "$TMPD/lstat"
 done < "$TMPD/logs"
 
 AWKFN='
@@ -330,7 +599,7 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
     if ($4 == "e") ce[$1 SUBSEP $2 SUBSEP $3] = $5; else cq[$1 SUBSEP $2 SUBSEP $3] = $5
     smps[$1] = 1; next }
   t == "lstat" {
-    f = $1; ff = $2; size = $4 + 0; tzo = $5 + 0; w = $6; o = 0
+    f = $1; ff = $2; size = $4 + 0; tzo = $5 + 0; w = $6; snapbase = $7 + 0; o = 0
     no[f] = $3; nf[f] = size
     # a log seen for the first time: from its end, and no line older than now counts from it later
     if (!(f in off)) { nl[f] = now; next }
@@ -339,8 +608,8 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v cap="$CAP" -v budget="$BUDGET" -v ns="$T
     if (ino[f] == $3 && size >= off[f] + 0) o = off[f] + 0
     n = size - o; if (n <= 0) next
     if (used >= budget) { nf[f] = o; next }  # read next time
-    rd = n > cap ? cap : n; from = size - rd
-    cmd = "tail -c +" sprintf("%.0f", from + 1) " \047" ff "\047 2>/dev/null | head -c " sprintf("%.0f", rd) \
+    rd = n > cap ? cap : n; from = size - rd; localfrom = from - snapbase; if (localfrom < 0) localfrom = 0
+    cmd = "tail -c +" sprintf("%.0f", localfrom + 1) " \047" ff "\047 2>/dev/null | head -c " sprintf("%.0f", rd) \
       " | grep -aF -e \047reached pm.max_children\047 -e \047executing too slow\047 -e \047execution timed out\047 -e \047exited on signal\047"
     while ((cmd | getline l) > 0) {
       s = msg(l)
