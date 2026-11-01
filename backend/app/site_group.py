@@ -217,10 +217,22 @@ def alert_text(g: dict, base: str, cause: list[str] | None = None) -> tuple[str,
         lines.append(f"и еще {n - shown}")
     if cause:
         lines.append(html.escape(tg_fmt.fact("На сервере тоже", tg_fmt.names(cause))))
-    text = "\n".join(lines)
-    full = text.replace(head, html.escape(g.get("label") or "")) if not g.get("srv") else text
-    line = f"{LVL_ICON.get(lvl, '🟠🌐')} {head}: {html.escape(what)}"
-    return text, text, line
+    full = "\n".join(lines)
+    short_head = head_html({**g, 'label': tg_fmt.field(g.get('label') or g.get('key', ''), 64)}, base)
+    reasons = '; '.join(tg_fmt.field(tg_fmt.cap(why or NO_WHY), 55) for why, _ in parts[:2])
+    if len(parts) > 2:
+        reasons += f'; и еще {len(parts)-2}'
+    if cause:
+        reasons = tg_fmt.field(reasons, 80)+'; '+tg_fmt.fact('На сервере тоже', tg_fmt.names(cause))
+    names = [tg_fmt.link(tg_fmt.field(m.get('host') or m.get('name', ''), 36), m.get('url', ''))
+             for m in mem[:tg_fmt.NAMES_MAX]]
+    more = f' и еще {n-len(names)}' if n > len(names) else ''
+    compact = [f"{LVL_ICON.get(lvl, '🟠🌐')} {short_head}", f'<b>{html.escape(what)}</b>']
+    if reasons:
+        compact.append(html.escape(reasons))
+    compact.append(', '.join(names)+more)
+    line = f"{LVL_ICON.get(lvl, '🟠🌐')} {short_head}: {html.escape(what)}"
+    return '\n'.join(compact), full, line
 
 
 def _left_rows(left: list[dict]) -> list[str]:

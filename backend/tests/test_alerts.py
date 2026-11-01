@@ -152,5 +152,5 @@ def test_merge_storm_same_failure_only():
     m = alerts.merge_storm(many)[0]
     # в чат - что случилось и первые серверы, остальные числом; в полном тексте - список длиннее
     assert str(m).startswith("⚠️⚙️ <b>35 серверов</b>\n<b>Упал x.service</b>\n")
-    assert m.endswith("и еще 29") and m.ref.startswith("srv:0,1,2")
+    assert m.endswith("и еще 32") and m.ref.startswith("srv:0,1,2")
     assert alerts.full_text(m).count('<a href="https://kx/web-') == 30

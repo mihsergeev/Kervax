@@ -129,6 +129,7 @@ async def test_pause_critical_with_buttons_waits_for_ack(client, tg, monkeypatch
     async with f() as s:
         rows = {r.target: r for r in (await s.scalars(select(TgAlert))).all()}
         assert all(r.undo.get("held") == "-100" for r in rows.values())
+        rows['web-a'].text = '🔴 web-a\nСервер недоступен\n'+('legacy detail\n'*100)
         rows["web-b"].acked_by = "@petya"
         await s.commit()
     now = datetime.now(timezone.utc)
@@ -136,6 +137,7 @@ async def test_pause_critical_with_buttons_waits_for_ack(client, tg, monkeypatch
     assert await tg_bot.dup_catchup(f, get_settings(), now + timedelta(minutes=11)) == 1
     main = tg.to("-100")
     assert len(main) == 1 and "никто не взял" in main[0] and "web-a" in main[0]
+    assert len(main[0]) <= 480 and len(main[0].splitlines()) <= 4
     async with f() as s:
         assert all("held" not in (r.undo or {}) for r in (await s.scalars(select(TgAlert))).all())
         assert await settings_store.get_main_passed(s) == [["offline", "web-a"]]

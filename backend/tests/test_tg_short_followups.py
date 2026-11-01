@@ -75,4 +75,4 @@ def test_storm_full_text_says_how_many_more_after_30():
     out = alerts.merge_storm(msgs)
     assert len(out) == 1
     assert out[0].full.count("<a href") == 30 and "и еще 5" in out[0].full
-    assert str(out[0]).split("\n")[-1].endswith("и еще 29")
+    assert str(out[0]).split("\n")[-1].endswith("и еще 32")

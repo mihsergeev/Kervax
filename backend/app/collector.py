@@ -1408,10 +1408,15 @@ async def _send_alerts(
             if ments:
                 text += " " + html.escape(ments)
         else:
-            # кастомный шаблон пользователя: рендерим и экранируем, ссылку — строкой
-            text = html.escape(_fmt_site(rule["text"], name, grp, status, msg))
-            if link_url:
-                text += f"\n🔗 {html.escape(link_url)}"
+            custom = _fmt_site(rule["text"], name, grp, status, msg)
+            full = html.escape(custom)
+            what, facts = tg_fmt.split_detail(custom)
+            head = tg_fmt.link(name, link_url)
+            if kind in _SITE_RECOVERY:
+                text = tg_fmt.recovery(head, what)
+            else:
+                text = tg_fmt.render(icon or '⚠️🌐', head, what, facts)
+            line = tg_fmt.one_line(icon or '⚠️🌐', head, what, facts)
         if zone:
             dom_at[zone] = len(texts)
             dom_n[zone] = 1
@@ -7448,12 +7453,9 @@ async def evaluate_servers(
                 short=srv_short.short(key, ctx, s, detail, level),
             )
         else:
-            txt = html.escape(_fmt_rule(rule["text"], s, ctx))
-            out = alerts.Msg(
-                txt + (f"\n🔗 {html.escape(url)}" if url else ""),
-                _ALERT_SECTION.get(key, "servers"),
-                s.group_name or "", kind=key, target=s.name, ref=f"srv:{s.id}",
-            )
+            out = _server_alert_text(key, s.name, _fmt_rule(rule['text'], s, ctx), url,
+                                    group=s.group_name or '', ref=f'srv:{s.id}',
+                                    level=int(ctx.get('level') or ctx.get('_lvl') or 1))
         # кнопка "заглушить" глушит вещи этого алерта, а не вид целиком (tg_buttons.ITEM_MUTE)
         out.mutes = tg_mute_keys(key, ctx)
         return out
@@ -8773,10 +8775,12 @@ async def evaluate_servers(
                                                                             if len(failed) > 5 else ""))
 
     if gap_n and not _gap_said.get("at"):
+        full = (f"🔴📡 Панель не получает отчеты\nЗамолчали разом {gap_n} из {gap_total} серверов. "
+                "Похоже на сбой приема на стороне панели (backend, прокси, сеть панели), а не на серверах: "
+                "недоступен по каждому не шлем")
         fires.append(alerts.Msg(
             f"🔴📡 <b>Панель не получает отчеты</b>\nЗамолчали разом {gap_n} из {gap_total} серверов. "
-            "Похоже на сбой приема на стороне панели (backend, прокси, сеть панели), а не на серверах: "
-            "\"недоступен\" по каждому не шлем", "servers", "", kind="ingest_gap", target="панель"))
+            "Проверьте прием отчетов в панели", "servers", "", kind="ingest_gap", target="панель", full=full))
         _gap_said["at"] = now
     elif not gap_n and _gap_said.get("at"):
         recoveries.append(alerts.Msg("✅📡 Панель снова получает отчеты серверов", "servers", "",

@@ -435,6 +435,7 @@ async def escalate(session_factory, settings: Settings, now: datetime | None = N
                 continue
             mins = int((now - _aware(row.ts)).total_seconds() // 60) if row.ts else esc["after_min"]
             text = f"⏰ Никто не взял за {mins} мин\n\n" + tg_buttons.row_text(row, tz, now)
+            text = alerts.short_message(text, 'HTML')
             sent = []
             for chat in chats:
                 try:
@@ -484,6 +485,7 @@ async def dup_catchup(session_factory, settings: Settings, now: datetime | None 
                 continue
             mins = int((now - _aware(row.ts)).total_seconds() // 60)
             text = f"⏰ В чате группы никто не взял за {mins} мин\n\n" + tg_buttons.row_text(row, tz, now)
+            text = alerts.short_message(text, 'HTML')
             try:
                 mid = await alerts.tg_send(cfg.get("telegram_api", ""), cfg["telegram_token"], chat,
                                            text, "HTML", tg_buttons.row_keyboard(row))

@@ -455,6 +455,25 @@ async def _esc_row(f, sid, kind="offline", minutes_ago=20, **kw) -> int:
         return row.id
 
 
+async def test_escalation_shortens_legacy_text_without_changing_original_or_buttons(client, tg):
+    f = _factory(client)
+    await _esc_setup(f)
+    sid = await _server(f, alert_state={'offline': 1})
+    aid = await _esc_row(f, sid)
+    original = '🔴 web-a\nСервер недоступен\n'+('legacy diagnostic\n'*100)
+    async with f() as session:
+        row = await session.get(TgAlert, aid)
+        row.text = original
+        await session.commit()
+    assert await tg_bot.escalate(f, collector.get_settings(), NOW) == 1
+    sent = tg.of('sendMessage')[-1]
+    assert len(sent['text']) <= 480 and len(sent['text'].splitlines()) <= 4
+    assert 'Сервер недоступен' in sent['text'] and 'reply_markup' in sent
+    async with f() as session:
+        row = await session.get(TgAlert, aid)
+        assert row.text == original and row.esc_level == 1
+
+
 async def test_escalation_repeats_unacked_alert(client, tg):
     f = _factory(client)
     await _esc_setup(f)

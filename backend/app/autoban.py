@@ -420,7 +420,7 @@ def _fmt_until(ts: float, tz) -> str:
     return datetime.fromtimestamp(ts, timezone.utc).astimezone(tz).strftime("%d.%m %H:%M")
 
 
-def digest_text(rows: list[tuple[Server, list[AutobanBan]]], period: str, base_url: str, tz) -> str:
+def digest_full_text(rows: list[tuple[Server, list[AutobanBan]]], period: str, base_url: str, tz) -> str:
     """Сводка банов одним сообщением (формат A, только символы клавиатуры):
 
     🚫 Автобан за сутки: 23 адреса на 3 серверах
@@ -445,6 +445,17 @@ def digest_text(rows: list[tuple[Server, list[AutobanBan]]], period: str, base_u
         lines.append(html.escape(f"и еще {len(rows) - 10} {_srv_word(len(rows) - 10)}"))
     lines.append("Это сканеры, делать ничего не надо. Список и разбан - в карточке сервера, раздел Веб")
     return "\n".join(lines)
+
+
+def digest_text(rows: list[tuple[Server, list[AutobanBan]]], period: str, base_url: str, tz) -> str:
+    """The notification shows counts and linked names; addresses and paths stay in the panel."""
+    total = sum(len(bans) for _, bans in rows)
+    period = 'за сутки' if period == 'day' else 'за час'
+    head = f"🚫 <b>Автобан {period}: {total} {_addr_word(total)} на {len(rows)} {_srv_word(len(rows))}</b>"
+    names = [tg_fmt.link(tg_fmt.field(s.name, 48), f'{base_url}/?server={s.id}&sec=web' if base_url else '')
+             for s, _ in rows[:tg_fmt.NAMES_MAX]]
+    tail = f' и еще {len(rows)-len(names)}' if len(rows) > len(names) else ''
+    return '\n'.join([head, ', '.join(names)+tail, 'Список и разбан - в панели'])
 
 
 def _addr_word(n: int) -> str:
@@ -507,11 +518,12 @@ async def send_digest(session_factory, settings, now: datetime) -> bool:
                 by.setdefault(r.server_id, []).append(r)
         groups = sorted(((servers[k], v) for k, v in by.items()), key=lambda x: (-len(x[1]), x[0].name))
         text = digest_text(groups, mode, (settings.panel_url or "").rstrip("/"), tz) if groups else ""
+        full = digest_full_text(groups, mode, (settings.panel_url or "").rstrip("/"), tz) if groups else ""
         threshold = int(cfg.get("flood_threshold", 6))
         can = bool(groups) and not muted and alerts.alerts_enabled(cfg)
         ids = [r.id for r in rows]
     delivered = can and await alerts.dispatch(
-        cfg, True, [alerts.Msg(text, "servers", "", kind="autoban_digest")], threshold,
+        cfg, True, [alerts.Msg(text, "servers", "", kind="autoban_digest", full=full, line=text.split('\n')[0])], threshold,
         parse_mode="HTML", session_factory=session_factory)
     if delivered or not groups:
         async with session_factory() as s:

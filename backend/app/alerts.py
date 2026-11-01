@@ -16,7 +16,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import settings_store, tg_buttons, tg_fmt
+from app import notification_text, settings_store, tg_buttons, tg_fmt
 from app.config import Settings
 from app.models import AlertEvent, Check, Server, TgAlert, User
 
@@ -87,6 +87,23 @@ def full_text(m: str) -> str:
     return getattr(m, "full", "") or str(m)
 
 
+def short_message(m: str, parse_mode: str | None = None) -> str:
+    """Keep delivery metadata and full history while bounding the notification copy."""
+    html_mode = (parse_mode or '').upper() == 'HTML'
+    text = notification_text.brief(m, html_mode)
+    line = getattr(m, 'line', '')
+    if line:
+        line = notification_text.brief(line, html_mode, max_lines=1, max_chars=150)
+    if text == str(m) and line == getattr(m, 'line', ''):
+        return m
+    out = Msg(text)
+    if isinstance(m, Msg):
+        out.__dict__.update(m.__dict__)
+    out.full = full_text(m)
+    out.line = line
+    return out
+
+
 # разделы, чьи объекты живут в группах СЕРВЕРОВ (у сайтов свой набор имён групп)
 _SERVER_SECTIONS = ("servers", "docker", "kuber", "services", "backups")
 
@@ -103,7 +120,7 @@ def _msg_scope(m: str) -> tuple[str, str]:
 # такой сервер идет своим сообщением.
 STORM_MIN = 3
 _STORM_NAMES = 30
-_STORM_SHORT = 6  # серверов ссылками в коротком сообщении, остальные - "и еще N"
+_STORM_SHORT = 3  # серверов ссылками в коротком сообщении, остальные - "и еще N"
 _AGO = re.compile(r"\d+\s*(?:с|сек|мин|ч|дн|д)\.?\s+назад")
 _HREF = re.compile(r'<a href="[^"]*">')
 # "это мы" и остальное, где кнопка про один сервер
@@ -161,11 +178,12 @@ def _storm_msg(parts: list) -> Msg:
         full = f_head + "\n↳ " + ", ".join(links[:_STORM_NAMES]) + f_more + (f"\n{f_tail}" if f_tail else "")
         line = first.line.replace(own, label, 1) if first.line and own in first.line else first.line
     else:
-        shown = links[:_STORM_NAMES]
+        shown = links[:tg_fmt.NAMES_MAX]
         more = f" и еще {len(links) - len(shown)}" if len(links) > len(shown) else ""
         head, _, tail = str(first).partition("\n")
         head = head.replace(own, label, 1) if own in head else head
         body = head + "\n" + ", ".join(shown) + more + (f"\n{tail}" if tail else "")
+        full = head + "\n" + ", ".join(links) + (f"\n{tail}" if tail else "")
     ids = [x for p in parts for x in str(p.ref or "").partition(":")[2].split(",") if x.strip().isdigit()]
     ref = "srv:" + ",".join(dict.fromkeys(ids)) if ids else ""
     mutes = list(dict.fromkeys(k for p in parts for k in getattr(p, "mutes", None) or []))
@@ -535,6 +553,7 @@ class _Link:
         if self.tg_down:
             raise TgDown(self.tg_down)
         try:
+            text = notification_text.brief(text, (parse_mode or '').upper() == 'HTML')
             return await tg_send(api, token, chat, text, parse_mode, reply_markup, http=await self.client())
         except httpx.TransportError as exc:  # таймаут, коннект: остальным сообщениям то же самое
             self.tg_down = f"Telegram не отвечает ({type(exc).__name__}), остальное в этот раз не слали"
@@ -546,6 +565,7 @@ class _Link:
             err = self.hook_down
         else:
             try:
+                text = notification_text.brief(text, (parse_mode or '').upper() == 'HTML')
                 r = await (await self.client()).post(url, json={"text": webhook_text(text, parse_mode)})
                 code = _status(r)
                 # без адреса: в адресе вебхука бывает секрет (у Discord токен прямо в пути)
@@ -622,7 +642,7 @@ async def send_alert(cfg: dict, text: str, parse_mode: str | None = None,
     return errors
 
 
-_DIGEST_LINES = 20  # сколько алертов показать в пачке (остальные - счетчиком)
+_DIGEST_LINES = 3  # остальные события остаются в истории, в чате - счетчик
 
 
 _PRE = re.compile(r"\n[^\n]*\n<pre>.*?</pre>", re.S)
@@ -633,16 +653,29 @@ def _digest_line(m: str) -> str:
     текста (хвост лога у Job и подробности в пачке не читаются и раздувают сообщение)."""
     line = getattr(m, "line", "")
     if line:
-        return line
-    return tg_fmt.clean(_PRE.sub("", str(m))).split("\n")[0]
+        return notification_text.brief(line, True, max_lines=1, max_chars=150)
+    rows = _PRE.sub('', str(m)).split('\n')
+    rows = rows[:1] if len(rows) > 1 and rows[1].lstrip().startswith('↳') else rows[:2]
+    text = ' - '.join(tg_fmt.clean(row) for row in rows)
+    return notification_text.brief(text, True, max_lines=1, max_chars=150)
 
 
 def _digest(messages: list[str]) -> str:
-    head = [_digest_line(m) for m in messages[:_DIGEST_LINES]]
+    def priority(m):
+        if getattr(m, 'recovery', False) or str(m).startswith('✅'):
+            return 3
+        if critical(m):
+            return 0
+        return 1 if str(m).startswith(('🔴', '🔥')) else 2
+    ordered = sorted(messages, key=priority)
+    head = [_digest_line(m) for m in ordered[:_DIGEST_LINES]]
     extra = len(messages) - len(head)
     body = "\n".join(head)
     if extra:
         body += f"\nи еще {extra}"
+        crit = sum(critical(m) for m in ordered[_DIGEST_LINES:])
+        if crit:
+            body += f', критичных: {crit}'
     # без заголовка "N алертов за раз": счетчик ничего не говорит, строки и так видны
     return body
 
@@ -654,6 +687,7 @@ async def tg_edit(cfg: dict, chat: str, message_id: int, text: str, reply_markup
         async with _link() as link:
             if link.tg_down:
                 return  # Telegram в этой пачке уже не ответил: правка подождет до следующего раза
+            text = notification_text.brief(text, True, keep_last=True)
             body = {"chat_id": chat, "message_id": message_id, "text": _clip(text, True), "parse_mode": "HTML",
                     "disable_web_page_preview": True}
             if reply_markup is not None:
@@ -799,6 +833,7 @@ async def dispatch(
     if session_factory is not None:
         messages = await with_notes(session_factory, messages)
     messages = merge_storm(messages)
+    messages = [short_message(m, parse_mode) for m in messages]
     # кнопки под алертами: запись нужна до отправки, ее id едет в кнопках
     rows: dict[int, int] = {}
     if session_factory is not None and buttons_on(cfg):
@@ -928,9 +963,10 @@ async def with_notes(session_factory, messages: list[str]) -> list[str]:
         if len(text) > _NOTE_MAX:
             text = text[:_NOTE_MAX - 3].rstrip() + "..."
         note = f"\n📝 <i>{html.escape(tg_fmt.clean(text))}</i>"
+        short_note = f"\n📝 <i>{html.escape(tg_fmt.field(tg_fmt.clean(text), 100))}</i>"
         if isinstance(m, Msg):
             # заметка - контекст для дежурного, она нужна и в коротком тексте
-            out.append(m.tail(note, note))
+            out.append(m.tail(note, short_note))
         else:
             out.append(Msg(f"{m}{note}"))
     return out

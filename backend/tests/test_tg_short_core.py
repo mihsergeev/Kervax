@@ -69,9 +69,8 @@ def test_tail_goes_to_the_full_text_only():
 def test_digest_is_one_line_per_alert():
     msgs = [_server_alert_text("disk", f"s{i}", "x", short=("Диск заполнен на 90%", ["/var"])) for i in range(3)]
     d = alerts._digest(msgs + [alerts.Msg("🔥 old — недоступен\n↳ подробности")])
-    assert d.split("\n") == ["⚠️💽 s0: диск заполнен на 90%, /var",
-                             "⚠️💽 s1: диск заполнен на 90%, /var", "⚠️💽 s2: диск заполнен на 90%, /var",
-                             "🔥 old: недоступен"]
+    assert d.split("\n") == ["🔥 old: недоступен", "⚠️💽 s0: диск заполнен на 90%, /var",
+                             "⚠️💽 s1: диск заполнен на 90%, /var", "и еще 1"]
 
 
 def test_storm_keeps_the_short_format_and_lists_servers_last():
@@ -83,7 +82,7 @@ def test_storm_keeps_the_short_format_and_lists_servers_last():
     lines = str(out[0]).split("\n")
     assert lines[0] == "🔴⚙️ <b>4 сервера</b>"
     assert lines[1:3] == ["<b>Упал node-exporter.service</b>", "код 1"]
-    assert lines[3].count("<a href") == 4
+    assert lines[3].count("<a href") == 3 and lines[3].endswith('и еще 1')
     assert "↳" in out[0].full and len(out[0].parts) == 4
 
 

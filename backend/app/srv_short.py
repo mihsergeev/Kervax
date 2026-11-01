@@ -349,7 +349,7 @@ _CRON_DAYS = re.compile(r"(\d+(?:\.\d+)?) дн(?!\w)")
 
 
 def _kube_cron(ctx: dict) -> tuple[str, list[str]]:
-    """Один CronJob: упал (причина и строка из конца лога, если агент ее прислал), не запускается
+    """Один CronJob: упал (причина; лог читают в панели), не запускается
     (сколько и почему) или завис. Несколько - именами, разбор в панели."""
     items = [x for x in ctx.get("items") or [] if isinstance(x, dict) and x.get("name")]
     if not items:  # контекст старого формата
@@ -360,8 +360,6 @@ def _kube_cron(ctx: dict) -> tuple[str, list[str]]:
     it = items[0]
     detail = _CRON_DAYS.sub(lambda m: tg_fmt.days(int(float(m.group(1)))), str(it.get("detail") or ""))
     facts = [f"{it['name']} - {detail}" if detail else str(it["name"])]
-    if it.get("log"):
-        facts.append(tg_fmt.fact("Последняя строка лога", str(it["log"])))
     return _CRON_WHAT.get(str(it.get("kind") or ""), "Не отработал CronJob"), facts
 
 

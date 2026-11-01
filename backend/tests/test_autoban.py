@@ -204,8 +204,10 @@ def test_digest_due_and_text():
     txt = autoban.digest_text([(s, rows)], "day", "https://panel.example.com", tz)
     lines = txt.split("\n")
     assert lines[0] == "🚫 <b>Автобан за сутки: 5 адресов на 1 сервере</b>"
-    assert lines[1].startswith('<a href="https://panel.example.com/?server=1&amp;sec=web">k8s-a</a> - 5: 203.0.113.0 /.env, /.git/config +5 до 03.11 15:00 повтор;')
-    assert lines[1].endswith("; и еще 2")
+    assert lines[1] == '<a href="https://panel.example.com/?server=1&amp;sec=web">k8s-a</a>'
+    assert len(lines) == 3 and '203.0.113.' not in txt and '/.env' not in txt
+    full = autoban.digest_full_text([(s, rows)], "day", "https://panel.example.com", tz)
+    assert '203.0.113.0' in full and '/.env' in full and '03.11 15:00' in full
     assert not _NOT_KEYBOARD.search(re.sub(r"<[^>]+>", "", txt))
 
 

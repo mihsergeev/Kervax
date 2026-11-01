@@ -108,9 +108,9 @@ async def test_neighbours_join_the_sent_message_and_recover_together(tmp_path, m
     assert len(edits) == 1 and edits[0][0] == 1
     text = edits[0][1]
     assert text.startswith("🟠🌐 203.0.113.10\n<b>3 монитора отвечают через раз</b>\n")
-    # причины разные: причина строкой, под ней ее мониторы
+    # Both reasons and the linked monitors remain visible in the compact summary.
     assert _plain(text).split("\n")[2:] == [
-        "TLS висит 10 с", "a.example.com", "api.example.org", "Не ответил за 10 с", "shop.example.net"]
+        "TLS висит 10 с; Не ответил за 10 с", "a.example.com, api.example.org, shop.example.net"]
     assert "https://panel.example/?check=" in text
     # у каждого монитора своя строка в истории
     assert [t for _k, t, _r in await _history(f)] == ["a.example.com", "api.example.org", "shop.example.net"]
@@ -209,7 +209,7 @@ async def test_server_of_the_monitors_and_its_own_alarm(tmp_path, monkeypatch):
     await collector._send_alerts(f, SET, [_flaky(n, ids[n], T0) for n in names], T0)
     assert len(sent) == 1
     assert sent[0].startswith('🟠🌐 <a href="https://panel.example/?server=1">web-a</a>\n')
-    assert "\nНа сервере тоже: CPU" in sent[0]
+    assert "На сервере тоже: CPU" in sent[0]
     await engine.dispose()
 
 
@@ -247,7 +247,8 @@ async def test_one_reason_for_all_is_written_once(tmp_path, monkeypatch):
     assert len(sent) == 1, sent
     assert _plain(sent[0]).split("\n") == [
         "🔴🌐 203.0.113.10", "5 мониторов не отвечают", "Сервер не принимает соединение: 10 с без ответа",
-        "a.example.com", "b.example.com", "www.example.com", "api.example.org", "shop.example.net"]
+        "a.example.com, b.example.com, www.example.com и еще 2"]
+    assert 'shop.example.net' in alerts.full_text(sent[0])
     assert " - " not in sent[0]
     assert len(await _history(f)) == 5
     await engine.dispose()
@@ -262,8 +263,8 @@ async def test_folded_neighbour_keeps_its_own_reason(tmp_path, monkeypatch):
     await collector._send_alerts(f, SET, pend, T0)
     assert len(sent) == 1
     assert _plain(sent[0]).split("\n")[2:] == [
-        "Сервер не принимает соединение: 10 с без ответа", "a.example.com",
-        "Не ответил за 10 с", "b.example.com", "api.example.org"]
+        "Сервер не принимает соединение: 10 с без ответа; Не ответил за 10 с",
+        "a.example.com, b.example.com, api.example.org"]
     await engine.dispose()
 
 
@@ -273,13 +274,13 @@ async def test_edit_regroups_by_reason(tmp_path, monkeypatch):
     engine, f, ids, sent, edits = await _panel(tmp_path, monkeypatch, names)
     await collector._send_alerts(f, SET, [_down(n, ids[n], T0) for n in names[:2]], T0)
     assert _plain(sent[0]).split("\n")[2:] == [
-        "Сервер не принимает соединение: 10 с без ответа", "a.example.com", "api.example.org"]
+        "Сервер не принимает соединение: 10 с без ответа", "a.example.com, api.example.org"]
     t1 = T0 + timedelta(minutes=5)
     await collector._send_alerts(f, SET, [_down("shop.example.net", ids["shop.example.net"], t1, TLS)], t1)
     assert len(sent) == 1 and len(edits) == 1
     assert _plain(edits[0][1]).split("\n")[1:] == [
-        "3 монитора не отвечают", "Сервер не принимает соединение: 10 с без ответа", "a.example.com",
-        "api.example.org", "TLS висит 10 с", "shop.example.net"]
+        "3 монитора не отвечают", "Сервер не принимает соединение: 10 с без ответа; TLS висит 10 с",
+        "a.example.com, api.example.org, shop.example.net"]
     await engine.dispose()
 
 
@@ -296,4 +297,4 @@ def test_list_max_counts_across_reasons(monkeypatch):
     mem = {str(i): {"host": f"h{i}.example.com", "why": "HTTP 502" if i < 2 else "HTTP 503"} for i in range(5)}
     text = site_group.alert_text({"lvl": "down", "label": "203.0.113.10", "members": mem}, "")[0]
     assert _plain(text).split("\n")[2:] == [
-        "HTTP 502", "h0.example.com", "h1.example.com", "HTTP 503", "h2.example.com", "и еще 2"]
+        "HTTP 502; HTTP 503", "h0.example.com, h1.example.com, h2.example.com и еще 2"]

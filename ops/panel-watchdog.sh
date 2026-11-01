@@ -7,23 +7,28 @@
 # (backend/app/heartbeat.py) and sends to Telegram/webhook INDEPENDENTLY when:
 #   * the heartbeat is stale (>MAX_AGE) - the container, scheduler or database is dead or hung;
 #   * alerts_ok=0 - the panel's own alert-channel self-test failed (expired token, Telegram
-#     blocked).
+#     blocked);
+#   * the scheduler loop is stuck: the heartbeat is fresh (it is written by its own task), but
+#     the last tick started longer than tick_max ago (an await without a timeout, a lock wait);
+#   * a scheduler stage has been failing for STAGE_STRIKES ticks in a row (stage_fail), e.g.
+#     the server alerts stage crashing on one node - the details are in "Panel errors".
 # Credentials (token, chat, mirror) come from the heartbeat itself, so it gets through even
 # when the panel and the database no longer answer. It alerts only on a state change, without
 # repeating itself.
 #
 # INSTALLATION (on the panel host, as root):
-#   install -D -m755 ops/panel-watchdog.sh /lib65/kervax/panel-watchdog.sh
+#   install -D -m755 ops/panel-watchdog.sh /lib65/scripts/kervax-panel-watchdog.sh
 #   # adjust HB below to your data path (default /root/kervax/data/heartbeat)
-#   echo '*/5 * * * * root /lib65/kervax/panel-watchdog.sh' > /etc/cron.d/kervax-watchdog
+#   echo '*/5 * * * * root /lib65/scripts/kervax-panel-watchdog.sh' > /etc/cron.d/kervax-watchdog
 #   chmod 644 /etc/cron.d/kervax-watchdog
 # (the script lives in /lib65 because /usr is excluded from backups; the cron config is in /etc.)
 
 set -u
 HB="${KERVAX_HEARTBEAT:-/root/kervax/data/heartbeat}"   # path to the heartbeat file on the host
-STATE=/lib65/kervax/watchdog.state
+STATE="${KERVAX_WD_STATE:-/lib65/kervax/watchdog.state}"
 MAX_AGE="${KERVAX_HB_MAX_AGE:-600}"                       # seconds: an older heartbeat raises an alarm
 STRIKES="${KERVAX_WD_STRIKES:-2}"                        # consecutive failing checks before alarming
+STAGE_STRIKES="${KERVAX_WD_STAGE_STRIKES:-5}"            # ticks in a row a stage may fail before alarming
 NOW=$(date +%s)
 
 val() { grep -m1 "^$1=" "$HB" 2>/dev/null | cut -d= -f2-; }
@@ -43,19 +48,31 @@ send() {
 
 problem=""
 if [ ! -f "$HB" ]; then
-  problem="the heartbeat file is missing - the scheduler is not writing it (is the panel running?)"
+  problem="heartbeat missing; check the scheduler"
 else
   ts=$(val ts); ok=$(val alerts_ok); age=$(( NOW - ${ts:-0} ))
   if [ "${ts:-0}" -eq 0 ] || [ "$age" -gt "$MAX_AGE" ]; then
-    problem="the panel has been silent for ${age}s (>${MAX_AGE}s) - container, scheduler or database is dead or hung"
+    problem="no heartbeat for ${age}s; check the panel"
   elif [ "$ok" = "0" ]; then
-    problem="the panel is alive but its alert channel is broken (Telegram unreachable or the token is invalid)"
+    problem="alert delivery failed; check Telegram and the token"
+  else
+    # older panels do not write these lines: empty values mean "nothing to check"
+    tick=$(val tick); tick_max=$(val tick_max); sf=$(val stage_fail)
+    case "$tick" in ''|*[!0-9]*) tick=0;; esac
+    case "$tick_max" in ''|*[!0-9]*) tick_max=0;; esac
+    sf_n=${sf%% *}; case "$sf_n" in ''|*[!0-9]*) sf_n=0;; esac
+    if [ "$tick" -gt 0 ] && [ "$tick_max" -gt 0 ] && [ $(( NOW - tick )) -gt "$tick_max" ]; then
+      problem="tick stuck for $(( NOW - tick ))s; see Panel errors"
+    elif [ "$sf_n" -ge "$STAGE_STRIKES" ]; then
+      problem="stage failed ${sf_n} ticks; see Panel errors"
+    fi
   fi
 fi
 
 # which panel exactly (from the heartbeat), so the alert says what went down
 panel=$(val panel)
 [ -z "$panel" ] && panel="$(hostname)"
+[ "${#panel}" -gt 64 ] && panel="$(hostname)"
 tag="🚑 Kervax watchdog [$panel]"
 
 # Debounce: an alarm is sent only after STRIKES consecutive failing checks, so short-lived
