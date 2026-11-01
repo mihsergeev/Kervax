@@ -237,7 +237,8 @@ def test_digest_drops_job_logs():
 
     m = "💥☸️ k8s-a - упал Job: shop/migrate-42\n↳ под migrate-42-x7k2p, конец лога:\n<pre>boom</pre>"
     d = alerts._digest([m] * 6)
-    assert "<pre>" not in d and "boom" not in d and d.count("упал Job: shop/migrate-42") == 6
+    assert "<pre>" not in d and "boom" not in d and d.count("упал Job: shop/migrate-42") == 3
+    assert len(d.splitlines()) == 4 and d.endswith('и еще 3')
 
 
 def test_restarts_are_declined():

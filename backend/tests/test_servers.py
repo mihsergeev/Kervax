@@ -271,7 +271,10 @@ async def test_server_alert_rules_disable_scope_text(tmp_path, monkeypatch):
             s, {"offline": {"enabled": True, "text": "УПАЛ {server}!", "scope_type": "all"}}
         )
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and sent[0].startswith("УПАЛ node!")
+    assert len(sent) == 1 and '<b>УПАЛ node!</b>' in sent[0]
+    assert sent[0].kind == 'offline' and len(sent[0].splitlines()) <= 4
+    from app.alerts import full_text
+    assert 'УПАЛ node!' in full_text(sent[0])
     await engine.dispose()
 
 
@@ -667,8 +670,9 @@ async def test_server_alert_flood_digest(tmp_path, monkeypatch):
 
     await collector.evaluate_servers(factory, settings, now)
     assert len(sent) == 1 and "8 серверов" in sent[0] and "Не на связи" in sent[0]
-    # в чате первые шесть именами и "и еще 2", весь список - в полном тексте
-    assert all(f"node{i}" in sent[0] for i in range(6)) and "и еще 2" in sent[0]
+    # Three linked names in chat, all affected servers in full history.
+    assert all(f"node{i}" in sent[0] for i in range(3)) and "и еще 5" in sent[0]
+    assert len(sent[0].splitlines()) <= 4
     assert all(f"node{i}" in full_text(sent[0]) for i in range(8))
 
     # порог дайджеста 0 = выкл: склейка от него не зависит, все равно одно сообщение

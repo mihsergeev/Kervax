@@ -100,7 +100,7 @@ def test_schedule_change_is_not_a_miss():
 
 
 def test_alert_short_text_and_link():
-    """Формат A: что случилось, CronJob с причиной, строка лога; ссылка открывает его строку и лог."""
+    """The alert has the CronJob and cause; its link opens the full log in the panel."""
     last = {"job": "export-29879100", "st": "failed", "reason": "BackoffLimitExceeded", "pr": "Error", "x": 1,
             "log": "SQLSTATE[HY000] [2002] Connection refused"}
     rep = _rep(_cj(last_schedule=TS - 3600, last_success=TS - 30 * 3600, last=last))
@@ -109,8 +109,8 @@ def test_alert_short_text_and_link():
     assert lvl == 1 and ctx["url_tail"] == "&cj=default/export&log=1"
     what, facts = srv_short.short("kube_cron", ctx, s)
     assert what == "Упал CronJob"
-    assert facts == ["default/export - BackoffLimitExceeded, код 1",
-                     "Последняя строка лога: SQLSTATE[HY000] [2002] Connection refused"]
+    assert facts == ["default/export - BackoffLimitExceeded, код 1"]
+    assert ctx['items'][0]['log'] == last['log']
     # не запускается: дни словом
     ls = TS - 4.3 * 86400
     rep = _rep(_cj(last_schedule=ls, last_success=ls + 60), _cj("hourly", schedule="0 * * * *",
