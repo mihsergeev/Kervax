@@ -62,6 +62,14 @@ def setup_needed(name: str, rep: dict, mutes: list[str] | None = None, relay: bo
     уточнить, чем невыкаченный helper, о котором панель молчит месяцами."""
     # relay-setup - только где в настройках сервера включен ретранслятор: helper держит прокси
     # и открывает порт, это решение человека, а не свойство ноды
+    if name == "docker-origin-setup":
+        from app import docker_risk
+        if "docker-origin" in (rep.get("extras") or {}):
+            return True
+        return any(isinstance(c, dict) and c.get("state") == "running"
+                   and docker_risk.SOCK in docker_risk.flags(c, True)
+                   and docker_risk.SOCK not in docker_risk.allowed(str(c.get("name") or ""), str(c.get("image") or ""))
+                   for c in (rep.get("docker") or {}).get("containers") or [])
     if name == "relay-setup":
         return relay
     # gre-setup - так же только по галочке: туннель до хоста панели включает человек
@@ -176,6 +184,7 @@ _MISSING_LABEL = {
 }
 _HELPER_LABEL = {
     "recheck-setup": "свежая перепроверка исправлений",
+    "docker-origin-setup": "происхождение образов Docker",
     "backup-setup": "бэкап-транспорт",
     "backupserver-setup": "статистика бэкап-сервера",
     "kube-setup": "доступ в Kubernetes",

@@ -34,7 +34,7 @@ def test_tools_get_only_what_they_need():
         _c("cadvisor", "gcr.io/cadvisor/cadvisor:v0.52.1", priv=True, binds=["/", "/var/run", "/sys"], ro=["/", "/sys"]),
         _c("node-exporter", "prom/node-exporter:v1.9.1", pid_host=True, binds=["/"], ro=["/"]),
         _c("promtail", "grafana/promtail:3.4.2", binds=["/var/run/docker.sock", "/var/log"], ro=["/var/log"]),
-        _c("kervax-docker-proxy", "sha256:4cada1e3f8e2", binds=["/var/run/docker.sock"]),
+        _c("kervax-docker-proxy", "wollomatic/socket-proxy:1.13.1", binds=["/var/run/docker.sock"]),
         _c("sentinel", "ghcr.io/coollabsio/sentinel:1.0.2", binds=["/var/run/docker.sock"]),
         _c("amnezia-awg2", "amnezia-awg2", priv=True, caps=["SYS_MODULE"]),
         _c("ci-dind", "docker:27-dind", priv=True),

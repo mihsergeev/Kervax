@@ -755,6 +755,7 @@ async def _name_free(session, name: str, exclude_id: int | None = None, user=Non
 
 
 _SETUP_LABEL = {
+    "docker-origin-setup": "Происхождение образов Docker",
     "recheck-setup": "Свежая перепроверка исправлений",
     "backup-setup": "Бэкап (клиент)",
     "backupserver-setup": "Бэкап-сервер",

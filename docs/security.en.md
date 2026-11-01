@@ -52,6 +52,23 @@ node. If you would rather not have that request: do not install the helper —
 without it the panel simply does not know the dates, everything else is
 unchanged.
 
+The optional `docker-origin-setup` helper verifies locally derived
+`wollomatic/socket-proxy` images. It reads only the local Docker API, checks an
+immutable parent digest and every added filesystem layer, and accepts only empty
+socket mount placeholders. It checks a closed set of read-only API rules,
+an internal network and the container's privilege restrictions on every refresh.
+Names, local tags and opaque hashes alone never establish this origin. Missing,
+stale or incomplete proof leaves the socket warning active; privileges and other
+host access remain separate findings. A read-only socket mount does not restrict
+the Docker API.
+
+Install this helper explicitly on the Docker node with the panel's helper command.
+It requires Python 3, installs its collector in `/lib65/scripts/` and writes only
+proof metadata to `/var/lib/kervax/report.d/docker-origin.json`. It never sends
+container environment values or commands to the panel. It does not change or
+restart containers. Unknown command rules, changed program files and unavailable
+image ancestry keep the warning active.
+
 ## 3. What the panel can even tell the agent
 
 The panel's reply to the agent is a struct with exactly two fields:

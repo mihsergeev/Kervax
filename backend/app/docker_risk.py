@@ -37,7 +37,7 @@ from __future__ import annotations
 import re
 import shlex
 
-from app import compose_cmd, docker_exposure, tg_fmt
+from app import compose_cmd, docker_exposure, docker_origin, tg_fmt
 from app.models import Server
 
 MUTE_PREFIX = "dockrisk:"
@@ -99,8 +99,6 @@ def allowed(name: str, image: str) -> frozenset[str]:
         out.add(SOCK)  # Coolify и его sentinel управляют контейнерами
     if nm.startswith("amnezia-"):
         out |= {PRIV, CAPS}  # контейнеры Amnezia VPN запускаются privileged
-    if nm == "kervax-docker-proxy":
-        out.add(SOCK)  # наш прокси сокета, образ бывает виден как sha256:...
     if base == "docker" and "dind" in tag:
         out.add(PRIV)
     return frozenset(out)
@@ -202,6 +200,8 @@ def view(srv: Server, fix: bool = False) -> list[dict]:
             continue
         name = str(c.get("name") or "")
         ok = allowed(name, str(c.get("image") or ""))
+        if docker_origin.verified_socket(rep, c):
+            ok = ok | {SOCK}
         fl = [f for f in flags(c, new) if f not in ok and not (f == SOCK and name in edge)]
         dd = dind(c) if PRIV in fl else None
         if dd:
