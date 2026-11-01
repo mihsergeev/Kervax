@@ -42,6 +42,9 @@ async def _row(session, server_id: int) -> ServerPackages:
 
 async def store_part(session, server, h: str, mgr: str, part: int, parts: int, items: list, now: datetime) -> bool:
     """Кусок списка. Возвращает True, когда список собран целиком."""
+    reported = ((server.last_report or {}).get("pkgs") or {}).get("h")
+    if reported and reported != h:
+        return False  # delayed chunks of an inventory superseded by a fresh collection
     row = await _row(session, server.id)
     pend = row.pending if isinstance(row.pending, dict) else None
     if not pend or pend.get("h") != h or pend.get("parts") != parts:

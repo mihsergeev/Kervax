@@ -8,6 +8,7 @@ import { CountryFlag } from './CountryFlag'
 import { grpLabel, grpMuteNote, grpMuteTip } from './homeGroups'
 import { useI18n } from './i18n'
 import { shortList } from './serverUtils'
+import { activateHomeRow } from './homeKeyboard'
 
 export type ActGroupItem = {
   key: string
@@ -42,6 +43,8 @@ export function ActGroup<I extends ActGroupItem>({
   onToggle,
   onOpen,
   onMute,
+  recheckHeader,
+  recheckItem,
 }: {
   grp: string
   items: I[] // живые, не заглушенные
@@ -51,6 +54,8 @@ export function ActGroup<I extends ActGroupItem>({
   onToggle: () => void
   onOpen: (it: I) => void
   onMute: (list: I[], on: boolean) => Promise<unknown>
+  recheckHeader?: ReactNode
+  recheckItem?: (it: I) => ReactNode
 }) {
   const { t } = useI18n()
   const [sel, setSel] = useState<Set<string>>(() => new Set())
@@ -84,7 +89,7 @@ export function ActGroup<I extends ActGroupItem>({
     return (
       <div key={it.key} role="button" tabIndex={0} title={it.tip}
         className={`home-attention-row home-attention-subrow${low ? ' home-attention-muted' : ''}`}
-        onClick={go} onKeyDown={(e) => e.key === 'Enter' && e.target === e.currentTarget && go()}>
+        onClick={go} onKeyDown={(e) => activateHomeRow(e, go)}>
         {box && (
           <input type="checkbox" className="home-sel-box" checked={sel.has(it.key)} aria-label={it.name}
             onClick={(e) => e.stopPropagation()} onChange={(e) => pick([it.key], e.target.checked)} />
@@ -93,6 +98,7 @@ export function ActGroup<I extends ActGroupItem>({
           <CountryFlag code={it.cc} /> <b>{it.name}</b>
           {it.detail && !bare ? <span className="muted"> - {it.detail}</span> : null}
         </span>
+        {!low && recheckItem?.(it)}
         {low
           ? canMute && (
               <button className="linklike small" disabled={busy}
@@ -157,7 +163,8 @@ export function ActGroup<I extends ActGroupItem>({
     )
   return (
     <div className={`home-attention-grpbox${open ? ' open' : ''}`}>
-      <button className="home-attention-row" onClick={onToggle}>
+      <div role="button" tabIndex={0} className="home-attention-row" onClick={onToggle}
+        onKeyDown={(e) => activateHomeRow(e, onToggle)}>
         <span className="lk-dot lk-dot-warn" />
         <span className="home-attention-ico">{icon}</span>
         <span className="home-attention-txt">
@@ -165,8 +172,9 @@ export function ActGroup<I extends ActGroupItem>({
           <span className="muted"> · {t('серверов: {n}', { n: items.length })} ({names})</span>
           {muted.length > 0 && <span className="muted"> · {t('заглушено {n}', { n: muted.length })}</span>}
         </span>
+        {recheckHeader}
         <span className="home-open">{open ? '▾' : '▸'}</span>
-      </button>
+      </div>
       {open && (
         <div className="home-attention-sub">
           {bar}

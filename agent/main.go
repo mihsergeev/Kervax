@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.61"
+const version = "2.62"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -180,16 +180,16 @@ type report struct {
 	MemCached uint64 `json:"mem_cached"`
 	MemFree   uint64 `json:"mem_free"`
 	// swap-активность (байт/сек) + детальная разбивка памяти (байты)
-	SwapIn       float64 `json:"swap_in"`       // подкачано с диска
-	SwapOut      float64 `json:"swap_out"`      // вытеснено на диск
+	SwapIn  float64 `json:"swap_in"`  // подкачано с диска
+	SwapOut float64 `json:"swap_out"` // вытеснено на диск
 	// 2.58: major faults ноды в секунду - страницы, которые пришлось читать с диска. Когда swap
 	// уже забит, своп почти стоит, а память все равно кончилась: ядро выкидывает код и кэш
 	// процессов и тут же читает их снова. Так зависал сервер с двумя сборками Gradle: swap_in
 	// 170 КБ/с, а major faults больше тысячи в секунду. nil - первый отчет после запуска
-	MajFlt *float64 `json:"majflt,omitempty"`
-	MemSlab      uint64  `json:"mem_slab"`      // память ядра (slab-аллокатор)
-	MemDirty     uint64  `json:"mem_dirty"`     // «грязные» страницы (ждут записи)
-	MemWriteback uint64  `json:"mem_writeback"` // активно пишутся на диск
+	MajFlt       *float64 `json:"majflt,omitempty"`
+	MemSlab      uint64   `json:"mem_slab"`      // память ядра (slab-аллокатор)
+	MemDirty     uint64   `json:"mem_dirty"`     // «грязные» страницы (ждут записи)
+	MemWriteback uint64   `json:"mem_writeback"` // активно пишутся на диск
 	// разбивка по интерфейсам/устройствам (для overlay-графиков)
 	NetIfaces []ifaceRate `json:"net_ifaces"` // rx/tx по каждому NIC, байт/сек
 	DiskDevs  []devRate   `json:"disk_devs"`  // %util/await/°C по каждому диску
@@ -368,16 +368,17 @@ type backupInfo struct {
 // снимок Kubernetes на ноде (read-only). Агент ходит в kube-API по токену
 // выделенного ServiceAccount с УЗКИМ RBAC (см. kube-setup.sh) — не cluster-admin.
 type kubeInfo struct {
-	Present    bool           `json:"present"`
-	Access     bool           `json:"access"`            // прочитан kube.json и опрошен kube-api
-	Flavor     string         `json:"flavor,omitempty"`  // k0s/k3s/microk8s/kubeadm/kubernetes
-	Version    string         `json:"version,omitempty"` // серверная k8s-версия (gitVersion)
-	Nodes      []kubeNode     `json:"nodes,omitempty"`
-	Namespaces int            `json:"namespaces,omitempty"`
-	Workloads  []kubeWorkload `json:"workloads,omitempty"`
-	Pods       []kubePod      `json:"pods,omitempty"`
-	CronJobs   []kubeCronJob  `json:"cronjobs,omitempty"` // панель по ним видит уже настроенные дампы
-	Volumes    []kubeVolume   `json:"volumes,omitempty"`  // тома: панель сверяет их с покрытием бэкапа
+	PodsComplete bool           `json:"pods_complete"` // only a successful complete bulk list proves absence
+	Present      bool           `json:"present"`
+	Access       bool           `json:"access"`            // прочитан kube.json и опрошен kube-api
+	Flavor       string         `json:"flavor,omitempty"`  // k0s/k3s/microk8s/kubeadm/kubernetes
+	Version      string         `json:"version,omitempty"` // серверная k8s-версия (gitVersion)
+	Nodes        []kubeNode     `json:"nodes,omitempty"`
+	Namespaces   int            `json:"namespaces,omitempty"`
+	Workloads    []kubeWorkload `json:"workloads,omitempty"`
+	Pods         []kubePod      `json:"pods,omitempty"`
+	CronJobs     []kubeCronJob  `json:"cronjobs,omitempty"` // панель по ним видит уже настроенные дампы
+	Volumes      []kubeVolume   `json:"volumes,omitempty"`  // тома: панель сверяет их с покрытием бэкапа
 	// упавшие за неделю Job, запущенные не по расписанию CronJob (миграции, разовые задачи)
 	FailedJobs []kubeJob `json:"failed_jobs,omitempty"`
 	// сервисы NodePort и LoadBalancer: порты, открытые на каждой ноде кластера
@@ -482,6 +483,7 @@ type kubeNode struct {
 // kubeUse - CPU в милликорах и память в байтах: использование пода или ноды по
 // metrics-server (как kubectl top) или объем ноды.
 type kubeUse struct {
+	Ts   int64  `json:"ts,omitempty"` // metrics.k8s.io sample timestamp; capacity has no timestamp
 	CPUm uint64 `json:"cpu_m"`
 	Mem  uint64 `json:"mem"`
 }
@@ -521,14 +523,14 @@ type kubePod struct {
 	Use *kubeUse `json:"use,omitempty"`
 	// начало metadata.uid (8 символов): агент воркера без доступа к kube-api знает свои поды
 	// только по uid из cgroup ("pod 56279ecf"), и по этому полю панель находит их имена
-	U    string `json:"u,omitempty"`
+	U string `json:"u,omitempty"`
 	// Только у подов с перезапусками: как кончился прошлый запуск контейнера, который
 	// перезапускался последним (kubectl describe: Last State). По нему панель пишет причину
 	// в алерте и в разделе "Перезапуски": OOMKilled при лимите, убит по пробе, exit 1 и строка лога
 	Last *kubeLast `json:"last,omitempty"`
-	ip   string // podIP: нужен агенту для скрейпа метрик, в отчёт НЕ уходит (строчная = не сериализуется)
-	uid  string // metadata.uid: по нему под находится в cgroup ноды
-	ctrl string // контроллер; в отчет - только у подов этой ноды (Ctrl)
+	ip   string    // podIP: нужен агенту для скрейпа метрик, в отчёт НЕ уходит (строчная = не сериализуется)
+	uid  string    // metadata.uid: по нему под находится в cgroup ноды
+	ctrl string    // контроллер; в отчет - только у подов этой ноды (Ctrl)
 }
 
 // kubeLast - прошлое завершение контейнера пода (lastState.terminated). Probe/PMsg - из событий
@@ -721,12 +723,13 @@ func dbImageLike(image string) bool {
 
 // снимок Docker на ноде (read-only)
 type dockerInfo struct {
-	Present    bool              `json:"present"`
-	Access     bool              `json:"access"` // агент смог прочитать сокет
-	Version    string            `json:"version,omitempty"`
-	APIVersion string            `json:"api_version,omitempty"`
-	Compose    string            `json:"compose,omitempty"`
-	Containers []dockerContainer `json:"containers,omitempty"`
+	ContainersComplete bool              `json:"containers_complete"` // socket/version access is not a successful inventory
+	Present            bool              `json:"present"`
+	Access             bool              `json:"access"` // агент смог прочитать сокет
+	Version            string            `json:"version,omitempty"`
+	APIVersion         string            `json:"api_version,omitempty"`
+	Compose            string            `json:"compose,omitempty"`
+	Containers         []dockerContainer `json:"containers,omitempty"`
 }
 
 type dockerContainer struct {
@@ -5062,7 +5065,7 @@ func collect(prev sample) (report, sample) {
 		SockUsed: sockUsed, SockTCP: sockTCP, SockTW: sockTW, SockUDP: sockUDP,
 		// watchdog: systemd задаёт WATCHDOG_USEC, когда в юните есть WatchdogSec (Type=notify).
 		// Нет → юнит старый, systemd не поднимет зависший агент → панель советует переустановку.
-		Caps:          map[string]bool{"kmsg": canReadKmsg(), "proc_full": procFullyVisible(), "watchdog": os.Getenv("WATCHDOG_USEC") != ""},
+		Caps:          map[string]bool{"alert_recheck": true, "alert_recheck_root": rootRecheckReady(), "kmsg": canReadKmsg(), "proc_full": procFullyVisible(), "watchdog": os.Getenv("WATCHDOG_USEC") != ""},
 		UpdateError:   lastUpdateErrorText(),
 		Docker:        dk,
 		Backup:        collectBackup(),
@@ -5870,7 +5873,8 @@ func collectDocker() *dockerInfo {
 			Type        string
 		}
 	}
-	if err := dockerGet(cl, "/containers/json?all=1", &raw); err == nil {
+	if err := dockerGet(cl, "/containers/json?all=1", &raw); err == nil && raw != nil {
+		di.ContainersComplete = true
 		for _, c := range raw {
 			name := ""
 			if len(c.Names) > 0 {
@@ -6598,7 +6602,8 @@ func commandLoop(panelURL, token string) {
 			BackupCommands []backupCommand `json:"backup_commands"`
 			// «Проверить сейчас» у сайта, который проверяем изнутри: человек ждёт ответ
 			// на кнопке, поэтому задание берём здесь, а не следующим отчётом (до 15 с).
-			SiteProbes []siteProbe `json:"site_probes"`
+			SiteProbes    []siteProbe        `json:"site_probes"`
+			AlertRechecks []alertRecheckTask `json:"alert_rechecks"`
 		}
 		if resp.StatusCode == 200 {
 			_ = json.NewDecoder(resp.Body).Decode(&out)
@@ -6615,6 +6620,9 @@ func commandLoop(panelURL, token string) {
 		}
 		for _, p := range out.SiteProbes {
 			go runManualSiteProbe(panelURL, token, p)
+		}
+		for _, t := range out.AlertRechecks {
+			go runAlertRecheck(strings.TrimRight(panelURL, "/"), token, t)
 		}
 	}
 }
@@ -6896,7 +6904,7 @@ func collectKube() *kubeInfo {
 	ki.Workloads = append(ki.Workloads, kubeReplicaWorkloads(cl, kc, "deployments", "Deployment")...)
 	ki.Workloads = append(ki.Workloads, kubeReplicaWorkloads(cl, kc, "statefulsets", "StatefulSet")...)
 	ki.Workloads = append(ki.Workloads, kubeDaemonsets(cl, kc)...)
-	ki.Pods = kubePods(cl, kc)
+	ki.Pods, ki.PodsComplete = kubePods(cl, kc)
 	// использование подов и нод по metrics-server, если он есть (нет - тихо без него)
 	if podUse, nodeUse := kubeMetrics(cl, kc); podUse != nil || nodeUse != nil {
 		for i := range ki.Pods {
@@ -7606,8 +7614,11 @@ func secretVarLike(n string) bool {
 	return false
 }
 
-func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
+func kubePods(cl *http.Client, kc *kubeConf) ([]kubePod, bool) {
 	var d struct {
+		Metadata struct {
+			Continue string `json:"continue"`
+		}
 		Items []struct {
 			Metadata struct {
 				Name, Namespace, UID string
@@ -7659,7 +7670,7 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 		}
 	}
 	if kubeGet(cl, kc, "/api/v1/pods", &d) != nil {
-		return nil
+		return nil, false
 	}
 	defer kubeLastRotate()
 	lookups := 0 // событий и логов прошлого запуска за один отчет - не больше kubeLastLookups
@@ -7779,10 +7790,11 @@ func kubePods(cl *http.Client, kc *kubeConf) []kubePod {
 		kp.Ready = ready && p.Status.Phase == "Running"
 		out = append(out, kp)
 	}
+	complete := d.Items != nil && d.Metadata.Continue == "" && len(out) <= kubePodCap
 	if len(out) > kubePodCap {
 		out = kubeCapPods(out, kubePodCap)
 	}
-	return out
+	return out, complete
 }
 
 type kubeTerm struct {
@@ -7965,6 +7977,7 @@ func kubeMetrics(cl *http.Client, kc *kubeConf) (map[string]*kubeUse, map[string
 	var pods struct {
 		Items []struct {
 			Metadata   struct{ Name, Namespace string }
+			Timestamp  time.Time
 			Containers []struct {
 				Usage map[string]string
 			}
@@ -7975,6 +7988,9 @@ func kubeMetrics(cl *http.Client, kc *kubeConf) (map[string]*kubeUse, map[string
 		podUse = make(map[string]*kubeUse, len(pods.Items))
 		for _, it := range pods.Items {
 			u := &kubeUse{}
+			if !it.Timestamp.IsZero() {
+				u.Ts = it.Timestamp.Unix()
+			}
 			for _, c := range it.Containers {
 				if cu := quantityUse(c.Usage["cpu"], c.Usage["memory"]); cu != nil {
 					u.CPUm += cu.CPUm
@@ -7986,15 +8002,22 @@ func kubeMetrics(cl *http.Client, kc *kubeConf) (map[string]*kubeUse, map[string
 	}
 	var nodes struct {
 		Items []struct {
-			Metadata struct{ Name string }
-			Usage    map[string]string
+			Metadata  struct{ Name string }
+			Timestamp time.Time
+			Usage     map[string]string
 		}
 	}
 	var nodeUse map[string]*kubeUse
 	if kubeGet(cl, kc, "/apis/metrics.k8s.io/v1beta1/nodes", &nodes) == nil {
 		nodeUse = make(map[string]*kubeUse, len(nodes.Items))
 		for _, it := range nodes.Items {
+			if _, ok := parseQuantity(it.Usage["memory"]); !ok {
+				continue // missing/invalid memory is not a zero-byte working set
+			}
 			if u := quantityUse(it.Usage["cpu"], it.Usage["memory"]); u != nil {
+				if !it.Timestamp.IsZero() {
+					u.Ts = it.Timestamp.Unix()
+				}
 				nodeUse[it.Metadata.Name] = u
 			}
 		}
@@ -8554,6 +8577,7 @@ type dumpStat struct {
 	// когда дамп включён (mtime скрипта). Панель по нему даёт grace: сразу после
 	// включения «файлов нет» — норма, а не поломка (первый дамп в ближайший бэкап).
 	EnabledTs int64 `json:"enabled_ts,omitempty"`
+	ErrorTs   int64 `json:"error_ts,omitempty"` // last failed run; cleared after successful publication
 }
 
 // collectBackup — nil, если следов restic-бэкапа нет (секции в панели не будет).
@@ -8832,7 +8856,7 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 		// grafana и neo4j тут отсутствовали, и кнопка «включить дампы» для них
 		// отбивалась агентом, хотя и панель, и helper их умеют
 		switch cmd.Engine {
-		case "pg", "mysql", "ch", "redis", "rabbitmq", "k8s", "grafana", "neo4j":
+		case "pg", "mysql", "mongo", "ch", "redis", "rabbitmq", "k8s", "grafana", "neo4j":
 		default:
 			postBackupResult(panelURL, token, cmd.ID, false, "неизвестный движок дампа")
 			return
@@ -10147,9 +10171,8 @@ func main() {
 		case kick <- struct{}{}:
 		default:
 		}
-		r, cur := collect(prev)
+		r, cur, cfg, err := collectAndSend(url, token, prev)
 		prev = cur
-		cfg, err := send(url, token, r)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "kervax-agent: отправка не удалась: %v\n", err)
 		} else {
@@ -11275,6 +11298,7 @@ func pkgLoop() {
 	since := time.Now().Add(-pkgEvBackfill).Unix()
 	var lastFull time.Time
 	for {
+		pkgCollectMu.Lock()
 		prev := pkgLatest.Load()
 		if time.Since(lastFull) > 24*time.Hour {
 			prev, lastFull = nil, time.Now()
@@ -11282,6 +11306,7 @@ func pkgLoop() {
 		if pl := collectPkgs(prev); pl != nil {
 			pkgLatest.Store(pl)
 		}
+		pkgCollectMu.Unlock()
 		if fileExists(dpkgLogPath) {
 			pkgEvPush(tail.next(dpkgLogPath, since, time.Local))
 		}

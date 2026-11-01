@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import math
 from zoneinfo import ZoneInfo
 
 from app import podnames, tg_fmt
@@ -50,13 +51,15 @@ def targets(rep: dict) -> dict[str, int]:
     их пропускаем), процессы из топа по приватной памяти (самый большой из одноименных)."""
     out: dict[str, int] = {}
     dk = (rep or {}).get("docker") or {}
+    dk = dk if isinstance(dk, dict) else {}
     if dk.get("access"):
         for c in dk.get("containers") or []:
             if not isinstance(c, dict) or c.get("state") != "running" or not c.get("name"):
                 continue
             if int(c.get("mem") or 0) >= 2**20 and not _cache_db(str(c.get("image") or "")):
                 out["docker:" + str(c["name"])] = int(c["mem"]) >> 20
-    for p in ((rep or {}).get("kube") or {}).get("pods") or []:
+    kube = (rep or {}).get("kube") or {}
+    for p in (kube.get("pods") or []) if isinstance(kube, dict) else []:
         if not isinstance(p, dict) or p.get("owner") not in _POD_OWNERS or not p.get("name") or p.get("image"):
             continue
         mem = int(p.get("mem") or ((p.get("use") or {}).get("mem") if isinstance(p.get("use"), dict) else 0) or 0)
@@ -70,6 +73,143 @@ def targets(rep: dict) -> dict[str, int]:
         if private > 0 and private > out.get(key, 0):
             out[key] = private
     return out
+
+
+SAMPLE_MAX_AGE = 180  # metrics-server timestamp, not the arrival time of a cached sample
+
+
+def fresh(s: Server, now: datetime) -> bool:
+    if not s.last_seen:
+        return False
+    seen = s.last_seen.replace(tzinfo=s.last_seen.tzinfo or now.tzinfo)
+    return -60 <= (now - seen).total_seconds() <= (s.offline_after_seconds or 120)
+
+
+def inventory_complete(rep: dict, kind: str) -> bool:
+    """Only a successful full list proves absence. Access alone is a version probe.
+
+    In agent 2.61 nonempty lists come only from successful unpaginated bulk reads;
+    nil/error and successful empty are indistinguishable. Keep that narrow legacy
+    compatibility, without overriding an explicit false marker from a newer agent.
+    top_mem is a bounded ranking, so absence there never proves a process is gone.
+    """
+    block, marker, field = ({"pod": ("kube", "pods_complete", "pods"),
+                             "docker": ("docker", "containers_complete", "containers")}
+                            .get(kind, ("", "", "")))
+    data = rep.get(block)
+    if not isinstance(data, dict) or data.get("access") is not True:
+        return False
+    items = data.get(field, [])
+    if not isinstance(items, list) or any(not isinstance(x, dict) or not x.get("name") for x in items):
+        return False
+    if marker in data:
+        return data[marker] is True
+    return (rep.get("agent_version") == "2.61" and bool(items)
+            and (kind != "pod" or len(items) < 400))
+
+
+def members(rep: dict) -> dict[str, dict]:
+    """Active identities, independently of whether a memory sample is available."""
+    out = {}
+    docker, kube = rep.get("docker") or {}, rep.get("kube") or {}
+    for c in (docker.get("containers") or []) if isinstance(docker, dict) else []:
+        if isinstance(c, dict) and c.get("name") and c.get("state") == "running" and not _cache_db(str(c.get("image") or "")):
+            out["docker:" + str(c["name"])] = c
+    for pod in (kube.get("pods") or []) if isinstance(kube, dict) else []:
+        if isinstance(pod, dict) and pod.get("owner") in _POD_OWNERS and pod.get("name") and not pod.get("image") \
+                and pod.get("phase") in (None, "", "Running"):
+            out[f"pod:{pod.get('ns') or '?'}/{pod['name']}"] = pod
+    for proc in rep.get("top_mem") or []:
+        if isinstance(proc, dict) and proc.get("comm") and not _cache_db(str(proc["comm"])):
+            out[f"proc:{proc['comm']}@{proc.get('user') or '?'}"] = proc
+    return out
+
+
+def _sample_fresh(rep: dict, key: str, now: datetime) -> bool:
+    if key not in targets(rep):
+        return False
+    if not key.startswith("pod:"):
+        return True
+    pod = members(rep).get(key, {})
+    if int(pod.get("mem") or 0) > 0:  # this agent's local cgroup read
+        return True
+    use = pod.get("use")
+    ts = use.get("ts") if isinstance(use, dict) else None
+    return isinstance(ts, (int, float)) and -60 <= now.timestamp() - ts <= SAMPLE_MAX_AGE
+
+
+def _budget(total, used) -> int | None:
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in (total, used)):
+        return None
+    return int(total - used) if total > 0 and 0 <= used <= total else None
+
+
+def _node_budget(rep: dict, node: str, now: datetime) -> int | None:
+    kube = rep.get("kube") or {}
+    for n in (kube.get("nodes") or []) if isinstance(kube, dict) else []:
+        if not isinstance(n, dict) or n.get("name") != node:
+            continue
+        cap = n["cap"] if isinstance(n.get("cap"), dict) else {}
+        use = n["use"] if isinstance(n.get("use"), dict) else {}
+        free, ts = _budget(cap.get("mem"), use.get("mem")), use.get("ts")
+        if free is not None and isinstance(ts, (int, float)) and -60 <= now.timestamp() - ts <= SAMPLE_MAX_AGE:
+            return free
+    return None
+
+
+def _pool(rep: dict, key: str, now: datetime) -> tuple[str, int | None]:
+    if not key.startswith("pod:"):
+        hostname = str(rep.get("hostname") or "")
+        free = _node_budget(rep, hostname, now) if hostname else None
+        if free is not None:
+            return "node:" + hostname, free  # the same physical worker as its local pods
+        return "host", _budget(rep.get("mem_total"), rep.get("mem_used"))
+    pod = members(rep).get(key, {})
+    node = str(pod.get("node") or "")
+    if not node:
+        return "unknown:" + key, None
+    return "node:" + node, _node_budget(rep, node, now)
+
+
+def _identity_changed(cs: dict, item: dict) -> bool:
+    # StatefulSet names can be reused; a new UID must start its own series too.
+    return bool(item.get("u")) and cs.get("u") != item["u"]
+
+
+def previous_keys(s: Server) -> set[str]:
+    state = s.alert_state or {}
+    known = (s.known_issues or {}).get("mem_leak") or {}
+    keys = set(state.get("mem_leak_sig") or []) | set(state.get("mem_leak_told") or []) | set(known.get("sig") or [])
+    if keys:
+        return keys
+    return {k for k, v in (state.get("mem_trend") or {}).items() if leak(v) is not None}
+
+
+def recovery_confirmed(s: Server, now: datetime, keys=None) -> bool:
+    """No recovery timer from missing/failed inventory or missing worker metrics."""
+    if not fresh(s, now):
+        return False
+    rep, st = s.last_report or {}, (s.alert_state or {}).get("mem_trend") or {}
+    check = set(previous_keys(s) if keys is None else keys)
+    if not check:
+        return False
+    current = members(rep)
+    for key in check:
+        kind = key.partition(":")[0]
+        complete = inventory_complete(rep, kind)
+        if key not in current:
+            if not complete:
+                return False
+            continue
+        if kind == "pod" and _identity_changed(st.get(key) or {}, current[key]):
+            if not complete:
+                return False
+            continue
+        if not _sample_fresh(rep, key, now):
+            return False
+        if leak(st.get(key)) is not None and _pool(rep, key, now)[1] is None:
+            return False
+    return True
 
 
 def _local_day(now: datetime, tz: str | None) -> date:
@@ -96,13 +236,27 @@ def step(prev: dict | None, v: int, now: datetime, tz: str | None = None) -> dic
 
 
 def update(state: dict | None, rep: dict, now: datetime, tz: str | None = None) -> dict:
-    """Новое alert_state["mem_trend"]. Пропавшее из отчета держим сутки (контейнер пересоздали,
-    процесс выпал из топа на минуту), дальше забываем. tz - пояс панели: сутки по нему."""
+    """Новое alert_state["mem_trend"]. Подтвержденно исчезнувшее держим сутки для истории. Неполный снимок
+    и выпадение процесса из ограниченного top не доказывают исчезновение: прежний ряд сохраняем.
+    tz - пояс панели: сутки по нему."""
     old = state if isinstance(state, dict) else {}
-    new = {k: step(old.get(k), v, now, tz) for k, v in targets(rep).items()}
+    current = members(rep)
+    new = {}
+    for k, v in targets(rep).items():
+        if not _sample_fresh(rep, k, now):
+            continue
+        prev, item = old.get(k), current.get(k, {})
+        if k.startswith("pod:") and prev and _identity_changed(prev, item):
+            if not inventory_complete(rep, "pod"):
+                continue
+            prev = None
+        new[k] = step(prev, v, now, tz)
+        if k.startswith("pod:") and item.get("u"):
+            new[k]["u"] = item["u"]
     keep_from = (_local_day(now, tz) - timedelta(days=1)).isoformat()
     for k, v in old.items():
-        if k not in new and isinstance(v, dict) and str(v.get("d") or "") >= keep_from:
+        if k not in new and isinstance(v, dict) and (not inventory_complete(rep, k.partition(":")[0])
+                or k in current or str(v.get("d") or "") >= keep_from):
             new[k] = v
     return new
 
@@ -144,17 +298,27 @@ def problems(s: Server, now: datetime) -> list[dict]:
     """Что растет: {"key", "kind" (docker|pod|proc), "name", "rate", "eta_days", "level", "text"}.
     Процессы - только если не растет ни один контейнер и под: процесс в контейнере видно и в
     топе процессов, а сказать про это надо один раз. eta_days - на сколько суток хватит свободной
-    памяти сервера, если все растущее будет расти так же; уровень 2, если ее хватит меньше чем на
-    CRIT_DAYS, иначе 0 - растет, но памяти хватает: видно в карточке, не беда."""
+    памяти соответствующей ноды, если ее объекты продолжат расти так же. Pod использует только
+    свежие метрики своей worker-ноды. Без достоверного запаса ETA отсутствует, сам тренд виден;
+    прежний объявленный/известный уровень сохраняется до подтвержденного восстановления."""
     st = (s.alert_state or {}).get("mem_trend")
     if not isinstance(st, dict):
         return []
     muted = {m[len(MUTE_PREFIX):] for m in (s.alert_mutes or []) if m.startswith(MUTE_PREFIX)}
     rep = s.last_report or {}
     ctrl = podnames.ctrls(rep)
-    free = max(int(rep.get("mem_total") or 0) - int(rep.get("mem_used") or 0), 0)
+    current = members(rep)
+    report_fresh = fresh(s, now)
+    prior = s.alert_state or {}
+    known = (s.known_issues or {}).get("mem_leak") or {}
+    prior_sig = set(prior.get("mem_leak_sig") or prior.get("mem_leak_told") or [])
+    known_sig = set(known.get("sig") or [])
     out = []
     for key in sorted(st):
+        kind = key.partition(":")[0]
+        complete = report_fresh and inventory_complete(rep, kind)
+        if complete and (key not in current or kind == "pod" and _identity_changed(st[key], current[key])):
+            continue
         # мьют на под глушит и его ворклоад: после деплоя у пода новое имя
         if podnames.muted(muted, key, ctrl.get(key, "")):
             continue
@@ -171,16 +335,38 @@ def problems(s: Server, now: datetime) -> list[dict]:
                 f"{_fmt(lk['last'])}, +{_fmt(lk['rate'])} в сутки")
         out.append({"key": key, "kind": kind, "name": name, "rate": lk["rate"], "series": lk["series"],
                     "text": text})
-    if any(x["kind"] != "proc" for x in out):
+    # A controller's host processes are unrelated to pods on another worker.
+    local_pods = any(x["kind"] == "pod" and current.get(x["key"], {}).get("node") == rep.get("hostname")
+                     and rep.get("hostname") for x in out)
+    if local_pods or any(x["kind"] == "docker" for x in out):
         out = [x for x in out if x["kind"] != "proc"]
-    # память у растущих общая: на сколько ее хватит, считаем по их суммарному росту
-    total = sum(x["rate"] for x in out)
-    eta = round(free / total, 1) if free and total > 0 else None
+    pools = {x["key"]: _pool(rep, x["key"], now) for x in out}
+    rates = {}
     for x in out:
+        pool, _ = pools[x["key"]]
+        if report_fresh and _sample_fresh(rep, x["key"], now):
+            rates[pool] = rates.get(pool, 0) + x["rate"]
+    for x in out:
+        key = x["key"]
+        pool, free = pools[key]
+        valid = report_fresh and _sample_fresh(rep, key, now) and free is not None
+        if x["kind"] == "pod" and _identity_changed(st[key], current.get(key, {})):
+            valid = False
+        rate = rates.get(pool, 0)
+        eta = round(free / rate, 1) if valid and rate > 0 else None
         x["eta_days"] = eta
         x["level"] = 2 if eta is not None and eta < CRIT_DAYS else 0
-        if x["level"]:
-            x["text"] += f", свободной памяти сервера ({_fmt(free)}) при таком росте хватит примерно на {eta:g} сут"
+        if not valid:
+            # Preserve an announced/known problem while evidence is unavailable, without
+            # inventing an ETA or opening a new problem from an unverified old series.
+            levels = [int(prior.get("mem_leak") or 0) if not prior_sig or key in prior_sig else 0,
+                      int(known.get("level") or 0) if not known_sig or key in known_sig else 0]
+            x["level"] = max(levels)
+            x["text"] += ("; запас памяти ноды сейчас неизвестен" if report_fresh and _sample_fresh(rep, key, now)
+                          else "; актуальность тренда сейчас не подтверждена")
+        elif x["level"]:
+            where = "ноды " + pool[5:] if pool.startswith("node:") else "сервера"
+            x["text"] += f", свободной памяти {where} ({_fmt(free)}) при таком росте хватит примерно на {eta:g} сут"
     return out
 
 

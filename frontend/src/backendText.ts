@@ -461,6 +461,10 @@ const PHRASES: Rule[] = [
   [/память процесса (.+?) растет (\d+) суток подряд: /g, 'memory of process $1 has grown $2 days in a row: '],
   [/ в сутки, свободной памяти сервера \((.+?)\) при таком росте хватит примерно на (\S+) сут/g,
     ' a day, at this rate the free memory of the server ($1) lasts about $2 days'],
+  [/ в сутки, свободной памяти ноды (\S+) \((.+?)\) при таком росте хватит примерно на (\S+) сут/g,
+    ' a day, at this rate the free memory of node $1 ($2) lasts about $3 days'],
+  [/; запас памяти ноды сейчас неизвестен/g, '; node memory headroom is currently unknown'],
+  [/; актуальность тренда сейчас не подтверждена/g, '; current trend data is not verified'],
   [/ в сутки/g, ' a day'],
   // у своего лимита памяти (mem_limit.py)
   [/под (\S+) уперся в лимит памяти (\S+): используется (\d+)%/g, 'pod $1 hit its memory limit $2: $3% used'],

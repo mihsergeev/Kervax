@@ -150,7 +150,9 @@ AGENT_USER=kervax
 #       Dump scripts check their path on every run; refresh adds that check to older scripts.
 # 0.49: PG dumps use an explicit maintenance database, fail on any incomplete stage,
 # preserve database names, and refresh only the exact older generated PG runner.
-KERVAX_SETUP_VERSION=0.49  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.50: MongoDB full-instance archives with secure authentication and topology checks;
+# explicit read-only inspect for fresh alert rechecks.
+KERVAX_SETUP_VERSION=0.50  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -877,6 +879,118 @@ my_host_probe() {
   return 1
 }
 
+# A full-instance archive: the oplog is included only on replica-set members. No secrets
+# in argv, the spool, generated scripts or diagnostics. mongosh reads credentials from
+# stdin (a private root config) or from the container's standard initialization env/files.
+# A root config is required for native/nonstandard authentication; it contains uri,
+# username, password and authenticationDatabase, never executable shell code.
+mongo_run() {
+  local operation="$1" container="${2:-}" expected="${3:-}" cfg=/etc/kervax/mongo-backup.json js rc=0
+  case "$operation:$expected" in probe:|dump:replica|dump:standalone) ;; *) return 2 ;; esac
+  [ -z "$container" ] || cfg="/etc/kervax/mongo-backup.d/$container.json"
+  if [ -e "$cfg" ] || [ -L "$cfg" ]; then
+    if [ -L "$cfg" ] || [ ! -f "$cfg" ] || ! dump_path_safe "${cfg%/*}" || [ "$(stat -c '%u %a' "$cfg")" != '0 600' ]; then
+      echo "MongoDB: credentials config must be a root-owned regular 0600 file with safe parents" >&2; return 1
+    fi
+  else cfg=/dev/null; fi
+  js="const operation='$operation', expected='$expected';"
+  js+="$(cat <<'MONGO_JS'
+const fs = require('fs'), cp = require('child_process'), os = require('os'), path = require('path');
+let privateDir = '', stage = 'configuration', rc = 0;
+function fail(message) { throw new Error(message); }
+function envSecret(name) {
+  const file = process.env[name + '_FILE'];
+  return process.env[name] || (file ? fs.readFileSync(file, 'utf8').replace(/[\r\n]+$/, '') : '');
+}
+try {
+  const raw = fs.readFileSync(0, 'utf8');
+  const cfg = raw.trim() ? JSON.parse(raw) : {};
+  const uri = cfg.uri || 'mongodb://127.0.0.1:27017/?directConnection=true';
+  const target = new URL(uri);
+  if (target.protocol !== 'mongodb:' || target.username || target.password ||
+      !['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname)) fail('local URI required');
+  const username = cfg.username || envSecret('MONGO_INITDB_ROOT_USERNAME') || envSecret('MONGODB_ROOT_USER');
+  const password = cfg.password || envSecret('MONGO_INITDB_ROOT_PASSWORD') || envSecret('MONGODB_ROOT_PASSWORD');
+  if (!!username !== !!password) fail('username and password required together');
+  const authDB = cfg.authenticationDatabase || 'admin';
+  if (typeof authDB !== 'string' || !/^[A-Za-z0-9_-]+$/.test(authDB)) fail('invalid authentication database');
+  stage = 'tools';
+  const help = cp.spawnSync('mongodump', ['--help'], {encoding:'utf8'});
+  if (help.status !== 0 || !help.stdout.includes('--config')) fail('Database Tools 100.3+ required');
+  stage = 'access';
+  const connection = new Mongo(uri);
+  if (username && !connection.getDB(authDB).auth(username, password)) fail('authentication failed');
+  const admin = connection.getDB('admin');
+  const hello = admin.runCommand({hello:1});
+  if (!hello.ok) fail('hello failed');
+  if (hello.msg === 'isdbgrid') { stage = 'sharded'; fail('mongos is unsupported'); }
+  stage = 'topologyAccess';
+  const options = admin.runCommand({getCmdLineOpts:1});
+  if (!options.ok || !options.parsed) fail('cannot verify cluster role');
+  if (options.parsed.sharding && options.parsed.sharding.clusterRole) {
+    stage = 'sharded'; fail('shard/config server is unsupported');
+  }
+  const mode = hello.setName ? 'replica' : 'standalone';
+  if (expected && expected !== mode) { stage = 'topology'; fail('topology changed'); }
+  stage = 'access';
+  const databases = admin.runCommand({listDatabases:1, nameOnly:true, authorizedDatabases:false});
+  if (!databases.ok) fail('full instance access required');
+  // Require a built-in backup or root role for authenticated instances. A read-only
+  // application login must not silently publish a partial backup as complete.
+  const status = admin.runCommand({connectionStatus:1});
+  const roles = status.authInfo && status.authInfo.authenticatedUserRoles || [];
+  if (username && !roles.some(r => r.db === 'admin' && ['root', 'backup'].includes(r.role))) {
+    stage = 'role'; fail('backup role required');
+  }
+  privateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kervax-mongo-'));
+  fs.chmodSync(privateDir, 0o700);
+  const configPath = path.join(privateDir, 'tools.yml');
+  fs.writeFileSync(configPath, 'uri: ' + JSON.stringify(uri) + '\n' +
+    (password ? 'password: ' + JSON.stringify(password) + '\n' : ''), {mode:0o600});
+  const args = ['--config', configPath, '--quiet'];
+  if (username) args.push('--username', username, '--authenticationDatabase', authDB);
+  if (operation === 'probe') {
+    // A synthetic indexed _id query checks the tools login as well as the shell
+    // login, without running a full trial dump or scanning application data.
+    args.push('--archive=/dev/null', '--db=__kervax_backup_probe__',
+      '--collection=probe', '--query={"_id":"__kervax_backup_probe__"}');
+  } else {
+    args.push('--archive', '--gzip');
+    if (mode === 'replica') args.push('--oplog');
+  }
+  stage = operation === 'probe' ? 'toolsLogin' : 'dump';
+  const result = cp.spawnSync('mongodump', args, {stdio:['ignore', operation === 'probe' ? 'ignore' : 1, 'ignore']});
+  if (result.status !== 0) fail('mongodump failed');
+  if (operation === 'probe') print(mode);
+} catch (_) {
+  const messages = {
+    configuration:'invalid root credentials JSON; use a local uri, username, password and authenticationDatabase',
+    tools:'install mongosh and MongoDB Database Tools 100.3+ in the host/container',
+    access:'cannot authenticate or list the full instance; configure /etc/kervax/mongo-backup[.d/<container>].json (root 0600)',
+    role:'grant the built-in backup role on admin (or root) to the configured account',
+    sharded:'sharded clusters are unsupported; configure a cluster-aware backup separately',
+    topologyAccess:'cannot verify cluster role; grant getCmdLineOpts (for example clusterMonitor on admin) in addition to backup',
+    topology:'topology changed since the probe; retry the dump',
+    toolsLogin:'mongodump cannot authenticate; check credentials, authenticationDatabase and Database Tools compatibility',
+    dump:'mongodump failed; check database availability, backup permissions and oplog/DDL activity'
+  };
+  fs.writeSync(2, 'MongoDB: ' + (messages[stage] || 'backup failed') + '\n');
+  rc = 1;
+} finally {
+  if (privateDir) fs.rmSync(privateDir, {recursive:true, force:true});
+}
+process.exit(typeof rc === 'undefined' ? 0 : rc);
+MONGO_JS
+)"
+  if [ -n "$container" ]; then
+    docker exec -i "$container" mongosh --quiet --norc --nodb --eval "$js" < "$cfg" || rc=$?
+  else
+    if ! command -v mongosh >/dev/null 2>&1; then echo 'MongoDB: install mongosh and MongoDB Database Tools 100.3+ on the host' >&2; return 1; fi
+    mongosh --quiet --norc --nodb --eval "$js" < "$cfg" || rc=$?
+  fi
+  return "$rc"
+}
+
 # Every failed check says why: its error goes to the caller (cmd_dump_setup hands it to the
 # panel). Up to 0.37 most branches sent stderr to /dev/null with the output, and the panel showed
 # an empty reason.
@@ -904,6 +1018,7 @@ dump_probe() {
         docker exec -u postgres "$container" pg_dumpall -U "$pgu" --schema-only >/dev/null 2>&1 \
           || docker exec "$container" pg_dumpall -U "$pgu" --schema-only >/dev/null
       else sudo -u postgres pg_dumpall --schema-only >/dev/null; fi ;;
+    mongo) mongo_run probe "$container" >/dev/null ;;
     mysql)
       # mariadb:11 has no mysqldump name, the generated script already prefers mariadb-dump
       if [ -n "$container" ]; then
@@ -1124,8 +1239,8 @@ dumps_rsyncable_maybe() {
 cmd_dump_setup() {
   local engine="$1" container="${2:-}"
   case "$engine" in
-    pg|mysql|ch|redis|rabbitmq|k8s|grafana|neo4j) ;;
-    *) echo "unknown engine: $engine (supported: pg, mysql, ch, redis, rabbitmq, k8s, grafana, neo4j)" >&2; return 2 ;;
+    pg|mysql|mongo|ch|redis|rabbitmq|k8s|grafana|neo4j) ;;
+    *) echo "unknown engine: $engine (supported: pg, mysql, mongo, ch, redis, rabbitmq, k8s, grafana, neo4j)" >&2; return 2 ;;
   esac
   case "$container" in ''|*[!A-Za-z0-9._-]*) container="" ;; esac
   # a database in a pod: the "container" is the workload, entered with kubectl exec (see kube_enter)
@@ -1216,6 +1331,14 @@ cmd_dump_setup() {
     printf '#!/usr/bin/env bash\n# generated by kervax - dump of %s before the file backup\nset -uo pipefail\n' "$engine"
     dump_gz_header
     printf 'OUT=%q\nKEEP=%s\nCONT=%q\nKT=%q\nMINFREE=%s\nSKIPF=%q\n' "$out" "$keep" "$dcont" "$kt" "$minfree" "$skipf"
+    if [ "$engine" = mongo ]; then
+      printf 'ERRF=%q\n' "$DUMPS_D/$slot.error"
+      # One temporary directory per slot: serialize manual/timer/file-backup starts.
+      printf '%s\n' 'umask 077' 'exec 9>"${ERRF%.error}.lock"' 'flock 9 || exit 1'
+      cat <<'MONGO_ERROR_TRAP'
+trap 'rc=$?; if [ "$rc" -ne 0 ]; then date +%s > "$ERRF"; fi' EXIT
+MONGO_ERROR_TRAP
+    fi
     dump_path_guard
     printf 'TS=$(date +%%Y%%m%%d-%%H%%M%%S)\n'
     printf 'FINAL="$OUT"\nMULTI=""\n'
@@ -1269,6 +1392,11 @@ cmd_dump_setup() {
            # on the host: the client and the options file the probe got in with (my_host_probe)
            printf 'else MYBIN=%q; MYDEF=%q\n' "${MY_BIN:-mysqldump}" "$MY_DEF"
            printf '%s\n' '  "$MYBIN" ${MYDEF:+"--defaults-file=$MYDEF"} --all-databases --single-transaction --quick | $GZ > "$F"; fi' ;;
+      mongo)
+           declare -f mongo_run
+           printf 'MMODE="$(mongo_run probe "$CONT")" || { rm -rf "$OUT"; exit 1; }\n'
+           printf 'F="$OUT/mongodump-$MMODE-$TS.archive.gz"\n'
+           printf 'mongo_run dump "$CONT" "$MMODE" > "$F"\n' ;;
       redis) printf 'F="$OUT/redis-$TS.rdb"\n'
            # --rdb performs a full sync into a file; from a container we extract it with
            # docker cp because redis-cli writes a FILE (streaming to stdout is not supported
@@ -1365,9 +1493,10 @@ fi
     printf 'if [ $rc -ne 0 ] || [ ! -s "$F" ]; then rm -rf "$OUT"; echo "%s dump failed (rc=$rc)" >&2; exit 1; fi\n' "$engine"
     # gzip -t catches exactly a truncation: the file is there and not empty but cannot be decompressed
     printf 'case "$F" in *.gz) gzip -t "$F" 2>/dev/null || { rm -rf "$OUT"; echo "%s dump is corrupt (write interrupted)" >&2; exit 1; } ;; esac\n' "$engine"
-    printf 'chmod 0600 "$F"\n'
+    printf 'chmod 0600 "$F" || { rm -rf "$OUT"; echo "dump permissions failed" >&2; exit 1; }\n'
     # publication: the finished file is moved in one go and the temporary directory is removed
-    printf 'mv -f "$F" "$FINAL/"; F="$FINAL/$(basename "$F")"; rm -rf "$OUT"; OUT="$FINAL"\n'
+    printf 'mv -f "$F" "$FINAL/" || { rm -rf "$OUT"; echo "dump publication failed" >&2; exit 1; }; F="$FINAL/$(basename "$F")"; rm -rf "$OUT"; OUT="$FINAL"\n'
+    [ "$engine" != mongo ] || printf 'rm -f "$ERRF"\n'
     # rotation: only the last KEEP are kept, otherwise the history eats the local disk
     printf 'ls -1t "$OUT"/*.gz 2>/dev/null | tail -n +$((KEEP+1)) | xargs -r rm -f\n'
     printf 'echo "kervax-dump: %s → $F"\n' "$engine"
@@ -1428,7 +1557,7 @@ fi
 cmd_dump_remove() {
   local engine="$1" container="${2:-}"
   case "$engine" in
-    pg|mysql|ch|redis|rabbitmq|k8s|grafana|neo4j) ;;
+    pg|mysql|mongo|ch|redis|rabbitmq|k8s|grafana|neo4j) ;;
     *) echo "unknown engine: $engine" >&2; return 2 ;;
   esac
   case "$container" in ''|*[!A-Za-z0-9._-]*) container="" ;; esac
@@ -1458,7 +1587,7 @@ cmd_dump_remove() {
   # Old slots may predate the setup checks. No recursive removal through untrusted symlinks,
   # foreign-owned or writable intermediate directories, even under the default /backup.
   [ -z "$keepfiles" ] && ! dump_path_safe "$out" && keepfiles=1
-  rm -f "$f" "$DUMPS_D/$slot.meta" "$DUMPS_D/$slot.skip"
+  rm -f "$f" "$DUMPS_D/$slot.meta" "$DUMPS_D/$slot.skip" "$DUMPS_D/$slot.error"
   if [ -n "$keepfiles" ]; then
     refresh_config
     echo "OK $slot dumps disabled; the files in $out were left in place: it is not a dump directory this helper lays out"
@@ -1514,7 +1643,7 @@ cmd_get_config() {
   # looks exactly the same after enabling as before it.
   # A slot is either "engine" or "engine@container": the panel shows the state of EACH database
   # separately, otherwise a second postgres would look covered by the first one's dump
-  local dumps_json="" slot de dcont ddir dn dsz dts dkeep dminfree skipped skip_ts skip_free enabled_ts
+  local dumps_json="" slot de dcont ddir dn dsz dts dkeep dminfree skipped skip_ts skip_free enabled_ts error_ts
   for slot in "$DUMPS_D"/*.sh; do
     [ -f "$slot" ] || continue
     slot="$(basename "$slot" .sh)"
@@ -1531,9 +1660,9 @@ cmd_get_config() {
       dkeep="$(sed -n 's/^keep=//p' "$DUMPS_D/$slot.meta" | head -1)"
       dminfree="$(sed -n 's/^minfree=//p' "$DUMPS_D/$slot.meta" | head -1)"
     fi
-    dn=$(find "$ddir" -type f -name "*.gz" ! -path "*/.partial-*" 2>/dev/null | wc -l)
+    dn=$(find "$ddir" -type f -name "*.gz" ! -path "*/.partial-*" ! -path "*/.partial/*" 2>/dev/null | wc -l)
     dsz=$(du -sb "$ddir" 2>/dev/null | cut -f1); [ -z "$dsz" ] && dsz=0
-    dts=$(find "$ddir" -type f -name "*.gz" ! -path "*/.partial-*" -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)
+    dts=$(find "$ddir" -type f -name "*.gz" ! -path "*/.partial-*" ! -path "*/.partial/*" -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)
     [ -z "$dts" ] && dts=0
     # the out-of-space skip marker (written by the dump script itself): "ts|free_pct|need_mb"
     skipped=false; skip_ts=0; skip_free=0
@@ -1542,7 +1671,9 @@ cmd_get_config() {
       skip_ts="$(cut -d'|' -f1 "$DUMPS_D/$slot.skip")"; [ -z "$skip_ts" ] && skip_ts=0
       skip_free="$(cut -d'|' -f2 "$DUMPS_D/$slot.skip")"; [ -z "$skip_free" ] && skip_free=0
     fi
-    dumps_json="${dumps_json:+$dumps_json,}{\"engine\":\"$(json_escape "$de")\",\"container\":\"$(json_escape "$dcont")\",\"files\":$dn,\"size_bytes\":$dsz,\"last_ts\":$dts,\"keep\":${dkeep:-2},\"min_free_pct\":${dminfree:-10},\"dir\":\"$(json_escape "$ddir")\",\"skipped\":$skipped,\"skip_ts\":$skip_ts,\"skip_free_pct\":$skip_free,\"enabled_ts\":${enabled_ts:-0}}"
+    error_ts="$(head -c 20 "$DUMPS_D/$slot.error" 2>/dev/null || true)"
+    case "$error_ts" in ''|*[!0-9]*) error_ts=0 ;; esac
+    dumps_json="${dumps_json:+$dumps_json,}{\"engine\":\"$(json_escape "$de")\",\"container\":\"$(json_escape "$dcont")\",\"files\":$dn,\"size_bytes\":$dsz,\"last_ts\":$dts,\"keep\":${dkeep:-2},\"min_free_pct\":${dminfree:-10},\"dir\":\"$(json_escape "$ddir")\",\"skipped\":$skipped,\"skip_ts\":$skip_ts,\"skip_free_pct\":$skip_free,\"enabled_ts\":${enabled_ts:-0},\"error_ts\":$error_ts}"
   done
   # helper_version tells the panel that the helper on the node is outdated (it needs reinstalling)
   printf '{"manageable":true,"helper_version":%s,"mode":"%s","schedule":"%s","includes":[%s],"excludes":[%s],"repo_dest":"%s","dumps":[%s]}\n' \
@@ -3422,7 +3553,20 @@ verify_maybe() {
   ) 9>/run/kervax-backup-verify.lock > /dev/null 2>&1 &
 }
 
+# Explicit read-only collection for alert rechecks. No *_maybe, migrations, retries,
+# dump execution or unit mutations. Subshells contain collectors' shell option changes.
+# Failure of any collector rejects the entire result; an old cache is never substituted.
+cmd_inspect() {
+  local config unit custom
+  config="$(cmd_get_config)" || return 1
+  unit="$(unit_report)" || return 1
+  custom="$(cmd_custom_scan)" || return 1
+  [ -n "$config" ] && [ -n "$unit" ] && [ -n "$custom" ] || return 1
+  printf '{"v":1,"ts":%s,"complete":true,"backup_config":%s,"backup_unit":%s,"custom_backups":%s}\n' "$(date +%s)" "$config" "$unit" "$custom"
+}
+
 case "${1:-}" in
+  inspect)       cmd_inspect ;;
   get-config)    cmd_get_config ;;
   # the scan is throttled inside (every CUSTOM_EVERY seconds): the config refresh stays per-minute
   refresh)       dumps_paths_maybe || true; dumps_pg_maybe || true; refresh_config || true; unit_report_maybe || true; custom_scan_maybe; kube_access_maybe || true; dumps_trigger_maybe || true

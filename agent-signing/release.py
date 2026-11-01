@@ -78,7 +78,9 @@ def build_remote(pubkey: str, out: str, host: str, keyfile: str):
     ssh = lambda c: subprocess.run(["ssh", *base, host, c], check=True)  # noqa: E731
     scp = lambda a, cwd=None: subprocess.run(["scp", *base, *a], check=True, cwd=cwd)
     ssh("rm -rf /tmp/kervax-rel && mkdir -p /tmp/kervax-rel/src /tmp/kervax-rel/out")
-    scp(["go.mod", "main.go", f"{host}:/tmp/kervax-rel/src/"], cwd=AGENT)
+    sources = sorted(name for name in os.listdir(AGENT)
+                     if name.endswith(".go") and not name.endswith("_test.go"))
+    scp(["go.mod", *sources, f"{host}:/tmp/kervax-rel/src/"], cwd=AGENT)
     for arch in ARCHES:
         ssh(
             # docker без прав → sudo -n (build-хост может быть не root)

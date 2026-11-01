@@ -10,11 +10,11 @@ MB = 2**20
 
 def _rep(**kw):
     r = {"mem_total": 16 * 2**30, "mem_used": 8 * 2**30,
-         "docker": {"access": True, "containers": [
+         "docker": {"access": True, "containers_complete": True, "containers": [
              {"name": "worker", "image": "app/worker:1", "state": "running", "mem": 900 * MB},
              {"name": "db", "image": "mariadb:11", "state": "running", "mem": 4 * 2**30},
              {"name": "old", "image": "app/old:1", "state": "exited", "mem": 0}]},
-         "kube": {"pods": [{"ns": "shop", "name": "api-7f9", "owner": "ReplicaSet", "mem": 300 * MB},
+         "kube": {"access": True, "pods_complete": True, "pods": [{"ns": "shop", "name": "api-7f9", "owner": "ReplicaSet", "mem": 300 * MB},
                            {"ns": "db", "name": "pg-0", "owner": "StatefulSet", "image": "postgres:16", "mem": 2**30},
                            {"ns": "shop", "name": "job-1", "owner": "Job", "mem": 50 * MB}]},
          "top_mem": [{"comm": "java", "user": "app", "rss": 1200 * MB, "shared": 200 * MB},
@@ -120,7 +120,9 @@ def test_problems_alert_and_home_rows():
 def test_memory_is_shared_by_everything_that_grows():
     # свободно 1 ГБ: одному контейнеру с +200 МБ в сутки хватило бы на 5 суток, двоим - на 2.6
     two = _state(**{"docker:worker": [500, 700, 900, 1100, 1300], "docker:api": [500, 700, 900, 1100, 1300]})
-    ps = mem_trend.problems(_srv(two, rep=_rep(mem_used=15 * 2**30)), NOW)
+    rep = _rep(mem_used=15 * 2**30)
+    rep["docker"]["containers"].append({"name":"api","image":"app/api:1","state":"running","mem":900*MB})
+    ps = mem_trend.problems(_srv(two, rep=rep), NOW)
     assert [(x["key"], x["level"], x["eta_days"]) for x in ps] == [("docker:api", 2, 2.6), ("docker:worker", 2, 2.6)]
     one = _state(**{"docker:worker": [500, 700, 900, 1100, 1300]})
     assert mem_trend.problems(_srv(one, rep=_rep(mem_used=15 * 2**30)), NOW)[0]["level"] == 0
@@ -140,6 +142,8 @@ def test_no_false_recovery_when_still_growing():
 def test_pod_mute_survives_a_deploy():
     """Мьют роста памяти ставится на под, а после деплоя у пода новое имя: глушим ворклоад."""
     st = _state(**{"pod:shop/mail-worker-789cd65bb8-nkftn": [500, 700, 900, 1100, 1300]})
-    assert [x["key"] for x in mem_trend.problems(_srv(st), NOW)] == ["pod:shop/mail-worker-789cd65bb8-nkftn"]
-    assert mem_trend.problems(_srv(st, mutes=["leak:pod:shop/mail-worker-6b8b56c769-f4k8m"]), NOW) == []
-    assert mem_trend.problems(_srv(st, mutes=["leak:pod:shop2/mail-worker-6b8b56c769-f4k8m"]), NOW) != []
+    rep = _rep()
+    rep["kube"]["pods"].append({"ns":"shop","name":"mail-worker-789cd65bb8-nkftn","owner":"ReplicaSet","mem":1300*MB})
+    assert [x["key"] for x in mem_trend.problems(_srv(st, rep=rep), NOW)] == ["pod:shop/mail-worker-789cd65bb8-nkftn"]
+    assert mem_trend.problems(_srv(st, rep=rep, mutes=["leak:pod:shop/mail-worker-6b8b56c769-f4k8m"]), NOW) == []
+    assert mem_trend.problems(_srv(st, rep=rep, mutes=["leak:pod:shop2/mail-worker-6b8b56c769-f4k8m"]), NOW) != []

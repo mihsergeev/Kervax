@@ -175,6 +175,7 @@ _MISSING_LABEL = {
     "kube": "Kubernetes без доступа (нужен kube-setup)",
 }
 _HELPER_LABEL = {
+    "recheck-setup": "свежая перепроверка исправлений",
     "backup-setup": "бэкап-транспорт",
     "backupserver-setup": "статистика бэкап-сервера",
     "kube-setup": "доступ в Kubernetes",

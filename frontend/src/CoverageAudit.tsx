@@ -352,6 +352,9 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
           {side === 'q' && muteBtn(x)}
         </span>
         <div className="cov-ln" title={x.detail}>{rowLine(x, d)}</div>
+        {x.dump_engine === 'mongo' && (d || cfgFor === cfgKey) && (
+          <div className="cov-full small muted">{t('MongoDB: replica set снимается с oplog, восстановление с --oplogReplay. Для standalone приостановите запись на время дампа. Шардированные кластеры не поддерживаются.')}</div>
+        )}
         {d?.skipped && (
           <div className="cov-full form-error small">
             ⚠️ {t('последний прогон пропущен: на разделе было свободно {p}% (< порога) — расчистите место',

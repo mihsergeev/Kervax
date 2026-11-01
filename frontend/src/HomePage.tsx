@@ -19,13 +19,13 @@ import {
   type Server,
   dropCheckKnown,
   dropServerKnown,
-  setServerFixed,
   setServerKnown,
   type KnownIssue,
 } from './api'
 import type { Section } from './App'
 import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta, tallyTile, type TallyTile } from './serverUtils'
-import { FixedDialog, FIX_KINDS } from './FixedDialog'
+import { RecheckButton, RecheckSummary, recheckKey, recheckUnavailable, useAlertRechecks, type RecheckRef } from './AlertRecheck'
+import { activateHomeRow } from './homeKeyboard'
 import { KnownDialog } from './KnownDialog'
 import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, collectMutes, isDecision, kindLabel, liftMute, muteDate, muteLiveText, muteQuiet, oomCulpritLabel, withLive, type MuteItem } from './mutes'
 import { MaintChip, MaintHome } from './MaintModal'
@@ -496,6 +496,7 @@ type Warn = {
   days: number
   more?: number
   check: Check
+  members: number[]
 }
 
 const maxWarn = (w: number[]) => (w.length ? Math.max(...w) : 0)
@@ -515,11 +516,12 @@ function expiryWarnings(checks: Check[], hidden = false): Warn[] {
     expHidden(c, kind) === hidden && (days <= maxWarn(warn) || (hidden && !!expEntry(c, kind)))
   for (const c of checks) {
     if (c.check_ssl && c.ssl_days != null && inWarn(c, 'ssl', c.ssl_days, c.ssl_warn_days))
-      out.push({ id: c.id, name: c.name, kind: 'ssl', days: c.ssl_days, check: c })
+      out.push({ id: c.id, name: c.name, kind: 'ssl', days: c.ssl_days, check: c, members: [c.id] })
     if (c.check_domain && c.domain_days != null && inWarn(c, 'domain', c.domain_days, c.domain_warn_days)) {
       const zone = registrableDomain(c.target || c.name)
       const seen = byDomain.get(zone)
       if (seen) {
+        seen.members.push(c.id)
         seen.more = (seen.more ?? 0) + 1
         // ведём в монитор с наименьшим сроком — он и есть самый срочный
         if (c.domain_days < seen.days) {
@@ -529,7 +531,7 @@ function expiryWarnings(checks: Check[], hidden = false): Warn[] {
         }
         continue
       }
-      const w: Warn = { id: c.id, name: zone, kind: 'domain', days: c.domain_days, check: c }
+      const w: Warn = { id: c.id, name: zone, kind: 'domain', days: c.domain_days, check: c, members: [c.id] }
       byDomain.set(zone, w)
       out.push(w)
     }
@@ -552,8 +554,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const viaPanels = useViaPanels()
   // отметить проблему сервера известной (📌 в "Что сломано")
   const [knownFor, setKnownFor] = useState<{ id: number; kind: string; title: string } | null>(null)
-  // починили (✅ в "Что сломано", FixedDialog.tsx): markable - можно предложить известную, если еще видно
-  const [fixFor, setFixFor] = useState<{ id: number; kind: string; title: string; markable: boolean } | null>(null)
   const [avail, setAvail] = useState('')
   const [relProblem, setRelProblem] = useState('')
   const [probeHints, setProbeHints] = useState<LocalProbeSuggestion[]>([])
@@ -602,6 +602,18 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         .catch(() => setMutes([]))
     else setMutes([])
   }, [onUnauthorized, isAdmin])
+  const rechecks = useAlertRechecks(load)
+  const recheckAction = (refs: RecheckRef[]) => {
+    if (isViewer || !refs.length) return null
+    const blocked = Object.fromEntries(refs.flatMap((r) => {
+      const reason = recheckUnavailable(r, (servers ?? []).find((s) => s.id === r.object_id),
+        !!ov?.checks.find((c) => c.id === r.object_id)?.probe_local)
+      return reason ? [[recheckKey(r), reason]] : []
+    }))
+    return <RecheckButton refs={refs} jobs={rechecks.jobs} run={rechecks.run} blocked={blocked} />
+  }
+  const actRef = (it: ActItem): RecheckRef[] => it.id && it.grp
+    ? [{ object_type: 'server', object_id: it.id, kind: `home:${it.grp}` }] : []
 
   // быстрый мут прямо с главной: приглушить типы алертов сервера навсегда (alert_mutes).
   // Для диска warn ключ 'disk@1' — крит и проблема продолжат алертить (см. _muted).
@@ -813,10 +825,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const updN = fleet.length + (agentRowOn ? 1 : 0) + (helperRowOn ? 1 : 0)
   // строка "Что сломано"; sub - внутри раскрытой группы: сервер и подробности без шапки
   const brokenRow = (it: Broken, sub = false) => (
-    <button
+    <div role="button" tabIndex={0}
       key={it.key}
       className={`home-attention-row${sub ? ' home-attention-subrow' : ''}`}
       onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
+      onKeyDown={(e) => activateHomeRow(e, () => onOpen(it.section, it.id, it.srv, it.sec))}
     >
       {!sub && <span className={`lk-dot ${it.tone === 't-down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />}
       {!sub && <span className="home-attention-ico">{ISSUE_ICON[it.kind] ?? '⚠️'}</span>}
@@ -831,15 +844,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           </span>
         )}
       </span>
-      {it.srv && FIX_KINDS.has(it.kind) && !isViewer && (
-        <span className="quick-mute" title={t('Починили: убрать алерт сейчас и считать заново')}
-          onClick={(e) => {
-            e.stopPropagation()
-            setFixFor({ id: it.id, kind: it.kind, title: `${it.name} - ${it.text}`, markable: !!it.markable })
-          }}>
-          ✅
-        </span>
-      )}
+      {recheckAction([{ object_type: it.section === 'sites' ? 'check' : 'server', object_id: it.id, kind: it.kind }])}
       {it.markable && !isViewer && (
         <span className="quick-mute" title={t('Известная проблема: алерт молчит, пока не станет хуже')}
           onClick={(e) => {
@@ -877,7 +882,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         </span>
       )}
       <span className="home-open">→</span>
-    </button>
+    </div>
   )
   const brokenGrpRow = (r: BrokenRow) => {
     if ('one' in r) return brokenRow(r.one)
@@ -885,26 +890,30 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     const names = shortList([...new Set(r.items.map((x) => x.name))], t, 4)
     return (
       <div key={`bg-${r.grp}`} className={`home-attention-grpbox${open ? ' open' : ''}`}>
-        <button className="home-attention-row" onClick={() => toggleGrp(`b-${r.grp}`)}>
+        <div role="button" tabIndex={0} className="home-attention-row" onClick={() => toggleGrp(`b-${r.grp}`)}
+          onKeyDown={(e) => activateHomeRow(e, () => toggleGrp(`b-${r.grp}`))}>
           <span className="lk-dot lk-dot-warn" />
           <span className="home-attention-ico">{ISSUE_ICON[r.items[0].kind] ?? '⚠️'}</span>
           <span className="home-attention-txt">
             {r.head}
             <span className="muted"> · {t('серверов: {n}', { n: new Set(r.items.map((x) => x.id)).size })} ({names})</span>
           </span>
+          {recheckAction(r.items.map((it) => ({ object_type: it.section === 'sites' ? 'check' : 'server', object_id: it.id, kind: it.kind })))}
           <span className="home-open">{open ? '▾' : '▸'}</span>
-        </button>
+        </div>
         {open && <div className="home-attention-sub">{r.items.map((x) => brokenRow(x, true))}</div>}
       </div>
     )
   }
   const actRow = (it: ActItem) => (
-    <button key={it.key} className="home-attention-row" title={it.tip} onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
+    <div role="button" tabIndex={0} key={it.key} className="home-attention-row" title={it.tip} onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
+      onKeyDown={(e) => activateHomeRow(e, () => onOpen(it.section, it.id, it.srv, it.sec))}>
       <span className={`lk-dot ${it.fleet ? 'lk-dot-info' : 'lk-dot-warn'}`} />
       <span className="home-attention-ico">{it.icon}</span>
       <span className="home-attention-txt">
         <CountryFlag code={it.cc} /> {it.text}
       </span>
+      {recheckAction(actRef(it))}
       {it.mute && !isViewer && it.grp && (
         <QuickMute tip={grpMuteTip(it.grp, t)} busy={actBusy}
           onMute={() => {
@@ -913,7 +922,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           }} />
       )}
       <span className="home-open">→</span>
-    </button>
+    </div>
   )
   // группа - общий компонент с галками и заглушкой (ActGroup.tsx)
   const grpRow = (r: ActRow) =>
@@ -922,6 +931,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     ) : (
       <ActGroup key={`g-${r.grp}`} grp={r.grp} items={r.items} muted={r.muted} open={openGrps.has(r.grp)}
         canMute={!isViewer} onToggle={() => toggleGrp(r.grp)} onMute={muteActs}
+        recheckHeader={recheckAction(r.items.flatMap(actRef))} recheckItem={(it) => recheckAction(actRef(it))}
         onOpen={(it) => onOpen(it.section, it.id, it.srv, it.sec)} />
     )
   // Сводка сверху: плитка на раздел, клик ведет в него (HomeTiles.tsx). Беды - те же строки, что
@@ -1069,6 +1079,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
             {w.more ? ` · ${t('мониторов: {n}', { n: w.more + 1 })}` : ''}
           </span>
         </span>
+        {!off && recheckAction(w.members.map((id) => ({ object_type: 'check', object_id: id, kind: w.kind })))}
         {off ? (
           <ExpirySnoozeState check={w.check} kind={w.kind} canEdit={!isViewer} onDone={load} />
         ) : !isViewer && warnPick === key ? (
@@ -1097,21 +1108,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   return (
     <div>
       <p className="tagline">{t('Мониторинг инфраструктуры')}</p>
-      {fixFor && (
-        <FixedDialog
-          title={fixFor.title}
-          onClose={() => setFixFor(null)}
-          onKnown={fixFor.markable ? () => {
-            setKnownFor({ id: fixFor.id, kind: fixFor.kind, title: fixFor.title })
-            setFixFor(null)
-          } : undefined}
-          onSave={async (text) => {
-            await setServerFixed(fixFor.id, fixFor.kind, text)
-            setFixFor(null)
-            load()
-          }}
-        />
-      )}
+      <RecheckSummary refs={rechecks.last} jobs={rechecks.jobs} err={rechecks.err} />
       {knownFor && (
         <KnownDialog
           title={knownFor.title}
@@ -1145,7 +1142,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           {cap(t('Сайты'), siteRows, siteDown ? 'bad' : 'warn')}
           <div className="home-attention-list">
             {downChecks.slice(0, HOME_LIST_LIMIT).map((c) => (
-              <button key={c.id} className="home-attention-row" onClick={() => onOpen('sites', c.id)}>
+              <div role="button" tabIndex={0} key={c.id} className="home-attention-row" onClick={() => onOpen('sites', c.id)}
+                onKeyDown={(e) => activateHomeRow(e, () => onOpen('sites', c.id))}>
                 <span className={`lk-dot ${c.last_status === 'down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
                 <span className="home-attention-ico">🌐</span>
                 <span className="home-attention-txt">
@@ -1165,8 +1163,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                     {c.last_status !== 'up' && c.last_message ? ` · ${c.last_message}` : ''}
                   </span>
                 </span>
+                {recheckAction([{ object_type: 'check', object_id: c.id, kind: 'status' }])}
                 <span className="home-open">→</span>
-              </button>
+              </div>
             ))}
             {downChecks.length > HOME_LIST_LIMIT && (
               <button className="ghost small home-attention-more" onClick={() => onNavigate('sites')}>

@@ -4270,7 +4270,17 @@ def server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None =
     out = _server_problems(s, now, pod_names, web_err)
     if keep_fixed or not getattr(s, "alert_fixed", None):
         return out
-    return [p for p in out if not fixed_mod.pending(s, p.get("kind") or "")]
+    def pending_clean(p):
+        kind = p.get("kind") or ""
+        if not fixed_mod.pending(s, kind):
+            return False
+        ent = fixed_mod.entry(s, kind) or {}
+        # A verified recovery only skips the old hold. A new bad observation
+        # remains visible even before the normal alert collector's next tick.
+        if ent.get("verified"):
+            return not fixed_mod.left(s, kind, now, web_err, pod_names)
+        return True
+    return [p for p in out if not pending_clean(p)]
 
 
 def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None = None,
@@ -4727,7 +4737,7 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # (ретранслятор, через него ходят агенты других серверов) не тут: их падение - повод для алерта.
 # kervax-mirror-pull (перекачка копий на резервном) тут: отставшую копию ловит алерт backup_mirror.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(autoban|changes|cron|db-stats|disk-health|disk-usage|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|gre|gre-sync|mirror-pull|queues|relay-sync|sockfix|units|vpn|vpnflow|web-rate|web-sites|webfiles|workers"
+    r"kervax-(autoban|changes|cron|db-stats|disk-health|disk-usage|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|gre|gre-sync|mirror-pull|queues|recheck|relay-sync|sockfix|units|vpn|vpnflow|web-rate|web-sites|webfiles|workers"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
@@ -6389,6 +6399,8 @@ def dump_issues(rep: dict, now: datetime) -> tuple[list[str], str, list[str], in
     """Дампы СУБД так, как их видят алерты backup_dump и backup_dump_space: (сломанные, почему,
     пропущенные из-за места, % свободного). Упал сам бэкап - дампы не судим, это backup_failed."""
     bk = rep.get("backup") or {}
+    failed = sorted(_dump_label(d) for d in bk.get("dumps", []) if d.get("error_ts"))
+    error_reason = "последний запуск дампа завершился ошибкой, проверьте журнал дампов"
     from_systemd = bk.get("ts_source") == "systemd"
     # метрика без restic и таймера - следы старого бэкапа: дампы тогда сверяем по часам, как без
     # файлового бэкапа (одно правило с разделом "Бэкапы", app/backup_state.py)
@@ -6396,12 +6408,12 @@ def dump_issues(rep: dict, now: datetime) -> tuple[list[str], str, list[str], in
         if backup_state.backup_failed(bk):
             return [], "", [], 0
         skipped, free = _dump_skipped(bk)
-        return _dump_problems(bk), _DUMP_REASON_BACKUP, skipped, free
+        return sorted(set(failed + _dump_problems(bk))), error_reason if failed else _DUMP_REASON_BACKUP, skipped, free
     if bk.get("dumps"):
         now_ts = now.timestamp()
         broken = sorted(_dump_label(d) for d in bk["dumps"] if dump_local_stale(d, now_ts))
         skipped, free = _dump_skipped(bk)
-        return broken, _DUMP_REASON_LOCAL, skipped, free
+        return sorted(set(failed + broken)), error_reason if failed else _DUMP_REASON_LOCAL, skipped, free
     return [], "", [], 0
 
 
@@ -6928,9 +6940,9 @@ def _server_conditions(s: Server, now: datetime,
         # Файлового бэкапа нет, а дампы есть: helper снимает их своим таймером, и сверять
         # их не с чем, кроме часов (см. dump_local_stale). Висящий алерт при выключенных
         # дампах тоже сюда: условие должно прийти с нулём, иначе он не закроется.
-        broken, _reason, skipped, free = dump_issues(rep, now)
+        broken, reason, skipped, free = dump_issues(rep, now)
         sustain("backup_dump", bool(broken),
-                {"engines": ", ".join(broken), "n": len(broken), "reason": _DUMP_REASON_LOCAL})
+                {"engines": ", ".join(broken), "n": len(broken), "reason": reason})
         out["backup_dump_space"] = (1 if skipped else 0,
                                     {"engines": ", ".join(skipped), "free": free})
     # Дамп-CronJob'ы в кластере: мониторим прогоны НЕЗАВИСИМО от restic-бэкапа (kube-нода
@@ -7168,9 +7180,12 @@ def _server_conditions(s: Server, now: datetime,
     # Утечка памяти: дно растет суток подряд (история - в alert_state mem_trend, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("mem_trend"), dict):
         ml = [x for x in mem_trend.problems(s, now) if x["level"]]
-        out["mem_leak"] = (max((x["level"] for x in ml), default=0),
-                           {"detail": "; ".join(x["text"] for x in ml[:3]), "sig": [x["key"] for x in ml], "items": ml,
-                            "parts": [(x["key"], x["text"]) for x in ml]})
+        if not ml and not mem_trend.recovery_confirmed(s, now):
+            ml = None  # absence of evidence must not turn a stored active alert into recovery
+        if ml is not None:
+            out["mem_leak"] = (max((x["level"] for x in ml), default=0),
+                               {"detail": "; ".join(x["text"] for x in ml[:3]), "sig": [x["key"] for x in ml], "items": ml,
+                                "parts": [(x["key"], x["text"]) for x in ml]})
     # Уперся в лимит памяти: выдержка - своя на каждый контейнер и под (alert_state memlim, его
     # ведет цикл алертов), общая не нужна. sig - кто именно
     if online and mem_limit.block(rep) is not None:
@@ -7723,10 +7738,17 @@ async def evaluate_servers(
                 continue
             if not talking:
                 # нода молчит: что с ее диском, неизвестно, и "проблема ушла" было бы неправдой
-                known_now[kk] = ent
+                kept = dict(ent)
+                if kk == "mem_leak":
+                    kept.pop("gone_at", None)
+                    if kept != ent:
+                        known_upd.append((s.id, kk, ent.get("at"), kept, ""))
+                known_now[kk] = kept
                 continue
             k_lvl, k_ctx = conds.get(kk, (0, {}))
-            new_k, what = known_mod.step(ent, int(k_ctx["raw"]) if "raw" in k_ctx else k_lvl, k_ctx.get("sig"), now)
+            confirmed = kk != "mem_leak" or mem_trend.recovery_confirmed(s, now, ent.get("sig"))
+            new_k, what = known_mod.step(ent, int(k_ctx["raw"]) if "raw" in k_ctx else k_lvl, k_ctx.get("sig"), now,
+                                        confirmed=confirmed)
             # сервер разработки: про приложение не напоминаем, отметка пишется сразу
             k_dev = what == "remind" and dev and dev_mode.quiet(kk)
             if new_k != ent:

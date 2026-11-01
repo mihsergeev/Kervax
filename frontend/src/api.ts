@@ -3027,6 +3027,7 @@ export type DumpStat = {
   skipped?: boolean // последний прогон пропущен из-за нехватки места
   skip_ts?: number
   skip_free_pct?: number // сколько было свободно при пропуске
+  error_ts?: number // последний неудачный запуск, очищается успешной публикацией
   enabled_ts?: number // когда дамп включён (mtime скрипта) — для grace «файлов ещё нет»
 }
 export type BackupAudit = {

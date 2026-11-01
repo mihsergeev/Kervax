@@ -9,7 +9,7 @@ FROM golang:1.27.3-alpine AS agent
 ARG AGENT_PUBKEY=
 WORKDIR /agent
 COPY agent/go.mod ./
-COPY agent/main.go ./
+COPY agent/*.go ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
       -ldflags="-s -w -buildid= -X main.updatePubKeyB64=${AGENT_PUBKEY}" \
       -o /out/kervax-agent-amd64 . \

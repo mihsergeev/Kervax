@@ -6,6 +6,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 
 from app.api import (
+    alert_rechecks,
     alert_history,
     alerts,
     ansible as ansible_api,
@@ -112,6 +113,8 @@ def create_app() -> FastAPI:
     app.add_middleware(PanelErrorMiddleware)
 
     app.include_router(health.router, prefix="/api")
+    app.include_router(alert_rechecks.router, prefix="/api")
+    app.include_router(alert_rechecks.agent_router, prefix="/api")
     app.include_router(auth.router, prefix="/api")
     app.include_router(users_api.router, prefix="/api")
     app.include_router(login_guard.router, prefix="/api")

@@ -50,12 +50,15 @@ def covers(entry: dict | None, level: int, sig=None) -> bool:
     return True
 
 
-def step(entry: dict, level: int, sig, now: datetime) -> tuple[dict | None, str]:
+def step(entry: dict, level: int, sig, now: datetime, *, confirmed: bool = True) -> tuple[dict | None, str]:
     """Один тик для одной отметки сервера: (новая запись или None - снять, что случилось).
     Что случилось: "" | "closed" (ушла сама) | "expired" (вышел срок) | "remind"."""
     if expired(entry, now):
         return None, "expired"
     new = dict(entry)
+    if not confirmed:
+        new.pop("gone_at", None)  # a gap is not 600 seconds of confirmed recovery
+        return new, ""
     if level > 0:
         new.pop("gone_at", None)
         if new.get("level") is None:

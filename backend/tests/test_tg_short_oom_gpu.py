@@ -117,11 +117,21 @@ def _hist(vals, last_day=date(2026, 10, 11)):
 
 def test_mem_leak():
     st = {"mem_trend": {"pod:access-hub/access-hub-5965758d6c-tbvbr": _hist([746, 790, 835, 880, 925])}}
-    s = _srv(alert_state=st, last_report={"mem_total": 2 * 2**30, "mem_used": 2 * 2**30 - 50 * MB})
+    report = {"mem_total": 2 * 2**30, "mem_used": 2 * 2**30 - 50 * MB,
+              "kube": {"access": True, "pods_complete": True, "pods": [
+                  {"ns": "access-hub", "name": "access-hub-5965758d6c-tbvbr", "owner": "Deployment",
+                   "node": "worker-a", "mem": 925 * MB}], "nodes": [
+                  {"name": "worker-a", "cap": {"mem": 2 * 2**30},
+                   "use": {"mem": 2 * 2**30 - 50 * MB, "ts": TS}}]}}
+    s = _srv(alert_state=st, last_report=report)
     items = [x for x in mem_trend.problems(s, NOW) if x["level"]]
     assert _clean(*mem_trend.tg_short(items)) == ("Память растет 4 дня", ["Под: access-hub, уже 925мб"])
     st["mem_trend"].update({"docker:rest-server": _hist([87, 128, 170, 211, 253]),
                             "pod:shop/api-7f9c8d6b5-x2k4q": _hist([300, 350, 400, 450, 500])})
+    report["kube"]["pods"].append({"ns": "shop", "name": "api-7f9c8d6b5-x2k4q", "owner": "Deployment",
+                                    "node": "worker-a", "mem": 500 * MB})
+    report["docker"] = {"access": True, "containers_complete": True, "containers": [
+        {"name": "rest-server", "state": "running", "image": "rest-server", "mem": 253 * MB}]}
     items = [x for x in mem_trend.problems(_srv(alert_state=st, last_report=s.last_report), NOW) if x["level"]]
     what, facts = mem_trend.tg_short(items)
     assert what == "Память растет 4 дня" and len(facts) == 2 and facts[1].startswith("Еще: ")

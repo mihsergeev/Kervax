@@ -269,6 +269,16 @@ async def ingest(
             await _ingest_domain(session, req, now)
             continue
         check = await session.get(Check, req.check_id)
+        if req.kind == "home":
+            # Home verification binds every path to the same immutable request.
+            # A late reply may not change a disabled, moved or recreated monitor.
+            from app import alert_recheck
+            from app.models import AlertRecheck
+            job = await session.get(AlertRecheck, (req.spec or {}).get("recheck") or "")
+            if (job is None or job.status != "checking" or _aware(job.deadline) <= now
+                    or check is None or alert_recheck.identity(check) != job.spec["identity"]
+                    or alert_recheck.digest(alert_recheck.check_snapshot(check, "status")) != job.spec["baseline"]):
+                continue
         if check is None or not check.probe_local or check.probe_server_id != server_id:
             # пока ждали, монитор удалили, перевели на проверку из панели или сайт
             # переехал — ответ этой ноды про него больше ничего не значит

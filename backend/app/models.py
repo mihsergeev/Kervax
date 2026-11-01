@@ -543,6 +543,30 @@ class AgentPathProbe(Base):
     )
 
 
+class AlertRecheck(Base):
+    """Fresh, read-only verification requested from the home page.
+
+    active_key deduplicates across workers; the random id binds an answer to this
+    collection, rather than to a periodically replayed report. Terminal results survive
+    panel/agent restarts and are retained for seven days.
+    """
+    __tablename__ = "alert_rechecks"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    active_key: Mapped[str | None] = mapped_column(String(100), unique=True, nullable=True)
+    object_type: Mapped[str] = mapped_column(String(8))
+    object_id: Mapped[int] = mapped_column(Integer, index=True)
+    kind: Mapped[str] = mapped_column(String(64))
+    section: Mapped[str] = mapped_column(String(16))
+    requested_by: Mapped[str] = mapped_column(String(64), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    taken_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="checking", index=True)
+    message: Mapped[str] = mapped_column(String(512), default="")
+    spec: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
 class ProbeRequest(Base):
     """Ручная проверка локального сайта: «проверь сейчас» для агента на ноде.
 

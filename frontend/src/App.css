@@ -8493,3 +8493,13 @@ button.inv-dd-btn { font-size: 0.82rem; padding: 0.28rem 0.7rem; }
   .gre-rows .loc-res-name { min-width: 0; font-weight: 500; color: var(--text-muted); font-size: 0.8rem; }
   .gre-rows .loc-res-msg { text-align: left; }
 }
+.home-recheck-wrap { display: inline-flex; align-items: center; gap: .35rem; flex-shrink: 0; }
+.home-recheck { font-size: .75rem; padding: .22rem .45rem; white-space: nowrap; border: 1px solid var(--border); border-radius: 5px; background: transparent; color: var(--text-muted); }
+.home-recheck:hover:not(:disabled), .home-recheck:focus-visible { color: var(--text); border-color: var(--accent); }
+.home-recheck.has-result { color: var(--warn); }
+.home-recheck:disabled { opacity: .65; cursor: default; }
+.home-recheck-summary { padding: .6rem .8rem; margin-bottom: 1rem; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-card); }
+@media (max-width: 650px) {
+  .home-attention-row { flex-wrap: wrap; }
+  .home-recheck-wrap { margin-left: auto; }
+}

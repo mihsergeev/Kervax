@@ -11,6 +11,32 @@ export type Lang = 'ru' | 'en'
 // Ключ = русская строка (дефолт). Значение = английский перевод.
 // Отсутствующий ключ → возвращается русский (мягкий фолбэк).
 const EN: Record<string, string> = {
+  'MongoDB: replica set снимается с oplog, восстановление с --oplogReplay. Для standalone приостановите запись на время дампа. Шардированные кластеры не поддерживаются.':
+    'MongoDB: replica sets include the oplog; restore with --oplogReplay. Pause writes during a standalone dump. Sharded clusters are not supported.',
+  'запросил свежую проверку исправления': 'requested fresh recovery verification',
+  'Свежая перепроверка исправлений': 'Fresh recovery verification',
+  'свежая перепроверка исправлений': 'fresh recovery verification',
+  'Исправил': 'Fixed it',
+  'Исправил: перепроверить': 'Fixed it: verify again',
+  'Исправил: запросить свежую проверку. Алерт исчезнет только после подтверждения.': 'Request a fresh check. The alert clears only after recovery is verified.',
+  'Проверяю': 'Checking',
+  'Проблема осталась': 'Problem remains',
+  'Не удалось проверить': 'Could not verify',
+  'Перепроверка недоступна': 'Verification unavailable',
+  'Проверяю свежие данные…': 'Checking fresh observations…',
+  'Проверка завершена': 'Verification complete',
+  'подтверждено исправление: {n}': 'recovery verified: {n}',
+  'проблема осталась: {n}': 'problem remains: {n}',
+  'не удалось проверить: {n}': 'could not verify: {n}',
+  'доступно {n} из {total}': '{n} of {total} available',
+  'Для этого вида пока нет принудительной проверки. Откройте карточку объекта.': 'This issue has no on-demand collector yet. Open the object details.',
+  'Для этой проверки изнутри сервера пока нет свежего разбора. Откройте карточку объекта.': 'A fresh analysis from inside the server is not available yet. Open the object details.',
+  'Сервер не на связи. Свежую проверку сейчас выполнить некому.': 'The server is offline. A fresh check cannot run now.',
+  'Обновите агент: нужна поддержка свежих проверок.': 'Update the agent to enable fresh verification.',
+  'Установите read-only helper recheck-setup.': 'Install the read-only recheck-setup helper.',
+  'Очередь read-only helper недоступна агенту. Переустановите recheck-setup.': 'The agent cannot write to the read-only collector queue. Reinstall recheck-setup.',
+  'Обновите backup-helper до 0.50: нужна read-only команда inspect.': 'Update backup-helper to 0.50 for the read-only inspect action.',
+  'Не удалось получить результат проверки. Повторяем запрос; алерт не скрыт.': 'Could not retrieve the result. Retrying; the alert remains visible.',
   // сервер разработки (ServerEdit.tsx, ServersPage.tsx, cardLayout.tsx, DockerPage.tsx; backend app/dev_mode.py)
   'Назначение': 'Purpose',
   'Прод': 'Production',
@@ -2918,8 +2944,8 @@ const EN: Record<string, string> = {
     'The percentage is the share of the last minute when at least one process waited for the resource. The kernel counts "all stalled" per CPU (its processes wait for the resource and there is nothing else to run on it), so on a multi-core server it does not mean the whole server stood still. D-state processes wait for disk or network and cannot be interrupted, a stuck one has not woken up for more than 2 minutes.',
   // утечка памяти
   'Растет память': 'Memory keeps growing',
-  'Минимум памяти за сутки растет 4 суток подряд. Пила сборщика мусора и всплески минимум не двигают, а утечка поднимает его каждый день. Алерт - только если при таком росте свободной памяти сервера не хватит на неделю.':
-    'The daily memory minimum has grown 4 days in a row. Garbage collector sawtooth and spikes do not move the minimum, a leak raises it every day. Alerts only if at this rate the free memory of the server lasts less than a week.',
+  'Суточный минимум памяти растет 4 суток подряд. Разовые всплески и сборка мусора не считаются. Алерт появляется, когда при таком росте памяти на ноде останется меньше чем на 3 суток. Для подов прогноз строится по ноде, где они работают; без свежих метрик прогноз не показывается.':
+    'The daily memory minimum has grown for 4 consecutive days. Brief spikes and garbage collection do not count. An alert appears when the node would run out of memory in less than 3 days at this rate. Pod forecasts use the node running the pods; no forecast is shown without fresh metrics.',
   'процесс': 'process',
   'в сутки': 'a day',
   'памяти хватит на {d} сут': 'memory lasts {d} days',

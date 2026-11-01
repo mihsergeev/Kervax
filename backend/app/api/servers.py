@@ -755,6 +755,7 @@ async def _name_free(session, name: str, exclude_id: int | None = None, user=Non
 
 
 _SETUP_LABEL = {
+    "recheck-setup": "Свежая перепроверка исправлений",
     "backup-setup": "Бэкап (клиент)",
     "backupserver-setup": "Бэкап-сервер",
     "kube-setup": "Kubernetes",
@@ -912,7 +913,7 @@ def _db_engine_of(image: str, name: str = "") -> str | None:
 
 
 # движки, для которых панель умеет включить локальный дамп (helper: dump-setup <code>)
-_DUMP_ENGINE = {"PostgreSQL": "pg", "MySQL/MariaDB": "mysql", "ClickHouse": "ch",
+_DUMP_ENGINE = {"PostgreSQL": "pg", "MySQL/MariaDB": "mysql", "MongoDB": "mongo", "ClickHouse": "ch",
                 "Redis": "redis", "Valkey": "redis", "RabbitMQ": "rabbitmq",
                 # etcd на контроллере = кластер: k0s/k3s умеют бэкап сами, без exec
                 "etcd": "k8s",
@@ -987,6 +988,15 @@ def _kube_workload(pod: dict) -> str:
     kind, rx = rules[owner]
     m = re.match(rx, name)
     return f"k8s.{ns}.{kind}.{m.group(1)}" if m else ""
+
+
+def _mongo_dump_block(agent_version: str, rep: dict) -> str:
+    if _ver_key(agent_version) < (2, 62):
+        return "для дампов MongoDB обновите агент до 2.62 или новее"
+    have = str((rep.get("setup_versions") or {}).get("backup-setup") or "")
+    if _ver_key(have) < (0, 50):
+        return "для дампов MongoDB обновите backup-helper до 0.50 или новее"
+    return ""
 
 
 def _kube_dump_block(rep: dict, code: str) -> str:
@@ -1268,6 +1278,14 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
             # не «стареют», про неё есть свой алерт.
             seen_ts = (server.last_seen.replace(tzinfo=server.last_seen.tzinfo or timezone.utc).timestamp()
                        if server.last_seen else datetime.now(timezone.utc).timestamp())
+            if dump and dump.get("error_ts"):
+                out.append(BackupAudit(
+                    kind="db", subject=eng, gap=False, instance=inst,
+                    detail=f"{where_txt} — последний запуск дампа завершился ошибкой; проверьте доступ к базе, инструменты и журнал дампов",
+                    note="последний запуск дампа завершился ошибкой; проверьте доступ, инструменты и журнал дампов",
+                    dump_engine=code, can_dump=True, container=inst, pods=inst_pods[:4],
+                ))
+                continue
             if dump and own_timer and dump_local_stale(dump, seen_ts):
                 out.append(BackupAudit(
                     kind="db", subject=eng, gap=False, instance=inst,
@@ -1323,6 +1341,8 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
             else:
                 block = ("не удалось определить StatefulSet или Deployment пода — дамп из него панель "
                          "не снимает") if bare and not inst else ""
+                if code == "mongo":
+                    block = block or _mongo_dump_block(server.agent_version, rep)
                 can_dump = not block
             out.append(BackupAudit(
                 kind="db", subject=eng, gap=False, instance=inst,
@@ -2590,6 +2610,12 @@ async def backup_command(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан движок дампа")
         payload = {"engine": body.engine, "container": body.container}
         if body.action == "dump_setup":
+            if body.engine == "mongo":
+                block = _mongo_dump_block(srv.agent_version, srv.last_report or {})
+                if body.container.startswith("k8s."):
+                    block = "дампы MongoDB из Kubernetes пока не поддерживаются; настройте отдельный бэкап кластера"
+                if block:
+                    raise HTTPException(status.HTTP_409_CONFLICT, block)
             # свой каталог дампов - root-действие на ноде (helper создает его 0700, выключение
             # дампа удаляет): как "Освободить место", только админ. /backup и пусто - всем
             if not dump_dir_default(body.dump_dir) and user.role != "admin":
@@ -3813,7 +3839,7 @@ async def agent_packages(
 ) -> dict:
     """Кусок списка пакетов (app/packages.py): агент шлет их по одному, каждым своим соединением."""
     token = authorization.removeprefix("Bearer ").strip()
-    server = await session.scalar(select(Server).where(Server.token_hash == hash_agent_token(token))) if token else None
+    server = await session.scalar(select(Server).where(Server.token_hash == hash_agent_token(token)).with_for_update()) if token else None
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
     if body.part >= body.parts:
@@ -3974,10 +4000,13 @@ async def agent_commands(
     bcmds = await _take_backup_commands(session, server.id)
     # ручная проверка сайта — агенту 2.7+, он ответит через /agent/site-probe-result
     sprobes = await manual_probe.take_fast_tasks(session, server, datetime.now(timezone.utc))
+    from app import alert_recheck
+    rechecks = await alert_recheck.take_tasks(session, server, datetime.now(timezone.utc))
     await session.commit()
     return {
         "docker_commands": cmds, "kube_commands": kcmds, "backup_commands": bcmds,
         "site_probes": sprobes,
+        "alert_rechecks": rechecks,
     }
 
 
