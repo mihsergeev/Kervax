@@ -4743,7 +4743,7 @@ _SIGNALS = {6: "ABRT", 9: "KILL", 11: "SEGV", 15: "TERM"}
 # (ретранслятор, через него ходят агенты других серверов) не тут: их падение - повод для алерта.
 # kervax-mirror-pull (перекачка копий на резервном) тут: отставшую копию ловит алерт backup_mirror.
 _OWN_HELPER_UNIT = re.compile(
-    r"kervax-(autoban|changes|cron|db-stats|disk-health|disk-usage|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|gre|gre-sync|mirror-pull|queues|recheck|relay-sync|sockfix|units|vpn|vpnflow|web-rate|web-sites|webfiles|workers"
+    r"kervax-(autoban|changes|cron|db-stats|disk-health|disk-usage|docker-origin|fpm|gitlab|gpu|kube-expiry|kube-flux|logerr|gre|gre-sync|mirror-pull|queues|recheck|relay-sync|sockfix|units|vpn|vpnflow|web-rate|web-sites|webfiles|workers"
     r"|[a-z]+-req)\.service")
 
 # Задание по таймеру, которое падает на каждом запуске, между падениями несколько минут
