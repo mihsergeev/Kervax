@@ -172,8 +172,9 @@ def _pool(rep: dict, key: str, now: datetime) -> tuple[str, int | None]:
 
 
 def _identity_changed(cs: dict, item: dict) -> bool:
-    # StatefulSet names can be reused; a new UID must start its own series too.
-    return bool(item.get("u")) and cs.get("u") != item["u"]
+    # Older state has no UID: its first binding is not proof of replacement.
+    # StatefulSet names can be reused, so two known different UIDs start a new series.
+    return bool(cs.get("u")) and bool(item.get("u")) and cs["u"] != item["u"]
 
 
 def previous_keys(s: Server) -> set[str]:
@@ -251,8 +252,9 @@ def update(state: dict | None, rep: dict, now: datetime, tz: str | None = None) 
                 continue
             prev = None
         new[k] = step(prev, v, now, tz)
-        if k.startswith("pod:") and item.get("u"):
-            new[k]["u"] = item["u"]
+        uid = item.get("u") or (prev or {}).get("u")
+        if k.startswith("pod:") and uid:
+            new[k]["u"] = uid
     keep_from = (_local_day(now, tz) - timedelta(days=1)).isoformat()
     for k, v in old.items():
         if k not in new and isinstance(v, dict) and (not inventory_complete(rep, k.partition(":")[0])

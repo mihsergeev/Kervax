@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.78] - 2026-11-01
+
+### Fixed
+- Переход со старой истории памяти сохраняет суточные минимумы и действующий алерт:
+  первое получение UID пода не считается его заменой. Подтвержденная смена UID начинает
+  отдельную серию, а временное отсутствие UID не стирает известную привязку.
+
 ## [1.8.77] - 2026-11-01
 
 ### Added
