@@ -1802,9 +1802,9 @@ async def test_daily_uncovered_digest(tmp_path, monkeypatch):
     assert "dbstat-setup" in msg, "не сказано, чего не хватает"
     assert "Docker без доступа" in msg
     assert msg.split("Что сделать")[0].count("новая-нода") == 1, "сервер повторяется на каждую дыру"
-    # и что сделать: команда плейбука для helper'а, прокси Docker - по ссылке
-    assert "<code>ansible-playbook playbooks/kervax_helpers.yml -l 'новая-нода'</code>" in msg, msg
-    assert "read-only proxy" in msg
+    # Commands and the full host list stay in the panel/history, never in chat.
+    assert "ansible-playbook" not in msg and "read-only proxy" not in msg
+    assert len(msg.splitlines()) == 3
     # в полном тексте - словами и с готовой командой
     assert "инвентарь СУБД" in full, "не сказано, чего не хватает"
     assert "kervax_helpers.yml" in full, "нет готовой команды — сводка не действие, а новость"

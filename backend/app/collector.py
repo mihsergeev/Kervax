@@ -9306,8 +9306,12 @@ _UNCOVERED_SUSTAIN = 3600
 
 
 _UNCOV_HELPERS = "ansible-playbook playbooks/kervax_helpers.yml -l '{}'"
-# сколько строк "что - где" в чате, остальные серверы - "и еще N"
-_UNCOV_ROWS = 3
+# On-demand verification does not collect automatic monitoring data. Its installation
+# advice stays in the panel, but adding this helper must not notify the entire fleet.
+_UNCOV_OPTIONAL = frozenset({"helper:recheck-setup"})
+_UNCOV_TYPES = 3
+_UNCOV_NAME_LEN = 48
+_UNCOV_WHAT_LEN = 140
 
 
 def _uncov_what(keys: list[str]) -> str:
@@ -9358,37 +9362,24 @@ def _uncov_fix(rows: list[tuple[Server, list[str]]]) -> list[tuple[str, str]]:
 
 
 def _uncov_short(rows: list[tuple[Server, list[str]]], base: str) -> str:
-    """Короткий текст в чат: серверы с одинаковыми дырами одной строкой, у каждого имя ссылкой
-    туда, где это чинится, и что сделать - один раз на всех.
+    """Three bounded lines: count, missing coverage, up to three linked names.
 
-        🧩 Покрытие
-        Новое без мониторинга
-        bk-01: Kubernetes без доступа, нет kubeexpiry-setup
-        Что сделать: ansible-playbook playbooks/kervax_helpers.yml -l 'bk-01' -e ...
+    Complete host lists and installation commands belong in the panel/history.
+    The heading opens all servers, including those omitted from the short list.
     """
-    groups: dict[str, list[str]] = {}
-    for srv, ks in rows:
-        groups.setdefault(_uncov_what(ks), []).append(tg_fmt.link(srv.name or "", _uncov_url(base, srv, ks)))
-    lines = ["🧩 <b>Покрытие</b>", "<b>Новое без мониторинга</b>"]
-    for what, links in list(groups.items())[:_UNCOV_ROWS]:
-        shown = links[:tg_fmt.NAMES_MAX]
-        more = f" и еще {len(links) - len(shown)}" if len(links) > len(shown) else ""
-        if len(links) == 1:
-            lines.append(f"{links[0]}: {html.escape(what, quote=False)}")
-        else:
-            lines.append(f"{html.escape(tg_fmt.cap(what), quote=False)}: {', '.join(shown)}{more}")
-    rest = sum(len(v) for v in list(groups.values())[_UNCOV_ROWS:])
-    if rest:
-        lines.append(f"И еще {rest} {alerts._servers_word(rest)}")
-    # одно действие - строкой "Что сделать: ...", несколько - по строке с подписью, к чему оно
-    fix = [(what, html.escape(how, quote=False) if what == "Docker" else f"<code>{html.escape(how, quote=False)}</code>")
-           for what, how in _uncov_fix(rows)]
-    if len(fix) == 1:
-        lines.append(f"Что сделать: {fix[0][1]}")
-    elif fix:
-        lines.append("Что сделать:")
-        lines += [f"{html.escape(what, quote=False)}: {how}" for what, how in fix]
-    return "\n".join(lines)
+    base = base.rstrip("/")
+    heading = tg_fmt.link("Покрытие", f"{base}/?section=servers" if base else "")
+    keys = list(dict.fromkeys(k for _, ks in rows for k in ks))
+    what = tg_fmt.field(tg_fmt.clean(tg_fmt.cap(_uncov_what(keys[:_UNCOV_TYPES]))), _UNCOV_WHAT_LEN)
+    if len(keys) > _UNCOV_TYPES:
+        what += f" и еще {len(keys) - _UNCOV_TYPES}"
+    links = [tg_fmt.link(tg_fmt.field(srv.name or "", _UNCOV_NAME_LEN), _uncov_url(base, srv, ks))
+             for srv, ks in rows[:tg_fmt.NAMES_MAX]]
+    names = ", ".join(links)
+    if len(rows) > len(links):
+        names += f" и еще {len(rows) - len(links)}"
+    return "\n".join([f"🧩 <b>{heading}</b>: {len(rows)} {alerts._servers_word(len(rows))}",
+                       html.escape(what, quote=False), names])
 
 
 def _uncov_since(state: dict, keys: set[str], now: datetime) -> dict:
@@ -9430,9 +9421,8 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
     заглядывают, свежий Postgres стоит без инвентаря баз, а докер без доступа —
     без контейнеров: мониторинг вроде есть, а половины его нет.
 
-    Шлём то, что чинится ОДНИМ действием (прогон плейбука или kube-setup), и в
-    конце даём готовую команду. Устаревшие версии helper'ов сюда не попадают:
-    там всё работает, просто не последней версии.
+    Команды и полный список оставляем в истории и панели. Устаревшие версии
+    helper'ов и отсутствие on-demand перепроверки не означают потерю мониторинга.
     """
     now = datetime.now(timezone.utc)
     async with session_factory() as session:
@@ -9467,7 +9457,7 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
             (k, txt)
             for k, txt in gaps(srv.last_report or {}, cur, srv.alert_mutes, srv.relay_enabled, srv.gre_enabled,
                                srv.backup_mirror_role)
-            if k in since
+            if k not in _UNCOV_OPTIONAL and k in since
             and (now - (_parse_iso(since[k]) or now)).total_seconds() >= _UNCOVERED_SUSTAIN
         ]
         if not g:
@@ -9485,19 +9475,20 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
     default = settings_store.SERVER_ALERT_KINDS["uncovered"][1]
     tpl = rule.get("text") or default
     if tpl == default:
-        # коротко: что и где (имя ссылкой туда, где это чинится) и что сделать; в историю - то же
-        # с подписями helper'ов словами
+        # The detailed version is retained in history; never append its commands to chat.
         full = "🧩 новое без покрытия мониторингом:\n{}\n{}".format(
             "\n".join(lines), "\n".join(f"↳ {what}: {html.escape(how, quote=False)}" for what, how in _uncov_fix(rows)))
-        text = alerts.Msg(_uncov_short(rows, settings.panel_url.rstrip("/")), "servers", "",
-                          kind="uncovered", full=full)
     else:
         # свой шаблон: {cmd} как раньше - плейбук по всем серверам сводки
         try:
             body = tpl.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
         except (KeyError, IndexError, ValueError):
             body = default.format(list="\n".join(lines), cmd=html.escape(cmd, quote=False), n=len(hosts))
-        text = alerts.Msg(f"🧩 {body}", "servers", "", kind="uncovered")
+        full = f"🧩 {body}"
+    short = _uncov_short(rows, settings.panel_url)
+    # A custom template must not reintroduce full commands/host lists into notifications.
+    text = alerts.Msg(short, "servers", "", kind="uncovered", full=full,
+                      line=" - ".join(short.split("\n")[:2]))
     if await alerts.dispatch(cfg, True, [text], threshold, parse_mode="HTML",
                              session_factory=session_factory):
         async with session_factory() as session:
