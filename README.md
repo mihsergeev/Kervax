@@ -154,6 +154,47 @@ Discovered by the agent, no configuration per service.
 - Backup server and clients deployed from the panel; DB dumps before each run.
 - Restore credentials in a vault encrypted in the browser: the panel stores only ciphertext.
 
+For a complete MongoDB restore drill, copy `ops/mongo-restore-test.py` to
+`/lib65/scripts/` on a Linux host with Python 3.12+ and Docker, and make the
+source-compatible MongoDB image available locally. For example:
+
+```sh
+python3 /lib65/scripts/mongo-restore-test.py /backup/mongo/example.archive.gz \
+  --image mongo:7.0 --mode replica --report /backup/mongo/restore-result.json
+```
+
+Use the same MongoDB major version/FCV and the same Database Tools version as the source;
+the script never pulls an image. A standalone dump requires `--mode standalone
+--quiesced`, confirming writes were stopped throughout that dump. This flag records
+the operator's confirmation, it cannot prove source consistency. Replica archives
+are restored with `--oplogReplay`; sharded-cluster recovery is outside this tool.
+
+The complete gzip and archive are checked, then every restored collection is
+validated and read. The JSON result binds the archive SHA-256 to the exact image ID,
+MongoDB and Database Tools versions. It contains only counts and a fingerprint of
+documents, collection options, indexes, users and roles; credentials and raw logs
+are never printed. `restore_ok` means the full restore completed, `validation_ok`
+means the restored database was readable, and `expectations_match` stays null
+unless `--expect /path/to/baseline.json` is supplied. Expectations accept a previous
+report or its `inventory` object. A mismatch fails even after a successful restore.
+A baseline from an earlier drill does not prove that a newer dump contains every
+record from its source: that requires independently captured expectations from the
+same consistent source state. The fingerprint excludes `local`, `admin.system.keys`
+and runtime-only `config` namespaces omitted by a full-instance `mongodump`.
+Keep reports private. See the MongoDB documentation for
+[restore options](https://www.mongodb.com/docs/database-tools/mongorestore/) and
+[version compatibility and dump exclusions](https://www.mongodb.com/docs/database-tools/mongodump/mongodump-behavior/).
+
+Each drill uses its own disposable container, localhost binding, no network, no
+published ports, no host mounts, dropped capabilities and a read-only root. It
+does not contact the source database or change backup schedules. Defaults are
+600 seconds, one CPU, 2 GiB memory and a 1 GiB temporary in-memory database;
+`--timeout`, `--memory-mib` and `--storage-mib` adjust those limits. Allow extra
+memory for MongoDB and uncompressed data/indexes. A limit failure is a failed drill,
+not proof that the original backup is corrupt. Cleanup removes only the container
+owned by this invocation and may take an additional 40 seconds. Reports must use a
+new filename; existing files are never overwritten.
+
 ## Alerts
 
 ![Alert history](docs/img/alerts.png)

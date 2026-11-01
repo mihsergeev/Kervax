@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_state, backup_verify
+from app import report_progress
 from app import bsrv_mirror
 from app import home_mute, kube_coverage, os_support
 from app import mute_watch
@@ -7043,7 +7044,8 @@ def _server_conditions(s: Server, now: datetime,
             out[key] = (1 if items or hold else 0, {"detail": sep.join(x["text"] for x in items[:4]),
                                                     "sig": sorted({x["key"] for x in items} | hold.keys()),
                                                     "sep": sep, "hold": hold, "items": items,
-                                                    "parts": [(x["key"], x["text"]) for x in items]})
+                                                    "parts": [(x["key"], x["text"]) for x in items],
+                                                    "_complete": mem_trend.inventory_complete(rep, kind)})
     # Пропал порт, который слушался неделями (история - alert_state listen_hist, ведет цикл алертов)
     if online and isinstance((s.alert_state or {}).get("listen_hist"), dict):
         lg = listen_watch.problems(s, now)
@@ -7130,7 +7132,8 @@ def _server_conditions(s: Server, now: datetime,
         out["workers"] = (max((x["level"] for x in wp), default=0),
                           {"detail": "\n".join(x["text"] for x in wp[:3])
                                      + (f"\nи еще {len(wp) - 3}" if len(wp) > 3 else ""),
-                           "sig": [x["key"] for x in wp], "items": wp, "parts": [(x["key"], x["text"]) for x in wp], "sep": "\n"})
+                           "sig": [x["key"] for x in wp], "items": wp, "parts": [(x["key"], x["text"]) for x in wp], "sep": "\n",
+                           "_complete": not bool(workers_mod.block(rep).get("skipped"))})
     # Кроны: выдержка уже в правилах (вторая копия идет 15 минут, висит - не раньше часа). sig -
     # какие задачи: вторая наслоившаяся дает свой алерт
     if online and cron_watch.block(rep) is not None:
@@ -7571,8 +7574,31 @@ async def evaluate_servers(
             apply(s.id, f"flap_{fk}_last", None)
             if int(st.get(fk, 0)) == 0:
                 flap_back.append(fk)
-        conds = _server_conditions(s, now, web_err.get(s.id), pod_names, fill_hist.get(s.id),
-                                   metric_hist.get(s.id, []))
+        talking = seen_online(s, now)
+        # Persist ordering evidence across scheduler/session restarts. Delivery of
+        # an older report or one frozen point cannot prove continuous recovery.
+        progress, report_fresh, report_epoch = report_progress.step(
+            st.get(report_progress.KEY), s.last_report or {}, now)
+        if progress is not None and progress != st.get(report_progress.KEY):
+            apply(s.id, report_progress.KEY, progress)
+        # Own per-object holds are evaluated inside _server_conditions. A new
+        # observation epoch must start them afresh before deriving a zero level.
+        original_state = s.alert_state
+        if report_epoch:
+            reset = {f"{key}_hold": None for key in _OWN_SETTLE}
+            for token in original_state or {}:
+                if ((token.endswith("_cool") and token[:-5] in settings_store.SERVER_ALERT_KINDS)
+                        or token == "web_5xx_since"):
+                    reset[token] = None
+                    if st.get(token) is not None:
+                        apply(s.id, token, None)
+            s.alert_state = {**(original_state or {}), **reset}
+        try:
+            conds = _server_conditions(s, now, web_err.get(s.id), pod_names, fill_hist.get(s.id),
+                                       metric_hist.get(s.id, []))
+        finally:
+            if report_epoch:
+                s.alert_state = original_state
         for fk in flap_back:
             # тот же текст, что у обычного отбоя: "CPU снова в норме, 79%", а не без цифры
             recoveries.append(_server_alert_text(
@@ -7583,7 +7609,18 @@ async def evaluate_servers(
         # "недоступен", замирает как было: ни срабатываний, ни отбоев, ни сброса выдержек.
         # Иначе пороговые условия на молчащей ноде падали в ноль, и объявленный CPU получал
         # "снова в норме" ровно тогда, когда нода пропала (и после каждого деплоя панели).
-        talking = seen_online(s, now)
+        # Unknown time cannot fill the recovery hold. Missing/stale helper data,
+        # an incomplete source and an offline node break continuous confirmation.
+        for state_key in list(st):
+            if not st.get(state_key):
+                continue
+            kind = (state_key[:-5] if state_key.endswith(("_calm", "_cool"))
+                    else "web_5xx" if state_key == "web_5xx_since" else "")
+            if kind in settings_store.SERVER_ALERT_KINDS and (
+                not talking or not report_fresh or report_epoch or kind not in conds
+                or not conds[kind][1].get("_complete", True)
+            ):
+                apply(s.id, state_key, None)
         warm = talking and boot_warmup.server_warming(s, now)
         # Починили (app/fixed.py): отметка, которую сборщик еще не закрыл. Беды по виду нет (или ее
         # держит только выдержка отбоя) - уровень в ноль в этом же тике и отбой сразу, с тем, кто
@@ -7596,8 +7633,10 @@ async def evaluate_servers(
             if fixed_mod.expired(ent, now):
                 fixed_upd.append((s.id, fk, ent.get("at"), None))
                 continue
-            if ent.get("done") or not talking:
+            if ent.get("done") or not talking or not report_fresh:
                 continue
+            if fk in fixed_mod.STATE and (fk not in conds or not conds[fk][1].get("_complete", True)):
+                continue  # a state acknowledgment still needs an observed state
             if fk in conds:
                 f_lvl, f_ctx = conds[fk]
                 if fixed_mod.broken(fk, f_lvl, f_ctx):
@@ -7628,6 +7667,8 @@ async def evaluate_servers(
         # «<тип>_since» — момент начала «жарки» (по времени); throttle — «_streak».
         for k, (_lvl, cx) in conds.items():
             if not talking and k != "offline":
+                continue
+            if k != "offline" and (not report_fresh or (not _lvl and not cx.get("_complete", True))):
                 continue
             if quiet_srv:
                 # снуз и окно обслуживания: выдержка пойдет с их конца (в окне чистят тот самый
@@ -7660,12 +7701,22 @@ async def evaluate_servers(
                 apply(s.id, f"{k}_from", now.isoformat())
             elif _lvl <= 0 and frm:
                 apply(s.id, f"{k}_from", None)
+        # These kinds own their per-object recovery hold and bypass _SETTLE_S.
+        # A missing source must invalidate that hold as well as the common calm.
+        for key in _OWN_SETTLE:
+            if st.get(f"{key}_hold") and (
+                not talking or not report_fresh or key not in conds
+                or not conds[key][1].get("_complete", True)
+            ):
+                apply(s.id, f"{key}_hold", None)
         if quiet_srv:
             # Сервер в снузе или в окне обслуживания. Стало легче - уровень молча вниз; объявленное
             # ушло совсем - отбой (снуз ставят, чтобы не слышать повторов, а не чтобы не узнать, что
             # починилось). Новое не пишем: после снуза оно придет алертом
             for key, (level, ctx) in conds.items():
                 if (not talking and key != "offline") or level >= int(st.get(key, 0)):
+                    continue
+                if key != "offline" and (not report_fresh or report_epoch or not ctx.get("_complete", True)):
                     continue
                 if level or key in _SILENT_RECOVERY or (key in _FLAP_METRIC_KINDS and st.get(f"flap_{key}_muted")):
                     apply(s.id, key, level)
@@ -7741,15 +7792,16 @@ async def evaluate_servers(
             if not talking:
                 # нода молчит: что с ее диском, неизвестно, и "проблема ушла" было бы неправдой
                 kept = dict(ent)
-                if kk == "mem_leak":
-                    kept.pop("gone_at", None)
-                    if kept != ent:
-                        known_upd.append((s.id, kk, ent.get("at"), kept, ""))
+                kept.pop("gone_at", None)
+                if kept != ent:
+                    known_upd.append((s.id, kk, ent.get("at"), kept, ""))
                 known_now[kk] = kept
                 continue
             k_lvl, k_ctx = conds.get(kk, (0, {}))
-            confirmed = kk != "mem_leak" or mem_trend.recovery_confirmed(s, now, ent.get("sig"))
-            new_k, what = known_mod.step(ent, int(k_ctx["raw"]) if "raw" in k_ctx else k_lvl, k_ctx.get("sig"), now,
+            confirmed = (report_fresh and kk in conds and k_ctx.get("_complete", True)
+                         and (kk != "mem_leak" or mem_trend.recovery_confirmed(s, now, ent.get("sig"))))
+            observed_entry = {k: v for k, v in ent.items() if k != "gone_at"} if report_epoch else ent
+            new_k, what = known_mod.step(observed_entry, int(k_ctx["raw"]) if "raw" in k_ctx else k_lvl, k_ctx.get("sig"), now,
                                         confirmed=confirmed)
             # сервер разработки: про приложение не напоминаем, отметка пишется сразу
             k_dev = what == "remind" and dev and dev_mode.quiet(kk)
@@ -7795,6 +7847,15 @@ async def evaluate_servers(
         for key, (level, ctx) in conds.items():
             if not talking and key != "offline":
                 continue  # нода молчит: остальное замерло (см. выше)
+            # Removing a deliberately muted or statically excluded member is a
+            # policy decision, not a claim of observed recovery. It must still
+            # close the old incident silently on the first observation epoch.
+            policy_sig = set(st.get(f"{key}_sig") or [])
+            policy_close = not level and bool(policy_sig) and _sig_all_quiet(s, key, policy_sig, now)
+            if key != "offline" and key not in fix_now and not policy_close and (not report_fresh or (not level and (
+                (report_epoch and key in _OWN_SETTLE) or not ctx.get("_complete", True)
+            ))):
+                continue  # a failed source or replay does not confirm a transition
             rule = rules.get(key) or _fallback_rule(key)
             if not rule["enabled"] or not _rule_scope_ok(rule, s):
                 continue  # правило выключено или сервер вне области применения
@@ -7895,6 +7956,8 @@ async def evaluate_servers(
                 tk = f"{key}_told"
                 old_sig = set(st.get(sk) or [])
                 new_sig = set(ctx.get("sig") or [])
+                if not ctx.get("_complete", True):
+                    new_sig |= old_sig  # unknown members remain unresolved
                 if key == "kube_restarts":
                     # sig был по подам, стал по ворклоадам: та же беда под новым ключом не новость
                     old_sig = {podnames.pod_key(x) for x in old_sig}
@@ -8199,7 +8262,8 @@ async def evaluate_servers(
                     rec_apply.append((s.id, "offline_back", None))
                     rec_apply.append((s.id, "offline_before", None))
             else:  # де-эскалация (crit→problem): без алерта, просто снижаем уровень
-                apply(s.id, key, level)
+                if ctx.get("_complete", True):
+                    apply(s.id, key, level)
         # перезагрузка (аптайм сброшен) — одноразовый алерт на новый rebooted_at. Плановая (после
         # обновлений ее ждали, os_support.planned_reboot) - только в хронологии
         rb = rules.get("reboot")

@@ -298,7 +298,8 @@ async def test_recovery_waits_half_an_hour(tmp_path, monkeypatch):
         async with factory() as s:
             srv = (await s.execute(select(Server))).scalars().one()
             srv.last_seen = t
-            srv.last_report = {"uptime_seconds": 100000, "kube": {"pods": [pod] if up else []}}
+            srv.last_report = {"uptime_seconds": 100000,
+                               "kube": {"access": True, "pods_complete": True, "pods": [pod] if up else []}}
             srv.alert_state = {**(srv.alert_state or {}), "restarts": hot if up else {}}
             await s.commit()
         await collector.evaluate_servers(factory, cfg, t)

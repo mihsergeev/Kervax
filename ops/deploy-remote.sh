@@ -28,7 +28,8 @@
 #   on success    the previous :prev images and build cache older than 48 hours are removed,
 #                 the last 10 run directories are kept
 #
-# Result: run.status in the run directory (ok, rolled-back, failed, build-failed, busy), the log
+# Result: run.status in the run directory (ok, rolled-back, failed, snapshot-failed, build-failed,
+# busy), the log
 # is run.log. A rollback by hand (`ops/deploy.sh <host> --rollback`) uses the directory of the
 # last run, with its own rollback.log and rollback.status.
 set -u
@@ -63,7 +64,19 @@ health() {
 
 migration() {
     pw=$(grep '^KERVAX_DB_PASSWORD=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)
-    docker exec -e PGPASSWORD="$pw" kervax-db-1 psql -U kervax -d kervax -tAc 'select version_num from alembic_version' 2>/dev/null | head -1
+    result=$(docker exec -e PGPASSWORD="$pw" kervax-db-1 psql -U kervax -d kervax -tAc 'select version_num from alembic_version' 2>/dev/null) || return 1
+    # An unavailable database or multiple heads is not evidence that rollback is safe.
+    case "$result" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
+    printf '%s\n' "$result"
+}
+
+# A pipe to tail hides compose's exit status on POSIX sh. Keep the useful last lines,
+# but an old healthy backend must not turn a failed frontend recreation into success.
+up() {
+    dc up -d --no-build $SERVICES > "$RD/$KIND-up.log" 2>&1
+    rc=$?
+    tail -6 "$RD/$KIND-up.log"
+    return "$rc"
 }
 
 # wait until health answers with the wanted version and a reachable database
@@ -85,48 +98,81 @@ image_name() { printf '%s' "$1" | sed 's/:[^:/]*$//'; }
 restore_sources() {
     [ -f "$RD/prev-src.tar" ] || { note "no previous sources saved - the files stay new"; return 1; }
     cd "$DIR" || return 1
-    tar xf "$RD/prev-src.tar"
+    # prev-list also exists on the first managed deploy: it lists every pre-existing
+    # file that this delivery can overwrite, even if there was no old manifest.
+    old_list="$RD/prev-list"
+    [ -f "$old_list" ] || old_list="$RD/prev-manifest"
+    [ -f "$old_list" ] || return 1
+    LC_ALL=C sort "$old_list" > "$RD/.old" || return 1
+    { cat "$RD/manifest.txt" && printf '%s\n' agent-dist/manifest.json agent-dist/manifest.sig; } > "$RD/.new-unsorted" || return 1
+    LC_ALL=C sort -u "$RD/.new-unsorted" > "$RD/.new" || return 1
+    LC_ALL=C comm -13 "$RD/.old" "$RD/.new" > "$RD/.added" || return 1
+    while IFS= read -r f; do
+        [ -z "$f" ] || rm -f -- "$f" || return 1
+    done < "$RD/.added"
+    # Free space occupied by newly added files before restoring the old archive.
+    # This also makes recovery from a full filesystem during unpack possible.
+    tar xf "$RD/prev-src.tar" || return 1
+    rm -f "$RD/.old" "$RD/.new" "$RD/.new-unsorted" "$RD/.added"
     if [ -f "$RD/prev-manifest" ]; then
-        LC_ALL=C sort "$RD/prev-manifest" > "$RD/.old"
-        LC_ALL=C sort "$RD/manifest.txt" > "$RD/.new"
-        LC_ALL=C comm -13 "$RD/.old" "$RD/.new" | while IFS= read -r f; do
-            [ -n "$f" ] && rm -f -- "$f"
-        done
-        rm -f "$RD/.old" "$RD/.new"
-        cp "$RD/prev-manifest" .kervax-deployed
+        cp "$RD/prev-manifest" .kervax-deployed || return 1
+    else
+        rm -f .kervax-deployed || return 1
     fi
     note "sources are back at the previous delivery"
 }
 
+restore_images() {
+    ok=1
+    for svc in $SERVICES; do
+        row=$(grep "^$svc " "$RD/images" 2>/dev/null)
+        ref=$(printf '%s\n' "$row" | cut -d' ' -f2)
+        saved=$(printf '%s\n' "$row" | cut -d' ' -f3)
+        [ -n "$ref" ] || { note "$svc: no previous image recorded"; ok=0; continue; }
+        # New snapshots pin immutable ids; older run directories used only :prev tags.
+        [ -n "$saved" ] || saved="$(image_name "$ref"):prev"
+        docker tag "$saved" "$ref" || ok=0
+    done
+    [ "$ok" = 1 ]
+}
+
+unpack_failed() {
+    note "could not publish the sources - restoring the previous delivery"
+    restore_sources || note "could not restore the previous sources"
+    finish failed 1
+}
+
 rollback() {
     step "Rolling back to $PREV_VERSION"
-    mig_now=$(migration)
+    mig_now=$(migration) || { note "cannot read the current migration - rollback is unsafe"; return 1; }
     mig_before=$(cat "$RD/mig-before" 2>/dev/null)
-    if [ -n "$mig_before" ] && [ "$mig_now" != "$mig_before" ]; then
+    [ -n "$mig_before" ] || { note "no known previous migration - rollback is unsafe"; return 1; }
+    if [ "$mig_now" != "$mig_before" ]; then
         note "the migration changed: $mig_before -> $mig_now. The old code does not know the new schema,"
         note "so no automatic rollback. By hand, once it is clear what the migration did:"
         note "  cd $DIR && docker compose $FILES run --rm --no-deps backend alembic downgrade $mig_before"
         note "  then: sh $RD/run.sh start rollback"
         return 1
     fi
-    ok=1; failed=""
+    failed=""
     for svc in $SERVICES; do
         ref=$(grep "^$svc " "$RD/images" 2>/dev/null | cut -d' ' -f2)
-        [ -n "$ref" ] || { note "$svc: no :prev image recorded"; ok=0; continue; }
+        [ -n "$ref" ] || continue
         # the image that did not pass goes away after the rollback, it has no tag left
         failed="$failed $(docker image inspect -f '{{.Id}}' "$ref" 2>/dev/null)"
-        docker tag "$(image_name "$ref"):prev" "$ref" || ok=0
     done
-    restore_sources || ok=0
-    dc up -d --no-build $SERVICES 2>&1 | tail -6
+    # Do not recreate any container unless both parts of the rollback are usable.
+    restore_images || return 1
+    restore_sources || return 1
+    up || { note "compose could not recreate the previous release"; return 1; }
     if wait_version "$PREV_VERSION"; then
         note "the panel is back on $PREV_VERSION"
         for id in $failed; do docker rmi "$id" > /dev/null 2>&1; done
     else
         note "the panel did not come back on $PREV_VERSION - look at: docker compose $FILES logs --tail=50"
-        ok=0
+        return 1
     fi
-    [ "$ok" = 1 ]
+    return 0
 }
 
 case "$MODE" in
@@ -190,11 +236,11 @@ fi
 
 step "Snapshot of what is running now"
 tar tf "$RD/src.tar" > /dev/null 2>&1 || finish failed 1
-migration > "$RD/mig-before"
+migration > "$RD/mig-before" || { note "cannot read the migration - nothing was changed"; finish snapshot-failed 1; }
 note "migration: $(cat "$RD/mig-before")"
-: > "$RD/images"
-: > "$RD/old-prev"
-mkdir -p "$RD/logs"
+: > "$RD/images" || finish snapshot-failed 1
+: > "$RD/old-prev" || finish snapshot-failed 1
+mkdir -p "$RD/logs" || finish snapshot-failed 1
 for svc in $SERVICES; do
     ref=$(image_ref "$svc")
     if [ -z "$ref" ]; then
@@ -204,44 +250,68 @@ for svc in $SERVICES; do
     fi
     name=$(image_name "$ref")
     case "${ref##*/}" in *:*) ;; *) ref="$ref:latest" ;; esac
-    echo "$svc $ref" >> "$RD/images"
     old=$(docker image inspect -f '{{.Id}}' "$name:prev" 2>/dev/null)
     cur=$(docker inspect -f '{{.Image}}' "kervax-$svc-1")
+    [ -n "$cur" ] || finish snapshot-failed 1
+    echo "$svc $ref $cur" >> "$RD/images" || finish snapshot-failed 1
     [ -n "$old" ] && [ "$old" != "$cur" ] && echo "$old" >> "$RD/old-prev"
-    docker tag "$cur" "$name:prev" && note "$svc: $name:prev"
+    docker tag "$cur" "$name:prev" || finish snapshot-failed 1
+    note "$svc: $name:prev"
     # the log of the container about to be recreated, with timestamps - otherwise it is gone
-    docker logs --timestamps "kervax-$svc-1" 2>&1 | gzip -1 > "$RD/logs/$svc.log.gz"
+    { docker logs --timestamps "kervax-$svc-1" 2>&1; printf '%s\n' "$?" > "$RD/logs/$svc.rc"; } \
+        | gzip -1 > "$RD/logs/$svc.log.gz" || finish snapshot-failed 1
+    [ "$(cat "$RD/logs/$svc.rc" 2>/dev/null)" = 0 ] || finish snapshot-failed 1
+    rm -f "$RD/logs/$svc.rc"
 done
 note "container logs saved: $(du -sh "$RD/logs" | cut -f1)"
 if [ -f .kervax-deployed ]; then
-    cp .kervax-deployed "$RD/prev-manifest"
-    while IFS= read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done < .kervax-deployed > "$RD/prev-list"
-    for f in agent-dist/manifest.json agent-dist/manifest.sig; do [ -f "$f" ] && echo "$f" >> "$RD/prev-list"; done
-    tar cf "$RD/prev-src.tar" -T "$RD/prev-list" && note "previous sources saved: $(wc -l < "$RD/prev-list") files"
+    cp .kervax-deployed "$RD/prev-manifest" || finish snapshot-failed 1
 fi
+# Include stale files too: orphan removal must be reversible. A first delivery has no
+# manifest, but still has existing configuration and sources worth preserving.
+cat "$RD/manifest.txt" "$RD/stale.txt" > "$RD/.snapshot-candidates" || finish snapshot-failed 1
+[ ! -f "$RD/prev-manifest" ] || cat "$RD/prev-manifest" >> "$RD/.snapshot-candidates" || finish snapshot-failed 1
+printf '%s\n' agent-dist/manifest.json agent-dist/manifest.sig >> "$RD/.snapshot-candidates" || finish snapshot-failed 1
+LC_ALL=C sort -u "$RD/.snapshot-candidates" > "$RD/.snapshot-list" || finish snapshot-failed 1
+while IFS= read -r f; do
+    if [ -f "$f" ] || [ -L "$f" ]; then printf '%s\n' "$f" || exit 1; fi
+done < "$RD/.snapshot-list" > "$RD/prev-list" || finish snapshot-failed 1
+tar cf "$RD/prev-src.tar" -T "$RD/prev-list" || finish snapshot-failed 1
+tar tf "$RD/prev-src.tar" > /dev/null || finish snapshot-failed 1
+note "previous sources saved: $(wc -l < "$RD/prev-list") files"
 
 step "Unpacking $REV"
-tar xf "$RD/src.tar" -C "$DIR" || finish failed 1
+tar xf "$RD/src.tar" -C "$DIR" || unpack_failed
 if [ -s "$RD/stale.txt" ]; then
-    while IFS= read -r f; do [ -n "$f" ] && rm -f -- "$f"; done < "$RD/stale.txt"
+    while IFS= read -r f; do [ -z "$f" ] || rm -f -- "$f" || unpack_failed; done < "$RD/stale.txt"
     find . -type d -empty -not -path './data/*' -not -path './.git/*' -not -path './.deploy/*' -delete 2>/dev/null || true
     note "stale files removed: $(wc -l < "$RD/stale.txt")"
 fi
-[ -f "$RD/agent.tar" ] && tar xf "$RD/agent.tar" -C "$DIR/agent-dist" && note "signed agent release delivered"
-cp "$RD/manifest.txt" .kervax-deployed
+if [ -f "$RD/agent.tar" ]; then
+    tar xf "$RD/agent.tar" -C "$DIR/agent-dist" || unpack_failed
+    note "signed agent release delivered"
+fi
+cp "$RD/manifest.txt" .kervax-deployed || unpack_failed
 
 step "Building: $SERVICES"
 if ! dc build $SERVICES > "$RD/build.log" 2>&1; then
     tail -20 "$RD/build.log"
     note "the build failed - the containers were not touched"
-    restore_sources
+    restored=1
+    restore_images || restored=0
+    restore_sources || restored=0
+    [ "$restored" = 1 ] || { note "could not restore the previous delivery"; finish failed 1; }
     finish build-failed 1
 fi
 tail -3 "$RD/build.log"
 
 step "Starting: $SERVICES"
 UP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-dc up -d --no-build $SERVICES 2>&1 | tail -6
+if ! up; then
+    note "compose failed to start the release"
+    rollback && finish rolled-back 1
+    finish failed 1
+fi
 
 step "Verifying"
 BAD=0

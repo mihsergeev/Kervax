@@ -12,8 +12,8 @@ NOW = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
 
 
 def _rep(rc=0, pod_rc=0, access=True):
-    return {"docker": {"access": access, "containers": [{"name": "web", "state": "running", "restarts": rc}]},
-            "kube": {"pods": [{"ns": "shop", "name": "api-7f9", "owner": "ReplicaSet", "phase": "Running",
+    return {"docker": {"access": access, "containers_complete": access, "containers": [{"name": "web", "state": "running", "restarts": rc}]},
+            "kube": {"access": True, "pods_complete": True, "pods": [{"ns": "shop", "name": "api-7f9", "owner": "ReplicaSet", "phase": "Running",
                                "ready": True, "restarts": pod_rc},
                               {"ns": "shop", "name": "migrate-x", "owner": "Job", "restarts": 9}]}}
 
@@ -133,7 +133,7 @@ def test_pod_names_come_down_to_their_workload():
 
 
 def _dev_rep(*pods):
-    return {"kube": {"pods": [{"ns": "shop", "name": n, "owner": "ReplicaSet", "ctrl": f"deployment/{c}",
+    return {"kube": {"access": True, "pods_complete": True, "pods": [{"ns": "shop", "name": n, "owner": "ReplicaSet", "ctrl": f"deployment/{c}",
                                "phase": "Running", "ready": True, "restarts": 5} for n, c in pods]}}
 
 

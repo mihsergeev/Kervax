@@ -159,7 +159,11 @@ async def test_pressure_at_the_same_time_every_day_is_routine(tmp_path, monkeypa
             await _tick(factory, cfg, tt, _psi(True))
         end = t + timedelta(minutes=minutes)
         await _tick(factory, cfg, end, _psi(False))
-        await _tick(factory, cfg, end + calm, _psi(False))
+        # The hold needs observed health throughout, not two points an hour apart.
+        point = end
+        while point < end + calm:
+            point = min(point + timedelta(minutes=2), end + calm)
+            await _tick(factory, cfg, point, _psi(False))
 
     await episode(0, 0, 100)
     assert len(sent) == 2 and "✅" in sent[1]          # первый раз - алерт и отбой

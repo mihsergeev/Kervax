@@ -79,7 +79,7 @@ jobs:
           KERVAX_TEST_PG: postgresql+asyncpg://kervax:kervax@localhost:5432/kervax_tests
         run: |
           PGPASSWORD=kervax psql -h localhost -U kervax -d kervax -c 'create database kervax_tests'
-          pytest -q tests/test_backup.py tests/test_auth.py tests/test_users.py tests/test_checks.py tests/test_servers.py tests/test_maint.py tests/test_check_edit_roundtrip.py tests/test_audit_view.py tests/test_home_mute.py tests/test_api_scope_regressions.py tests/test_auth_identity.py tests/test_recent_beats.py tests/test_alert_recheck.py tests/test_alert_recheck_pg.py tests/test_mongo_dumps.py
+          pytest -q tests/test_backup.py tests/test_auth.py tests/test_users.py tests/test_checks.py tests/test_servers.py tests/test_maint.py tests/test_check_edit_roundtrip.py tests/test_audit_view.py tests/test_home_mute.py tests/test_api_scope_regressions.py tests/test_auth_identity.py tests/test_recent_beats.py tests/test_alert_recheck.py tests/test_alert_recheck_pg.py tests/test_alert_observation_pg.py tests/test_mongo_dumps.py
 
   # Проверка «панель не молчит»: рядом с кодом живут списки, написанные руками
   # (виды алертов, подписи helper'ов, разделы, переводы). Код уходит вперёд —
