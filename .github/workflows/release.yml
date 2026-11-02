@@ -12,9 +12,20 @@ permissions:
   contents: read
 
 jobs:
-  # Тег не обходит проверки main/PR: тот же набор тестов и обязательных сканов.
+  # Тот же SHA уже полностью проверен в main. Не запускаем полный CI второй раз.
+  # Без свежего успешного CI (все jobs и обязательные steps) релиз блокируется.
   checks:
-    uses: ./.github/workflows/ci.yml
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Verify successful main CI for this exact commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 ops/release-ci.py
 
   images:
     needs: checks
