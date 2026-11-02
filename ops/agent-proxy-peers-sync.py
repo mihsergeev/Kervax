@@ -14,7 +14,7 @@ INSPECT = ('{"id":{{json .Id}},"project":{{json (index .Config.Labels "com.docke
            '"service":{{json (index .Config.Labels "com.docker.compose.service")}},'
            '"oneoff":{{json (index .Config.Labels "com.docker.compose.oneoff")}},'
            '"running":{{json .State.Running}},"status":{{json .State.Status}},'
-           '"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},'
+           '"health":{{with index .State "Health"}}{{json .Status}}{{else}}null{{end}},'
            '"networks":{{json .NetworkSettings.Networks}}}')
 ID = re.compile(r"[a-f0-9]{64}\Z")
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")

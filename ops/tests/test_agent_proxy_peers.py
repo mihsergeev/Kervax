@@ -198,7 +198,17 @@ def test_docker_reads_filtered_metadata_without_env(monkeypatch):
     argv, kwargs = calls[0]
     assert argv[:3] == ["docker", "inspect", "--format"]
     assert kwargs["check"] and 0 < kwargs["timeout"] <= 5
-    assert "Config.Env" not in argv[3] and ".State.Health.Status" in argv[3]
+    assert "Config.Env" not in argv[3] and '{{with index .State "Health"}}' in argv[3]
+
+
+def test_optional_health_uses_safe_map_lookup_for_containers_without_healthcheck(topology):
+    # Docker's strict Go template evaluator errors on .State.Health when that key
+    # is absent (normal for a proxy without HEALTHCHECK). index safely yields nil.
+    assert '{{with index .State "Health"}}{{json .Status}}{{else}}null{{end}}' in sync.INSPECT
+    assert ".State.Health" not in sync.INSPECT
+    env, items, _, _ = topology
+    assert all(item["health"] is None for item in items.values())
+    assert sync.snapshot(env)["v"] == 1
 
 
 def test_timer_and_deploy_refresh_contract():
