@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Kervax proxy peers after container recreation
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=1s
+Unit=kervax-agent-proxy-peers.service
+
+[Install]
+WantedBy=timers.target

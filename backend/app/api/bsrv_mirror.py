@@ -205,5 +205,5 @@ async def agent_mirror_wanted(request: Request, session: SessionDep) -> str:
     """Условие установки helper'а mirror-setup (KERVAX_SETUP_WHEN): сделан ли этот сервер резервным.
     Токен в теле, как у gre-wanted."""
     token = (await request.body())[:512].decode("ascii", errors="ignore").strip()
-    server = await _by_token(session, token)
+    server = await _by_token(session, token, request)
     return "yes" if server.backup_mirror_role else "no"

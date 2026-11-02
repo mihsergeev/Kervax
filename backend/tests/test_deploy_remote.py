@@ -19,12 +19,16 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux POSIX dep
 
 
 DOCKER = r'''#!/usr/bin/env python3
-import json, os, pathlib, sys
+import json, os, pathlib, sys, time
 a = sys.argv[1:]
 s = pathlib.Path(os.environ['DEPLOY_FIXTURE_STATE'])
 with (s/'calls').open('a') as f: f.write(json.dumps(a)+'\n')
 mode = os.environ.get('DEPLOY_FIXTURE_MODE', '')
 if a[0] == 'inspect':
+    if a[2] == '{{.State.StartedAt}}':
+        from datetime import datetime, timezone
+        print(datetime.fromtimestamp(time.time()-1, timezone.utc).isoformat())
+        sys.exit(0)
     if a[-1] == 'kervax-scheduler-1': sys.exit(1)
     service = a[-1].removeprefix('kervax-').removesuffix('-1')
     print('fixture-'+service+':latest' if 'Config.Image' in a[2] else 'sha256:old-'+service)
@@ -33,7 +37,9 @@ elif a[:2] == ['image', 'inspect']:
 elif a[0] == 'tag':
     if mode == 'tag-fail' and a[-1].endswith(':prev'): sys.exit(23)
 elif a[0] == 'compose':
-    if 'build' in a:
+    if 'config' in a:
+        print(json.dumps({'services':{'backend':{'environment':{'KERVAX_AGENT_SOURCE_GUARD':'1'}}}}))
+    elif 'build' in a:
         (s/'built').touch()
         if mode == 'build-fail': sys.exit(24)
     elif 'up' in a:
@@ -45,7 +51,16 @@ elif a[0] == 'compose':
         if mode in ('changed-schema', 'rollback-db-fail', 'rollback-db-empty'):
             (s/'health').write_text('broken')
 elif a[0] == 'exec':
-    if 'psql' in a:
+    if 'agent_source_guard' in a[-1]:
+        print('0' if mode == 'agent-runtime-off' else '1')
+    elif 'SELECT id,last_seen FROM servers' in a[-1]:
+        if mode == 'agent-baseline-empty': print('[]')
+        else:
+            baseline=s/'agent-baseline-time'
+            if not baseline.exists(): baseline.write_text(str(time.time()-5))
+            seen=float(baseline.read_text()) if mode == 'agent-stalled' or not (s/'up-count').exists() else time.time()
+            print(json.dumps([[101,seen]]))
+    elif 'psql' in a:
         if mode == 'snapshot-db-fail' or mode == 'rollback-db-fail' and (s/'built').exists(): sys.exit(26)
         if mode == 'snapshot-db-empty' or mode == 'rollback-db-empty' and (s/'built').exists(): sys.exit(0)
         if mode == 'snapshot-db-multiple': print('0141\n0142')
@@ -233,3 +248,50 @@ def test_success_and_repeat_keep_private_settings_and_report_stderr_progress(dep
     assert repeat.returncode == 0, repeat.stdout+repeat.stderr
     assert (second / 'run.status').read_text().strip() == 'ok'
     assert_protected(deployment)
+
+
+def enable_guard_fixture(deployment):
+    panel, run, state, env, _, protected = deployment
+    protected['.env'] += 'KERVAX_AGENT_SOURCE_GUARD=1\n'
+    (panel / '.env').write_text(protected['.env'])
+    payload = state / 'guard-payload'
+    payload.mkdir()
+    helper = Path(__file__).resolve().parents[2] / 'ops/agent-source-live-check.py'
+    (payload / 'agent-source-live-check.py').write_text(helper.read_text().replace('def verify(path, since, timeout=60):', 'def verify(path, since, timeout=0):').replace('if os.geteuid() != 0:', 'if False:  # fixture owns its private baseline directory'))
+    shutil.copyfile(helper.with_name('agent-source-guard-enabled.py'), payload / 'agent-source-guard-enabled.py')
+    (payload / 'agent-proxy-peers-setup.sh').write_text('#!/bin/sh\necho \'["peer-refresh"]\' >> "$DEPLOY_FIXTURE_STATE/calls"\n')
+    with tarfile.open(run / 'src.tar', 'a') as archive:
+        for source in payload.iterdir(): archive.add(source, arcname='ops/' + source.name)
+    with (run / 'manifest.txt').open('a') as manifest:
+        for source in payload.iterdir(): manifest.write('ops/' + source.name + '\n')
+    systemctl = Path(env['PATH'].split(os.pathsep)[0]) / 'systemctl'
+    systemctl.write_text('#!/bin/sh\necho \'["host-peer-refresh"]\' >> "$DEPLOY_FIXTURE_STATE/calls"\n')
+    systemctl.chmod(0o755)
+
+
+@pytest.mark.parametrize('mode,expected,up_count', [('agent-baseline-empty', 'snapshot-failed', 0), ('agent-stalled', 'rolled-back', 2), ('agent-runtime-off', 'rolled-back', 2), ('', 'ok', 1)])
+def test_guard_requires_prefresh_agents_to_report_after_new_backend_start(deployment, mode, expected, up_count):
+    enable_guard_fixture(deployment)
+    result, status, calls = execute(deployment, mode)
+    assert status == expected, result.stdout + result.stderr
+    assert (result.returncode == 0) == (expected == 'ok')
+    assert sum(a[0] == 'compose' and 'up' in a for a in calls) == up_count
+    if expected != 'ok':
+        assert_old_sources(deployment)
+    if mode == 'agent-baseline-empty':
+        assert sum(a[0] == 'exec' and 'SELECT id,last_seen FROM servers' in a[-1] for a in calls) == 1
+    if mode == 'agent-stalled':
+        assert 'reports not advanced for IDs: 101' in result.stdout
+        assert sum(a[0] == 'exec' and 'SELECT id,last_seen FROM servers' in a[-1] for a in calls) == 2
+    if expected == 'ok':
+        assert '1 agents reported after backend start' in result.stdout
+
+
+def test_manual_guarded_rollback_refreshes_restored_container_peers(deployment):
+    enable_guard_fixture(deployment)
+    result, status, _ = execute(deployment)
+    assert result.returncode == 0 and status == 'ok', result.stdout + result.stderr
+    result, status, calls = execute(deployment, kind='rollback')
+    assert result.returncode == 0 and status == 'rolled-back', result.stdout + result.stderr
+    assert sum(call[0] == 'host-peer-refresh' for call in calls) == 2
+    assert_old_sources(deployment)

@@ -14,7 +14,7 @@ services:
       - sh
       - -c
       # без access-лога uvicorn: те же запросы с временем ответа пишет nginx фронта
-      - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${KERVAX_WEB_WORKERS:-3} --no-access-log
+      - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${KERVAX_WEB_WORKERS:-3} --no-access-log --no-proxy-headers
     environment:
       KERVAX_RUN_SCHEDULER: "0"
     healthcheck:

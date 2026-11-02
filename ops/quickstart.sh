@@ -275,6 +275,7 @@ else
 fi
 
 # ── 7. Start ─────────────────────────────────────────────────────────────────
+sh "$DIR/ops/agent-proxy-peers-setup.sh" "$DIR" $FILES || die "proxy peer snapshot could not be prepared"
 if [ "$BUILD" = "1" ]; then
     say "Building images from source (a few minutes, needs about 2 GB of RAM)"
     docker compose $FILES up -d --build || die "the build failed"
@@ -286,6 +287,7 @@ else
     docker compose $FILES up -d --pull always || die "startup failed"
 fi
 
+sh "$DIR/ops/agent-proxy-peers-setup.sh" "$DIR" $FILES || die "proxy peer snapshot could not be refreshed"
 say "Waiting for the panel to answer"
 # Ask the panel from the INSIDE rather than over its public address. From outside we
 # would be connecting from the server's own address, which the allow-list

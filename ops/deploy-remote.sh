@@ -58,6 +58,33 @@ finish() {
 
 dc() { env KERVAX_DEPS_EPOCH="$EPOCH" docker compose $FILES "$@"; }
 
+agent_source_guard_enabled() {
+    [ "${AGENT_SOURCE_GUARD:-0}" = 1 ]
+}
+
+effective_agent_source_guard() {
+    resolver="$DIR/ops/agent-source-guard-enabled.py"
+    [ -f "$resolver" ] || resolver=/lib65/kervax/agent-source-guard-enabled.py
+    if [ -f "$resolver" ]; then
+        python3 "$resolver" --dir "$DIR" $FILES
+    elif grep -Eq '^[[:space:]]*(export[[:space:]]+)?KERVAX_AGENT_SOURCE_GUARD[[:space:]]*=' "$DIR/.env" || [ "${KERVAX_AGENT_SOURCE_GUARD+x}" = x ]; then
+        note "guard configuration resolver missing" >&2
+        return 1
+    else
+        printf '0\n'
+    fi
+}
+
+refresh_proxy_peers() {
+    agent_source_guard_enabled || return 0
+    if [ -f "$DIR/ops/agent-proxy-peers-setup.sh" ]; then
+        sh "$DIR/ops/agent-proxy-peers-setup.sh" "$DIR" $FILES
+    else
+        # A rollback can restore sources older than the optional host helper.
+        systemctl restart kervax-agent-proxy-peers.service
+    fi
+}
+
 health() {
     docker exec kervax-backend-1 python -c 'import urllib.request;print(urllib.request.urlopen("http://localhost:8000/api/health", timeout=5).read().decode())' 2>/dev/null
 }
@@ -73,10 +100,15 @@ migration() {
 # A pipe to tail hides compose's exit status on POSIX sh. Keep the useful last lines,
 # but an old healthy backend must not turn a failed frontend recreation into success.
 up() {
+    refresh_proxy_peers || return 1
     dc up -d --no-build $SERVICES > "$RD/$KIND-up.log" 2>&1
     rc=$?
     tail -6 "$RD/$KIND-up.log"
-    return "$rc"
+    [ "$rc" = 0 ] || return "$rc"
+    if agent_source_guard_enabled; then
+        UP_FINISHED_AT=$(python3 -c 'import time; print(time.time())') || return 1
+    fi
+    refresh_proxy_peers
 }
 
 # wait until health answers with the wanted version and a reachable database
@@ -230,6 +262,7 @@ cd "$DIR" || finish failed 1
 printf '%s  %s %s -> %s on %s\n' "$(date '+%F %T')" "$MODE" "$PREV_VERSION" "$VERSION" "$(hostname)"
 
 if [ "$MODE" = rollback ]; then
+    AGENT_SOURCE_GUARD=$(effective_agent_source_guard) || finish failed 1
     rollback && finish rolled-back 0
     finish failed 1
 fi
@@ -306,6 +339,19 @@ fi
 tail -3 "$RD/build.log"
 
 step "Starting: $SERVICES"
+AGENT_SOURCE_GUARD=0
+AGENT_SOURCE_GUARD=$(effective_agent_source_guard) || {
+        note "cannot resolve the effective agent guard setting - containers were not touched"
+        restore_images && restore_sources || { finish failed 1; }
+        finish snapshot-failed 1
+}
+if agent_source_guard_enabled; then
+    if ! python3 "$DIR/ops/agent-source-live-check.py" --capture "$RD/agent-source-baseline.json"; then
+        note "agent acceptance baseline unavailable - containers were not touched"
+        restore_images && restore_sources || { finish failed 1; }
+        finish snapshot-failed 1
+    fi
+fi
 UP_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 if ! up; then
     note "compose failed to start the release"
@@ -319,6 +365,9 @@ if wait_version "$VERSION"; then
     note "health: $VERSION, db ok"
 else
     note "✗ health does not answer with $VERSION"; BAD=1
+fi
+if [ "$BAD" = 0 ] && agent_source_guard_enabled; then
+    python3 "$DIR/ops/agent-source-live-check.py" --verify "$RD/agent-source-baseline.json" --since "$UP_FINISHED_AT" || BAD=1
 fi
 case " $SERVICES " in
 *" scheduler "*)

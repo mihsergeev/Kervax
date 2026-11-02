@@ -16,6 +16,7 @@ from app.models import Location, Server
 from app.schemas import (GreInstallOut, InstallStatusOut, InstallViaIn, InstallViaOut, RelayUpdate, ServerOut,
                          agent_ip_valid)
 from app.security import hash_agent_token
+from app.agent_auth import require_agent_source
 
 router = APIRouter(prefix="/servers", tags=["relay"])
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
@@ -156,20 +157,21 @@ async def install_status(server_id: int, user: CurrentUser, session: SessionDep)
     return out
 
 
-async def _by_token(session, token: str) -> Server:
+async def _by_token(session, token: str, request: Request) -> Server:
     server = await session.scalar(select(Server).where(Server.token_hash == hash_agent_token(token))) if token else None
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    await require_agent_source(server, request, session)
     return server
 
 
 @agent_router.post("/relay")
-async def agent_relay(session: SessionDep, body: dict = Body(default_factory=dict),
+async def agent_relay(session: SessionDep, request: Request, body: dict = Body(default_factory=dict),
                       authorization: str = Header(default="")) -> dict:
     """Helper relay-setup раз в минуту: сообщает, как у него дела, и получает, что держать.
     Куда пускать, в ответе нет: helper берет адрес панели из конфига своего агента, так что
     даже подмененный ответ не превратит ретранслятор в открытый прокси."""
-    server = await _by_token(session, authorization.removeprefix("Bearer ").strip())
+    server = await _by_token(session, authorization.removeprefix("Bearer ").strip(), request)
     if not server.relay_enabled:
         return {"enabled": False}
     server.relay_state = relay_mod.helper_status(body if isinstance(body, dict) else {})
@@ -191,5 +193,5 @@ async def agent_relay_wanted(request: Request, session: SessionDep) -> str:
     ноде. Токен в теле, а не в заголовке: условие пишется без кавычек и обратных слэшей, а
     curl --data-binary @- берет его прямо из конфига агента."""
     token = (await request.body())[:512].decode("ascii", errors="ignore").strip()
-    server = await _by_token(session, token)
+    server = await _by_token(session, token, request)
     return "yes" if server.relay_enabled else "no"

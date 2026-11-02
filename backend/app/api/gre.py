@@ -67,12 +67,12 @@ async def gre_install(server_id: int, user: CurrentUser, session: SessionDep) ->
 
 
 @agent_router.post("/gre")
-async def agent_gre(session: SessionDep, body: dict = Body(default_factory=dict),
+async def agent_gre(session: SessionDep, request: Request, body: dict = Body(default_factory=dict),
                     authorization: str = Header(default="")) -> dict:
     """Helper gre-setup раз в минуту: сообщает, как у него дела, и получает, что держать. Адрес
     хоста панели (remote) - тот, с которого хост ждет GRE от этой ноды; пока хост свою сторону
     не поднял, его нет, и helper туннель не поднимает."""
-    server = await _by_token(session, authorization.removeprefix("Bearer ").strip())
+    server = await _by_token(session, authorization.removeprefix("Bearer ").strip(), request)
     if not server.gre_enabled:
         return {"enabled": False}
     st = gre_mod.helper_status(body if isinstance(body, dict) else {})
@@ -104,15 +104,15 @@ async def agent_gre_wanted(request: Request, session: SessionDep) -> str:
     """Условие установки helper'а gre-setup (KERVAX_SETUP_WHEN): включен ли GRE этой ноде. Токен
     в теле, как у relay-wanted."""
     token = (await request.body())[:512].decode("ascii", errors="ignore").strip()
-    server = await _by_token(session, token)
+    server = await _by_token(session, token, request)
     return "yes" if server.gre_enabled else "no"
 
 
 @agent_router.get("/probe")
-async def agent_probe(session: SessionDep, n: int = Query(default=8192, ge=1, le=PROBE_MAX),
+async def agent_probe(session: SessionDep, request: Request, n: int = Query(default=8192, ge=1, le=PROBE_MAX),
                       authorization: str = Header(default="")) -> Response:
     """n случайных байт одним ответом: агент меряет, доходит ли большой кусок одним соединением.
     Случайные - чтобы сжатие по дороге не сделало из 100 КБ два."""
-    await _by_token(session, authorization.removeprefix("Bearer ").strip())
+    await _by_token(session, authorization.removeprefix("Bearer ").strip(), request)
     return Response(os.urandom(n), media_type="application/octet-stream",
                     headers={"Cache-Control": "no-store"})

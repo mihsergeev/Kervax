@@ -6922,6 +6922,7 @@ function ServerDetail({
       name: s.name,
       group_name: s.group_name,
       agent_ip: s.agent_ip ?? '',
+      agent_source_ips: (s.agent_source_ips ?? []).join('\n'),
       cpu_alert_percent: s.cpu_alert_percent,
       mem_alert_percent: s.mem_alert_percent,
       disk_alert_percent: s.disk_alert_percent,
@@ -6963,6 +6964,7 @@ function ServerDetail({
         name: form.name.trim(),
         group_name: form.group_name.trim(),
         agent_ip: form.agent_ip.trim(),
+        agent_source_ips: form.agent_source_ips.split(/\r?\n/).map((ip) => ip.trim()).filter(Boolean),
         cpu_alert_percent: int(form.cpu_alert_percent),
         mem_alert_percent: int(form.mem_alert_percent),
         disk_alert_percent: int(form.disk_alert_percent),
@@ -7900,6 +7902,7 @@ function ServerDetail({
     )}
     {editing && form && (
       <ServerEditModal
+        agentSourceGuardEnabled={!!s.agent_source_guard_enabled}
         form={form}
         set={(patch) => setForm({ ...form, ...patch })}
         busy={saving}

@@ -156,6 +156,7 @@ from app.schemas import (
     SnoozeIn,
 )
 from app.security import generate_agent_token, hash_agent_token
+from app.agent_auth import require_agent_source
 
 log = logging.getLogger("kervax.servers")
 
@@ -318,6 +319,7 @@ def _out(
     web_err: tuple[float, float, int, dict, float] | None = None,
 ) -> ServerOut:
     o = ServerOut.model_validate(server)
+    o.agent_source_guard_enabled = get_settings().agent_source_guard
     o.online = _is_online(server, now)
     o.agent_advice, o.agent_fix_command = _agent_advice(server)
     o.agent_update_note = agent_update_note(server.last_report or {}) or None
@@ -3618,6 +3620,7 @@ async def agent_report(
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
 
+    verified_source = await require_agent_source(server, request, session)
     now = datetime.now(timezone.utc)
     mem_pct = (
         round(body.mem_used / body.mem_total * 100, 1) if body.mem_total else None
@@ -3703,7 +3706,7 @@ async def agent_report(
         server.os = body.os[:128]
     if body.local_ip:
         server.local_ip = body.local_ip[:64]
-    ext = _client_ip(x_forwarded_for, x_real_ip)
+    ext = verified_source or _client_ip(x_forwarded_for, x_real_ip)
     if body.proxy:
         # Агент ходит через прокси: панель видит адрес прокси, а не ноды. По нему считались бы
         # страна и проверки снаружи, и у всех нод за одним прокси он был бы один. Адрес ноды
@@ -3836,13 +3839,14 @@ async def agent_report(
 
 @agent_router.post("/packages")
 async def agent_packages(
-    body: AgentPackagesIn, session: SessionDep, authorization: str = Header(default=""),
+    body: AgentPackagesIn, session: SessionDep, request: Request, authorization: str = Header(default=""),
 ) -> dict:
     """Кусок списка пакетов (app/packages.py): агент шлет их по одному, каждым своим соединением."""
     token = authorization.removeprefix("Bearer ").strip()
     server = await session.scalar(select(Server).where(Server.token_hash == hash_agent_token(token)).with_for_update()) if token else None
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    await require_agent_source(server, request, session)
     if body.part >= body.parts:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "номер куска больше их числа")
     done = await packages_mod.store_part(session, server, body.h, body.mgr, body.part, body.parts, body.items,
@@ -3986,7 +3990,7 @@ async def _site_probe_tasks(session, server_id: int) -> list[dict]:
 
 @agent_router.get("/commands")
 async def agent_commands(
-    session: SessionDep, authorization: str = Header(default="")
+    session: SessionDep, request: Request, authorization: str = Header(default="")
 ) -> dict:
     """Быстрый опрос очереди docker-команд (агент дёргает чаще, чем шлёт метрики) —
     чтобы restart/logs исполнялись за ~3с, а не за интервал отчёта. Тело крошечное."""
@@ -3996,6 +4000,7 @@ async def agent_commands(
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    await require_agent_source(server, request, session)
     cmds = await _take_docker_commands(session, server.id)
     kcmds = await _take_kube_commands(session, server.id)
     bcmds = await _take_backup_commands(session, server.id)
@@ -4026,6 +4031,7 @@ async def agent_site_probe_result(
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    await require_agent_source(server, request, session)
     now = datetime.now(timezone.utc)
     pending = await _store_site_probes(session, server.id, body.site_probes, now)
     await session.commit()
@@ -4037,6 +4043,7 @@ async def agent_site_probe_result(
 async def agent_going_down(
     body: AgentGoingDownIn,
     session: SessionDep,
+    request: Request,
     authorization: str = Header(default=""),
 ) -> dict:
     """Агент 2.47+ уходит штатно (SIGTERM от systemd): перезагрузка, выключение или остановка
@@ -4048,6 +4055,7 @@ async def agent_going_down(
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    await require_agent_source(server, request, session)
     rep = dict(server.last_report or {})
     rep[going_down.KEY] = going_down.make(body.kind, datetime.now(timezone.utc))
     server.last_report = rep
@@ -4069,6 +4077,7 @@ async def agent_docker_result(
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    await require_agent_source(server, request, session)
     c = await session.get(DockerCommand, body.id)
     if c is None or c.server_id != server.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
@@ -4096,6 +4105,7 @@ async def agent_kube_result(
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    await require_agent_source(server, request, session)
     c = await session.get(KubeCommand, body.id)
     if c is None or c.server_id != server.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
@@ -4124,6 +4134,7 @@ async def agent_backup_result(
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
+    await require_agent_source(server, request, session)
     c = await session.get(BackupCommand, body.id)
     if c is None or c.server_id != server.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")

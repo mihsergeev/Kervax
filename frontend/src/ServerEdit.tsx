@@ -15,6 +15,7 @@ export type ServerEditForm = {
   name: string
   group_name: string
   agent_ip: string
+  agent_source_ips: string // по одному адресу в строке
   cpu_alert_percent: number
   mem_alert_percent: number
   disk_alert_percent: number
@@ -193,6 +194,7 @@ export function ServerEditModal({
   note,
   initialSec,
   devHint,
+  agentSourceGuardEnabled,
   onSubmit,
   onCancel,
   onDelete,
@@ -209,6 +211,7 @@ export function ServerEditModal({
   note: ReactNode // заметка: сохраняется сразу, отдельно от формы
   initialSec?: string
   devHint?: boolean // имя или группа похожи на разработку, а пометки нет (backend dev_mode.looks_dev)
+  agentSourceGuardEnabled: boolean
   onSubmit: () => void
   onCancel: () => void
   onDelete: () => void
@@ -440,7 +443,29 @@ export function ServerEditModal({
         {rows(area, { disktemp: thr('disk_temp_alert_c', '°C', { max: 120, off: true }) })}
       </>
     )
-  else if (area?.id === 'net') body = rows(area, { conntrack: thr('conntrack_alert_percent', '%', { off: true }) })
+  else if (area?.id === 'net') body = (
+    <>
+      <label className="field">
+        <span>{t('Дополнительные IP источников агента')}</span>
+        <textarea
+          rows={4}
+          value={form.agent_source_ips}
+          onChange={(e) => set({ agent_source_ips: e.target.value })}
+          placeholder={'198.51.100.10\n2001:db8::10'}
+          aria-describedby="agent-source-ips-help"
+        />
+      </label>
+      <p id="agent-source-ips-help" className="small muted">
+        {t('Для NAT или HTTP-прокси: до 16 отдельных IPv4 или IPv6, по одному в строке. Основной IP учитывается автоматически. После его замены старый разрешен только если явно добавлен в этот список.')}
+      </p>
+      <p className={`small ${agentSourceGuardEnabled ? 'muted' : 'form-error'}`}>
+        {agentSourceGuardEnabled
+          ? t('IP-фильтр запросов агента включен. Если основной IP и дополнительные адреса пусты, доступ проверяется только по токену.')
+          : t('IP-фильтр запросов агента не включен. Сохраненные адреса пока не ограничивают доступ к API агента, запросы проверяются по токену.')}
+      </p>
+      {rows(area, { conntrack: thr('conntrack_alert_percent', '%', { off: true }) })}
+    </>
+  )
   else if (area?.id === 'k8s')
     body = (
       <>

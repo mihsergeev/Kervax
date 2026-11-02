@@ -696,6 +696,8 @@ class Server(Base):
     # data/agent_allow_ips, а хостовый скрипт (ops/agent-firewall-sync.sh)
     # разрешает эти адреса в ufw/firewalld, если панель закрыта фаерволом
     agent_ip: Mapped[str] = mapped_column(String(64), default="")
+    # Только явно заданные дополнительные источники для agent API (NAT/HTTP proxy).
+    agent_source_ips: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]")
     # отпечаток списка пакетов, который у панели есть (app/packages.py): не совпал с отчетом -
     # агента просят прислать список
     pkg_hash: Mapped[str] = mapped_column(String(32), default="", server_default="")

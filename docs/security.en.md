@@ -11,6 +11,33 @@ listener (`net.Listen`/HTTP server) and never spawns a shell or processes. It on
 **POSTs metrics** to the panel over HTTPS periodically. The panel physically cannot
 connect back to the server — there is no open port to reach.
 
+## 1b. Agent API source addresses
+
+Authenticated agent API requests still require their token. Source IP filtering is controlled by
+`KERVAX_AGENT_SOURCE_GUARD` (default `0`). Saving addresses in a server card does
+not enable the global filter; the Network settings show whether it is enabled.
+
+When enabled, a server accepts agent API requests from its current main IP
+(`agent_ip`) and its explicitly configured `agent_source_ips`. Replacing the main
+IP stops allowing the old address unless it is explicitly listed as an extra.
+Reports, previously observed addresses and proxy installation metadata never
+add trusted sources automatically. An empty main IP and an empty extra list keep
+token-only access for that server.
+
+For NAT or an HTTP proxy, add the actual source address in **Network -> Additional
+agent source IPs**, one per line, for example `198.51.100.10` or `2001:db8::10`.
+Up to 16 individual IPv4/IPv6 addresses are accepted; networks, hostnames and
+empty entries are rejected. IPv6 is canonicalized, IPv4-mapped IPv6 becomes IPv4,
+and duplicates are removed. Editors have the same server/group permissions for
+this list as for the main IP. The reported `agent_source_guard_enabled` flag is
+read-only and comes from the panel configuration.
+
+Before enabling the filter, configure and verify trusted reverse proxy peers on
+the panel host, check direct and proxied agent routes, and explicitly add any
+required NAT or HTTP proxy sources. A forwarding header from an arbitrary client
+must not establish its identity. The source list supplements token checks; it
+does not replace the host firewall or make an untrusted proxy trustworthy.
+
 ## 2. The agent is unprivileged and locked down
 
 - System user `kervax`: no home directory, shell `/usr/sbin/nologin`.

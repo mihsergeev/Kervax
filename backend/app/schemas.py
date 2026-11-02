@@ -1238,12 +1238,38 @@ def agent_ip_valid(v: str) -> bool:
         return False
 
 
+def _agent_source_ips_ok(value):
+    """Явный список отдельных адресов: отчеты агента не расширяют доверие."""
+    import ipaddress
+
+    if not isinstance(value, list) or len(value) > 16:
+        raise ValueError("Дополнительные источники агента - список не более 16 IP-адресов")
+    addresses = []
+    for raw in value:
+        if not isinstance(raw, str) or not raw.strip() or "%" in raw:
+            raise ValueError("Каждый источник агента - отдельный IPv4 или IPv6")
+        try:
+            address = ipaddress.ip_address(raw.strip())
+        except ValueError:
+            raise ValueError("Каждый источник агента - отдельный IPv4 или IPv6, без подсети и имени") from None
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
+            address = address.ipv4_mapped
+        if address.is_unspecified or address.is_multicast:
+            raise ValueError("Источник агента - адрес конкретной машины")
+        canonical = str(address)
+        if canonical not in addresses:
+            addresses.append(canonical)
+    return addresses
+
+
 class ServerCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     group_name: str = Field(default="", max_length=64)
     # IP, с которого агент будет ходить в панель (опционально, для фаервола)
     agent_ip: str = Field(default="", max_length=64)
     _agent_ip = field_validator("agent_ip")(_agent_ip_ok)
+    agent_source_ips: list[str] = Field(default_factory=list, max_length=16)
+    _agent_sources = field_validator("agent_source_ips", mode="before")(_agent_source_ips_ok)
     cpu_alert_percent: int = Field(default=90, ge=0, le=100)
     mem_alert_percent: int = Field(default=90, ge=0, le=100)
     disk_alert_percent: int = Field(default=90, ge=0, le=100)
@@ -1258,6 +1284,8 @@ class ServerUpdate(BaseModel):
     group_name: str | None = Field(default=None, max_length=64)
     agent_ip: str | None = Field(default=None, max_length=64)
     _agent_ip = field_validator("agent_ip")(_agent_ip_ok)
+    agent_source_ips: list[str] = Field(default_factory=list, max_length=16)
+    _agent_sources = field_validator("agent_source_ips", mode="before")(_agent_source_ips_ok)
     enabled: bool | None = None
     cpu_alert_percent: int | None = Field(default=None, ge=0, le=100)
     mem_alert_percent: int | None = Field(default=None, ge=0, le=100)
@@ -1536,6 +1564,9 @@ class ServerOut(BaseModel):
     local_ip: str
     external_ip: str
     agent_ip: str = ""
+    agent_source_ips: list[str] = Field(default_factory=list, max_length=16)
+    _agent_sources = field_validator("agent_source_ips", mode="before")(_agent_source_ips_ok)
+    agent_source_guard_enabled: bool = False
     # ISO-код страны по IP (офлайн-таблица, см. app/geoip.py); '' = не определилась
     country: str = ""
     # контейнеры, по которым алерт уже ушёл: {имя: "down"|"loop"} — панель подсвечивает

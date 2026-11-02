@@ -35,6 +35,8 @@ jobs:
         run: pip install .[dev]
       - name: Tests
         run: pytest -q -n auto
+      - name: Agent source host security regression
+        run: python -m pytest --noconftest -q ../ops/tests
       # Реальные uid/права/симлинки: установщик пишет только в изолированное дерево теста.
       - name: Backup installer security regression
         run: sudo env PATH="$PATH" "$(command -v python)" -m pytest --noconftest -q tests/test_backup_dump_paths_security.py tests/test_backup_pg_dump_runner.py tests/test_mongo_dump_runner.py tests/test_recheck_helper.py

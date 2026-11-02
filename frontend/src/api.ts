@@ -2557,6 +2557,8 @@ export type Server = {
   // только что поставлена: установщик еще ставит helper'ы и прокси Docker
   fresh?: boolean
   agent_ip: string
+  agent_source_ips: string[]
+  agent_source_guard_enabled: boolean
   last_report: ServerReport | null
   last_seen: string | null
   snooze_until: string | null
@@ -3179,6 +3181,7 @@ export type ServerForm = {
   name: string
   group_name?: string
   agent_ip?: string
+  agent_source_ips?: string[]
   cpu_alert_percent?: number
   mem_alert_percent?: number
   disk_alert_percent?: number

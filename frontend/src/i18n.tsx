@@ -11,6 +11,13 @@ export type Lang = 'ru' | 'en'
 // Ключ = русская строка (дефолт). Значение = английский перевод.
 // Отсутствующий ключ → возвращается русский (мягкий фолбэк).
 const EN: Record<string, string> = {
+  'Дополнительные IP источников агента': 'Additional agent source IPs',
+  'Для NAT или HTTP-прокси: до 16 отдельных IPv4 или IPv6, по одному в строке. Основной IP учитывается автоматически. После его замены старый разрешен только если явно добавлен в этот список.':
+    'For NAT or an HTTP proxy: up to 16 individual IPv4 or IPv6 addresses, one per line. The main IP is included automatically. After replacing it, the old address is allowed only if explicitly added to this list.',
+  'IP-фильтр запросов агента включен. Если основной IP и дополнительные адреса пусты, доступ проверяется только по токену.':
+    'Agent request IP filtering is enabled. If the main IP and additional addresses are empty, access is checked by token only.',
+  'IP-фильтр запросов агента не включен. Сохраненные адреса пока не ограничивают доступ к API агента, запросы проверяются по токену.':
+    'Agent request IP filtering is not enabled. Saved addresses do not restrict access to the agent API yet; requests are checked by token.',
   'MongoDB: replica set снимается с oplog, восстановление с --oplogReplay. Для standalone приостановите запись на время дампа. Шардированные кластеры не поддерживаются.':
     'MongoDB: replica sets include the oplog; restore with --oplogReplay. Pause writes during a standalone dump. Sharded clusters are not supported.',
   'запросил свежую проверку исправления': 'requested fresh recovery verification',

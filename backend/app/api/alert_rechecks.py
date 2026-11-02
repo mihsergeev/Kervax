@@ -13,6 +13,7 @@ from app.collector import _aware
 from app.deps import CurrentUser, SessionDep, group_allowed, user_sections
 from app.models import AlertRecheck, Check, ProbeRequest, Server, User
 from app.security import hash_agent_token
+from app.agent_auth import require_agent_source
 
 router = APIRouter(prefix="/alert-rechecks", tags=["alert rechecks"])
 agent_router = APIRouter(prefix="/agent", tags=["agent"])
@@ -170,12 +171,13 @@ class ResultIn(BaseModel):
 
 
 @agent_router.post("/alert-recheck-result")
-async def result(body: ResultIn, session: SessionDep, authorization: str = Header(default="")) -> dict:
+async def result(body: ResultIn, session: SessionDep, request: Request, authorization: str = Header(default="")) -> dict:
     server = await session.scalar(select(Server).where(
         Server.token_hash == hash_agent_token(authorization.removeprefix("Bearer ").strip())
     ).with_for_update())
     if server is None or not server.enabled:
         raise HTTPException(401, "Неверный токен агента")
+    await require_agent_source(server, request, session)
     await recheck.ingest(session, server, body.id, body.ok, body.snapshot, datetime.now(timezone.utc))
     await session.commit()
     return {"ok": True}

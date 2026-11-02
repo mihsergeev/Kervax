@@ -49,6 +49,21 @@ def test_exact_commit_reuses_all_eight_successful_main_jobs():
     assert receipt['sha'] == SHA and receipt['run_id'] == 100 and receipt['jobs'] == 8
 
 
+@pytest.mark.parametrize('backend', ['backend (3.12)', 'backend (3.14)'])
+@pytest.mark.parametrize('state', ['missing', 'skipped'])
+def test_host_source_security_checks_cannot_be_omitted(backend, state):
+    api = API()
+    job = next(job for job in api.jobs if job['name'] == backend)
+    name = 'Agent source host security regression'
+    step = next(step for step in job['steps'] if step['name'] == name)
+    if state == 'missing':
+        job['steps'].remove(step)
+    else:
+        step['conclusion'] = 'skipped'
+    with pytest.raises(gate.Rejected):
+        gate.verify(api, REPO, SHA, NOW)
+
+
 @pytest.mark.parametrize('field,value', [
     ('head_sha', 'b' * 40), ('head_branch', 'topic'), ('event', 'pull_request'),
     ('workflow_id', 20), ('path', '.github/workflows/unrelated.yml'),
