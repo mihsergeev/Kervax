@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.86] - 2026-11-03
+
+### Fixed
+- An OOM alert already delivered to Telegram or a webhook stays recorded even when another alert in the batch needs a retry.
+- If Telegram may have accepted an OOM notification but its response was lost, Kervax logs the uncertain delivery and skips the duplicate. Connection failures before sending still retry.
+
 ## [1.8.85] - 2026-11-03
 
 ### Fixed

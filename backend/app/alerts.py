@@ -608,6 +608,14 @@ class SendErrors(list):
     (TgRejected): такое сообщение повторять незачем."""
 
     rejected: int = 0
+    uncertain: bool = False
+
+
+def _tg_uncertain(exc: Exception) -> bool:
+    # POST мог дойти до Telegram, даже если ответ не пришел. Ошибка
+    # соединения до отправки и явный ответ API об ошибке сюда не входят.
+    return isinstance(exc, (httpx.ReadTimeout, httpx.ReadError, httpx.WriteTimeout,
+                            httpx.WriteError, httpx.RemoteProtocolError))
 
 
 async def send_alert(cfg: dict, text: str, parse_mode: str | None = None,
@@ -631,8 +639,10 @@ async def send_alert(cfg: dict, text: str, parse_mode: str | None = None,
                 errors.rejected += 1
                 log.warning("Telegram отказал в алерте: %s", exc)
             except Exception as exc:  # noqa: BLE001 — алерт не должен ронять цикл
-                errors.append(f"Telegram: {exc}")
-                log.warning("Telegram-алерт не отправлен: %s", exc)
+                errors.uncertain = _tg_uncertain(exc)
+                detail = str(exc) or type(exc).__name__
+                errors.append(f"Telegram: {detail}")
+                log.warning("Telegram-алерт не подтвержден: %s", detail)
 
         if cfg.get("webhook"):
             err = await link.hook(cfg["webhook"], text, parse_mode)
@@ -815,6 +825,8 @@ async def dispatch(
     threshold: int,
     parse_mode: str | None = None,
     session_factory=None,
+    *,
+    oom_finished: set[int] | None = None,
 ) -> bool:
     """Отправка пачки алертов ОДНОГО цикла с антифлудом. Если сообщений
     ≥ threshold (>0) — шлём один дайджест вместо потока; иначе — поштучно.
@@ -823,6 +835,8 @@ async def dispatch(
     в журнале ошибок). Умерший вебхук при живом Telegram повтора не вызывает, ошибка вебхука
     запоминается рядом с ошибками чатов по группам (ключ "_webhook").
     can_send=False (каналы не настроены / пауза) → не шлём и не фиксируем.
+    oom_finished - серверы, чей OOM не надо повторять даже при сбое остальной пачки.
+    Для OOM после неопределенного исхода POST ошибка остается в журнале панели.
     parse_mode прокидывается в send_alert (дайджест-обёртка html-безопасна).
     Вся пачка идет через один http-клиент; после первого таймаута Telegram остальное в
     Telegram в этот раз не шлется (повтор на следующем тике)."""
@@ -839,6 +853,7 @@ async def dispatch(
     if session_factory is not None and buttons_on(cfg):
         rows = await tg_buttons.prepare(session_factory, messages)
     sent: dict[int, list] = {}
+    uncertain: set[int] = set()
     async with _link() as link:
         # тихие часы/выключенные каналы уже отсеяны выше (can_send) — персональные
         # получатели подчиняются тем же правилам, отдельного «ночью можно» у них нет
@@ -848,11 +863,11 @@ async def dispatch(
         on_main = [bool(main) and main in chats_for(cfg, m) for m in messages]
         everything = list(range(len(messages)))
         if not main or all(on_main):
-            got, again = await _send_common(cfg, everything, messages, threshold, parse_mode, rows, sent)
+            got, again = await _send_common(cfg, everything, messages, threshold, parse_mode, rows, sent, uncertain)
         else:
             # основной чат получает только остальное, а вебхук - все, как и раньше
             got, again = await _send_common({**cfg, "webhook": ""}, [i for i in everything if on_main[i]],
-                                            messages, threshold, parse_mode, rows, sent)
+                                            messages, threshold, parse_mode, rows, sent, uncertain)
             if cfg.get("webhook"):
                 got2, again2 = await _send_common({**cfg, "telegram_chat": ""}, everything, messages,
                                                   threshold, parse_mode, {}, sent)
@@ -862,12 +877,22 @@ async def dispatch(
         ok = True
         if cfg.get("telegram_token"):
             rok, rgot = await _send_routes(cfg, messages, threshold, parse_mode, rows, sent,
-                                           session_factory)
+                                           session_factory, uncertain if oom_finished is not None else None)
             ok, got = rok, got | rgot
             # то, что основной чат не получает (main=rest), в Telegram идет чатом по группам: если
             # тот принял, а вебхук нет - сообщение доставлено, как с основным чатом. Сбой самого
             # основного чата чат по группам не покрывает: там повтор, как и раньше
             again -= {i for i in rgot if not on_main[i]}
+        if oom_finished is not None:
+            for i in got | uncertain:
+                for part in getattr(messages[i], "parts", None) or [messages[i]]:
+                    if getattr(part, "kind", "") == "oom":
+                        kind, ids = _ref_ids(part.ref)
+                        if kind == "srv":
+                            oom_finished.update(ids)
+                        if i not in got:
+                            log.error("Доставка OOM в Telegram не подтверждена, повтор отключен: %s", part.target)
+            again -= {i for i in uncertain if getattr(messages[i], "kind", "") == "oom"}
         ok = ok and not again
         delivered = [m for i, m in enumerate(messages) if i in got]
         if rows:
@@ -999,7 +1024,8 @@ def _outcome(errors: list[str], channels: int, text: str) -> tuple[bool, bool]:
 
 
 async def _send_common(cfg: dict, idx: list[int], messages: list[str], threshold: int,
-                       parse_mode: str | None, rows: dict[int, int], sent: dict[int, list]
+                       parse_mode: str | None, rows: dict[int, int], sent: dict[int, list],
+                       uncertain: set[int] | None = None,
                        ) -> tuple[set[int], set[int]]:
     """Основной чат и вебхук: дайджестом, если сообщений много, иначе по одному. Возвращает,
     что дошло хоть в один канал, и что повторить на следующем цикле (см. _outcome)."""
@@ -1009,6 +1035,8 @@ async def _send_common(cfg: dict, idx: list[int], messages: list[str], threshold
     if threshold and len(idx) >= threshold:
         text = _digest([messages[i] for i in idx])
         errors = await send_alert(cfg, text, parse_mode)
+        if uncertain is not None and getattr(errors, "uncertain", False):
+            uncertain.update(idx)
         got, again = _outcome(errors, channels, text)
         return (set(idx) if got else set()), (set(idx) if again else set())
     got, again = set(), set()
@@ -1024,6 +1052,8 @@ async def _send_common(cfg: dict, idx: list[int], messages: list[str], threshold
         if aid and out:
             sent.setdefault(aid, []).extend(out)
         _note_sent(m, out)
+        if uncertain is not None and getattr(errors, "uncertain", False):
+            uncertain.add(i)
         g, a = _outcome(errors, channels, m)
         if g:
             got.add(i)
@@ -1033,16 +1063,18 @@ async def _send_common(cfg: dict, idx: list[int], messages: list[str], threshold
 
 
 async def _send_batch(cfg: dict, chat: str, items: list[tuple[int, str]], threshold: int,
-                      parse_mode: str | None, rows: dict[int, int], sent: dict[int, list]
+                      parse_mode: str | None, rows: dict[int, int], sent: dict[int, list],
+                      uncertain: set[int] | None = None,
                       ) -> tuple[list[int], str]:
     """Пачка сообщений в чат по группам: дайджестом, если их много, иначе по одному с кнопками.
     Возвращает, какие не ушли, и текст последней ошибки."""
     async with _link() as link:
-        return await _send_batch_via(link, cfg, chat, items, threshold, parse_mode, rows, sent)
+        return await _send_batch_via(link, cfg, chat, items, threshold, parse_mode, rows, sent, uncertain)
 
 
 async def _send_batch_via(link: "_Link", cfg: dict, chat: str, items: list[tuple[int, str]], threshold: int,
-                          parse_mode: str | None, rows: dict[int, int], sent: dict[int, list]
+                          parse_mode: str | None, rows: dict[int, int], sent: dict[int, list],
+                          uncertain: set[int] | None = None,
                           ) -> tuple[list[int], str]:
     api, token = cfg.get("telegram_api", ""), cfg["telegram_token"]
     if threshold and len(items) >= threshold:
@@ -1050,8 +1082,10 @@ async def _send_batch_via(link: "_Link", cfg: dict, chat: str, items: list[tuple
             await link.tg(api, token, chat, _digest([t for _, t in items]), parse_mode)
             return [], ""
         except Exception as exc:  # noqa: BLE001
+            if uncertain is not None and _tg_uncertain(exc):
+                uncertain.update(i for i, _ in items)
             log.warning("Telegram-алерт в чат %s не отправлен: %s", chat, exc)
-            return [i for i, _ in items], str(exc)
+            return [i for i, _ in items], str(exc) or type(exc).__name__
     failed: list[int] = []
     err = ""
     for i, text in items:
@@ -1064,9 +1098,11 @@ async def _send_batch_via(link: "_Link", cfg: dict, chat: str, items: list[tuple
             if mid is not None:
                 _note_sent(text, [{"chat": chat, "id": mid}])
         except Exception as exc:  # noqa: BLE001 — алерт не должен ронять цикл
+            if uncertain is not None and _tg_uncertain(exc):
+                uncertain.add(i)
             log.warning("Telegram-алерт в чат %s не отправлен: %s", chat, exc)
             failed.append(i)
-            err = str(exc)
+            err = str(exc) or type(exc).__name__
     return failed, err
 
 
@@ -1078,7 +1114,8 @@ def _fallback_text(m: str, name: str, err: str, parse_mode: str | None) -> str:
 
 
 async def _send_routes(cfg: dict, messages: list[str], threshold: int, parse_mode: str | None,
-                       rows: dict[int, int], sent: dict[int, list], session_factory=None
+                       rows: dict[int, int], sent: dict[int, list], session_factory=None,
+                       uncertain: set[int] | None = None,
                        ) -> tuple[bool, set[int]]:
     """Чаты по группам. Чат, который не принял сообщение, повтора не вызывает (иначе основной
     чат получал бы тот же алерт каждый цикл): сообщение уходит в основной чат с припиской, если
@@ -1097,18 +1134,27 @@ async def _send_routes(cfg: dict, messages: list[str], threshold: int, parse_mod
     fallback: list[str] = []
     back: list[int] = []
     for chat, items in plan.items():
-        failed, err = await _send_batch(cfg, chat, items, threshold, parse_mode, rows, sent)
+        route_uncertain: set[int] = set()
+        failed, err = await _send_batch(cfg, chat, items, threshold, parse_mode, rows, sent, route_uncertain)
+        if uncertain is not None:
+            uncertain.update(route_uncertain)
         got.update(i for i, _ in items if i not in failed)
         if failed:
             errors[chat] = err
         for i in failed:
+            if uncertain is not None and i in route_uncertain and getattr(messages[i], "kind", "") == "oom":
+                continue
             if main and main not in chats_for(cfg, messages[i]) and i not in back:
                 back.append(i)
                 fallback.append(_fallback_text(messages[i], names.get(chat, chat), err, parse_mode))
     ok = True
     if fallback:
+        fallback_uncertain: set[int] = set()
         fgot, fagain = await _send_common({**cfg, "webhook": ""}, list(range(len(fallback))), fallback,
-                                          threshold, parse_mode, {}, sent)
+                                          threshold, parse_mode, {}, sent, fallback_uncertain)
+        if uncertain is not None:
+            uncertain.update(back[j] for j in fallback_uncertain)
+            fagain -= {j for j in fallback_uncertain if getattr(messages[back[j]], "kind", "") == "oom"}
         ok = not fagain
         got.update(back[j] for j in fgot)
     if session_factory is not None:

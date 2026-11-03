@@ -2,11 +2,15 @@
 недоступный Telegram, подделка строк алерта именем от агента, разметка в вебхуке."""
 import html
 import logging
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
+from sqlalchemy import select
 
-from app import alerts, settings_store, tg_fmt
+from app import alerts, collector, settings_store, tg_fmt
+from app.config import Settings
+from app.models import AlertEvent, Server
 
 
 class _Resp:
@@ -160,6 +164,72 @@ async def test_network_errors_are_retried(http, fail):
 
     http.answer = answer
     assert await alerts.dispatch(_cfg(), True, [_msg()], 0, parse_mode="HTML") is False
+
+
+@pytest.mark.parametrize("lost_response", [False, True])
+async def test_oom_is_checkpointed_when_the_rest_of_the_batch_retries(client, http, lost_response):
+    factory = _factory(client)
+    now = datetime.now(timezone.utc)
+    cfg = Settings(alert_telegram_token="fake-token-example", alert_telegram_chat="-100")
+    async with factory() as session:
+        for name in ("node-a", "node-b"):
+            session.add(Server(name=name, token_hash=name, enabled=True, last_seen=now, oom_total=1,
+                               created_at=now - timedelta(days=1), last_report={"uptime_seconds": 100000},
+                               backup_not_required=True))
+        await session.commit()
+
+    def answer(_url, payload):
+        if "node-a" in payload["text"]:
+            if lost_response:
+                raise httpx.ReadTimeout("reply lost after sending")
+            return _ok()
+        raise httpx.ConnectError("connection not opened")
+
+    http.answer = answer
+    await collector.evaluate_servers(factory, cfg, now)
+    async with factory() as session:
+        servers = {s.name: s for s in await session.scalars(select(Server))}
+        assert servers["node-a"].alert_state["oom_seen"] == 1
+        assert not (servers["node-b"].alert_state or {}).get("oom_seen")
+
+    http.answer = None
+    await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=30))
+    assert sum("node-a" in j["text"] for j in http.tg()) == 1
+    assert "node-b" in http.tg()[-1]["text"]
+    async with factory() as session:
+        names = list(await session.scalars(select(AlertEvent.target).where(AlertEvent.kind == "oom")))
+        assert sorted(names) == (["node-b"] if lost_response else ["node-a", "node-b"])
+        server = await session.scalar(select(Server).where(Server.name == "node-a"))
+        server.oom_total = 2
+        server.last_seen = now + timedelta(hours=2)
+        await session.commit()
+    await collector.evaluate_servers(factory, cfg, now + timedelta(hours=2))
+    assert sum("node-a" in j["text"] for j in http.tg() if "(OOM)" in j["text"]) == 2
+
+
+async def test_uncertain_oom_digest_checkpoints_only_oom(http):
+    def lost(_url, _payload):
+        raise httpx.ReadTimeout("")
+
+    http.answer = lost
+    oom = alerts.Msg("OOM", "servers", "", "oom", "node-a", ref="srv:1")
+    finished = set()
+    assert not await alerts.dispatch(_cfg(), True, [oom, _msg("node-b")], 2, oom_finished=finished)
+    assert len(http.tg()) == 1
+    assert finished == {1}
+
+
+async def test_uncertain_oom_in_group_does_not_fall_back_to_main_chat(http):
+    def lost(_url, _payload):
+        raise httpx.ReadTimeout("")
+
+    http.answer = lost
+    cfg = _cfg(routes={"main": "rest", "chats": [{"chat": "-200", "server_groups": ["edge"]}]})
+    oom = alerts.Msg("OOM", "servers", "edge", "oom", "node-a", ref="srv:1")
+    finished = set()
+    assert await alerts.dispatch(cfg, True, [oom], 0, oom_finished=finished)
+    assert [j["chat_id"] for j in http.tg()] == ["-200"]
+    assert finished == {1}
 
 
 async def test_server_error_text_has_no_token(http):

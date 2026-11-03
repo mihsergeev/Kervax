@@ -8876,11 +8876,19 @@ async def evaluate_servers(
             apply(sid, key, value)
 
     # parse_mode=HTML: имя сервера идёт ссылкой <a href> (как у сайтов). Контент экранирован.
+    oom_finished: set[int] = set()
+    delivery = {"oom_finished": oom_finished} if any(getattr(m, "kind", "") == "oom" for m in fires) else {}
     if await alerts.dispatch(cfg, can_send, fires, threshold, parse_mode="HTML",
-                             session_factory=session_factory):
+                             session_factory=session_factory, **delivery):
         for sid, key, value in fire_apply:
             apply(sid, key, value)
         known_upd.extend(known_remind)
+    elif oom_finished:
+        # Один неотправленный алерт в пачке не должен повторно открывать уже
+        # обработанный эпизод OOM. Остальные переходы сохраняют свой retry.
+        for sid, key, value in fire_apply:
+            if sid in oom_finished and key.startswith("oom_"):
+                apply(sid, key, value)
     if await alerts.dispatch(cfg, can_send, recoveries, threshold, parse_mode="HTML",
                              session_factory=session_factory):
         for sid, key, value in rec_apply:
