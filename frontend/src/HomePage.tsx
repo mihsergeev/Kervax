@@ -1144,9 +1144,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         </div>
       )}
       {/* Сайты: лежащие мониторы и истекающие SSL/домены. Клик - в сам монитор */}
-      {siteRows > 0 && (
+      {canSee('sites') && (siteRows > 0 || warnsOff.length > 0) && (
         <div className={`chart-card net-card home-block${siteDown ? ' has-down' : ''}`}>
-          {cap(t('Сайты'), siteRows, siteDown ? 'bad' : 'warn')}
+          {cap(t('Сайты'), siteRows || undefined, siteDown ? 'bad' : 'warn')}
           <div className="home-attention-list">
             {downChecks.slice(0, HOME_LIST_LIMIT).map((c) => (
               <div role="button" tabIndex={0} key={c.id} className="home-attention-row" onClick={() => onOpen('sites', c.id)}
