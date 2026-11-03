@@ -179,3 +179,48 @@ async def test_api_snooze_whole_domain_and_audit(client: httpx.AsyncClient, auth
     # "не следить" доступно всегда
     r = await client.post(url, headers=auth_headers, json={"kind": "domain", "mode": 0})
     assert r.json()["expiry_snooze"]["domain"]["mode"] == 0
+
+
+async def test_expired_muted_domain_holds_outage_until_renewal(client, monkeypatch):
+    from app import collector
+    from app.config import Settings
+
+    factory = client._transport.app.state.session_factory  # noqa: SLF001
+    async with factory() as session:
+        row = Check(name="Example site", type="http", target="https://example.com", check_domain=True,
+                    domain_days=0, expiry_snooze={"domain": expiry_snooze.entry(0, 0, "admin", NOW)})
+        session.add(row)
+        await session.commit()
+        cid = row.id
+
+    sent = []
+
+    async def dispatch(cfg, can_send, texts, threshold, **kwargs):
+        sent.extend(texts)
+        return True
+
+    monkeypatch.setattr(collector.alerts, "dispatch", dispatch)
+    settings = Settings(alert_webhook="http://hook")
+    outage = [collector.Pending("bad", "Example site", "down", "HTTP 502", None, cid, None)]
+    await collector._send_alerts(factory, settings, outage, NOW)
+    assert not sent
+
+    async with factory() as session:
+        row = await session.get(Check, cid)
+        row.domain_days = 365
+        expiry_snooze.sync(row)
+        assert expiry_snooze.hidden(row, "domain")
+        await session.commit()
+
+    await collector._send_alerts(factory, settings, outage, NOW)
+    assert len(sent) == 1
+    assert "502" in sent[0].full
+
+    async with factory() as session:
+        row = await session.get(Check, cid)
+        row.domain_days = -1
+        row.expiry_snooze = None
+        await session.commit()
+
+    await collector._send_alerts(factory, settings, outage, NOW)
+    assert len(sent) == 2

@@ -1211,7 +1211,7 @@ async def _send_alerts(
         mutes: dict[int, set] = {}  # заглушённые типы алертов по монитору
         meta: dict[int, tuple[str, str, int]] = {}  # id → (target, type, port) для хоста
         snoozed: set[int] = set()  # мониторы с активным снузом — алерты не шлём
-        known_ids: set[int] = set()  # мониторы с известной проблемой - молчим про сбой
+        quiet_failures: set[int] = set()  # известная проблема или заглушенный истекший домен
         # окна обслуживания: монитор в идущем окне молчит, как под снузом
         _ms, maint_chk = maint.active(list(await session.scalars(select(MaintenanceWindow))), now,
                                       cfg.get("tz") or "Europe/Moscow")
@@ -1235,11 +1235,11 @@ async def _send_alerts(
                     Check.id, Check.group_name, Check.alert_mutes,
                     Check.target, Check.type, Check.port, Check.snooze_until, Check.known_issue,
                     Check.probe_local, Check.probe_server_id, Check.parent_mode, Check.parent_server_id,
-                    Check.last_inside,
+                    Check.last_inside, Check.domain_days, Check.expiry_snooze,
                 ).where(Check.id.in_(ids))
             )
             lite: list[SimpleNamespace] = []
-            for i, g, m, tgt, typ, prt, snz, kn, pl, ps, pm, pp, li in rows.all():
+            for i, g, m, tgt, typ, prt, snz, kn, pl, ps, pm, pp, li, days, expiry in rows.all():
                 if i in down_ids and (line := inside_probe.alert_line(li, now)):
                     inside_by[i] = line
                 groups[i] = g
@@ -1247,8 +1247,9 @@ async def _send_alerts(
                 meta[i] = (tgt, typ, prt)
                 if snz is not None and _aware(snz) > now:
                     snoozed.add(i)
-                if isinstance(kn, dict) and not known_mod.expired(kn, now):
-                    known_ids.add(i)
+                if (isinstance(kn, dict) and not known_mod.expired(kn, now)
+                        or expiry_snooze.expired_domain_muted(days, expiry)):
+                    quiet_failures.add(i)
                 if i in fail_ids:
                     lite.append(SimpleNamespace(id=i, target=tgt, type=typ, probe_local=pl, probe_server_id=ps,
                                                 parent_mode=pm, parent_server_id=pp))
@@ -1340,8 +1341,8 @@ async def _send_alerts(
                                     "sites", grp or "", kind="known", target=name,
                                     full=f"{icon or '📌'} <b>{html.escape(name)}</b> — {html.escape(msg)}"))
             continue
-        if check_id is not None and check_id in known_ids and kind in ("bad", "flaky", "locpart"):
-            continue  # известная проблема: про нее знают, молчим, пока не закроется или не выйдет срок
+        if check_id in quiet_failures and kind in ("bad", "flaky", "locpart"):
+            continue
         if check_id is not None and check_id in held and kind in ("bad", "flaky", "locpart"):
             continue  # родитель молчит или прогревается: лежит из-за него, ждем
         tgt, typ, prt = meta.get(check_id, ("", "http", 0))

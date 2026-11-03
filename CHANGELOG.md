@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.87] - 2026-11-03
+
+### Fixed
+- An expired domain marked "Do not watch" also suppresses site availability alerts and active issue rows. Monitoring continues, and availability alerts resume once the domain is renewed or watching is restored.
+
 ## [1.8.86] - 2026-11-03
 
 ### Fixed

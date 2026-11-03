@@ -56,6 +56,12 @@ def hidden(row, kind: str, days: int | None = None) -> bool:
     return days is not None and days > mode
 
 
+def expired_domain_muted(domain_days: int | None, snooze: dict | None) -> bool:
+    """Suppress availability alerts while an explicitly ignored domain is expired."""
+    entry = snooze.get("domain") if isinstance(snooze, dict) else None
+    return domain_days is not None and domain_days <= 0 and isinstance(entry, dict) and entry.get("mode") == 0
+
+
 def thresholds(row, kind: str, thr: list[int], days: int | None = None) -> list[int]:
     """Пороги напоминаний с порогом отложки: "напомнить за 7 дней" алертит на 7, даже если
     у монитора пороги [30, 1]."""

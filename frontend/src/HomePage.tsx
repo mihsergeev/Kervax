@@ -31,7 +31,7 @@ import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, collectMutes, isDecisi
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
 import { expiryText, registrableDomain } from './checkUtils'
-import { ExpirySnoozePick, ExpirySnoozeState, expEntry, expHidden, expSnoozeTip } from './ExpirySnooze'
+import { ExpirySnoozePick, ExpirySnoozeState, expEntry, expHidden, expiredDomainMuted, expSnoozeTip } from './ExpirySnooze'
 import { useAuth } from './auth'
 import { IconBackups, IconDocker, IconKube, IconServers, IconSites } from './icons'
 import { CountryFlag } from './CountryFlag'
@@ -675,7 +675,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         c.enabled &&
         (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since) &&
         // известная проблема - не в "проблемах", она в своем блоке
-        !knownActive(c.known_issue),
+        !knownActive(c.known_issue) && !expiredDomainMuted(c),
     )
     .sort((a, b) => (a.last_status === 'down' ? 0 : 1) - (b.last_status === 'down' ? 0 : 1))
   // лежащие, но отмеченные известной проблемой: "все в норме" про них было бы неправдой
@@ -684,6 +684,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       c.enabled && knownActive(c.known_issue) &&
       (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since),
   ).length
+  const mutedDomainDown = (ov?.checks ?? []).filter((c) =>
+    c.enabled && expiredDomainMuted(c) && !knownActive(c.known_issue) &&
+    (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since),
+  ).length
+  const mutedDomainText = mutedDomainDown && t('сбои заглушенных доменов: {n}', { n: mutedDomainDown })
   const srvTotal = servers?.length ?? 0
   const srvOnline = servers?.filter((s) => s.online).length ?? 0
   const srvList = servers ?? []
@@ -961,16 +966,18 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
             value: String(ov.up), unit: t('из {n}', { n: ov.total }),
             // частично (не отвечает из части локаций) входит в "работают", как плитка "Работает" в
             // разделе Сайты, и так же отдельно подписан: иначе 10 из 12 читалось как "все десять в порядке"
-            ok: ov.partial > 0 ? t('частично: {n}', { n: ov.partial }) : knownDown ? '' : t('все в норме'),
+            ok: ov.partial > 0 ? t('частично: {n}', { n: ov.partial }) : knownDown || mutedDomainDown ? '' : t('все в норме'),
             okTone: ov.partial > 0 ? 'warn' : 'ok',
             foot: subOf(
               knownDown && t('известных: {n}', { n: knownDown }),
+              mutedDomainText,
               ov.open_incidents > 0 && t('открытых инцидентов: {n}', { n: ov.open_incidents }),
             ),
             total: subOf(
               t('работают {n} из {total}', { n: ov.up, total: ov.total }),
               ov.partial > 0 && t('частично: {n}', { n: ov.partial }),
               knownDown && t('известных: {n}', { n: knownDown }),
+              mutedDomainText,
             ),
             issues: tileIssues(byTone(siteIssueRows(ov.checks, t)), onOpen),
           }),

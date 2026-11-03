@@ -795,6 +795,9 @@ const EN: Record<string, string> = {
   'следить снова': 'watch again',
   'не следим': 'not watched',
   'не следим: {n}': 'not watched: {n}',
+  'сбои заглушенных доменов: {n}': 'outages on muted domains: {n}',
+  'Пока заглушенный домен истек, уведомления о недоступности сайта тоже скрыты. После продления они вернутся.':
+    'Site availability alerts are muted while the ignored domain is expired. They resume once the domain is renewed.',
   'отметил {who}, {when}': 'marked by {who}, {when}',
   'не используется ни одним ingress': 'not used by any ingress',
   'не используется, можно удалить': 'not used, can be deleted',

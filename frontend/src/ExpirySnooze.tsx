@@ -30,6 +30,10 @@ export function expHidden(c: Check, kind: ExpKind): boolean {
   return d > e.mode
 }
 
+export function expiredDomainMuted(c: Check): boolean {
+  return c.domain_days != null && c.domain_days <= 0 && expEntry(c, 'domain')?.mode === 0
+}
+
 export function expSnoozeText(e: ExpirySnooze, t: T): string {
   return e.mode === 0 ? t('не следим') : t('напомню за {n} дн.', { n: e.mode })
 }
@@ -57,9 +61,11 @@ const modeLabel = (m: Mode, kind: ExpKind, t: T, short: boolean) =>
       ? short ? t('за 1 день') : t('напомнить за 1 день')
       : short ? t('не следить') : kind === 'domain' ? t('не следить за доменом') : t('не следить за сертификатом')
 
-const modeTip = (m: Mode, t: T) =>
+const modeTip = (m: Mode, kind: ExpKind, t: T) =>
   m === 0
-    ? t('Пункт уйдет с главной и из алертов навсегда. Вернуть - строкой "не следим" внизу блока или в карточке')
+    ? kind === 'domain'
+      ? t('Пока заглушенный домен истек, уведомления о недоступности сайта тоже скрыты. После продления они вернутся.')
+      : t('Пункт уйдет с главной и из алертов навсегда. Вернуть - строкой "не следим" внизу блока или в карточке')
     : t('Пункт уйдет с главной и из алертов, пока до конца больше {n} дн. Продлят - отложка снимется сама', { n: m })
 
 // Выбор в строке: на главной - компактно, рядом с 🔕
@@ -87,7 +93,7 @@ export function ExpirySnoozePick({
     <span className="home-mute-pick exp-snooze-pick" onClick={(e) => e.stopPropagation()}>
       {short && <span className="muted">{t('напомнить:')}</span>}
       {expModes(daysOf(check, kind)).map((m) => (
-        <span key={m} className={`home-mute-opt${busy ? ' muted' : ''}`} role="button" title={modeTip(m, t)}
+        <span key={m} className={`home-mute-opt${busy ? ' muted' : ''}`} role="button" title={modeTip(m, kind, t)}
           onClick={() => !busy && pick(m)}>
           {modeLabel(m, kind, t, short)}
         </span>

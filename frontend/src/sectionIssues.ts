@@ -3,6 +3,7 @@ import type { Check, Server } from './api'
 import { bsrvRepoProblems, type RepoProblemKind } from './bsrvRepos'
 import { offLines, rotationLines } from './BsrvCleanup'
 import { backupAlive, knownActive, srvIssues, srvMutesNow } from './serverUtils'
+import { expiredDomainMuted } from './ExpirySnooze'
 
 // Строки беды по разделам: "Что сломано" и плитки главной (HomePage.tsx) и плитки в шапках
 // разделов (HomeTiles.tsx) считают по одним правилам, иначе "2 проблемы" на главной и "3" в разделе
@@ -209,7 +210,7 @@ export function siteIssueRows(checks: Check[], t: T): SecIssue[] {
     c.last_status === 'down' ? t('Недоступно') : c.last_status === 'degraded' ? t('Деградация') : t('Отвечает через раз')
   return [
     ...checks
-      .filter((c) => c.enabled && (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since) && !knownActive(c.known_issue))
+      .filter((c) => c.enabled && (c.last_status === 'down' || c.last_status === 'degraded' || !!c.flaky_since) && !knownActive(c.known_issue) && !expiredDomainMuted(c))
       .map((c) => ({
         key: `dc-${c.id}`, id: c.id, name: c.name, down: c.last_status === 'down', section: 'sites' as Section, srv: false,
         text: st(c) + (c.last_status !== 'up' && c.last_message ? ` · ${c.last_message}` : ''),
