@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.88] - 2026-11-03
+
+### Added
+- Windows monitoring collects CPU usage, physical memory and space on mounted fixed volumes. It uses the existing server history and offline/recovery alerts.
+- The server setup dialog provides a PowerShell collector and a separate token copy button for Windows.
+
 ## [1.8.87] - 2026-11-03
 
 ### Fixed

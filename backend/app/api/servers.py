@@ -1507,7 +1507,7 @@ async def agent_update(
     q = scope_query(user, select(Server).where(Server.enabled.is_(True)), Server)
     if body.server_ids is not None:
         q = q.where(Server.id.in_(body.server_ids))
-    servers = list(await session.scalars(q))
+    servers = [s for s in await session.scalars(q) if (s.last_report or {}).get("platform") != "windows"]
     targeted = []
     for s in servers:
         if s.agent_version == body.version:  # уже на целевой — не трогаем
@@ -3454,6 +3454,14 @@ async def backupserver_setup_script() -> PlainTextResponse:
         return PlainTextResponse(f.read(), media_type="text/x-shellscript")
 
 
+@agent_router.get("/windows-monitor.ps1")
+async def windows_monitor_download() -> FileResponse:
+    path = os.path.join(get_settings().agent_dist_dir, "windows-monitor.ps1")
+    if not os.path.isfile(path):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "windows-monitor.ps1 не найден")
+    return FileResponse(path, media_type="application/octet-stream", filename="windows-monitor.ps1")
+
+
 @agent_router.get("/setup/index")
 async def setup_index() -> list[dict]:
     """Каталог setup-хелперов: имя, версия и признак «безопасен везде» (KERVAX_SETUP_ALWAYS).
@@ -3793,6 +3801,11 @@ async def agent_report(
                      and str(body.pkgs["h"])[:32] != (server.pkg_hash or ""))
     if server.first_report_at is None:
         server.first_report_at = now
+    if body.platform == "windows":
+        server.target_agent_version = ""
+        await session.commit()
+        return AgentConfigOut(interval=60, checks=[])
+
     await traffic_mod.ingest(session, server, body.net_ifaces, now)
     await usage_mod.ingest(session, server, body.net_users, body.disk_writers, now)
     link_tasks = await netlinks.handle(session, server, body.links, now)
@@ -4001,6 +4014,9 @@ async def agent_commands(
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
     await require_agent_source(server, request, session)
+    if (server.last_report or {}).get("platform") == "windows":
+        return {"docker_commands": [], "kube_commands": [], "backup_commands": [],
+                "site_probes": [], "alert_rechecks": []}
     cmds = await _take_docker_commands(session, server.id)
     kcmds = await _take_kube_commands(session, server.id)
     bcmds = await _take_backup_commands(session, server.id)

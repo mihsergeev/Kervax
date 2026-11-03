@@ -6217,6 +6217,17 @@ export function InstallModal({
           </button>
         </div>
 
+        <details className="ic-step">
+          <summary>Windows Server</summary>
+          <p>{t('Скачайте скрипт на Windows и запустите из PowerShell от администратора в папке со скриптом.')}</p>
+          <a href="/api/agent/windows-monitor.ps1" download>{t('Скачать сборщик Windows')}</a>
+          <pre className="install-cmd ic-cmd">{`powershell.exe -NoProfile -File .\\windows-monitor.ps1 -Install -PanelUrl ${window.location.origin}`}</pre>
+          <p>{t('Вставьте токен, когда PowerShell его запросит.')}</p>
+          <button className="ghost small" onClick={() => copy(enroll.token, 'windows-token')}>
+            {copied === 'windows-token' ? t('Скопировано ✓') : t('Копировать токен Windows')}
+          </button>
+        </details>
+
         <section className="ic-step">
           <div className="ic-step-head">
             <span className="ic-num">1</span>

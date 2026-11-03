@@ -1970,6 +1970,7 @@ def safe_hostname(value: str) -> str:
 
 
 class AgentReportIn(BaseModel):
+    platform: Literal["linux", "windows"] = "linux"
     hostname: str = Field(default="", max_length=255)
 
     @field_validator("hostname", mode="before")

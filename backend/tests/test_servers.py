@@ -42,6 +42,66 @@ async def test_server_enroll_report_flow(client: httpx.AsyncClient, auth_headers
     assert r.status_code == 401
 
 
+async def test_windows_report_metrics_offline_and_recovery(client, auth_headers, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from app import collector
+    from app.alerts import full_text
+    from app.config import Settings
+    from app.models import Server
+
+    r = await client.post("/api/servers", json={"name": "Windows fixture", "backup_not_required": True},
+                          headers=auth_headers)
+    assert r.status_code == 201
+    sid = r.json()["server"]["id"]
+    headers = {"Authorization": f"Bearer {r.json()['token']}"}
+    report = {
+        "platform": "windows", "hostname": "windows-fixture", "os": "Windows Server",
+        "agent_version": "windows-0.1.0", "cpu_percent": 25.5, "mem_used": 2**30, "mem_total": 2**32,
+        "disks": [{"mount": "C:", "used": 20, "total": 100}, {"mount": "D:", "used": 40, "total": 100}],
+        "uptime_seconds": 3600,
+    }
+    factory = client._transport.app.state.session_factory  # noqa: SLF001
+    async with factory() as session:
+        server = await session.get(Server, sid)
+        server.target_agent_version = "99.0"
+        server.created_at = datetime.now(timezone.utc) - timedelta(days=1)
+        await session.commit()
+
+    r = await client.post("/api/agent/report", json=report, headers=headers)
+    assert r.status_code == 200
+    assert r.json()["update"] is None and not r.json()["site_probes"]
+    r = await client.get(f"/api/servers/{sid}", headers=auth_headers)
+    server = r.json()
+    assert server["online"] and server["last_report"]["platform"] == "windows"
+    assert server["last_report"]["disks"] == report["disks"]
+    assert server["target_agent_version"] == ""
+    r = await client.get(f"/api/servers/{sid}/metrics", headers=auth_headers)
+    point = r.json()[0]
+    assert point["cpu_percent"] == 25.5 and point["mem_percent"] == 25.0
+    assert point["disks"] == [{"mount": "C:", "pct": 20.0}, {"mount": "D:", "pct": 40.0}]
+
+    sent = []
+
+    async def send(cfg, text, parse_mode=None):
+        sent.append(full_text(text))
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", send)
+    now = datetime.now(timezone.utc)
+    async with factory() as session:
+        server = await session.get(Server, sid)
+        server.last_seen = now - timedelta(minutes=10)
+        await session.commit()
+    settings = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, settings, now)
+    await collector.evaluate_servers(factory, settings, now + timedelta(seconds=15))
+    assert len(sent) == 1 and "недоступен" in sent[0]
+    assert (await client.post("/api/agent/report", json=report, headers=headers)).status_code == 200
+    await collector.evaluate_servers(factory, settings, datetime.now(timezone.utc))
+    assert len(sent) == 2 and "снова на связи" in sent[-1]
+
+
 async def test_server_offline_and_recovery_alert(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 
