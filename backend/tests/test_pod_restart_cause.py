@@ -141,14 +141,14 @@ def test_apps_failing_together_without_node_stall_count_per_pod():
     """Три деплоймента падают в одни минуты с ошибкой приложения (общая база), а нода в порядке:
     не "подвисает нода", а каждый под своей строкой со своей причиной."""
     pods = [_pod(f"app-{x}-6b8b56c769-f4k8m", f"app-{x}", {"c": "app", "r": "Error", "x": 1,
-                                                          "log": "SQLSTATE[08006] connection to db refused"})
+                                                          "log": "SQLSTATE[08006] connection to db: i/o timeout"})
             for x in "abc"]
     rs = {f"pod:default/app-{x}-6b8b56c769-f4k8m": _ev(10, 130, 250, 370, 490) for x in "abc"}
     rs[restarts.PSI_KEY] = [[(NOW - timedelta(minutes=m)).isoformat(), {"c": 3, "ms": 0, "mf": 0, "is": 1, "if": 0}]
                             for m in (10, 130, 250, 370, 490)]
     pr = restarts.problems(_srv(pods, rs), NOW)
     assert [x["key"] for x in pr] == ["pod:default/app-a", "pod:default/app-b", "pod:default/app-c"]
-    assert pr[0]["text"].endswith(": exit 1: SQLSTATE[08006] connection to db refused")
+    assert pr[0]["text"].endswith(": exit 1: SQLSTATE[08006] connection to db: i/o timeout")
     assert restarts.kube_view(_srv(pods, rs), NOW)["bursts"] == []
 
 
@@ -246,7 +246,7 @@ def test_planned_exit_is_remembered_through_a_rollout():
     st = None
     for i in range(31):  # тридцать плановых выходов каждого за 10 часов, все в одну минуту
         t = NOW - timedelta(minutes=20 * (30 - i) + 1)
-        st = restarts.update(st, {"kube": {"pods": [dict(_pod(n, c, done if i else None), restarts=i)
+        st = restarts.update(st, {"kube": {"pods": [dict(_pod(n, c, dict(done, t=int(t.timestamp())) if i else None), restarts=i)
                                                     for n, c in names]}}, t)
     # минута выкладки: поды еще в отчете, но прошлого запуска у них уже нет
     gone = [dict(_pod(n, c), restarts=30) for n, c in names]
@@ -264,6 +264,52 @@ def test_planned_exit_is_remembered_through_a_rollout():
     assert st2["pod:default/app-a-6f678d8d6d-jxrpd"]["last"]["x"] == 1
     # под пересоздали (счетчик с нуля) - прошлая причина ему не принадлежит
     assert "last" not in restarts.step(st2["pod:default/app-a-6f678d8d6d-jxrpd"], 0, NOW + timedelta(minutes=2))
+
+
+def test_mixed_restarts_only_alert_on_failures_and_keep_their_own_cause():
+    name, ctrl = "worker-6f678d8d6d-jxrpd", "worker"
+    key = "pod:default/" + name
+    clean = {"c": "app", "r": "Completed", "x": 0, "log": "20-min deadline reached"}
+    db = {"c": "app", "r": "Error", "x": 1, "log": "SQLSTATE[08006] connection to db refused"}
+    st = None
+
+    def observe(i, termination):
+        nonlocal st
+        t = NOW + timedelta(minutes=20 * i)
+        pod = dict(_pod(name, ctrl, termination), restarts=250 + i)
+        st = restarts.update(st, {"kube": {"pods": [pod]}}, t)
+        return restarts.problems(_srv([pod], st), t)
+
+    for i in range(12):
+        assert observe(i, dict(clean, t=int(NOW.timestamp()) + 1200 * i)) == []
+    for i in range(12, 20):
+        last = db if i % 2 == 0 else clean
+        assert observe(i, dict(last, t=int(NOW.timestamp()) + 1200 * i)) == []
+    failure = dict(db, t=int(NOW.timestamp()) + 1200 * 20)
+    problems = observe(20, failure)
+    assert problems[0]["n"] == 5
+    assert restarts.tg_short(problems) == ("Под перезапускается", ["worker: нет связи с базой"])
+    # Штатный выход не отменяет историю падений. Повторенный LastState при росте
+    # счетчика не дает основания назвать следующий перезапуск ошибкой базы.
+    assert observe(21, dict(clean, t=failure["t"] + 1200))[0]["n"] == 5
+    for i, last in enumerate((None, failure), start=22):
+        problems = observe(i, last)
+        assert problems[0]["n"] == i - 16
+        assert restarts.tg_short(problems) == ("Под перезапускается", ["worker"])
+    assert restarts.count(st[key], NOW + timedelta(minutes=460))[0] == 23
+
+
+def test_counter_jump_only_attributes_the_latest_termination():
+    clean = {"r": "Completed", "x": 0, "t": int(NOW.timestamp())}
+    prev = {"rc": 10, "ev": [[(NOW - timedelta(minutes=20)).isoformat(), 8]],
+            "last": dict(clean, t=clean["t"] - 1200)}
+    state = restarts.step(prev, 16, NOW, clean, pod=True)
+    name = "worker-6f678d8d6d-jxrpd"
+    pod = dict(_pod(name, "worker", clean), restarts=16)
+    problems = restarts.problems(_srv([pod], {"pod:default/" + name: state}), NOW)
+    assert problems[0]["n"] == 5
+    assert restarts.tg_short(problems) == ("Под перезапускается", ["worker"])
+    assert restarts.count(state, NOW)[0] == 14
 
 
 async def test_recovery_waits_half_an_hour(tmp_path, monkeypatch):

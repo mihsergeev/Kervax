@@ -3,7 +3,8 @@
 Быстрый цикл (3 перезапуска за 15 минут) ловят docker_loop и CrashLoopBackOff, а медленный -
 нет: между падениями контейнер "работает", а сервис раз в час теряет соединения, очереди и
 кэш. Счетчики перезапусков (RestartCount) агент шлет давно; панель запоминает их приросты за
-сутки в alert_state["restarts"]: {"docker:<имя>" | "pod:<ns>/<имя>": {"rc", "ev": [[время, n]]}}.
+сутки в alert_state["restarts"]. Для подов событие [время, n, last] хранит причину именно
+этого завершения (None, если неизвестна). Docker и старая история используют [время, n].
 """
 from __future__ import annotations
 
@@ -25,6 +26,26 @@ def _ts(v) -> datetime | None:
         return datetime.fromisoformat(str(v))
     except (TypeError, ValueError):
         return None
+
+
+def _event_time(e) -> datetime | None:
+    return _ts(e[0]) if isinstance(e, list) and len(e) in (2, 3) else None
+
+
+def _event_last(e: list, legacy: dict | None) -> dict | None:
+    return e[2] if len(e) == 3 else legacy
+
+
+def _trim_pod_events(ev: list[list]) -> list[list]:
+    # Штатные выходы не вытесняют падения из суточного окна.
+    clean = [cause(_event_last(e, None))[0] == "exit0" for e in ev]
+    remaining = {True: _KEEP, False: _KEEP}
+    out = []
+    for e, ok in zip(reversed(ev), reversed(clean)):
+        if remaining[ok]:
+            out.append(e)
+            remaining[ok] -= 1
+    return out[::-1]
 
 
 def targets(rep: dict) -> dict[str, int]:
@@ -50,13 +71,35 @@ def step(prev: dict | None, rc: int, now: datetime, last: dict | None = None, po
     p = prev if isinstance(prev, dict) else {}
     ev = []
     for e in p.get("ev") or []:
-        t = _ts(e[0]) if isinstance(e, list) and len(e) == 2 else None
+        t = _event_time(e)
         if t is not None and (now - t).total_seconds() <= WINDOW:
             ev.append(e)
     was = p.get("rc")
+    known = p.get("last") if isinstance(p.get("last"), dict) else None
+    if isinstance(was, int) and rc < was and pod:
+        ev = []
+        known = None
+    if last and known and last.get("t") and known.get("t") and last["t"] < known["t"]:
+        last = None
     if isinstance(was, int) and rc > was:
-        ev.append([now.isoformat(), rc - was])
-    out = {"rc": rc, "ev": ev[-_KEEP:]}
+        delta = rc - was
+        stamp = now.isoformat()
+        if pod:
+            # В старой истории известно только последнее завершение. Не приписываем
+            # новую причину старым событиям и сохраняем прежнее исключение exit0.
+            legacy = known if cause(known)[0] == "exit0" else None
+            ev = [e if len(e) == 3 else [*e, legacy] for e in ev]
+            latest = last
+            if known and (last == known or
+                          (last and known.get("t") and last.get("t") and last["t"] <= known["t"])):
+                latest = None
+            # LastState описывает только одно завершение, даже если счетчик вырос на несколько.
+            if latest and delta > 1:
+                ev.append([stamp, delta - 1, None])
+            ev.append([stamp, 1 if latest else delta, latest])
+        else:
+            ev.append([stamp, delta])
+    out = {"rc": rc, "ev": _trim_pod_events(ev) if pod else ev[-_KEEP:]}
     if pod:
         # новый под или пересозданный под тем же именем (счетчик сбросился, так у StatefulSet и
         # DaemonSet) - с сейчас. У подов, которые панель видела раньше без отметки, ее нет: старые
@@ -64,7 +107,7 @@ def step(prev: dict | None, rc: int, now: datetime, last: dict | None = None, po
             out["seen"] = now.isoformat()
         elif p.get("seen"):
             out["seen"] = p["seen"]
-    known = last or (p.get("last") if isinstance(p.get("last"), dict) else None)
+    known = last or known
     if known and rc:
         out["last"] = known
     return out
@@ -135,7 +178,7 @@ def count(cs: dict | None, now: datetime) -> tuple[int, datetime | None]:
     """Перезапусков за сутки и когда последний"""
     n, last = 0, None
     for e in (cs or {}).get("ev") or []:
-        t = _ts(e[0]) if isinstance(e, list) and len(e) == 2 else None
+        t = _event_time(e)
         if t is not None and (now - t).total_seconds() <= WINDOW:
             n += int(e[1] or 0)
             last = t if last is None or t > last else last
@@ -225,16 +268,16 @@ def _after(rs: dict, prefix: str, at: datetime | None) -> dict:
     for k, cs in rs.items():
         if k.startswith(prefix) and isinstance(cs, dict):
             out[k] = {**cs, "ev": [e for e in cs.get("ev") or []
-                                   if isinstance(e, list) and len(e) == 2 and (t := _ts(e[0])) is not None and t > at]}
+                                   if (t := _event_time(e)) is not None and t > at]}
     return out
 
 
-def _events(cs: dict | None, now: datetime) -> list[tuple[datetime, int]]:
+def _events(cs: dict | None, now: datetime) -> list[tuple[datetime, list]]:
     out = []
     for e in (cs or {}).get("ev") or []:
-        t = _ts(e[0]) if isinstance(e, list) and len(e) == 2 else None
+        t = _event_time(e)
         if t is not None and (now - t).total_seconds() <= WINDOW:
-            out.append((t, int(e[1] or 0)))
+            out.append((t, e))
     return out
 
 
@@ -244,12 +287,14 @@ def _events(cs: dict | None, now: datetime) -> list[tuple[datetime, int]]:
 def _node_sign(last: dict | None) -> bool | None:
     """True - под упал так, как падают при подвисшей ноде (проба не дождалась ответа, потерян
     lease), False - своя причина (OOM, ошибка приложения), None - причина неизвестна"""
-    ck, _t = cause(last)
+    ck, text = cause(last)
     if not ck:
         return None
     if ck == "probe":
         return bool(_NODE_SIGNS.search(str((last or {}).get("pmsg") or ""))) or not (last or {}).get("pmsg")
     if ck == "crash":
+        if cause_short(text) == "нет связи с базой":
+            return False
         return bool(_NODE_SIGNS.search(f"{(last or {}).get('msg') or ''} {(last or {}).get('log') or ''}"))
     return False
 
@@ -262,10 +307,12 @@ def bursts(rs: dict, ctrl: dict[str, str], now: datetime, skip: set[str] | None 
            lasts: dict[str, dict | None] | None = None) -> list[dict]:
     """Пачки перезапусков подов за сутки: {"t" (последний в пачке), "pods" (ключи), "wl" (ворклоады),
     "node" (подвисание ноды подтверждено), "psi" (самое сильное давление в эти минуты)}. skip - поды,
-    которые в пачки не идут (плановый выход, заглушенные); lasts - как кончился прошлый запуск пода."""
+    которые в пачки не идут (заглушенные); штатные выходы отфильтровываются по событиям."""
     skip = skip or set()
-    evs = sorted((t, k) for k, cs in rs.items() if k.startswith("pod:") and k not in skip
-                 for t, _n in _events(cs, now))
+    evidence = {(t, k): _event_last(e, (lasts or {}).get(k))
+                for k, cs in rs.items() if k.startswith("pod:") and k not in skip
+                for t, e in _events(cs, now) if cause(_event_last(e, (lasts or {}).get(k)))[0] != "exit0"}
+    evs = sorted(evidence)
     groups: list[list[tuple[datetime, str]]] = []
     for t, k in evs:
         if groups and (t - groups[-1][0][0]).total_seconds() <= BURST_GAP:
@@ -283,8 +330,12 @@ def bursts(rs: dict, ctrl: dict[str, str], now: datetime, skip: set[str] | None 
         snaps = [x for t, x in psi if (t0 - timedelta(seconds=90)) <= t <= (t1 + timedelta(seconds=90))]
         stall = [x for x in snaps if _stall(x)]
         keys = sorted({k for _t, k in g})
-        signs = [v for v in (_node_sign((lasts or {}).get(k)) for k in keys) if v is not None]
-        node = bool(stall) or (len(signs) >= 2 and sum(signs) * 2 >= len(signs))
+        signs = {k: set() for k in keys}
+        for t, k in g:
+            if (sign := _node_sign(evidence[t, k])) is not None:
+                signs[k].add(sign)
+        votes = [v == {True} for v in signs.values() if v]
+        node = bool(stall) or (len(votes) >= 2 and sum(votes) * 2 >= len(votes))
         top = max(stall or snaps, key=lambda x: max(float(x.get(k) or 0) for k in _PSI_STALL), default=None)
         out.append({"t": t1, "pods": keys, "wl": wl, "ev": {(k, t) for t, k in g}, "node": node,
                     "psi": top if stall else None})
@@ -361,7 +412,7 @@ def rollout_hold(s: Server, now: datetime) -> set[str]:
 
 def _pod_rows(s: Server, now: datetime, rs: dict | None = None) -> tuple[list[dict], list[dict]]:
     """Поды с перезапусками за сутки и пачки. У пода: n - всего, solo - не в пачках, cause, alert -
-    повод для алерта: OOMKilled от MIN_OOM, остальное (кроме выхода с кодом 0) - от MIN не в пачках;
+    повод для алерта: от MIN_OOM событий OOMKilled или от MIN нештатных выходов вне пачек;
     перезапуски выкатки (_young) не в счет, wait - до какого момента ждем нового пода. rs - счетчики,
     если не из состояния (с отметки "починили", _after)"""
     st = s.alert_state or {}
@@ -371,9 +422,9 @@ def _pod_rows(s: Server, now: datetime, rs: dict | None = None) -> tuple[list[di
     pods = _pods(s.last_report)
     muted = muted_keys(s)
     # причина из отчета, а нет ее там - последняя известная (см. _LAST_KEYS)
-    lasts = {k: (pods.get(k) or {}).get("last") or (rs[k].get("last") if isinstance(rs[k], dict) else None)
+    lasts = {k: (rs[k].get("last") if isinstance(rs[k], dict) else None) or _last_of(pods.get(k))
              for k in rs if k.startswith("pod:")}
-    skip = {k for k in lasts if cause(lasts[k])[0] == "exit0" or podnames.muted(muted, k, ctrl.get(k, ""))}
+    skip = {k for k in lasts if podnames.muted(muted, k, ctrl.get(k, ""))}
     bl = bursts(rs, ctrl, now, skip, lasts)
     # в счет пода не идут только перезапуски из пачек, где подтверждено подвисание ноды
     in_burst = set().union(*(b["ev"] for b in bl if b["node"])) if bl else set()
@@ -385,17 +436,25 @@ def _pod_rows(s: Server, now: datetime, rs: dict | None = None) -> tuple[list[di
         evs = _events(rs[key], now)
         if not evs:
             continue
-        n = sum(c for _t, c in evs)
-        solo = sum(c for t, c in evs if (key, t) not in in_burst)
+        n = sum(e[1] for _t, e in evs)
+        failures = [(t, e[1], cause(_event_last(e, lasts.get(key)))) for t, e in evs]
+        failures = [(t, c, why) for t, c, why in failures if why[0] != "exit0"]
+        solo = sum(c for t, c, _why in failures if (key, t) not in in_burst)
         p = pods.get(key) or {}
         ck, ctext = cause(lasts.get(key))
-        wait, early = _young(rs[key], evs, key in rollout, key not in pods, now)
-        n_a = sum(c for t, c in evs if t not in early)
-        solo_a = sum(c for t, c in evs if (key, t) not in in_burst and t not in early)
-        alert = wait is None and ck != "exit0" and (n_a >= MIN_OOM if ck == "oom" else solo_a >= MIN)
+        wait, early = _young(rs[key], [(t, c) for t, c, _why in failures], key in rollout, key not in pods, now)
+        solo_events = [(t, c, why) for t, c, why in failures if t not in early and (key, t) not in in_burst]
+        oom_events = [(t, c, why) for t, c, why in failures if t not in early and why[0] == "oom"]
+        alert_events = solo_events if sum(c for _t, c, _why in solo_events) >= MIN else oom_events
+        alert_count = sum(c for _t, c, _why in alert_events)
+        alert = wait is None and alert_count >= MIN_OOM
+        alert_last, alert_cause = None, ""
+        if alert:
+            alert_last, _c, (_kind, alert_cause) = max(reversed(alert_events), key=lambda e: e[0])
         rows.append({"key": key, "n": n, "solo": solo, "last": max(t for t, _c in evs), "times": sorted(t for t, _c in evs),
                      "ck": ck, "cause": ctext, "alert": alert, "ctrl": ctrl.get(key, ""), "pod": p,
-                     "lastinfo": lasts.get(key), "wait": wait, "rollout": key in rollout})
+                     "lastinfo": lasts.get(key), "wait": wait, "rollout": key in rollout,
+                     "alert_count": alert_count, "alert_last": alert_last, "alert_cause": alert_cause})
     return rows, bl
 
 
@@ -452,7 +511,7 @@ def problems(s: Server, now: datetime) -> list[dict]:
     for r in rows:
         if r["alert"] and not podnames.muted(muted, r["key"], r["ctrl"]):
             groups.setdefault(podnames.pod_key(r["key"], r["ctrl"]), []).append(
-                (r["key"][4:], r["n"], r["last"], r["cause"]))
+                (r["key"][4:], r["alert_count"], r["alert_last"], r["alert_cause"]))
     out = []
     nb = [b for b in bl if b["node"]]
     if len(nb) >= BURST_MIN and BURSTS_KEY not in muted:
