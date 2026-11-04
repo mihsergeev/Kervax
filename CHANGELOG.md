@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.90] - 2026-11-04
+
+### Fixed
+- Windows servers display a platform icon in the list and details. The card shows the Windows collector version without offering Linux agent updates.
+- Windows cards and settings show supported metrics and controls. CPU history plots total usage, and Linux-only menus and onboarding checks are hidden.
+- Windows servers behind NAT can have a separate connection IP. The card identifies the source of agent reports separately.
+
 ## [1.8.89] - 2026-11-04
 
 ### Added

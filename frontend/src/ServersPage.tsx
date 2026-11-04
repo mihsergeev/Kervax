@@ -87,6 +87,7 @@ import { fmtBytes, fmtDur, rateUnits, timeUnits } from './units'
 import {
   MuteChip,
   SNOOZE_KINDS,
+  WINDOWS_ALERT_KINDS,
   UNIT_MUTE,
   WEB_MUTE,
   EXPOSED_MUTE,
@@ -291,10 +292,16 @@ function buildMetric(
   key: MetricKey,
   M: ServerMetric[],
   t: (s: string) => string,
+  windows = false,
 ): MetricChart {
   const ts = M.map((m) => new Date(m.ts).getTime())
   const pctY = (v: number) => `${Math.round(v)}%`
   const pctV = (v: number) => `${v.toFixed(1)}%`
+  if (windows && key === 'cpu')
+    return {
+      key, title: t('Загрузка CPU'), ts, yMax: 100, fmtY: pctY, fmtV: pctV,
+      series: [{ name: 'CPU', color: '#5a8fc7', values: M.map((m) => m.cpu_percent) }],
+    }
   if (key === 'cpu')
     // Стек до ста процентов вместе с простоем — та самая картинка, по которой
     // сразу видно, СКОЛЬКО процессора свободно, а не только чем занят занятый.
@@ -361,12 +368,12 @@ function buildMetric(
         {
           name: t('занято'), color: '#ff9830',
           values: M.map((m) =>
-            m.mem_free != null && m.mem_cache != null
+            !windows && m.mem_free != null && m.mem_cache != null
               ? Math.max(0, 100 - m.mem_free - m.mem_cache)
               : m.mem_percent,
           ),
         },
-        { name: t('кэш/буфер'), color: '#fade2a', values: M.map((m) => m.mem_cache) },
+        ...(!windows ? [{ name: t('кэш/буфер'), color: '#fade2a', values: M.map((m) => m.mem_cache) }] : []),
         // Свободное — синим до самого верха, как простой у процессора: ресурс, которого
         // осталось много, и выглядит свободным, а не пустым местом над графиком.
         { name: t('свободно'), color: GRAFANA_CPU.idle, values: M.map((m) => m.mem_free) },
@@ -845,6 +852,7 @@ const DETAIL_SECTIONS: SecDef[] = [
   { id: 'timeline', label: 'Хронология', group: 'События' },
 ]
 const SEC_IDS = new Set(DETAIL_SECTIONS.map((x) => x.id))
+const WINDOWS_SECTIONS = new Set(['overview', 'cpu', 'mem', 'disk', 'deps', 'alerts', 'timeline'])
 // разделы с графиками: у них переключатель периода
 const CHART_SECS = new Set(['cpu', 'mem', 'disk', 'net', 'gpu', 'web'])
 // карта сервера на сводке: ресурсы там плитками, здесь остальное, у чего есть состояние
@@ -1096,31 +1104,35 @@ function AddrIcon({ kind }: { kind: 'ext' | 'loc' }) {
 // Адрес(а) сервера с иконками: внешний (глобус) + локальный (домик, только если отличается).
 // Контекстно-нейтрально (обёртка .srv-addr, не chip) — годится и в плашках-метах, и в
 // компактной плитке .check-target. Нет ни одного IP → hostname.
-function ServerAddr({ s, t }: { s: Server; t: (str: string) => string }) {
-  const ext = s.external_ip
+function ServerAddr({ s, t, showSource }: { s: Server; t: TFn; showSource?: boolean }) {
+  const windows = s.last_report?.platform === 'windows'
+  const access = windows || !s.last_report ? s.access_ip : null
+  const ext = access || (windows ? null : s.external_ip)
   const loc = s.local_ip
   const showLoc = loc && loc !== ext
+  const source = windows && (showSource || !ext) && s.external_ip !== ext ? s.external_ip : null
   // агент за прокси: адрес соединения - это прокси, внешний IP тогда задан руками
   const proxy = s.last_report?.proxy
   return (
     <span className="srv-addr">
-      {!ext && !showLoc ? (
+      {!ext && !showLoc && !source ? (
         s.hostname || '—'
       ) : (
         <>
           {ext && (
-            <span className="srv-addr-part" title={t('внешний (публичный) IP')}>
+            <span className="srv-addr-part" title={access ? t('IP для подключения') : t('внешний (публичный) IP')}>
               <AddrIcon kind="ext" />
-              {ext}
+              {access && showSource ? t('IP для подключения: {ip}', { ip: ext }) : ext}
             </span>
           )}
-          {showLoc && (
+          {showLoc && loc !== source && (
             <span className="srv-addr-part" title={t('локальный IP (внутренняя сеть)')}>
               <AddrIcon kind="loc" />
               {loc}
             </span>
           )}
-          {proxy && (
+          {source && <span className="srv-addr-part">{t('Отчеты с {ip}', { ip: source })}</span>}
+          {!windows && proxy && (
             <span className="srv-addr-part" title={t('агент ходит в панель через прокси')}>
               ↪ {proxy}
             </span>
@@ -2680,7 +2692,7 @@ function DiskSpaceCard({ server: s, r, onChanged }: { server: Server; r: ServerR
   const [cmds, setCmds] = useState<string | null>(null)
   const disks = r.disks ?? []
   if (!disks.length) return null
-  const du = diskUsage(r)
+  const du = r.platform === 'windows' ? null : diskUsage(r)
   const fcAll = diskForecast(s, r)
   const fcFresh = !!s.disk_forecast?.ts && !!r.clock_unix && r.clock_unix - s.disk_forecast.ts <= 7200
   const age = du ? Math.max(0, Math.round(((r.clock_unix || Date.now() / 1000) - du.ts) / 60)) : null
@@ -2814,8 +2826,9 @@ function DiskSpaceCard({ server: s, r, onChanged }: { server: Server; r: ServerR
         const freed = freedOn(d.mount)
         // раздел без разбора: заметная строка, если он уже заполнен или растет и есть что нажать или
         // что сказать (прогноз), иначе только кнопка в конце строки
-        const loud = !fs && (fc.length > 0 || (p >= 50 && !!s.disk_analyze && !isViewer))
-        const quietAnalyze = !fs && !loud && !!s.disk_analyze && !isViewer
+        const canAnalyze = r.platform !== 'windows' && !!s.disk_analyze && !isViewer
+        const loud = !fs && (fc.length > 0 || (p >= 50 && canAnalyze))
+        const quietAnalyze = !fs && !loud && canAnalyze
         const tree = fs && fs.top_state !== 'skipped' && fs.top_state !== 'none' && fs.top.length > 0
         const b = bulk[d.mount]
         const showAll = more[d.mount]
@@ -3301,7 +3314,7 @@ function SrvTiles({ r, M, info, onGo, gpu, oom }: {
   }
   return (
     <div className="net-tiles srv-tiles">
-      {tile('cpu', 'CPU', cpu != null ? `${cpu}%` : '—', `load ${r.load?.[0] ?? '—'}`, cpu,
+      {tile('cpu', 'CPU', cpu != null ? `${cpu}%` : '—', r.platform === 'windows' ? '' : `load ${r.load?.[0] ?? '—'}`, cpu,
         <TileSpark vals={M.map((m) => m.cpu_percent)} max={100} color="#5a8fc7" />)}
       {tile('mem', t('Память'), mem != null ? `${mem}%` : '—', `${fmtBytes(r.mem_used)} / ${fmtBytes(r.mem_total)}`, mem,
         <TileSpark vals={M.map((m) => m.mem_percent)} max={100} color="#4fa79a" />)}
@@ -3313,7 +3326,7 @@ function SrvTiles({ r, M, info, onGo, gpu, oom }: {
       {worst &&
         tile('disk', t('Диск'), `${dp}%`, `${worst.mount}${ds.length > 1 ? ` · ${ds.length} ${t('разд.')}` : ''}`, dp,
           <TileSpark vals={M.map((m) => m.disk_percent)} max={100} color="#cf9b52" />)}
-      {tile('net', t('Сеть'), `↓ ${fmtRate(r.net_rx)}`,
+      {r.platform !== 'windows' && tile('net', t('Сеть'), `↓ ${fmtRate(r.net_rx)}`,
         `↑ ${fmtRate(r.net_tx)}${(r.swap_total ?? 0) > 0 ? ` · swap ${fmtBytes(r.swap_used)}` : ''}`, null,
         <TileSpark vals={M.map((m) => m.net_rx)} color="#57a894" />)}
       {gpu &&
@@ -3412,7 +3425,7 @@ function MemNow({ server: s }: { server: Server }) {
         <NetTile
           label={t('Доступно')}
           value={fmtBytes(Math.max(0, total - used))}
-          sub={t('из них кэш {n}', { n: fmtBytes(r.mem_cached ?? 0) })}
+          sub={r.platform === 'windows' ? undefined : t('из них кэш {n}', { n: fmtBytes(r.mem_cached ?? 0) })}
         />
         {swapT > 0 && (
           <NetTile
@@ -5608,7 +5621,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
       )}
 
       {/* позитивный индикатор: все агенты на актуальной ПОДПИСАННОЙ версии */}
-      {avail && behind.length === 0 && (servers?.some((s) => s.agent_version) ?? false) && (
+      {avail && behind.length === 0 && (servers?.some((s) => s.last_report?.platform !== 'windows' && s.agent_version) ?? false) && (
         <div className="agent-update-ok">
           {t('✓ Все агенты на подписанной версии {v}', { v: avail })}
         </div>
@@ -5931,7 +5944,7 @@ function ServerRow({
               🔥
             </span>
           )}
-          <OsIcon os={s.os} />
+          <OsIcon os={s.last_report?.platform === 'windows' ? 'Windows' : s.os} />
           <CountryFlag code={s.country} />
           {s.name}
           {s.note && (
@@ -6012,6 +6025,7 @@ export function EnrollModal({
   const [name, setName] = useState(initial?.name ?? '')
   const [group, setGroup] = useState(initial?.group ?? '')
   const [agentIp, setAgentIp] = useState(initial?.ip ?? '')
+  const [accessIp, setAccessIp] = useState('')
   const [platform, setPlatform] = useState<AgentPlatform>('linux')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
@@ -6033,6 +6047,7 @@ export function EnrollModal({
         name,
         group_name: group || undefined,
         agent_ip: agentIp.trim() || undefined,
+        access_ip: platform === 'windows' ? accessIp.trim() || undefined : undefined,
       })
       onEnrolled(e, platform)
     } catch (ex) {
@@ -6078,8 +6093,14 @@ export function EnrollModal({
             ))}
           </datalist>
         </label>
+        {platform === 'windows' && (
+          <label className="field">
+            <span>{t('IP для подключения (опционально)')}</span>
+            <input value={accessIp} onChange={(e) => setAccessIp(e.target.value)} placeholder="203.0.113.10" />
+          </label>
+        )}
         <label className="field">
-          <span>{t('IP сервера (опционально)')}</span>
+          <span>{t(platform === 'windows' ? 'IP источника агента (опционально)' : 'IP сервера (опционально)')}</span>
           <input
             value={agentIp}
             onChange={(e) => setAgentIp(e.target.value)}
@@ -6481,6 +6502,7 @@ function agentLate(s: Server): boolean {
 // (весь сервер ИЛИ конкретный тип) + 1ч/1д/1нед. Активные снузы — чипами ниже
 // с «до …» и крестиком. kind === null → весь сервер, иначе тип.
 function SnoozeBar({
+  windows,
   snoozeUntil,
   snoozes,
   mutes,
@@ -6490,6 +6512,7 @@ function SnoozeBar({
   onUnmute,
   busy,
 }: {
+  windows: boolean
   snoozeUntil: string | null
   snoozes: Record<string, string> | null
   mutes: string[]  // постоянные мьюты: без срока, снимаются только вручную
@@ -6540,7 +6563,7 @@ function SnoozeBar({
           disabled={busy}
         >
           <option value="all">{t('Весь сервер')}</option>
-          {SNOOZE_KINDS.map(({ k, label }) => (
+          {SNOOZE_KINDS.filter(({ k }) => !windows || WINDOWS_ALERT_KINDS.has(k.split('@')[0])).map(({ k, label }) => (
             <option key={k} value={k}>
               {t(label)}
             </option>
@@ -6716,7 +6739,7 @@ function ServerChartModal({
   }, [server.id, hours, zoom])
 
   const M = metrics ?? []
-  const mc = padToNow(buildMetric(metricKey, M, t), zoom ? zoom.to * 1000 : Date.now())
+  const mc = padToNow(buildMetric(metricKey, M, t, server.last_report?.platform === 'windows'), zoom ? zoom.to * 1000 : Date.now())
   const spanH = zoom ? (zoom.to - zoom.from) / 3600 : hours
   const fmtT =
     spanH <= 24
@@ -6868,6 +6891,7 @@ function ServerDetail({
   const [saveErr, setSaveErr] = useState<string | null>(null)
   const mutes0 = useRef<string[]>([]) // мьюты на момент открытия формы
   const r = s.last_report ?? {}
+  const windows = r.platform === 'windows'
 
   useEffect(() => {
     setMetrics(null)
@@ -6884,7 +6908,8 @@ function ServerDetail({
 
   // открытый раздел: сводка или тот, куда вела ссылка; в адресе он виден (?sec=), ссылкой
   // на раздел можно поделиться
-  const [active, setActive] = useState<string>(() => secOfLink(initialSection) ?? 'overview')
+  const [requestedSection, setActive] = useState<string>(() => secOfLink(initialSection) ?? 'overview')
+  const active = windows && !WINDOWS_SECTIONS.has(requestedSection) ? 'overview' : requestedSection
   useUrlParam('sec', active === 'overview' ? null : active)
   const [oomEps, setOomEps] = useState<OomEpisode[] | null>(null)
   const oomMuteSig = JSON.stringify([
@@ -6897,7 +6922,7 @@ function ServerDetail({
   }, [])
   useUrlParam('oom', active === 'mem' ? oomOpen : null)
   useEffect(() => {
-    if (active !== 'mem') return
+    if (windows || active !== 'mem') return
     let alive = true
     const run = () =>
       serverOom(s.id)
@@ -6910,7 +6935,7 @@ function ServerDetail({
       window.clearInterval(id)
     }
     // мьют OOM поставили или сняли: эпизоды заново, их пометка "не алертит" считается на бэкенде
-  }, [s.id, active, oomMuteSig])
+  }, [s.id, active, oomMuteSig, windows])
   const layoutRef = useRef<HTMLDivElement>(null)
   // Другой раздел: показываем его с начала. Если страница уже прокручена ниже меню (длинный
   // раздел графиков), подкручиваем к началу разделов, иначе новый раздел открылся бы с середины
@@ -7020,6 +7045,7 @@ function ServerDetail({
       name: s.name,
       group_name: s.group_name,
       agent_ip: s.agent_ip ?? '',
+      access_ip: s.access_ip ?? '',
       agent_source_ips: (s.agent_source_ips ?? []).join('\n'),
       cpu_alert_percent: s.cpu_alert_percent,
       mem_alert_percent: s.mem_alert_percent,
@@ -7062,6 +7088,7 @@ function ServerDetail({
         name: form.name.trim(),
         group_name: form.group_name.trim(),
         agent_ip: form.agent_ip.trim(),
+        access_ip: windows && form.access_ip.trim() !== (s.access_ip ?? '') ? form.access_ip.trim() || null : undefined,
         agent_source_ips: form.agent_source_ips.split(/\r?\n/).map((ip) => ip.trim()).filter(Boolean),
         cpu_alert_percent: int(form.cpu_alert_percent),
         mem_alert_percent: int(form.mem_alert_percent),
@@ -7149,7 +7176,7 @@ function ServerDetail({
 
   // Секция графика: кликабельная карточка → полноэкранный график этой метрики.
   const chartCard = (key: MetricKey, extra?: React.ReactNode, marks?: ChartMark[]) => {
-    const mc = padToNow(buildMetric(key, M, t), Date.now())
+    const mc = padToNow(buildMetric(key, M, t, windows), Date.now())
     return (
       // якорь на КАРТОЧКУ: ссылка из алерта должна вести к самой метрике, а не к
       // началу раздела. У диска, например, раздел открывается графиками ввода-вывода,
@@ -7201,7 +7228,7 @@ function ServerDetail({
       default: return true
     }
   }
-  const secs = DETAIL_SECTIONS.filter((x) => x.id === active || shown(x.id))
+  const secs = DETAIL_SECTIONS.filter((x) => windows ? WINDOWS_SECTIONS.has(x.id) : x.id === active || shown(x.id))
   const cur = DETAIL_SECTIONS.find((x) => x.id === active) ?? DETAIL_SECTIONS[0]
   // на сводке строками: проблемы из другого раздела панели (со ссылкой туда) и то, у чего нет
   // своего раздела. Часы и DNS не здесь: у них свои блоки с тем, что делать
@@ -7216,11 +7243,11 @@ function ServerDetail({
     <div className="srv-sec">
       <OnboardBlock server={s} t={t} canManage={!isViewer} onChanged={onChanged} onOpenSection={onOpenSection}
         onInstall={isViewer ? undefined : () => reissue()} />
-      {!isViewer && (s.agent_fix_command || (s.helper_advice?.length ?? 0) > 0) && (
+      {!windows && !isViewer && (s.agent_fix_command || (s.helper_advice?.length ?? 0) > 0) && (
         <ServerFixBanner titles={s.agent_advice} command={s.agent_fix_command} helpers={s.helper_advice || []} t={t} />
       )}
       {/* соединение до панели режут по объему (замеры агента): предложить GRE до панели */}
-      {s.gre_need && !s.gre_enabled && (
+      {!windows && s.gre_need && !s.gre_enabled && (
         <div className="install-late">
           <span>
             🚇 {t('Соединение до панели режут после ~16кб: из {n} попыток кусок {kb}кб одним соединением дошел {ok} раз, мелкие доходят. Обновления агента и большие ответы идут с трудом - включите GRE до панели.', {
@@ -7233,13 +7260,13 @@ function ServerDetail({
         </div>
       )}
       {/* сдвиг часов: ломает TOTP, TLS и логи, плюс команда фикса */}
-      {r.clock && Math.abs(r.clock_skew_sec ?? 0) >= 5 && (
+      {!windows && r.clock && Math.abs(r.clock_skew_sec ?? 0) >= 5 && (
         <ClockFix server={s} clock={r.clock} skew={r.clock_skew_sec} canManage={!isViewer} />
       )}
       {/* DNS тормозит или не резолвит (сразу, проблемой - после выдержки алерта) либо дольше
           10 минут лежит один из резолверов: что именно и что с этим делать прямо сейчас. Совет -
           по тому, как нода ходит в DNS */}
-      {(s.problems ?? []).filter((p) => p.kind === 'dns').map((p) => (
+      {!windows && (s.problems ?? []).filter((p) => p.kind === 'dns').map((p) => (
         <div key="dns" className="dns-problem small">
           <span className={p.level >= 2 ? 't-down' : 't-degraded'}>{p.text}</span>
           {p.sub === 'resolver'
@@ -7315,7 +7342,7 @@ function ServerDetail({
         <div className="detail-head">
           <div className="detail-title">
             <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
-            <OsIcon os={s.os} size={18} />
+            <OsIcon os={windows ? 'Windows' : s.os} size={18} />
             <CountryFlag code={s.country} />
             <h3>{s.name}</h3>
             {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
@@ -7380,20 +7407,20 @@ function ServerDetail({
         {s.last_report ? (
           <div className="srv-meta srv-meta-line">
             {s.os && <span className="srv-meta-item">{s.os}</span>}
-            {r.is_vm !== undefined && (
+            {!windows && r.is_vm !== undefined && (
               <span className="srv-meta-item">
                 {r.is_vm ? (r.virt ? `VM · ${r.virt}` : 'VM') : 'Baremetal'}
               </span>
             )}
             {s.hostname && <span className="srv-meta-item mono">{s.hostname}</span>}
-            {(s.external_ip || s.local_ip) && <ServerAddr s={s} t={t} />}
-            <GreChip s={s} onClick={() => go('net')} />
+            {(s.external_ip || s.local_ip || s.access_ip) && <ServerAddr s={s} t={t} showSource />}
+            {!windows && <GreChip s={s} onClick={() => go('net')} />}
             <span className="srv-meta-item">
               <span className="srv-meta-k">{t('аптайм')}</span> {fmtUptime(r.uptime_seconds)}
             </span>
             <span className="srv-meta-item">
               <span className="srv-meta-k">{t('агент')}</span> {s.agent_version || '—'}
-              {!isViewer &&
+              {!windows && !isViewer &&
                 (s.target_agent_version && s.target_agent_version !== s.agent_version ? (
                   <>
                     {' '}
@@ -7442,6 +7469,7 @@ function ServerDetail({
             {s.last_seen
               ? `${t('оффлайн')} · ${fmtRel(s.last_seen)}`
               : t('агент ещё не выходил на связь')}
+            {s.access_ip && <ServerAddr s={s} t={t} showSource />}
           </div>
         )}
 
@@ -7500,7 +7528,7 @@ function ServerDetail({
               <div className="loc-results chart-stats">
                 {r.cpu_model && <StatRow name={t('Модель')} value={r.cpu_model} />}
                 <StatRow name={t('Ядра')} value={r.cpu_cores ? String(r.cpu_cores) : '—'} />
-                <StatRow name={t('Load 1 / 5 / 15 мин')} value={loadStr || '—'} />
+                {!windows && <StatRow name={t('Load 1 / 5 / 15 мин')} value={loadStr || '—'} />}
               </div>,
             )}
             {r.cpu_cores_pct?.length ? chartCard('cores') : null}
@@ -7525,11 +7553,11 @@ function ServerDetail({
             {r.cpu_throttle != null ? chartCard('throttle') : null}
           </div>
           {/* кто ест CPU: сюда ведет алерт о процессах в пустом цикле (sec=cpueat) */}
-          <div className="net-cards" id="mcard-cpueat">
+          {!windows && <div className="net-cards" id="mcard-cpueat">
             <MemContainers server={s} onChanged={onChanged} by="cpu" />
             <MemPods server={s} onChanged={onChanged} by="cpu" />
             <CpuGroups server={s} />
-          </div>
+          </div>}
           </div>
         )}
 
@@ -7544,7 +7572,7 @@ function ServerDetail({
               memTotalB > 0 ? (
                 <div className="loc-results chart-stats">
                   <StatRow color="#5a8fc7" name={t('занято')} value={`${fmtBytes(memUsedB)} / ${fmtBytes(memTotalB)}`} />
-                  <StatRow color="#4fa79a" name={t('кэш/буфер')} value={fmtBytes(memCacheB)} />
+                  {!windows && <StatRow color="#4fa79a" name={t('кэш/буфер')} value={fmtBytes(memCacheB)} />}
                   <StatRow color="#5b6472" name={t('доступно')} value={fmtBytes(memAvailB)} />
                   {(r.swap_total ?? 0) > 0 && (
                     <StatRow name="swap" value={`${fmtBytes(r.swap_used)} / ${fmtBytes(r.swap_total)}`} />
@@ -7566,7 +7594,7 @@ function ServerDetail({
                   <StatRow color="#cf9b52" name={t('в swap')} value={fmtRate(r.swap_out)} />
                 </div>,
               )}
-            {chartCard(
+            {!windows && chartCard(
               'memwb',
               <div className="loc-results chart-stats">
                 <StatRow color="#cf9b52" name={t('ожидают записи')} value={fmtBytes(r.mem_dirty)} />
@@ -7575,13 +7603,13 @@ function ServerDetail({
               </div>,
             )}
           </div>
-          <div className="net-cards">
+          {!windows && <div className="net-cards">
             <OomBlock server={s} eps={oomEps} open={oomOpen} onOpen={setOomOpen} onChanged={onChanged} />
             <MemLeaks server={s} />
             <MemLimitsCard server={s} isViewer={isViewer} onChanged={onChanged} />
             <MemContainers server={s} onChanged={onChanged} />
             <MemPods server={s} onChanged={onChanged} />
-          </div>
+          </div>}
           </div>
         )}
 
@@ -7589,19 +7617,19 @@ function ServerDetail({
           <div className="srv-sec">
           <div className="net-cards">
             <DiskSpaceCard server={s} r={r} onChanged={onChanged} />
-            <DiskHealthBlock r={r} wear={s.wear_forecast} server={s} isViewer={isViewer} onChanged={onChanged} />
-            <DiskWritersBlock server={s} r={r} />
+            {!windows && <DiskHealthBlock r={r} wear={s.wear_forecast} server={s} isViewer={isViewer} onChanged={onChanged} />}
+            {!windows && <DiskWritersBlock server={s} r={r} />}
           </div>
           <div className="chart-grid">
             {chartCard('disk')}
-            {chartCard(
+            {!windows && chartCard(
               'diskio',
               <div className="loc-results chart-stats">
                 <StatRow color="#57a894" name={t('чтение')} value={fmtRate(r.disk_read)} />
                 <StatRow color="#cf9b52" name={t('запись')} value={fmtRate(r.disk_write)} />
               </div>,
             )}
-            {chartCard(
+            {!windows && chartCard(
               'diskiops',
               <div className="loc-results chart-stats">
                 <StatRow
@@ -7911,6 +7939,7 @@ function ServerDetail({
           <div className="srv-sec">
             {!isViewer ? (
               <SnoozeBar
+                windows={windows}
                 snoozeUntil={s.snooze_until}
                 snoozes={s.alert_snoozes}
                 mutes={(s.alert_mutes ?? []).filter((k) => !isDecision(k))}
@@ -7934,7 +7963,9 @@ function ServerDetail({
                     if (hours < 0) {
                       // «постоянно» — это не снуз, а мьют: снуз всегда имеет срок и
                       // истекает, а тут нужно, чтобы порог молчал, пока его не вернут
-                      await muteServerKeys(s.id, kind === null ? SRV_ALERT_KINDS.map((x) => x.k) : [kind])
+                      await muteServerKeys(s.id, kind === null
+                        ? SRV_ALERT_KINDS.map((x) => x.k).filter((k) => !windows || WINDOWS_ALERT_KINDS.has(k))
+                        : [kind])
                     } else if (kind === null) await snoozeServer(s.id, hours)
                     else await snoozeServerAlert(s.id, kind, hours)
                     onChanged()
@@ -8000,6 +8031,7 @@ function ServerDetail({
     )}
     {editing && form && (
       <ServerEditModal
+        windows={windows}
         agentSourceGuardEnabled={!!s.agent_source_guard_enabled}
         form={form}
         set={(patch) => setForm({ ...form, ...patch })}

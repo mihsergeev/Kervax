@@ -399,7 +399,7 @@ function srvAddrs(s: Server): string[] {
 // Все известные адреса ноды: внешний, с которого ходит агент (часто меш), локальный и публичные
 // на интерфейсах. Тот же набор, что у общего поиска панели (backend/app/search.py)
 export function srvIps(s: Server): string[] {
-  return [s.external_ip, s.agent_ip, s.local_ip, ...(s.last_report?.ips ?? [])].filter((x): x is string => !!x)
+  return [s.access_ip, s.external_ip, s.agent_ip, s.local_ip, ...(s.last_report?.ips ?? [])].filter((x): x is string => !!x)
 }
 
 // Поиск по адресу (q уже в нижнем регистре): с начала адреса, а с точкой или двоеточием в запросе -

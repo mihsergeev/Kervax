@@ -1268,6 +1268,8 @@ class ServerCreate(BaseModel):
     # IP, с которого агент будет ходить в панель (опционально, для фаервола)
     agent_ip: str = Field(default="", max_length=64)
     _agent_ip = field_validator("agent_ip")(_agent_ip_ok)
+    access_ip: str | None = Field(default=None, max_length=64)
+    _access_ip = field_validator("access_ip")(_agent_ip_ok)
     agent_source_ips: list[str] = Field(default_factory=list, max_length=16)
     _agent_sources = field_validator("agent_source_ips", mode="before")(_agent_source_ips_ok)
     cpu_alert_percent: int = Field(default=90, ge=0, le=100)
@@ -1284,6 +1286,8 @@ class ServerUpdate(BaseModel):
     group_name: str | None = Field(default=None, max_length=64)
     agent_ip: str | None = Field(default=None, max_length=64)
     _agent_ip = field_validator("agent_ip")(_agent_ip_ok)
+    access_ip: str | None = Field(default=None, max_length=64)
+    _access_ip = field_validator("access_ip")(_agent_ip_ok)
     agent_source_ips: list[str] = Field(default_factory=list, max_length=16)
     _agent_sources = field_validator("agent_source_ips", mode="before")(_agent_source_ips_ok)
     enabled: bool | None = None
@@ -1564,6 +1568,7 @@ class ServerOut(BaseModel):
     local_ip: str
     external_ip: str
     agent_ip: str = ""
+    access_ip: str | None = None
     agent_source_ips: list[str] = Field(default_factory=list, max_length=16)
     _agent_sources = field_validator("agent_source_ips", mode="before")(_agent_source_ips_ok)
     agent_source_guard_enabled: bool = False

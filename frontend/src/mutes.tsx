@@ -280,6 +280,8 @@ export function muteKindLabel(k: string, t: TFn): string | null {
   return k.startsWith(WEB_MUTE) ? `${t('5xx по логу')}: ${k.slice(WEB_MUTE.length)}` : null
 }
 
+export const WINDOWS_ALERT_KINDS = new Set(['offline', 'reboot', 'cpu', 'mem', 'disk', 'disk_forecast'])
+
 // Варианты для ВРЕМЕННОГО приглушения. Отличаются от списка выше уровнями диска:
 // «@N» = молчать про уровни до N включительно (см. _muted в коллекторе). Постоянно
 // уровень выключается порогом (0), поэтому в форме мьютов этих вариантов нет — иначе

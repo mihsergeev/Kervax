@@ -692,6 +692,7 @@ class Server(Base):
     target_agent_version: Mapped[str] = mapped_column(String(32), default="")
     local_ip: Mapped[str] = mapped_column(String(64), default="")  # сообщает агент
     external_ip: Mapped[str] = mapped_column(String(64), default="")  # источник запроса
+    access_ip: Mapped[str | None] = mapped_column(String(64))  # адрес для входящего подключения
     # IP, с которого агент будет ходить В панель (опционально): панель ведёт
     # data/agent_allow_ips, а хостовый скрипт (ops/agent-firewall-sync.sh)
     # разрешает эти адреса в ufw/firewalld, если панель закрыта фаерволом

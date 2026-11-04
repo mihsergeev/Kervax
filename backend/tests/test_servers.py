@@ -62,6 +62,39 @@ async def test_windows_install_checksum_matches_download(client, auth_headers, m
     assert rotated.json()["token"] != server["token"]
 
 
+async def test_connection_ip_is_separate_from_agent_source(client, auth_headers, tmp_path):
+    access_ip = "203.0.113.10"
+    source_ip = "192.0.2.12"
+    created = await client.post("/api/servers", json={
+        "name": "Windows connection fixture", "access_ip": access_ip, "agent_ip": source_ip,
+    }, headers=auth_headers)
+    assert created.status_code == 201
+    assert created.json()["server"]["access_ip"] == access_ip
+    path = f"/api/servers/{created.json()['server']['id']}"
+
+    report = await client.post("/api/agent/report", json={
+        "platform": "windows", "hostname": "windows-fixture", "agent_version": "windows-0.2.0",
+    }, headers={"Authorization": f"Bearer {created.json()['token']}", "X-Real-IP": source_ip})
+    assert report.status_code == 200
+    server = (await client.get(path, headers=auth_headers)).json()
+    assert server["access_ip"] == access_ip
+    assert server["external_ip"] == server["agent_ip"] == source_ip
+
+    updated = await client.patch(path, json={"access_ip": "2001:db8::10"}, headers=auth_headers)
+    assert updated.status_code == 200 and updated.json()["access_ip"] == "2001:db8::10"
+    assert (tmp_path / "data" / "agent_allow_ips").read_text().splitlines() == [source_ip]
+    matches = await client.get("/api/search", params={"q": "2001:db8::10"}, headers=auth_headers)
+    assert matches.status_code == 200
+    assert any(group["kind"] == "server" for group in matches.json()["groups"])
+    invalid = await client.patch(path, json={"access_ip": "203.0.113.0/24"}, headers=auth_headers)
+    assert invalid.status_code == 422
+    cleared = await client.patch(path, json={"access_ip": None}, headers=auth_headers)
+    assert cleared.status_code == 200 and cleared.json()["access_ip"] is None
+    assert cleared.json()["external_ip"] == cleared.json()["agent_ip"] == source_ip
+    matches = await client.get("/api/search", params={"q": "2001:db8::10"}, headers=auth_headers)
+    assert matches.status_code == 200 and matches.json()["groups"] == []
+
+
 async def test_windows_report_metrics_offline_and_recovery(client, auth_headers, monkeypatch):
     from datetime import datetime, timedelta, timezone
 

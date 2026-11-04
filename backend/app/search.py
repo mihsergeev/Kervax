@@ -90,7 +90,7 @@ def build_server(srv, rep: dict) -> list[Entry]:
     sid, name = srv.id, srv.name
     out: list[Entry] = []
     ips: list[str] = []
-    for ip in (srv.external_ip, srv.agent_ip, srv.local_ip, *_l(rep.get("ips"))):
+    for ip in (srv.access_ip, srv.external_ip, srv.agent_ip, srv.local_ip, *_l(rep.get("ips"))):
         ip = _s(ip)
         if ip and ip not in ips:
             ips.append(ip)
@@ -239,7 +239,8 @@ def check_entry(c, *, target: str | None = None) -> Entry:
 # --- кэш записей по серверам ------------------------------------------------------------------
 
 _SRV_COLS = (Server.id, Server.name, Server.group_name, Server.hostname, Server.os, Server.agent_version,
-             Server.local_ip, Server.external_ip, Server.agent_ip, Server.note, Server.last_seen, Server.pkg_hash)
+             Server.local_ip, Server.external_ip, Server.agent_ip, Server.access_ip,
+             Server.note, Server.last_seen, Server.pkg_hash)
 _cache: dict[int, tuple[tuple, list[Entry]]] = {}
 
 

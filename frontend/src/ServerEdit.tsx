@@ -4,7 +4,7 @@ import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
 import { UpdCmd, helperCmd } from './FleetUpdate'
 import { useI18n } from './i18n'
-import { SRV_ALERT_KINDS, kindLabel } from './mutes'
+import { SRV_ALERT_KINDS, WINDOWS_ALERT_KINDS, kindLabel } from './mutes'
 import { useEscape } from './useEscape'
 
 // Окно правки сервера: меню слева по областям сервера, в разделе области ее пороги и какие ее
@@ -15,6 +15,7 @@ export type ServerEditForm = {
   name: string
   group_name: string
   agent_ip: string
+  access_ip: string
   agent_source_ips: string // по одному адресу в строке
   cpu_alert_percent: number
   mem_alert_percent: number
@@ -77,6 +78,7 @@ const SECS: SecDef[] = [
   { id: 'gre', label: 'GRE до панели', group: 'Другое' },
   { id: 'del', label: 'Удаление', group: 'Другое' },
 ]
+const WINDOWS_EDIT_SECTIONS = new Set(['srv', 'load', 'disk', 'del'])
 
 // температуры на ВМ не видны: датчиков нет, алертов по ним не будет
 const HW_ONLY = ['temp', 'disktemp']
@@ -188,6 +190,7 @@ export function ServerEditModal({
   err,
   groups,
   isVm,
+  windows,
   relay,
   gre,
   host,
@@ -205,6 +208,7 @@ export function ServerEditModal({
   err: string | null
   groups: string[]
   isVm?: boolean
+  windows: boolean
   relay?: RelayView | null
   gre?: GreView | null
   host: string // имя ноды для ansible -l (как в "Требует действий")
@@ -218,7 +222,9 @@ export function ServerEditModal({
 }) {
   const { t } = useI18n()
   const { isAdmin } = useAuth()
-  const [sec, setSec] = useState(() => (SECS.some((x) => x.id === initialSec) ? initialSec! : 'srv'))
+  const secs = windows ? SECS.filter((x) => WINDOWS_EDIT_SECTIONS.has(x.id)) : SECS
+  const [requestedSec, setSec] = useState(initialSec)
+  const sec = secs.some((x) => x.id === requestedSec) ? requestedSec! : 'srv'
   const [form0] = useState(() => JSON.stringify(form))
   const dirty = JSON.stringify(form) !== form0
   const close = () => {
@@ -233,7 +239,7 @@ export function ServerEditModal({
   const muted = (k: string) => form.alert_mutes.includes(k)
   const toggle = (k: string) =>
     set({ alert_mutes: muted(k) ? form.alert_mutes.filter((x) => x !== k) : [...form.alert_mutes, k] })
-  const shown = (k: string) => !isVm || !HW_ONLY.includes(k)
+  const shown = (k: string) => windows ? WINDOWS_ALERT_KINDS.has(k) : !isVm || !HW_ONLY.includes(k)
   const others = (area: string) => form.alert_mutes.filter((k) => !KNOWN.has(k) && areaOfMute(k) === area)
 
   // в меню у области 🔕: в ней что-то заглушено, само не вернется
@@ -323,11 +329,33 @@ export function ServerEditModal({
       </div>
       {a.kinds.filter(shown).map((k) => kindRow(k, thrOf[k], capOf[k]))}
       {/* вид, который забыли разложить по областям */}
-      {a.id === 'srv' && SRV_ALERT_KINDS.filter((x) => !AREA_OF.has(x.k)).map((x) => kindRow(x.k))}
+      {a.id === 'srv' && SRV_ALERT_KINDS.filter((x) => !AREA_OF.has(x.k) && shown(x.k)).map((x) => kindRow(x.k))}
       {others(a.id).map(otherRow)}
     </div>
   )
 
+  const sourceIps = (
+    <>
+      <label className="field">
+        <span>{t('Дополнительные IP источников агента')}</span>
+        <textarea
+          rows={4}
+          value={form.agent_source_ips}
+          onChange={(e) => set({ agent_source_ips: e.target.value })}
+          placeholder={'198.51.100.10\n2001:db8::10'}
+          aria-describedby="agent-source-ips-help"
+        />
+      </label>
+      <p id="agent-source-ips-help" className="small muted">
+        {t('Для NAT или HTTP-прокси: до 16 отдельных IPv4 или IPv6, по одному в строке. Основной IP учитывается автоматически. После его замены старый разрешен только если явно добавлен в этот список.')}
+      </p>
+      <p className={`small ${agentSourceGuardEnabled ? 'muted' : 'form-error'}`}>
+        {agentSourceGuardEnabled
+          ? t('IP-фильтр запросов агента включен. Если основной IP и дополнительные адреса пусты, доступ проверяется только по токену.')
+          : t('IP-фильтр запросов агента не включен. Сохраненные адреса пока не ограничивают доступ к API агента, запросы проверяются по токену.')}
+      </p>
+    </>
+  )
   let body: ReactNode = null
   if (area?.id === 'srv')
     body = (
@@ -353,7 +381,7 @@ export function ServerEditModal({
           </label>
           <label className="field">
             <span title={t('Адрес, с которого агент ходит в панель — для разрешения в фаерволе хоста панели (ufw/firewalld).')}>
-              {t('IP сервера (опционально)')} <span className="se-q">?</span>
+              {t(windows ? 'IP источника агента (опционально)' : 'IP сервера (опционально)')} <span className="se-q">?</span>
             </span>
             <input
               value={form.agent_ip}
@@ -362,8 +390,17 @@ export function ServerEditModal({
             />
           </label>
         </div>
+        {windows && (
+          <>
+            <label className="field">
+              <span>{t('IP для подключения (опционально)')}</span>
+              <input value={form.access_ip} onChange={(e) => set({ access_ip: e.target.value })} placeholder="203.0.113.10" />
+            </label>
+            {sourceIps}
+          </>
+        )}
         {/* сервер разработки: поведение приложений не будит алертами (backend app/dev_mode.py) */}
-        <div className="se-dev">
+        {!windows && <div className="se-dev">
           <div className="win-switch" role="group" aria-label={t('Назначение')}>
             {([[false, t('Прод')], [true, t('Разработка')]] as const).map(([v, l]) => (
               <button
@@ -384,7 +421,7 @@ export function ServerEditModal({
                 ? t('По имени похоже на сервер разработки: там падения приложений бывают нормой.')
                 : t('Разработка: поведение приложений не будит алертами, инфраструктура - как обычно.')}
           </span>
-        </div>
+        </div>}
         <div className="se-note">{note}</div>
         {rows(area, { offline: thr('offline_after_seconds', t('сек'), { min: 30, max: 86400 }) }, { offline: t('молчит дольше') })}
       </>
@@ -394,7 +431,7 @@ export function ServerEditModal({
       <>
         {thrLine(
           t('Слать, если держится дольше'),
-          t('гасит спайки CPU, RAM, температуры и conntrack, 0 = слать сразу'),
+          windows ? t('0 = слать сразу') : t('гасит спайки CPU, RAM, температуры и conntrack, 0 = слать сразу'),
           thr('alert_sustain_min', t('мин'), { max: 1440 }),
         )}
         {rows(area, {
@@ -425,6 +462,7 @@ export function ServerEditModal({
           </div>
         </div>
         {/* Панель начнет сама запускать удаление на ноде - решение админа (сервер проверяет) */}
+        {!windows && <>
         <label className="checkbox se-check">
           <input
             type="checkbox"
@@ -440,29 +478,13 @@ export function ServerEditModal({
           {t('С порога предупреждения панель сама чистит журнал, старые логи, кэши пакетов и мусор docker.')}
           {!isAdmin && ` ${t('Включает только админ.')}`}
         </p>
+        </>}
         {rows(area, { disktemp: thr('disk_temp_alert_c', '°C', { max: 120, off: true }) })}
       </>
     )
   else if (area?.id === 'net') body = (
     <>
-      <label className="field">
-        <span>{t('Дополнительные IP источников агента')}</span>
-        <textarea
-          rows={4}
-          value={form.agent_source_ips}
-          onChange={(e) => set({ agent_source_ips: e.target.value })}
-          placeholder={'198.51.100.10\n2001:db8::10'}
-          aria-describedby="agent-source-ips-help"
-        />
-      </label>
-      <p id="agent-source-ips-help" className="small muted">
-        {t('Для NAT или HTTP-прокси: до 16 отдельных IPv4 или IPv6, по одному в строке. Основной IP учитывается автоматически. После его замены старый разрешен только если явно добавлен в этот список.')}
-      </p>
-      <p className={`small ${agentSourceGuardEnabled ? 'muted' : 'form-error'}`}>
-        {agentSourceGuardEnabled
-          ? t('IP-фильтр запросов агента включен. Если основной IP и дополнительные адреса пусты, доступ проверяется только по токену.')
-          : t('IP-фильтр запросов агента не включен. Сохраненные адреса пока не ограничивают доступ к API агента, запросы проверяются по токену.')}
-      </p>
+      {sourceIps}
       {rows(area, { conntrack: thr('conntrack_alert_percent', '%', { off: true }) })}
     </>
   )
@@ -578,7 +600,7 @@ export function ServerEditModal({
           </button>
         </div>
         <div className="al-body">
-          <CardNav secs={SECS} active={sec} info={{}} side={side} onGo={setSec} />
+          <CardNav secs={secs} active={sec} info={{}} side={side} onGo={setSec} />
           <div className="al-main">
             <div className="srv-main-head">
               <h4>{t(cur.label)}</h4>

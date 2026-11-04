@@ -3262,6 +3262,12 @@ const EN: Record<string, string> = {
   'у домена один адрес': 'the domain has one address',
   'Показать': 'Show',
   'IP сервера (опционально)': 'Server IP (optional)',
+  'IP для подключения': 'Connection IP',
+  'IP для подключения: {ip}': 'Connection IP: {ip}',
+  'IP для подключения (опционально)': 'Connection IP (optional)',
+  'IP источника агента (опционально)': 'Agent source IP (optional)',
+  'Отчеты с {ip}': 'Reports from {ip}',
+  '0 = слать сразу': '0 = send immediately',
   'Нужен вида http://логин:пароль@хост:порт (подходят и https://, socks5://), без пробелов и кавычек.':
     'Use the form http://user:password@host:port (https:// and socks5:// work too), no spaces or quotes.',
   'агент ходит в панель через прокси': 'the agent reaches the panel through a proxy',

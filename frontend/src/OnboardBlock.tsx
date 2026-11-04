@@ -35,6 +35,8 @@ export function OnboardBlock({ server: s, t, canManage, onChanged, onOpenSection
     rows.push(s.online
       ? { key: 'agent', ok: true, text: t('агент на связи') }
       : { key: 'agent', ok: false, text: t('агент отчитывался, но сейчас не на связи') })
+  }
+  if (s.first_report_at && r.platform !== 'windows') {
     const miss = (s.helper_advice ?? []).map((h) => h.label)
     if (r.docker?.present && !r.docker.access) miss.push(t('доступ к Docker'))
     if (r.kube?.present && !r.kube.access) miss.push(t('доступ к Kubernetes'))
