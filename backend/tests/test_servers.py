@@ -64,20 +64,24 @@ async def test_windows_install_checksum_matches_download(client, auth_headers, m
 
 async def test_connection_ip_is_separate_from_agent_source(client, auth_headers, tmp_path):
     access_ip = "203.0.113.10"
-    source_ip = "192.0.2.12"
+    source_ip = "192.168.0.250"
+    local_ip = "10.0.0.5"
     created = await client.post("/api/servers", json={
         "name": "Windows connection fixture", "access_ip": access_ip, "agent_ip": source_ip,
     }, headers=auth_headers)
     assert created.status_code == 201
     assert created.json()["server"]["access_ip"] == access_ip
+    assert created.json()["server"]["display_external_ip"] == access_ip
     path = f"/api/servers/{created.json()['server']['id']}"
 
     report = await client.post("/api/agent/report", json={
-        "platform": "windows", "hostname": "windows-fixture", "agent_version": "windows-0.2.0",
+        "platform": "windows", "hostname": "windows-fixture", "agent_version": "windows-0.2.1",
+        "local_ip": local_ip,
     }, headers={"Authorization": f"Bearer {created.json()['token']}", "X-Real-IP": source_ip})
     assert report.status_code == 200
     server = (await client.get(path, headers=auth_headers)).json()
-    assert server["access_ip"] == access_ip
+    assert server["access_ip"] == server["display_external_ip"] == access_ip
+    assert server["local_ip"] == local_ip
     assert server["external_ip"] == server["agent_ip"] == source_ip
 
     updated = await client.patch(path, json={"access_ip": "2001:db8::10"}, headers=auth_headers)
@@ -91,6 +95,8 @@ async def test_connection_ip_is_separate_from_agent_source(client, auth_headers,
     cleared = await client.patch(path, json={"access_ip": None}, headers=auth_headers)
     assert cleared.status_code == 200 and cleared.json()["access_ip"] is None
     assert cleared.json()["external_ip"] == cleared.json()["agent_ip"] == source_ip
+    assert cleared.json()["display_external_ip"] == ""
+    assert cleared.json()["local_ip"] == local_ip
     matches = await client.get("/api/search", params={"q": "2001:db8::10"}, headers=auth_headers)
     assert matches.status_code == 200 and matches.json()["groups"] == []
 
@@ -567,6 +573,25 @@ async def test_agent_update_only_own_groups(client, auth_headers, monkeypatch):
     tgt = {s["name"]: s["target_agent_version"]
            for s in (await client.get("/api/servers", headers=auth_headers)).json()}
     assert tgt == {"web-a": "", "db-a": "1.6"}
+
+
+async def test_legacy_agent_leaves_an_existing_rollout_and_cannot_be_retargeted(client, auth_headers, monkeypatch):
+    monkeypatch.setattr("app.api.servers._available_agent_version", lambda: "2.62")
+    created = (await client.post("/api/servers", json={"name": "legacy-fixture"}, headers=auth_headers)).json()
+    sid = created["server"]["id"]
+    agent = {"Authorization": f"Bearer {created['token']}"}
+    request = {"version": "2.62", "server_ids": [sid], "track": True}
+    assert (await client.post("/api/servers/agent-update", json=request, headers=auth_headers)).json()[0]["target_agent_version"] == "2.62"
+    assert (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()["agent"]["ids"] == [sid]
+
+    report = {"platform": "linux", "agent_version": "2.62-legacy", "update_error": "signature mismatch"}
+    result = await client.post("/api/agent/report", json=report, headers=agent)
+    assert result.status_code == 200 and result.json()["update"] is None
+    server = (await client.get(f"/api/servers/{sid}", headers=auth_headers)).json()
+    assert server["online"] and not server["agent_can_update"] and server["target_agent_version"] == ""
+    assert server["agent_update_error"] is None and not server["agent_advice"]
+    assert (await client.post("/api/servers/agent-update", json=request, headers=auth_headers)).json() == []
+    assert (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()["agent"] is None
 
 
 async def test_fleet_rollout_kept_on_panel(client, auth_headers, monkeypatch):

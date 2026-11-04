@@ -29,7 +29,7 @@ const DONE_MS = 3000
 
 // агент отстает от подписанной версии; выключенным сервером панель цель не ставит
 export function agentBehind(servers: Server[], avail: string): Server[] {
-  return servers.filter((s) => s.enabled && s.last_report?.platform !== 'windows' &&
+  return servers.filter((s) => s.enabled && s.agent_can_update &&
     s.agent_version && avail && s.agent_version !== avail)
 }
 

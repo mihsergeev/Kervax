@@ -241,6 +241,11 @@ def agent_update_error(rep: dict) -> str:
     return err
 
 
+def _agent_can_update(version: str, platform: str | None) -> bool:
+    # Legacy builds have their own installation path and are outside the signed Linux rollout.
+    return platform != "windows" and not version.endswith("-legacy")
+
+
 def _agent_advice(server: Server) -> tuple[list[str], str | None]:
     """По самодиагностике агента (last_report.caps) собираем: чего не хватает в юните
     (человекочитаемо) и ОДНУ команду-фикс (drop-in). Если агент старый и caps не шлёт
@@ -254,7 +259,7 @@ def _agent_advice(server: Server) -> tuple[list[str], str | None]:
     # ноды, а в панели виднелось только расхождение «цель X / версия Y». Самая
     # частая причина — панель собрана не с тем пубключом, которым подписан релиз;
     # на парке в десятки нод искать это по логам каждой ноды невозможно.
-    upd_err = agent_update_error(rep)
+    upd_err = agent_update_error(rep) if _agent_can_update(server.agent_version or "", rep.get("platform")) else ""
     # Медленная докачка - НЕ отказ: набранное лежит на ноде, следующая попытка идёт
     # дальше с того же места. Такой текст в «Требует действий» звал чинить то, что
     # чинится само: на РФ-нодах за DPI 5.8 МБ набираются за несколько попыток по
@@ -322,8 +327,21 @@ def _out(
     o.agent_source_guard_enabled = get_settings().agent_source_guard
     o.online = _is_online(server, now)
     o.agent_advice, o.agent_fix_command = _agent_advice(server)
-    o.agent_update_note = agent_update_note(server.last_report or {}) or None
-    o.agent_update_error = agent_update_error(server.last_report or {}) or None
+    report = server.last_report or {}
+    platform = report.get("platform")
+    o.agent_can_update = _agent_can_update(server.agent_version, platform)
+    if o.agent_can_update:
+        o.agent_update_note = agent_update_note(report) or None
+        o.agent_update_error = agent_update_error(report) or None
+    else:
+        o.target_agent_version = ""
+    o.display_external_ip = server.external_ip
+    if platform == "windows":
+        o.display_external_ip = server.access_ip or (
+            server.external_ip if open_ports.is_public(server.external_ip) else ""
+        )
+    elif server.last_report is None:
+        o.display_external_ip = server.access_ip or server.external_ip
     o.helper_advice = _helper_advice(
         server, cur_versions if cur_versions is not None else _current_setup_versions()
     )
@@ -1520,7 +1538,10 @@ async def agent_update(
     q = scope_query(user, select(Server).where(Server.enabled.is_(True)), Server)
     if body.server_ids is not None:
         q = q.where(Server.id.in_(body.server_ids))
-    servers = [s for s in await session.scalars(q) if (s.last_report or {}).get("platform") != "windows"]
+    servers = [
+        s for s in await session.scalars(q)
+        if _agent_can_update(s.agent_version, (s.last_report or {}).get("platform"))
+    ]
     targeted = []
     for s in servers:
         if s.agent_version == body.version:  # уже на целевой — не трогаем
@@ -1559,11 +1580,18 @@ async def agent_update_cancel(
     return [_out(s, now) for s in servers]
 
 
-async def _scoped_nodes(user, session) -> tuple[set[int], set[str]]:
-    """id и хосты (как их зовет ansible: hostname, иначе имя) серверов групп учетки."""
-    rows = (await session.execute(
-        scope_query(user, select(Server.id, Server.hostname, Server.name), Server))).all()
-    return {r.id for r in rows}, {r.hostname or r.name for r in rows}
+async def _scoped_nodes(user, session) -> tuple[set[int], set[str], set[int]]:
+    """ID серверов, имена для Ansible и ID агентов с поддержкой автообновления."""
+    query = select(
+        Server.id, Server.hostname, Server.name, Server.agent_version,
+        Server.last_report["platform"].as_string().label("platform"),
+    )
+    rows = (await session.execute(scope_query(user, query, Server))).all()
+    return (
+        {r.id for r in rows},
+        {r.hostname or r.name for r in rows},
+        {r.id for r in rows if _agent_can_update(r.agent_version, r.platform)},
+    )
 
 
 @router.get("/fleet-rollout", response_model=FleetRolloutOut)
@@ -1571,9 +1599,9 @@ async def get_fleet_rollout(user: CurrentUser, session: SessionDep) -> FleetRoll
     """Что запущено из "Обновлений" и когда (fleet_rollout.py). Чужие группы не видны:
     редактор группы получает только свои ноды, пусто - части нет."""
     data = await fleet_rollout.load(session)
-    ids, hosts = await _scoped_nodes(user, session)
+    _, hosts, update_ids = await _scoped_nodes(user, session)
     out = FleetRolloutOut()
-    if (a := data["agent"]) and (mine := [i for i in a["ids"] if i in ids]):
+    if (a := data["agent"]) and (mine := [i for i in a["ids"] if i in update_ids]):
         out.agent = AgentRunOut(v=a["v"], ids=mine, at=datetime.fromtimestamp(a["at"], timezone.utc))
     if (h := data["helpers"]) and (mine_h := [x for x in h["hosts"] if x in hosts]):
         out.helpers = HelperRunOut(hosts=mine_h, at=datetime.fromtimestamp(h["at"], timezone.utc))
@@ -1586,7 +1614,7 @@ async def start_helper_rollout(
 ) -> FleetRolloutOut:
     """Команду ansible для helper'ов скопировали: панель ее не выполняет, только ждет, пока
     хосты перестанут требовать прогона (helper_rollout), и показывает прогресс."""
-    _, hosts = await _scoped_nodes(user, session)
+    _, hosts, _ = await _scoped_nodes(user, session)
     mine = sorted({h for h in body.hosts if h in hosts})
     if mine:
         await fleet_rollout.track_helpers(session, mine)
@@ -1600,7 +1628,7 @@ async def close_fleet_rollout(part: str, user: CurrentUser, session: SessionDep)
     Цели агента не снимаются - для этого "стоп" (agent-update/cancel)."""
     if part not in ("agent", "helpers"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такой части")
-    ids, hosts = await _scoped_nodes(user, session)
+    ids, hosts, _ = await _scoped_nodes(user, session)
     await fleet_rollout.untrack(session, part, ids=ids, hosts=hosts)
     return await get_fleet_rollout(user, session)
 
@@ -3815,8 +3843,9 @@ async def agent_report(
                      and str(body.pkgs["h"])[:32] != (server.pkg_hash or ""))
     if server.first_report_at is None:
         server.first_report_at = now
-    if body.platform == "windows":
+    if not _agent_can_update(server.agent_version, body.platform):
         server.target_agent_version = ""
+    if body.platform == "windows":
         await session.commit()
         return AgentConfigOut(interval=60, checks=[])
 

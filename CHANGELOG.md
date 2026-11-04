@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.91] - 2026-11-04
+
+### Fixed
+- Windows servers use the same compact external and local address display and OS icon sizing as other servers.
+- Windows collector 0.2.1 reports the local interface address. A configured connection IP takes precedence for Windows servers behind NAT.
+- Legacy Linux agents are excluded from automatic updates and update warnings, including existing rollouts. They continue reporting metrics.
+
 ## [1.8.90] - 2026-11-04
 
 ### Fixed

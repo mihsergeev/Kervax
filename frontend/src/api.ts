@@ -2639,6 +2639,8 @@ export type Server = {
   traffic_limit_gb?: number
   traffic_count?: 'out' | 'both'
   traffic_cycle_day?: number
+  agent_can_update: boolean
+  display_external_ip: string
   agent_update_note?: string | null // «обновление докачивается: 59% (3.4 из 5.8 МБ)»
   agent_update_error?: string | null // агент отверг обновление: причина его словами
   agent_advice: string[] // чего агенту не хватает в systemd-юните (человекочитаемо)

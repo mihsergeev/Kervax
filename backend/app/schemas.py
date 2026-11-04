@@ -1761,6 +1761,8 @@ class ServerOut(BaseModel):
     # самодиагностика: чего агенту не хватает в systemd-юните + команда-фикс (или пусто)
     agent_advice: list[str] = []
     agent_fix_command: str | None = None
+    agent_can_update: bool = True
+    display_external_ip: str = ""
     # идёт докачка обновления агента (медленный канал) - не отказ, чинить нечего
     agent_update_note: str | None = None
     # агент отверг обновление (подпись, место, сеть): причина его словами, иначе None.

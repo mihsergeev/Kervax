@@ -1104,34 +1104,31 @@ function AddrIcon({ kind }: { kind: 'ext' | 'loc' }) {
 // Адрес(а) сервера с иконками: внешний (глобус) + локальный (домик, только если отличается).
 // Контекстно-нейтрально (обёртка .srv-addr, не chip) — годится и в плашках-метах, и в
 // компактной плитке .check-target. Нет ни одного IP → hostname.
-function ServerAddr({ s, t, showSource }: { s: Server; t: TFn; showSource?: boolean }) {
+function ServerAddr({ s, t }: { s: Server; t: TFn }) {
   const windows = s.last_report?.platform === 'windows'
-  const access = windows || !s.last_report ? s.access_ip : null
-  const ext = access || (windows ? null : s.external_ip)
+  const ext = s.display_external_ip
   const loc = s.local_ip
   const showLoc = loc && loc !== ext
-  const source = windows && (showSource || !ext) && s.external_ip !== ext ? s.external_ip : null
   // агент за прокси: адрес соединения - это прокси, внешний IP тогда задан руками
   const proxy = s.last_report?.proxy
   return (
     <span className="srv-addr">
-      {!ext && !showLoc && !source ? (
+      {!ext && !showLoc ? (
         s.hostname || '—'
       ) : (
         <>
           {ext && (
-            <span className="srv-addr-part" title={access ? t('IP для подключения') : t('внешний (публичный) IP')}>
+            <span className="srv-addr-part" title={t('внешний (публичный) IP')}>
               <AddrIcon kind="ext" />
-              {access && showSource ? t('IP для подключения: {ip}', { ip: ext }) : ext}
+              {ext}
             </span>
           )}
-          {showLoc && loc !== source && (
+          {showLoc && (
             <span className="srv-addr-part" title={t('локальный IP (внутренняя сеть)')}>
               <AddrIcon kind="loc" />
               {loc}
             </span>
           )}
-          {source && <span className="srv-addr-part">{t('Отчеты с {ip}', { ip: source })}</span>}
           {!windows && proxy && (
             <span className="srv-addr-part" title={t('агент ходит в панель через прокси')}>
               ↪ {proxy}
@@ -5621,7 +5618,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
       )}
 
       {/* позитивный индикатор: все агенты на актуальной ПОДПИСАННОЙ версии */}
-      {avail && behind.length === 0 && (servers?.some((s) => s.last_report?.platform !== 'windows' && s.agent_version) ?? false) && (
+      {avail && behind.length === 0 && (servers?.some((s) => s.agent_can_update && s.agent_version) ?? false) && (
         <div className="agent-update-ok">
           {t('✓ Все агенты на подписанной версии {v}', { v: avail })}
         </div>
@@ -6767,7 +6764,7 @@ function ServerChartModal({
         </div>
         <div className="srv-meta">
           {server.os && <span className="srv-meta-item">{server.os}</span>}
-          {(server.external_ip || server.local_ip) && (
+          {(server.display_external_ip || server.local_ip) && (
             <span className="srv-meta-item mono"><ServerAddr s={server} t={t} /></span>
           )}
         </div>
@@ -7413,14 +7410,14 @@ function ServerDetail({
               </span>
             )}
             {s.hostname && <span className="srv-meta-item mono">{s.hostname}</span>}
-            {(s.external_ip || s.local_ip || s.access_ip) && <ServerAddr s={s} t={t} showSource />}
+            {(s.display_external_ip || s.local_ip) && <ServerAddr s={s} t={t} />}
             {!windows && <GreChip s={s} onClick={() => go('net')} />}
             <span className="srv-meta-item">
               <span className="srv-meta-k">{t('аптайм')}</span> {fmtUptime(r.uptime_seconds)}
             </span>
             <span className="srv-meta-item">
               <span className="srv-meta-k">{t('агент')}</span> {s.agent_version || '—'}
-              {!windows && !isViewer &&
+              {s.agent_can_update && !isViewer &&
                 (s.target_agent_version && s.target_agent_version !== s.agent_version ? (
                   <>
                     {' '}
@@ -7469,7 +7466,7 @@ function ServerDetail({
             {s.last_seen
               ? `${t('оффлайн')} · ${fmtRel(s.last_seen)}`
               : t('агент ещё не выходил на связь')}
-            {s.access_ip && <ServerAddr s={s} t={t} showSource />}
+            {s.access_ip && <ServerAddr s={s} t={t} />}
           </div>
         )}
 

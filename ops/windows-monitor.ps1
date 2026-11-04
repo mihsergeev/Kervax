@@ -27,6 +27,29 @@ function Get-ReportUri([string]$Url) {
     return [uri]($uri.AbsoluteUri.TrimEnd('/') + '/api/agent/report')
 }
 
+function Get-LocalAddress {
+    try {
+        $adapters = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=TRUE' -OperationTimeoutSec 5 |
+            Sort-Object -Property @{ Expression = { -not $_.DefaultIPGateway } }, IPConnectionMetric, InterfaceIndex
+        foreach ($adapter in $adapters) {
+            $ipv6 = $null
+            foreach ($value in $adapter.IPAddress) {
+                $ip = $null
+                if (-not [Net.IPAddress]::TryParse($value, [ref]$ip) -or [Net.IPAddress]::IsLoopback($ip)) { continue }
+                if ($ip.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) {
+                    if ($value -ne '0.0.0.0' -and $value -notlike '169.254.*') { return $ip.ToString() }
+                } elseif (-not $ip.IsIPv6LinkLocal -and -not $ip.IsIPv6Multicast -and -not $ip.Equals([Net.IPAddress]::IPv6Any) -and -not $ipv6) {
+                    $ipv6 = $ip
+                }
+            }
+            if ($ipv6) { return $ipv6.ToString() }
+        }
+    } catch {
+        # An unavailable network inventory must not block the rest of the report.
+    }
+    return ''
+}
+
 function New-Report {
     $os = Get-CimInstance -ClassName Win32_OperatingSystem -OperationTimeoutSec 10
     $computer = Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 10
@@ -60,7 +83,8 @@ function New-Report {
     $now = [DateTimeOffset]::UtcNow
     return @{
         platform = 'windows'
-        agent_version = 'windows-0.2.0'
+        agent_version = 'windows-0.2.1'
+        local_ip = Get-LocalAddress
         hostname = $env:COMPUTERNAME
         os = $os.Caption.Substring(0, [Math]::Min(128, $os.Caption.Length))
         uptime_seconds = [Math]::Max(0L, [long]($now.UtcDateTime - $os.LastBootUpTime.ToUniversalTime()).TotalSeconds)
