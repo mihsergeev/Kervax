@@ -2586,9 +2586,6 @@ _LIVENESS_PER_TICK = 6
 # Репозиторий на бэкап-сервере «устарел», если в него давно не принимали бэкап.
 # 3 дня для ежедневных бэкапов; разовые/неактуальные репо глушатся мьютом.
 _BACKUP_REPO_STALE_SECONDS = 3 * 86400
-# Алерт «репозитории требуют внимания» НЕ срочный: шлём при появлении проблемы и
-# напоминаем не чаще раза в сутки (иначе спам, т.к. набор проблемных репо флапает).
-_BACKUP_REPO_REALERT = 86400
 # Лок в репозитории — НОРМА, пока идёт бэкап: restic держит его от начала до конца и
 # освежает раз в 5 минут. Проблема — лок, который перестали освежать (процесс умер,
 # репо осталось заблокированным). Порог с большим запасом к интервалу освежения.
@@ -7522,9 +7519,8 @@ async def evaluate_servers(
         return out
 
     # Сначала СОБИРАЕМ все переходы за тик (не шлём внутри цикла), чтобы при
-    # массовых событиях схлопнуть их в один дайджест. Состояние фиксируем после
-    # доставки: молчаливые де-эскалации — всегда; срабатывания/восстановления —
-    # только если их пачка ушла (иначе повторим на следующем тике).
+    # массовых событиях схлопнуть их в один дайджест. Молчаливые де-эскалации
+    # фиксируем всегда, остальные переходы — после подтверждения доставки.
     cur_by_id = {s.id: dict(s.alert_state or {}) for s in servers}
     changed_ids: set[int] = set()
     fires: list[alerts.Msg] = []
@@ -7750,6 +7746,14 @@ async def evaluate_servers(
                 continue
             if k != "offline" and (not report_fresh or (not _lvl and not cx.get("_complete", True))):
                 continue
+            # У уже открытых алертов запоминаем прежний уровень до первой деэскалации,
+            # в том числе во время обслуживания или мьюта.
+            prev_lvl = int(st.get(k, 0))
+            if (0 < _lvl < prev_lvl and not st.get(f"{k}_told_lvl")
+                    and not st.get(f"{k}_hush") and not st.get(f"{k}_quiet")):
+                apply(s.id, f"{k}_told_lvl", prev_lvl)
+                if k == "pressure" and prev_lvl >= 2 and st.get("pressure_res") in ("thrash", "dstate"):
+                    apply(s.id, "pressure_told", [st["pressure_res"]])
             if quiet_srv:
                 # снуз и окно обслуживания: выдержка пойдет с их конца (в окне чистят тот самый
                 # диск, алерт сразу после окна был бы про то, что еще доделывают)
@@ -8008,13 +8012,13 @@ async def evaluate_servers(
                     if was is not None:
                         apply(s.id, key, level)
                         apply(s.id, f"{key}_hush", now.isoformat())
+                        apply(s.id, f"{key}_told_lvl", int(was.get("lvl") or level))
                         if "sig" not in ctx and _who(ctx):
                             apply(s.id, f"{key}_who", _who(ctx))
                         if "sig" in ctx:
                             # перечень сказанного - с прошлой волны: новое в нем придет новостью
                             apply(s.id, f"{key}_sig", sorted(ctx.get("sig") or []))
                             apply(s.id, f"{key}_told", sorted(set(was.get("sig") or []) | set(ctx.get("sig") or [])))
-                            apply(s.id, f"{key}_told_lvl", max(int(was.get("lvl") or 0), level))
                         continue
                 elif level and hush is not None and (now - hush).total_seconds() >= _AGAIN_TELL                         and not _held_only(ctx):
                     # повтор держится часами: это уже не волна, говорим как о новой тревоге
@@ -8024,11 +8028,14 @@ async def evaluate_servers(
                 # Медленный признак (память растет день за днем, диск заполнится через дни): ждать
                 # он может до утра, в 3 ночи его не шлем. Состояние не трогаем - утром придет как есть
                 continue
-            if key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "mem_limit", "db_health",
+            tracks_members = key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "mem_limit", "db_health",
                        "web_config", "web_cert", "webfiles", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
                        "cf_realip",
                        "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm", "gitlab", "autoban",
-                       "vpn_torrent", "vpn_heavy"):
+                       "vpn_torrent", "vpn_heavy")
+            lvk = f"{key}_told_lvl"
+            told_lvl = max(prev, int(st.get(lvk) or 0)) if prev else 0
+            if tracks_members:
                 # Тот же уровень, но сломалось НОВОЕ (второй диск при уже развалившемся
                 # RAID, второй упавший юнит): молчать нельзя, хотя уровень не вырос. Что
                 # сломано - ключи в sig.
@@ -8056,8 +8063,6 @@ async def evaluate_servers(
                 fresh = new_sig - told
                 # самый высокий уровень, о котором сказали, пока алерт открыт (у открытых раньше -
                 # нынешний)
-                lvk = f"{key}_told_lvl"
-                told_lvl = int(st.get(lvk) or prev) if prev else 0
                 if prev and not level and old_sig and _sig_all_quiet(s, key, old_sig, now):
                     # объявленное теперь заглушено (или это свой helper, по которому алерта
                     # больше нет): ничего не стихло, отбой "снова в норме" был бы неправдой. Сняли
@@ -8110,7 +8115,7 @@ async def evaluate_servers(
                     fire_apply.append((s.id, sk, sorted(new_sig)))
                     fire_apply.append((s.id, tk, sorted(told | new_sig)))
                     fire_apply.append((s.id, f"{key}_said", now.isoformat()))
-                    fire_apply.append((s.id, lvk, level))
+                    fire_apply.append((s.id, lvk, max(told_lvl, level)))
                 elif level:
                     apply(s.id, sk, sorted(new_sig))
                     apply(s.id, tk, sorted(told | new_sig))
@@ -8173,6 +8178,17 @@ async def evaluate_servers(
                         apply(s.id, f"{key}_quiet", None)
                         continue
             if level == prev:
+                continue
+            pressure_causes = {res for _, res, _ in ctx.get("items", []) if res in ("thrash", "dstate")} \
+                if key == "pressure" and level >= 2 and not _held_only(ctx) else set()
+            pressure_told = set(st.get("pressure_told") or []) if key == "pressure" and prev else set()
+            if (not tracks_members and level > prev > 0 and (level <= told_lvl or key == "disk_slow")
+                    and not pressure_causes - pressure_told):
+                # Пока проблема открыта, возврат к уже объявленному уровню не новость.
+                # У задержки диска даже смена лидирующего устройства или порога в одной волне
+                # описывает тот же эпизод. Ошибки накопителей идут отдельным алертом.
+                apply(s.id, key, level)
+                apply(s.id, lvk, max(told_lvl, level))
                 continue
             # Гаситель «мигания» — только для НОВЫХ обрывов. Восстановление после уже
             # ОБЪЯВЛЕННОГО обрыва шлём всегда: иначе счётчик переключений добирает порог
@@ -8274,6 +8290,10 @@ async def evaluate_servers(
                                               _aware(s.last_seen) if key == "offline" and s.last_seen else now)
                 fires.append(fmsg)
                 fire_apply.append((s.id, key, level))
+                if not tracks_members:
+                    fire_apply.append((s.id, lvk, max(told_lvl, level) if prev else level))
+                if pressure_causes:
+                    fire_apply.append((s.id, "pressure_told", sorted(pressure_told | pressure_causes)))
                 if st.get(f"{key}_hush"):
                     fire_apply.append((s.id, f"{key}_hush", None))
                 if "sig" not in ctx and key not in _NO_SETTLE and _who(ctx):
@@ -8295,9 +8315,11 @@ async def evaluate_servers(
             elif level == 0:  # полное восстановление
                 if key in _FLAP_METRIC_KINDS and st.get(f"flap_{key}_muted"):
                     apply(s.id, key, 0)  # серия заглушена: про мигание уже сказано
+                    apply(s.id, lvk, None)
                     continue
                 if key in _SILENT_RECOVERY:
                     apply(s.id, key, 0)
+                    apply(s.id, lvk, None)
                     continue
                 kids_tail = ""
                 if key == "offline":
@@ -8330,6 +8352,10 @@ async def evaluate_servers(
                                           group=s.group_name or "")
                 recoveries.append(rmsg.tail(kids_tail) if kids_tail else rmsg)
                 rec_apply.append((s.id, key, 0))
+                if not tracks_members and st.get(lvk):
+                    rec_apply.append((s.id, lvk, None))
+                if pressure_told:
+                    rec_apply.append((s.id, "pressure_told", []))
                 if key not in _NO_SETTLE:
                     rec_apply.append((s.id, f"{key}_calm", None))
                     rec_apply.append((s.id, f"{key}_was", _was_after(st, key, prev, now)))
@@ -8735,11 +8761,11 @@ async def evaluate_servers(
             prev_names = list(prev.get("repos") or [])
             prev_ts = float(prev.get("ts") or 0)
             lock_ok = lr and lr["enabled"] and _rule_scope_ok(lr, s)
-            due = bool(set(names) - set(prev_names))
-            if locks and lock_ok and due:
-                items = [f"{n} ({d} дн)" for n, d in locks]
+            fresh = set(names) - set(prev_names)
+            if fresh and lock_ok:
+                items = [f"{n} ({d} дн)" for n, d in locks if n in fresh]
                 shown = ", ".join(items[:6]) + (f" и еще {len(items) - 6}" if len(items) > 6 else "")
-                fires.append(srv_fire(s, "backup_lock", lr, {"repos": shown, "names": names}))
+                fires.append(srv_fire(s, "backup_lock", lr, {"repos": shown, "names": sorted(fresh)}))
                 fire_apply.append((s.id, "backup_locks", {"repos": names, "ts": now.timestamp()}))
             elif locks and prev_names and names != prev_names:
                 # набор сузился: запоминаем молча, иначе вернувшийся лок не считался бы новым
@@ -8750,8 +8776,7 @@ async def evaluate_servers(
                     srv_url(s, "backup_lock"), recovery=True, group=s.group_name or ""))
                 rec_apply.append((s.id, "backup_locks", {}))
 
-        # Не прошла недельная проверка целостности репозитория. Как и с локом: при новом
-        # сломанном и раз в сутки, пока не починят; отбой, когда все проверки снова прошли.
+        # Не прошла недельная проверка целостности. Сообщаем о новых сбоях, отбой — когда все прошли.
         cr = rules.get("backup_check")
         if online_now and bsrv.get("present") and "backup_check" not in mutes:
             bad = failed_checks(bsrv, bsrv_extra(s.last_report or {}), set(s.backup_repo_mutes or []), now,
@@ -8759,10 +8784,10 @@ async def evaluate_servers(
             prev = st.get("backup_checks") if isinstance(st.get("backup_checks"), dict) else {}
             prev_names = list(prev.get("repos") or [])
             prev_ts = float(prev.get("ts") or 0)
-            due = bool(set(bad) - set(prev_names)) or now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT
-            if bad and cr and cr["enabled"] and _rule_scope_ok(cr, s) and due:
-                shown = ", ".join(bad[:6]) + (f" и еще {len(bad) - 6}" if len(bad) > 6 else "")
-                fires.append(srv_fire(s, "backup_check", cr, {"repos": shown, "names": bad}))
+            fresh = sorted(set(bad) - set(prev_names))
+            if fresh and cr and cr["enabled"] and _rule_scope_ok(cr, s):
+                shown = ", ".join(fresh[:6]) + (f" и еще {len(fresh) - 6}" if len(fresh) > 6 else "")
+                fires.append(srv_fire(s, "backup_check", cr, {"repos": shown, "names": fresh}))
                 fire_apply.append((s.id, "backup_checks", {"repos": bad, "ts": now.timestamp()}))
             elif bad and prev_names and bad != prev_names:
                 apply(s.id, "backup_checks", {"repos": bad, "ts": prev_ts})
@@ -8783,11 +8808,11 @@ async def evaluate_servers(
             prev_keys = list(prev.get("keys") or [])
             prev_ts = float(prev.get("ts") or 0)
             keys = sorted(mp)
-            due = bool(set(keys) - set(prev_keys))
-            if mp and mr and mr["enabled"] and _rule_scope_ok(mr, s) and due:
-                txt = [t for _l, t in sorted(mp.values(), key=lambda x: -x[0])]
+            fresh = sorted(set(keys) - set(prev_keys))
+            if fresh and mr and mr["enabled"] and _rule_scope_ok(mr, s):
+                txt = [t for _l, t in sorted((mp[k] for k in fresh), key=lambda x: -x[0])]
                 fires.append(srv_fire(s, "backup_mirror", mr, {
-                    "copies": "; ".join(txt[:4]) + (f" и еще {len(txt) - 4}" if len(txt) > 4 else ""), "names": keys}))
+                    "copies": "; ".join(txt[:4]) + (f" и еще {len(txt) - 4}" if len(txt) > 4 else ""), "names": fresh}))
                 fire_apply.append((s.id, "backup_mirror", {"keys": keys, "ts": now.timestamp()}))
             elif mp and prev_keys and keys != prev_keys:
                 apply(s.id, "backup_mirror", {"keys": keys, "ts": prev_ts})
@@ -8798,7 +8823,7 @@ async def evaluate_servers(
                 rec_apply.append((s.id, "backup_mirror", {}))
 
         # Чистка репозитория не работает: не открывает репозиторий, падает, пропущена или не
-        # запускается. Как с локом: при новом и раз в сутки, пока не починят. Упавшую - только если
+        # запускается. Как с локом: сообщаем о новых сбоях. Упавшую - только если
         # упал и следующий прогон (_PRUNE_FAIL_HOLD): разовый сбой проходит сам.
         pr = rules.get("backup_prune")
         if online_now and bsrv.get("present") and "backup_prune" not in mutes:
@@ -8814,11 +8839,11 @@ async def evaluate_servers(
             prev = st.get("backup_prunes") if isinstance(st.get("backup_prunes"), dict) else {}
             prev_names = list(prev.get("repos") or [])
             prev_ts = float(prev.get("ts") or 0)
-            due = bool(set(names) - set(prev_names)) or now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT
-            if names and pr and pr["enabled"] and _rule_scope_ok(pr, s) and due:
-                items = [f"{n} ({shown_now[n]})" for n in names]
+            fresh = sorted(set(names) - set(prev_names))
+            if fresh and pr and pr["enabled"] and _rule_scope_ok(pr, s):
+                items = [f"{n} ({shown_now[n]})" for n in fresh]
                 shown = ", ".join(items[:6]) + (f" и еще {len(items) - 6}" if len(items) > 6 else "")
-                fires.append(srv_fire(s, "backup_prune", pr, {"repos": shown, "names": names}))
+                fires.append(srv_fire(s, "backup_prune", pr, {"repos": shown, "names": fresh}))
                 fire_apply.append((s.id, "backup_prunes", {"repos": names, "ts": now.timestamp()}))
             elif names and prev_names and names != prev_names:
                 apply(s.id, "backup_prunes", {"repos": names, "ts": prev_ts})
@@ -8855,35 +8880,26 @@ async def evaluate_servers(
             probs = _backup_problem_repos(bsrv, set(s.backup_repo_mutes or []), now, repo_ext,
                                           panel_names, s.backup_repo_archive or {})
             prev = st.get("backup_repos")
-            if isinstance(prev, list):  # старый формат (голый список) → мигрируем
-                prev = {"repos": prev, "ts": 0}
-            prev = prev if isinstance(prev, dict) else {}
-            prev_active = bool(prev.get("repos"))
-            prev_ts = float(prev.get("ts") or 0)
+            prev_names = set(prev.get("repos") or []) if isinstance(prev, dict) else set(
+                prev if isinstance(prev, list) else [])
             repo_ok = rr and rr["enabled"] and _rule_scope_ok(rr, s)
-            # НЕ срочный: шлём при ПОЯВЛЕНИИ проблемы, потом напоминаем не чаще раза в сутки —
-            # а НЕ на каждое изменение набора (набор флапал по локам -> был спам). Новый
-            # проблемный репозиторий шлем сразу: опоздавший бэкап клиента без агента иначе
-            # ждал бы суточного напоминания про чужую проблему. Локи тут давно не участвуют.
-            new_names = set(probs) - set(prev.get("repos") or [])
-            due = not prev_active or bool(new_names) or (now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT)
-            if probs and repo_ok and due:
-                n = len(probs)
+            new_names = sorted(set(probs) - prev_names)
+            if new_names and repo_ok:
+                n = len(new_names)
                 # с причиной у каждого: по голому списку имен было не понять, что делать
                 byname = {r.get("name"): r for r in bsrv.get("repos") or []}
-                # новый проблемный при открытом алерте - первым: в списке по алфавиту его было не найти
-                order = sorted(probs, key=lambda p: p not in new_names) if prev_active else probs
-                items = [f"{p} ({repo_reason(byname.get(p) or {}, now, repo_ext, panel_names)})" for p in order]
+                whys = [repo_reason(byname.get(p) or {}, now, repo_ext, panel_names) for p in new_names]
+                items = [f"{p} ({why})" for p, why in zip(new_names, whys)]
                 lst = ", ".join(items[:8]) + (f" и еще {n - 8}" if n > 8 else "")
                 shown = f"{n} шт.: {lst}"
                 fires.append(srv_fire(s, "backup_repo", rr, {
-                    "repos": shown, "names": order,
-                    "whys": [repo_reason(byname.get(p) or {}, now, repo_ext, panel_names) for p in order]}))
+                    "repos": shown, "names": new_names, "whys": whys}))
                 fire_apply.append((s.id, "backup_repos", {"repos": probs, "ts": now.timestamp()}))
-            elif not probs and prev_active:
+            elif probs and prev_names - set(probs):
+                apply(s.id, "backup_repos", {"repos": sorted(prev_names & set(probs))})
+            elif not probs and prev_names:
                 # объявленные репозитории не починились, а ушли в архив или заглушены: молча
-                hidden = set(prev.get("repos") or []) & set(_backup_problem_repos(bsrv, set(), now, repo_ext,
-                                                                                  panel_names, {}))
+                hidden = prev_names & set(_backup_problem_repos(bsrv, set(), now, repo_ext, panel_names, {}))
                 if hidden:
                     quiet_closed.append((s, "backup_repo", "оставшиеся репозитории в архиве или заглушены"))
                 else:
@@ -8932,11 +8948,19 @@ async def evaluate_servers(
                                      kind="ingest_gap", target="панель", recovery=True))
         _gap_said.pop("at", None)
 
+    # Отбои не всегда несут ref, а имена серверов могут совпадать.
+    end = (None, len(fires), len(fire_apply), len(recoveries), len(rec_apply))
+    message_owners = {
+        id(m): sid
+        for (sid, f0, _a0, r0, _ra0), (_, f1, _a1, r1, _ra1) in zip(marks, [*marks[1:], end])
+        for m in (*fires[f0:f1], *recoveries[r0:r1])
+        if m.kind != "ingest_gap"
+    }
     if onboarding or dev_srv:
         # У серверов на подключении уходит только офлайн и критичный диск, у серверов разработки -
         # все, кроме видов приложений. Отметки придержанных событий пишутся сразу, как будто
         # сообщение дошло: после закрытия подключения или снятия пометки старое не придет
-        marks.append((None, len(fires), len(fire_apply), len(recoveries), len(rec_apply)))
+        marks.append(end)
         now_apply: list[tuple[int, str, object]] = []
         nf, nfa, nr, nra = [], [], [], []
         for (sid, f0, a0, r0, ra0), (_n, f1, a1, r1, ra1) in zip(marks, marks[1:]):
@@ -8957,22 +8981,57 @@ async def evaluate_servers(
             apply(sid, key, value)
 
     # parse_mode=HTML: имя сервера идёт ссылкой <a href> (как у сайтов). Контент экранирован.
+    # Исторические имена полей состояния, отличающиеся от вида сообщения.
+    state_kinds = {
+        "kube_jobs_seen": "kube_job", "rotation_stale": "backup_rotation",
+        "backup_locks": "backup_lock", "backup_checks": "backup_check", "backup_prunes": "backup_prune",
+        "bsrv_clients": "backup_unmonitored", "backup_repos": "backup_repo",
+    }
+    state_suffixes = ("_told_lvl", "_sig", "_told", "_calm", "_hush", "_said", "_was", "_who", "_val", "_at")
+
+    def acknowledged(messages: list[alerts.Msg], finished: set[int]):
+        sent: dict[int, set[str]] = {}
+        pending: dict[int, set[str]] = {}
+        for i, message in enumerate(messages):
+            sid = message_owners.get(id(message))
+            if sid is not None:
+                (sent if i in finished else pending).setdefault(sid, set()).add(message.kind)
+
+        def confirmed(sid: int, key: str) -> bool:
+            if not can_send:
+                return False
+            unfinished = pending.get(sid)
+            if not unfinished:
+                return True
+            complete = sent.get(sid, set())
+            kind = state_kinds.get(key, key)
+            if key.startswith(("offline_", "oom_")):
+                kind = key.partition("_")[0]
+            elif kind == key and key not in settings_store.SERVER_ALERT_KINDS and key not in complete | unfinished:
+                kind = next((key.removesuffix(suffix) for suffix in state_suffixes if key.endswith(suffix)), key)
+            # Если один сервер породил несколько сообщений одного вида, их общее
+            # состояние можно менять, только когда ни одно из них не требует повтора.
+            return kind in complete and kind not in unfinished
+
+        return confirmed
+
     oom_finished: set[int] = set()
+    fire_finished: set[int] = set()
     delivery = {"oom_finished": oom_finished} if any(getattr(m, "kind", "") == "oom" for m in fires) else {}
-    if await alerts.dispatch(cfg, can_send, fires, threshold, parse_mode="HTML",
-                             session_factory=session_factory, **delivery):
-        for sid, key, value in fire_apply:
+    fire_ok = await alerts.dispatch(cfg, can_send, fires, threshold, parse_mode="HTML",
+                                    session_factory=session_factory, finished=fire_finished, **delivery)
+    fire_ack = acknowledged(fires, fire_finished)
+    for sid, key, value in fire_apply:
+        if fire_ok or fire_ack(sid, key) or (sid in oom_finished and key.startswith("oom_")):
             apply(sid, key, value)
-        known_upd.extend(known_remind)
-    elif oom_finished:
-        # Один неотправленный алерт в пачке не должен повторно открывать уже
-        # обработанный эпизод OOM. Остальные переходы сохраняют свой retry.
-        for sid, key, value in fire_apply:
-            if sid in oom_finished and key.startswith("oom_"):
-                apply(sid, key, value)
-    if await alerts.dispatch(cfg, can_send, recoveries, threshold, parse_mode="HTML",
-                             session_factory=session_factory):
-        for sid, key, value in rec_apply:
+    known_upd.extend(entry for entry in known_remind if fire_ok or fire_ack(entry[0], "known"))
+
+    rec_finished: set[int] = set()
+    rec_ok = await alerts.dispatch(cfg, can_send, recoveries, threshold, parse_mode="HTML",
+                                   session_factory=session_factory, finished=rec_finished)
+    rec_ack = acknowledged(recoveries, rec_finished)
+    for sid, key, value in rec_apply:
+        if rec_ok or rec_ack(sid, key):
             apply(sid, key, value)
 
     if changed_ids or known_upd or known_add or onboard_closed or mute_lift or kexp_upd or quiet_closed or mute_swap \

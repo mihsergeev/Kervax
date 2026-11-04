@@ -821,6 +821,15 @@ async def test_prune_alert_waits_for_a_second_failure_but_not_for_a_broken_env(t
     await collector.evaluate_servers(factory, settings, later)
     hits = [x for x in sent if getattr(x, "kind", "") == "backup_prune"]
     assert len(hits) == 2 and "lock-once" in hits[1], sent
+    assert "env-broken" not in full_text(hits[1])
+    later += timedelta(hours=27)
+    async with factory() as s:
+        srv = (await s.scalars(collector.select(Server))).one()
+        srv.last_report = report(later)
+        srv.last_seen = later
+        await s.commit()
+    await collector.evaluate_servers(factory, settings, later)
+    assert [x for x in sent if getattr(x, "kind", "") == "backup_prune"] == hits
     await engine.dispose()
 
 

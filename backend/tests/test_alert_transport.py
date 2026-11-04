@@ -166,6 +166,87 @@ async def test_network_errors_are_retried(http, fail):
     assert await alerts.dispatch(_cfg(), True, [_msg()], 0, parse_mode="HTML") is False
 
 
+@pytest.mark.parametrize("recovery", [False, True])
+async def test_partial_server_batch_retries_only_failed_message(client, http, recovery):
+    factory = _factory(client)
+    now = datetime.now(timezone.utc)
+    cfg = Settings(alert_telegram_token="fake-token-example", alert_telegram_chat="-100")
+    report = {"cpu_temp": 40 if recovery else 95, "conntrack_count": 30 if recovery else 95,
+              "conntrack_max": 100, "uptime_seconds": 100000, "clock_unix": int(now.timestamp())}
+    async with factory() as session:
+        session.add(Server(name="node-a", token_hash="example", enabled=True, last_seen=now,
+                           created_at=now - timedelta(days=1), last_report=report,
+                           temp_alert_c=80, conntrack_alert_percent=80, alert_sustain_seconds=0,
+                           alert_state={"temp": 1, "conntrack": 1} if recovery else {},
+                           backup_not_required=True))
+        await session.commit()
+
+    def answer(_url, payload):
+        if "conntrack" in payload["text"].lower():
+            return _Resp({"ok": False, "description": "Bad Gateway"}, 502)
+        return _ok()
+
+    http.answer = answer
+    await collector.evaluate_servers(factory, cfg, now)
+    async with factory() as session:
+        server = (await session.scalars(select(Server))).one()
+        assert server.alert_state.get("temp", 0) == int(not recovery)
+        assert server.alert_state.get("conntrack", 0) == int(recovery)
+        later = now + timedelta(seconds=30)
+        server.last_seen = later
+        server.last_report = {**report, "clock_unix": int(later.timestamp()), "uptime_seconds": 100030}
+        await session.commit()
+
+    assert len(http.tg()) == 2
+    http.answer = None
+    await collector.evaluate_servers(factory, cfg, later)
+    assert len(http.tg()) == 3 and "conntrack" in http.tg()[-1]["text"].lower()
+    async with factory() as session:
+        server = (await session.scalars(select(Server))).one()
+        assert server.alert_state["conntrack"] == int(not recovery)
+        events = await session.scalars(select(AlertEvent).where(AlertEvent.kind.in_(("temp", "conntrack"))))
+        assert sorted((event.kind, event.recovery) for event in events) == [
+            ("conntrack", recovery), ("temp", recovery),
+        ]
+
+
+async def test_partial_dispatch_reports_original_indices_after_storm_and_notes(client, http):
+    factory = _factory(client)
+    messages = [_msg(f"node-{letter}") for letter in "abc"]
+    messages.insert(1, alerts.Msg("другое сообщение", kind="temp"))
+    async with factory() as session:
+        session.add(Server(id=1, name="notes", token_hash="example", note="проверить диск"))
+        await session.commit()
+
+    def answer(_url, payload):
+        if "другое сообщение" in payload["text"]:
+            return _Resp({"ok": False, "description": "Bad Gateway"}, 502)
+        return _ok()
+
+    http.answer = answer
+    finished = set()
+    assert not await alerts.dispatch(_cfg(), True, messages, 0, parse_mode="HTML",
+                                     session_factory=factory, finished=finished)
+    assert len(http.tg()) == 2
+    assert finished == {0, 2, 3}
+
+
+async def test_partial_dispatch_preserves_retry_after_group_fallback(http):
+    cfg = _cfg(routes={"main": "rest", "chats": [{"chat": "-200", "server_groups": ["edge"]}]})
+    messages = [alerts.Msg("обычный алерт", "servers"), alerts.Msg("групповой алерт", "servers", "edge")]
+
+    def answer(_url, payload):
+        if "групповой алерт" in payload["text"]:
+            return _Resp({"ok": False, "description": "Bad Gateway"}, 502)
+        return _ok()
+
+    http.answer = answer
+    finished = set()
+    assert not await alerts.dispatch(cfg, True, messages, 0, finished=finished)
+    assert [message["chat_id"] for message in http.tg()] == ["-100", "-200", "-100"]
+    assert finished == {0}
+
+
 @pytest.mark.parametrize("lost_response", [False, True])
 async def test_oom_is_checkpointed_when_the_rest_of_the_batch_retries(client, http, lost_response):
     factory = _factory(client)

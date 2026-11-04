@@ -177,6 +177,66 @@ async def test_escalation_from_warning_is_still_news(tmp_path, monkeypatch):
     await engine.dispose()
 
 
+async def test_disk_latency_is_one_notice_across_devices_and_thresholds(tmp_path, monkeypatch):
+    engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
+    start = datetime.now(timezone.utc) + timedelta(days=1)
+    for minute, (sda, sdb) in enumerate([(650, 300), (260, 320), (280, 680), (700, 210)]):
+        t = start + timedelta(minutes=minute)
+        await _tick(factory, cfg, t, {"disk_devs": [
+            {"dev": "sda", "await": sda, "util": 25}, {"dev": "sdb", "await": sdb, "util": 30},
+        ]}, {"disk_slow_since": (start - timedelta(minutes=30)).isoformat()})
+    assert [msg.kind for msg in sent] == ["disk_slow"]
+
+    # Sparse ticks below stand in for a continuous sequence of healthy reports.
+    monkeypatch.setattr(collector.report_progress, "MAX_SAME_SECONDS", 3600)
+    for minute in (5, 65, 81):
+        await _tick(factory, cfg, start + timedelta(minutes=minute),
+                    {"disk_devs": [{"dev": "sdb", "await": 5}]})
+    assert [(msg.kind, msg.recovery) for msg in sent] == [("disk_slow", False), ("disk_slow", True)]
+
+    later = start + timedelta(hours=9)
+    await _tick(factory, cfg, later, {"disk_devs": [{"dev": "sda", "await": 300}]},
+                {"disk_slow_since": (later - timedelta(minutes=30)).isoformat()})
+    assert [(msg.kind, msg.recovery) for msg in sent][-1] == ("disk_slow", False)
+    await engine.dispose()
+
+
+async def test_open_legacy_condition_keeps_highest_announced_level(tmp_path, monkeypatch):
+    engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
+    start = datetime.now(timezone.utc) + timedelta(days=1)
+    levels = {"level": 1}
+
+    def conditions(*_args, **_kwargs):
+        return {"net_health": (levels["level"], {"detail": "ошибки сети"})}
+
+    monkeypatch.setattr(collector, "_server_conditions", conditions)
+    await _tick(factory, cfg, start, {}, {"net_health": 2})
+    for minute, level in enumerate((2, 1, 2, 3, 2, 3), start=1):
+        levels["level"] = level
+        await _tick(factory, cfg, start + timedelta(minutes=minute), {})
+    assert [msg.kind for msg in sent] == ["net_health"]
+    async with factory() as s:
+        state = (await s.execute(select(Server))).scalars().one().alert_state
+    assert state["net_health"] == state["net_health_told_lvl"] == 3
+    await engine.dispose()
+
+
+async def test_new_critical_pressure_cause_can_alert_once(tmp_path, monkeypatch):
+    engine, factory, cfg, sent = await _env(tmp_path, monkeypatch)
+    start = datetime.now(timezone.utc) + timedelta(days=1)
+    condition = {}
+
+    def conditions(*_args, **_kwargs):
+        return {"pressure": condition["value"]}
+
+    monkeypatch.setattr(collector, "_server_conditions", conditions)
+    for minute, (level, cause) in enumerate(((2, "io"), (1, "io"), (2, "dstate"), (1, "io"), (2, "dstate"))):
+        condition["value"] = (level, {"res": cause, "detail": cause, "items": [(level, cause, cause)]})
+        await _tick(factory, cfg, start + timedelta(minutes=minute), {})
+    assert [msg.kind for msg in sent] == ["pressure", "pressure"]
+    await engine.dispose()
+
+
 def test_news_first_keeps_text_without_old():
     ctx = {"detail": "a; b", "sig": ["a", "b"], "parts": [("a", "a"), ("b", "b")]}
     # текст тот же; что нового - едет дальше в короткий текст ("fresh"), чтобы поставить его первым

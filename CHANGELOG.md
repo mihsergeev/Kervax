@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.97] - 2026-11-05
+
+- Open server alerts remember the highest reported severity. Returning to that level stays quiet. Disk latency sends one alert per incident, even when the slowest disk changes.
+- Repository alerts describe newly affected items and skip daily reminders for unresolved failures.
+- If part of a server alert batch fails, the scheduler keeps the confirmed deliveries and retries the pending alerts.
+
 ## [1.8.96] - 2026-11-05
 
 - On backup servers, disk latency spikes and disk wait stay on the charts. Disk errors still trigger alerts.
