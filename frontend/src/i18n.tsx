@@ -3278,11 +3278,12 @@ const EN: Record<string, string> = {
   'Через прокси локации из окна Локации': 'Via a location proxy from the Locations window',
   'Ваш http или socks5 прокси': 'Your own http or socks5 proxy',
   'Выполните на сервере под root': 'Run on the server as root',
-  'Скачайте скрипт на Windows и запустите из PowerShell от администратора в папке со скриптом.':
-    'Download the script to Windows and run it as an administrator from its folder in PowerShell.',
-  'Скачать сборщик Windows': 'Download Windows collector',
-  'Вставьте токен, когда PowerShell его запросит.': 'Paste the token when PowerShell prompts for it.',
-  'Копировать токен Windows': 'Copy Windows token',
+  'Операционная система': 'Operating system',
+  'Выполните в PowerShell от администратора': 'Run in PowerShell as Administrator',
+  'Команда скачает и установит агент, включит автозапуск и отправит первый отчет. Код подключения уже в команде.':
+    'The command downloads and installs the agent, enables automatic startup and sends the first report. It includes the enrollment credential.',
+  'Команда Windows доступна в панели по HTTPS, если сборщик установлен на панели.':
+    'The Windows command is available over HTTPS when the collector is installed on the panel.',
   'токен показывается один раз': 'the token is shown only once',
   'Сначала заполните поля выше: прокси попадет в команду': 'Fill in the fields above first: the proxy goes into the command',
   'Панель пока закрыта для этого сервера, ждем 10 с (curl $?, попытка $i/24)':

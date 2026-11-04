@@ -2036,7 +2036,7 @@ export function KuberPage({
           />,
           document.body,
         )}
-      {enroll && createPortal(<InstallModal enroll={enroll} onClose={() => setEnroll(null)} />, document.body)}
+      {enroll && createPortal(<InstallModal enroll={enroll} platform="linux" onClose={() => setEnroll(null)} />, document.body)}
     </div>
   )
 }

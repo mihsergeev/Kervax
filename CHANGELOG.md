@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.89] - 2026-11-04
+
+### Added
+- The Add Server dialog now offers Linux and Windows with platform icons. Linux is selected by default.
+- Windows setup uses one PowerShell command to download and verify the collector, install automatic reporting and send the first report. The command includes the enrollment credential.
+
 ## [1.8.88] - 2026-11-03
 
 ### Added

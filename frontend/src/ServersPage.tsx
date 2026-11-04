@@ -1,6 +1,6 @@
 import { localizeInstallCmd, withGre, withProxy } from './installProxy'
 import { InstallPath, type InstallMode } from './InstallPath'
-import { Fragment, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   agentUpdate,
@@ -5315,7 +5315,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
   const { isViewer } = useAuth()
   const [servers, setServers] = useState<Server[] | null>(null)
   const [err, setErr] = useState<string | null>(null)
-  const [enroll, setEnroll] = useState<ServerEnroll | null>(null)
+  const [enroll, setEnroll] = useState<{ result: ServerEnroll; platform: AgentPlatform } | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [detailId, setDetailId] = useState<number | null>(null)
   // раздел, на который надо промотать деталь: ставится кликом по 🔥
@@ -5780,16 +5780,17 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
         <EnrollModal
           servers={servers ?? []}
           groups={serverGroups}
+          allowWindows
           onClose={() => setAddOpen(false)}
-          onEnrolled={(e) => {
-            setEnroll(e)
+          onEnrolled={(result, platform) => {
+            setEnroll({ result, platform })
             setAddOpen(false)
             load()
           }}
           onUnauthorized={onUnauthorized}
         />
       )}
-      {enroll && <InstallModal enroll={enroll} onClose={() => setEnroll(null)} />}
+      {enroll && <InstallModal enroll={enroll.result} platform={enroll.platform} onClose={() => setEnroll(null)} />}
       {detail && (
         <ServerDetail
           key={detail.id}
@@ -5996,19 +5997,22 @@ export function EnrollModal({
   onClose,
   onEnrolled,
   onUnauthorized,
+  allowWindows = false,
 }: {
   servers: Server[]
   groups: string[]
   initial?: { name?: string; group?: string; ip?: string }
   onClose: () => void
-  onEnrolled: (e: ServerEnroll) => void
+  onEnrolled: (e: ServerEnroll, platform: AgentPlatform) => void
   onUnauthorized: () => void
+  allowWindows?: boolean
 }) {
   const { t } = useI18n()
   useEscape(onClose)
   const [name, setName] = useState(initial?.name ?? '')
   const [group, setGroup] = useState(initial?.group ?? '')
   const [agentIp, setAgentIp] = useState(initial?.ip ?? '')
+  const [platform, setPlatform] = useState<AgentPlatform>('linux')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   // Дубль видно до нажатия: имя занято - создавать нельзя (панель различает ноды по имени).
@@ -6030,7 +6034,7 @@ export function EnrollModal({
         group_name: group || undefined,
         agent_ip: agentIp.trim() || undefined,
       })
-      onEnrolled(e)
+      onEnrolled(e, platform)
     } catch (ex) {
       if (ex instanceof ApiError && ex.status === 401) return onUnauthorized()
       setErr(ex instanceof Error ? ex.message : t('Ошибка'))
@@ -6048,6 +6052,7 @@ export function EnrollModal({
             {t('Закрыть')}
           </button>
         </div>
+        {allowWindows && <AgentPlatformChoice value={platform} onChange={setPlatform} />}
         <label className="field">
           <span>{t('Название')}</span>
           <input value={name} onChange={(e) => setName(e.target.value)} autoFocus />
@@ -6132,19 +6137,72 @@ function InstallCmd({ cmd, token, add }: { cmd: string; token: string; add?: str
   )
 }
 
+type AgentPlatform = 'linux' | 'windows'
+
+function AgentPlatformChoice({ value, onChange }: { value: AgentPlatform; onChange: (value: AgentPlatform) => void }) {
+  const { t } = useI18n()
+  const name = useId()
+  return (
+    <fieldset className="agent-platform">
+      <legend>{t('Операционная система')}</legend>
+      <div className="agent-platform-options">
+        <label>
+          <input type="radio" name={name} checked={value === 'linux'} onChange={() => onChange('linux')} />
+          <span aria-hidden="true">🐧</span> Linux
+        </label>
+        <label>
+          <input type="radio" name={name} checked={value === 'windows'} onChange={() => onChange('windows')} />
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+            <path d="M0 0h7v7H0zm9 0h7v7H9zM0 9h7v7H0zm9 0h7v7H9z" />
+          </svg> Windows
+        </label>
+      </div>
+    </fieldset>
+  )
+}
+
+function windowsInstallCommand(origin: string, sha256: string, token: string) {
+  const beforeToken = [
+    '& {',
+    "$ErrorActionPreference = 'Stop';",
+    '$p = Join-Path $env:TEMP ([guid]::NewGuid().ToString() + \'-kervax.ps1\');',
+    '$old = $env:KERVAX_WINDOWS_TOKEN;',
+    'try {',
+    '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12;',
+    `Invoke-WebRequest -UseBasicParsing -TimeoutSec 30 -MaximumRedirection 0 -Uri '${origin}/api/agent/windows-monitor.ps1' -OutFile $p;`,
+    `if ((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash -ne '${sha256}') { throw 'Kervax installer checksum mismatch.' };`,
+    "$env:KERVAX_WINDOWS_TOKEN = '",
+  ].join(' ')
+  const afterToken = [
+    "';",
+    `& "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $p -Install -PanelUrl '${origin}';`,
+    "if ($LASTEXITCODE -ne 0) { throw 'Kervax installation failed.' }",
+    '} finally { $env:KERVAX_WINDOWS_TOKEN = $old; Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } }',
+  ].join(' ')
+  return { beforeToken, afterToken, command: beforeToken + token + afterToken }
+}
+
 export function InstallModal({
   enroll,
   onClose,
   title,
   mode,
+  platform,
 }: {
   enroll: ServerEnroll
   onClose: () => void
   title?: string
   mode?: InstallMode // с чего открыть выбор пути (подсказка "агент не достает до панели")
+  platform?: AgentPlatform
 }) {
   const { t } = useI18n()
   const [copied, setCopied] = useState('')
+  const [selectedPlatform, setSelectedPlatform] = useState<AgentPlatform>(platform ?? enroll.server.last_report?.platform ?? 'linux')
+  const windows = selectedPlatform === 'windows'
+  const origin = window.location.origin
+  const windowsCommand = windows && origin.startsWith('https://') && enroll.windows_sha256
+    ? windowsInstallCommand(origin, enroll.windows_sha256, enroll.token)
+    : null
   // путь до панели (InstallPath): прокси ретранслятора, локации или свой - в команду; GRE - начало
   // команды, которое поднимает туннель. Серверу с GRE до панели окно сразу предлагает GRE
   const start: InstallMode = mode ?? (enroll.server.gre_enabled ? 'gre' : 'direct')
@@ -6166,7 +6224,9 @@ export function InstallModal({
         const [list, now] = await Promise.all([listServers(), installStatus(enroll.server.id)])
         setSt(now)
         const s = list.find((x) => x.id === enroll.server.id)
-        if (s?.last_seen) setConnected(s)
+        if (s?.last_seen && (!windows || (
+          s.last_report?.platform === 'windows' && s.last_seen !== enroll.server.last_seen
+        ))) setConnected(s)
       } catch {
         /* транзиентные сбои поллинга не мешают ожиданию */
       }
@@ -6174,7 +6234,7 @@ export function InstallModal({
     void poll()
     const id = window.setInterval(poll, 4000)
     return () => window.clearInterval(id)
-  }, [enroll.server.id, connected])
+  }, [enroll.server.id, enroll.server.last_seen, connected, windows])
   // GRE, включенный кнопкой в этом окне, не остается включенным молча: закрыли окно, а агент так и
   // не пришел и нода даже установщик не скачала - выключаем, иначе обычная установка потом увела бы
   // агента в туннель. Включенный до окна не трогаем. Закрытая вкладка - тем же запросом с keepalive
@@ -6202,9 +6262,13 @@ export function InstallModal({
     onClose()
   }
   useEscape(close)
-  const copy = (text: string, what: string) => {
-    navigator.clipboard?.writeText(text)
-    setCopied(what)
+  const copy = async (text: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(what)
+    } catch {
+      setCopied('')
+    }
   }
   return (
     <div className="modal-backdrop">
@@ -6217,17 +6281,38 @@ export function InstallModal({
           </button>
         </div>
 
-        <details className="ic-step">
-          <summary>Windows Server</summary>
-          <p>{t('Скачайте скрипт на Windows и запустите из PowerShell от администратора в папке со скриптом.')}</p>
-          <a href="/api/agent/windows-monitor.ps1" download>{t('Скачать сборщик Windows')}</a>
-          <pre className="install-cmd ic-cmd">{`powershell.exe -NoProfile -File .\\windows-monitor.ps1 -Install -PanelUrl ${window.location.origin}`}</pre>
-          <p>{t('Вставьте токен, когда PowerShell его запросит.')}</p>
-          <button className="ghost small" onClick={() => copy(enroll.token, 'windows-token')}>
-            {copied === 'windows-token' ? t('Скопировано ✓') : t('Копировать токен Windows')}
-          </button>
-        </details>
-
+        {platform === undefined && (
+          <AgentPlatformChoice value={selectedPlatform} onChange={(next) => {
+            if (next === 'windows') greDrop(false)
+            setSelectedPlatform(next)
+            setCopied('')
+            setConnected(null)
+          }} />
+        )}
+        {windows ? (
+          <section className="ic-step">
+            <div className="ic-step-head">
+              <span className="ic-num">1</span>
+              {t('Выполните в PowerShell от администратора')}
+            </div>
+            {windowsCommand ? (
+              <>
+                <div className="ic-cmd-row">
+                  <pre className="install-cmd ic-cmd ic-windows-cmd" tabIndex={0}>
+                    <code>{windowsCommand.beforeToken}<span className="ic-tok">{enroll.token}</span>{windowsCommand.afterToken}</code>
+                  </pre>
+                  <button className="ic-copy" onClick={() => copy(windowsCommand.command, 'windows')}>
+                    {copied === 'windows' ? t('Скопировано ✓') : t('Копировать')}
+                  </button>
+                </div>
+                <p className="ic-hint muted small">{t('Команда скачает и установит агент, включит автозапуск и отправит первый отчет. Код подключения уже в команде.')}</p>
+              </>
+            ) : (
+              <p className="muted small">{t('Команда Windows доступна в панели по HTTPS, если сборщик установлен на панели.')}</p>
+            )}
+          </section>
+        ) : (
+          <>
         <section className="ic-step">
           <div className="ic-step-head">
             <span className="ic-num">1</span>
@@ -6294,9 +6379,11 @@ export function InstallModal({
             </div>
           </details>
         </section>
+          </>
+        )}
 
         <section className={`ic-status${connected ? ' ic-status-ok' : ''}`}>
-          <span className="ic-num">3</span>
+          <span className="ic-num">{windows ? 2 : 3}</span>
           {connected ? (
             <>
               <span className="ic-ok-dot">✓</span>
@@ -6319,7 +6406,7 @@ export function InstallModal({
               <span className="ic-pulse" />
               <span>
                 <b>{t('Ждем первый отчет агента')}</b>
-                <InstallProgress st={st} path={path} serverId={enroll.server.id} />
+                {!windows && <InstallProgress st={st} path={path} serverId={enroll.server.id} />}
               </span>
             </>
           )}

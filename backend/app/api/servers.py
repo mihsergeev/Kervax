@@ -706,6 +706,18 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
     return outs
 
 
+def _windows_monitor_path() -> str:
+    return os.path.join(get_settings().agent_dist_dir, "windows-monitor.ps1")
+
+
+def _windows_monitor_sha256() -> str | None:
+    try:
+        with open(_windows_monitor_path(), "rb") as f:
+            return hashlib.file_digest(f, "sha256").hexdigest()
+    except FileNotFoundError:
+        return None
+
+
 @router.post("", response_model=ServerEnrollOut, status_code=status.HTTP_201_CREATED)
 async def create_server(
     body: ServerCreate, user: CurrentUser, session: SessionDep
@@ -729,6 +741,7 @@ async def create_server(
         server=_out(server, datetime.now(timezone.utc)),
         token=token,
         install_cmd=_install_cmd(token),
+        windows_sha256=_windows_monitor_sha256(),
     )
 
 
@@ -1933,6 +1946,7 @@ async def rotate_token(
         server=_out(server, datetime.now(timezone.utc)),
         token=token,
         install_cmd=_install_cmd(token),
+        windows_sha256=_windows_monitor_sha256(),
     )
 
 
@@ -3456,7 +3470,7 @@ async def backupserver_setup_script() -> PlainTextResponse:
 
 @agent_router.get("/windows-monitor.ps1")
 async def windows_monitor_download() -> FileResponse:
-    path = os.path.join(get_settings().agent_dist_dir, "windows-monitor.ps1")
+    path = _windows_monitor_path()
     if not os.path.isfile(path):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "windows-monitor.ps1 не найден")
     return FileResponse(path, media_type="application/octet-stream", filename="windows-monitor.ps1")

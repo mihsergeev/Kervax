@@ -1861,6 +1861,7 @@ class ServerEnrollOut(BaseModel):
     server: ServerOut
     token: str  # сырой токен — показывается ОДИН раз
     install_cmd: str  # one-liner установки агента
+    windows_sha256: str | None = None
 
 
 class ServerMetricOut(BaseModel):

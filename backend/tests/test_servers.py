@@ -42,6 +42,26 @@ async def test_server_enroll_report_flow(client: httpx.AsyncClient, auth_headers
     assert r.status_code == 401
 
 
+async def test_windows_install_checksum_matches_download(client, auth_headers, monkeypatch, tmp_path):
+    import hashlib
+
+    from app.config import get_settings
+
+    collector = b"Write-Output 'Windows test collector'\n"
+    (tmp_path / "windows-monitor.ps1").write_bytes(collector)
+    monkeypatch.setattr(get_settings(), "agent_dist_dir", str(tmp_path))
+    created = await client.post("/api/servers", json={"name": "Windows install fixture"}, headers=auth_headers)
+    assert created.status_code == 201
+    server = created.json()
+    download = await client.get("/api/agent/windows-monitor.ps1")
+    assert download.status_code == 200 and download.content == collector
+    assert server["windows_sha256"] == hashlib.sha256(download.content).hexdigest()
+    rotated = await client.post(f"/api/servers/{server['server']['id']}/rotate", headers=auth_headers)
+    assert rotated.status_code == 200
+    assert rotated.json()["windows_sha256"] == server["windows_sha256"]
+    assert rotated.json()["token"] != server["token"]
+
+
 async def test_windows_report_metrics_offline_and_recovery(client, auth_headers, monkeypatch):
     from datetime import datetime, timedelta, timezone
 

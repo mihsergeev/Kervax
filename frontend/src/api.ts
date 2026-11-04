@@ -3060,7 +3060,7 @@ export type HelperAdvice = {
   installed: string | null // null = helper до версионирования
   current: string
 }
-export type ServerEnroll = { server: Server; token: string; install_cmd: string }
+export type ServerEnroll = { server: Server; token: string; install_cmd: string; windows_sha256?: string | null }
 export type ServerMetric = {
   ts: string
   cpu_percent: number | null

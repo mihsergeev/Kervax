@@ -60,7 +60,7 @@ function New-Report {
     $now = [DateTimeOffset]::UtcNow
     return @{
         platform = 'windows'
-        agent_version = 'windows-0.1.0'
+        agent_version = 'windows-0.2.0'
         hostname = $env:COMPUTERNAME
         os = $os.Caption.Substring(0, [Math]::Min(128, $os.Caption.Length))
         uptime_seconds = [Math]::Max(0L, [long]($now.UtcDateTime - $os.LastBootUpTime.ToUniversalTime()).TotalSeconds)
@@ -171,30 +171,36 @@ function Install-Monitor([string]$Url, [string]$ScriptPath) {
         throw 'The installation directory must have inheritance disabled.'
     }
 
-    $secret = Read-Host 'Server agent token' -AsSecureString
-    $buffer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
-    try {
-        $token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($buffer)
-        if ($token -notmatch '^[A-Za-z0-9._~-]+$') {
-            throw 'Enter a valid server agent token.'
+    $token = $env:KERVAX_WINDOWS_TOKEN
+    Remove-Item Env:KERVAX_WINDOWS_TOKEN -ErrorAction SilentlyContinue
+    if (-not $token) {
+        $secret = Read-Host 'Server agent token' -AsSecureString
+        $buffer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secret)
+        try {
+            $token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($buffer)
+        } finally {
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($buffer)
+            $secret.Dispose()
         }
-        $config = @{ panel_url = $Url; token = $token } | ConvertTo-Json -Compress
-        Write-ProtectedFile (Join-Path $directory 'config.json') ([Text.Encoding]::UTF8.GetBytes($config))
-    } finally {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($buffer)
-        $secret.Dispose()
     }
+    if ($token -notmatch '^[A-Za-z0-9._~-]+$') {
+        throw 'Enter a valid server agent token.'
+    }
+    $json = New-Report | ConvertTo-Json -Depth 4 -Compress
+    Send-Report (Get-ReportUri $Url) $token $json
+    $config = @{ panel_url = $Url; token = $token } | ConvertTo-Json -Compress
+    Write-ProtectedFile (Join-Path $directory 'config.json') ([Text.Encoding]::UTF8.GetBytes($config))
 
     $installed = Join-Path $directory 'windows-monitor.ps1'
     Write-ProtectedFile $installed ([IO.File]::ReadAllBytes($ScriptPath))
     $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
-        -Argument ('-NoProfile -NonInteractive -File "{0}"' -f $installed)
+        -Argument ('-NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File "{0}"' -f $installed)
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
     $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName 'Kervax Windows Monitor' -User 'SYSTEM' -Action $action `
         -Trigger $trigger -Settings $settings -Force | Out-Null
-    Write-Output 'Installed the Kervax Windows Monitor task. It sends a report every minute.'
+    Write-Output 'Sent the first report and installed the Kervax Windows Monitor task. It sends a report every minute.'
 }
 
 try {
