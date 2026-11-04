@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ApiError,
@@ -44,6 +44,7 @@ import { CoverageAudit } from './CoverageAudit'
 import { helperText } from './helperText'
 import { bulkCleanupScript, safeRepoName } from './bulkCleanupScript'
 import { useAuth } from './auth'
+import { useEscape } from './useEscape'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { useI18n, currentLang, tr } from './i18n'
 import { toastError } from './toast'
@@ -3294,111 +3295,202 @@ const DEFAULT_EXCLUDES = [
   '/mnt', '/media', '/var/log',
 ]
 
-// «Сделать бэкап-сервером»: поднять rest-server на ноде с нуля. Два состояния — helper ещё
-// не установлен (показываем команду) и установлен (порт + TLS → развёртывание с прогрессом).
-function DeployServerModal({ server: s, onClose, onDone }: {
-  server: Server; onClose: () => void; onDone: () => void
+// Состояние helper'а и список разделов приходят в очередном отчёте агента.
+function DeployServerModal({ server: s, onClose, onRefresh }: {
+  server: Server; onClose: () => void; onRefresh: () => Promise<void>
 }) {
-  const { t } = useI18n()
-  const [port, setPort] = useState(64100)
+  const { t, lang } = useI18n()
+  const titleId = useId()
+  const [port, setPort] = useState('64100')
   const [tls, setTls] = useState(true)
+  const [mount, setMount] = useState('')
   const [job, setJob] = useState<BackupSetupJob | null>(null)
   const [busy, setBusy] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [err, setErr] = useState<string | null>(null)
-  const [copied, setCopied] = useState(false)
-  const alive = useRef(true)
-  useEffect(() => () => { alive.current = false }, [])
-  // агент не отличает «helper есть, сервер не развёрнут» от «ничего нет» → смотрим версии
-  const helperReady = !!s.last_report?.setup_versions?.['backupserver-setup']
+  const [pollFailed, setPollFailed] = useState(false)
+  const [tlsRetry, setTlsRetry] = useState(false)
+  const helper = s.last_report?.setup_versions?.['backupserver-setup']
+  const disks = (s.last_report?.disks ?? []).filter(({ mount }) => mount.length <= 512
+    && /^(?:\/[A-Za-z0-9._-]+)+$/.test(mount)
+    && !mount.split('/').some((part) => part === '.' || part === '..'))
+  const selected = mount === '/' || disks.some((disk) => disk.mount === mount)
+  const customMount = selected && mount !== '/'
+  const path = selected ? (customMount ? mount + '/kervax-rest-server/data' : '/app/rest-server/data') : ''
+  const needsHelper = !helper || (customMount && !verAtLeast(String(helper), '0.39'))
+  const needsAgent = customMount && !verAtLeast(s.agent_version || s.last_report?.agent_version, '2.63')
   const cmd = `curl -fsSL ${window.location.origin}/api/agent/backupserver-setup.sh | sudo bash`
+  const portNumber = Number(port)
+  const portValid = Number.isInteger(portNumber) && portNumber >= 1024 && portNumber <= 65535
+    && !(tls && portNumber === 64101)
+  const running = job?.status === 'running'
+  const jobId = job?.id
+  const tlsIncomplete = tlsRetry || (tls && job?.steps.some((step) => step.step === 'deploy-server' && step.ok))
+  const serverPresent = s.last_report?.backup_server?.present
+  const canClose = !busy && (!running || pollFailed)
+  const localize = (message: string) => lang === 'en' ? trBackend(message) : message
+  const close = () => {
+    if (!canClose) return
+    if (job?.status === 'done') void onRefresh()
+    onClose()
+  }
+  useEscape(close)
 
-  const STEP_LABEL: Record<string, string> = {
+  useEffect(() => {
+    if (!running || jobId == null || pollFailed) return
+    let active = true
+    let timer: number
+    const poll = async () => {
+      try {
+        const next = await backupSetupStatus(s.id, jobId)
+        if (!active) return
+        setJob(next)
+        if (next.status === 'running') timer = window.setTimeout(poll, 2500)
+      } catch {
+        if (active) setPollFailed(true)
+      }
+    }
+    timer = window.setTimeout(poll, 2500)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [s.id, jobId, running, pollFailed])
+
+  const refresh = async () => {
+    setRefreshing(true)
+    try {
+      await onRefresh()
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
+  const run = async () => {
+    if (busy || !selected || !portValid || !s.online || needsHelper || needsAgent) return
+    setErr(null)
+    setBusy(true)
+    try {
+      setJob(await deployBackupServer(s.id, { port: portNumber, tls, storage_mount: mount }))
+    } catch (e) {
+      setErr(e instanceof Error ? localize(e.message) : t('Ошибка'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const retryTls = async () => {
+    setErr(null)
+    setBusy(true)
+    try {
+      setJob(await enableBackupTls(s.id))
+      setTlsRetry(true)
+    } catch (e) {
+      setErr(e instanceof Error ? localize(e.message) : t('Ошибка'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const stepLabel: Record<string, string> = {
     'deploy-server': t('rest-server (docker, restic, htpasswd)'),
     'tls-front': t('TLS-фронт на бэкап-сервере'),
   }
 
-  const run = async () => {
-    setErr(null); setBusy(true)
-    try {
-      const j = await deployBackupServer(s.id, { port, tls })
-      setJob(j)
-      let cur = j
-      while (cur.status === 'running' && alive.current) {
-        await new Promise((r) => setTimeout(r, 2500))
-        if (!alive.current) return
-        cur = await backupSetupStatus(s.id, j.id)
-        setJob(cur)
-      }
-      if (cur.status === 'done' && alive.current) window.setTimeout(() => alive.current && onDone(), 1400)
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : t('ошибка'))
-    } finally {
-      if (alive.current) setBusy(false)
-    }
-  }
-
   return createPortal(
-    <div className="modal-backdrop">
-      <div className="modal-card backup-manage-modal">
-        <div className="modal-head">
-          <h3>{t('Сделать бэкап-сервером')}: {s.name}</h3>
-          <button className="ghost" onClick={onClose}>{t('Закрыть')}</button>
+    <div className="modal-backdrop" onClick={close}>
+      <div className="card modal backup-deploy-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}>
+        <div className="clients-head">
+          <h3 id={titleId}>{t('Сделать бэкап-сервером')}: {s.name}</h3>
+          <button className="ghost" onClick={close} disabled={!canClose}>{t('Закрыть')}</button>
         </div>
-        {!helperReady ? (
-          <div className="backup-setup-form">
-            <div className="muted small">
-              {t('Сначала поставьте на ноду helper бэкап-сервера (root). Он же ставит docker, restic и htpasswd, если их нет:')}
-            </div>
-            <div className="agent-advice-cmd">
-              <pre>{cmd}</pre>
-              <button className="ghost" onClick={() => {
-                navigator.clipboard?.writeText(cmd); setCopied(true)
-                window.setTimeout(() => setCopied(false), 1500)
-              }}>{copied ? t('Скопировано') : t('Копировать')}</button>
-            </div>
-            <div className="muted small">
-              {t('После установки вернитесь сюда — появится кнопка развёртывания.')}
-            </div>
-          </div>
-        ) : !job ? (
-          <div className="backup-setup-form">
-            <div>
-              <label className="backup-manage-label">{t('Порт rest-server')}</label>
-              <input className="field-inp backup-time-inp" type="number" min={1024} max={65535}
-                value={port} onChange={(e) => setPort(Math.min(65535, Math.max(1024, +e.target.value || 64100)))} />
-            </div>
-            <label className="nobackup-check">
-              <input type="checkbox" checked={tls} onChange={(e) => setTls(e.target.checked)} />
-              {t('HTTPS/TLS (self-signed на порту 64101)')}
-            </label>
-            {err && <div className="form-error small">{err}</div>}
-            <div className="backup-manage-actions">
-              <button disabled={busy} onClick={run}>{busy ? '…' : t('▶ Развернуть')}</button>
-            </div>
-            <div className="muted small">
-              {t('Панель поставит docker/restic/htpasswd из штатных реп дистрибутива и поднимет rest-server в режиме append-only + private-repos. Репозитории клиентов создаются потом, отдельно. До ~2 мин.')}
-            </div>
-          </div>
-        ) : (
-          <div className="backup-setup-progress">
-            {job.steps.map((st, i) => (
-              <div key={i} className={`setup-step ${st.ok ? 't-up' : 't-down'}`}>
-                <span className="mono">{st.ok ? '✓' : '✗'}</span> {STEP_LABEL[st.step] || st.step}
-                {!st.ok && st.detail && <span className="muted small"> — {st.detail}</span>}
+        {job ? (
+          <div className="backup-setup-progress" aria-live="polite">
+            {job.steps.map((st) => (
+              <div key={st.step} className={`setup-step ${st.ok ? 't-up' : 't-down'}`}>
+                <span className="mono">{st.ok ? '✓' : '✗'}</span> {stepLabel[st.step] || st.step}
+                {!st.ok && st.detail && <span className="muted small"> - {localize(st.detail)}</span>}
               </div>
             ))}
-            {job.status === 'running' && (
+            {running && !pollFailed && (
               <div className="setup-step muted"><span className="sdot sdot-unknown" /> {t('выполняется…')}</div>
             )}
-            <div className={`setup-final ${job.status === 'done' ? 't-up' : job.status === 'error' ? 'form-error' : 'muted'}`}>
-              {job.status === 'done' ? `✅ ${t('бэкап-сервер развёрнут')}` : job.status === 'error' ? `❌ ${job.message}` : ''}
-            </div>
-            {job.status !== 'running' && (
+            {pollFailed && <>
+              <div className="form-error small">{t('Не удалось получить статус развёртывания.')}</div>
               <div className="backup-manage-actions">
-                <button onClick={job.status === 'done' ? onDone : onClose}>{t('Закрыть')}</button>
+                <button onClick={() => setPollFailed(false)}>{t('Проверить статус')}</button>
               </div>
-            )}
+            </>}
+            {job.status === 'done' && <div className="setup-final t-up">✓ {t('бэкап-сервер развёрнут')}</div>}
+            {job.status === 'error' && <>
+              <div className="setup-final form-error">{job.message ? localize(job.message) : t('Ошибка')}</div>
+              {err && <div className="form-error small" role="alert">{err}</div>}
+              {tlsIncomplete && !serverPresent && (
+                <div className="muted small">{t('Панель увидит изменения после следующего отчёта агента.')}</div>
+              )}
+              <div className="backup-manage-actions">
+                {tlsIncomplete
+                  ? <button onClick={() => void retryTls()} disabled={busy || !serverPresent || !s.online}>
+                    {busy ? '…' : t('Повторить настройку HTTPS')}
+                  </button>
+                  : <button className="ghost" onClick={() => { setJob(null); void refresh() }}>
+                    {t('Вернуться к настройкам')}
+                  </button>}
+              </div>
+            </>}
           </div>
+        ) : (
+          <form className="backup-setup-form" onSubmit={(e) => { e.preventDefault(); void run() }}>
+            {helper && <>
+              <label>
+                <span className="backup-manage-label">{t('Раздел для хранения бэкапов')}</span>
+                <select className="field-inp" value={mount} onChange={(e) => setMount(e.target.value)} disabled={busy}>
+                  <option value="" disabled>{t('Выберите раздел')}</option>
+                  <option value="/">{t('Стандартный каталог')}</option>
+                  {mount && !selected && <option value={mount} disabled>{mount}</option>}
+                  {disks.map((disk) => {
+                    const free = disk.avail ?? disk.total - disk.used
+                    return <option key={disk.mount} value={disk.mount}>
+                      {t('{mount} · свободно {free}', { mount: disk.mount, free: free > 0 ? fmtBytes(free) : '0' })}
+                    </option>
+                  })}
+                </select>
+              </label>
+              {path && <div className="muted small">{t('Каталог репозиториев')} <code>{path}</code></div>}
+              {mount && !selected && <div className="form-error small">{t('Выбранного раздела больше нет в отчёте агента.')}</div>}
+              <label>
+                <span className="backup-manage-label">{t('Порт rest-server')}</span>
+                <input className="field-inp backup-time-inp" type="number" min={1024} max={65535}
+                  value={port} onChange={(e) => setPort(e.target.value)} disabled={busy} />
+              </label>
+              <label className="nobackup-check">
+                <input type="checkbox" checked={tls} onChange={(e) => setTls(e.target.checked)} disabled={busy} />
+                {t('HTTPS/TLS (self-signed на порту 64101)')}
+              </label>
+              {tls && portNumber === 64101 && <div className="form-error small">{t('Порт 64101 зарезервирован для HTTPS.')}</div>}
+            </>}
+            {needsAgent && <div className="form-error small">{t('Для отдельного раздела обновите агент до 2.63 или новее.')}</div>}
+            {needsHelper && <>
+              <div className="muted small">{helper
+                ? t('Для отдельного раздела обновите helper на сервере.')
+                : t('Установите helper на выбранном сервере. Он подготовит Docker, restic и htpasswd.')}</div>
+              <FixCmd cmd={cmd} />
+            </>}
+            {(needsHelper || needsAgent) && (
+              <div className="muted small">{t('Панель увидит изменения после следующего отчёта агента.')}</div>
+            )}
+            {!s.online && <div className="form-error small">{t('Агент сейчас не на связи.')}</div>}
+            {err && <div className="form-error small" role="alert">{err}</div>}
+            <div className="backup-manage-actions">
+              <button type="button" className="ghost" onClick={() => void refresh()} disabled={busy || refreshing}>
+                {refreshing ? '…' : t('Проверить снова')}
+              </button>
+              {helper && <button type="submit" disabled={busy || !selected || !portValid || !s.online || needsHelper || needsAgent}>
+                {busy ? '…' : t('Развернуть')}
+              </button>}
+            </div>
+          </form>
         )}
       </div>
     </div>,
@@ -3639,7 +3731,7 @@ export function BackupsPage({
   const [openSrvId, setOpenSrvId] = useState<number | null>(openSrvHostId)
   const [linkSrvSec, setLinkSrvSec] = useState<{ id: number | null; sec: string | null }>({ id: openSrvHostId, sec: openSrvSec })
   const [setupSrv, setSetupSrv] = useState<Server | null>(null)
-  const [deploySrv, setDeploySrv] = useState<Server | null>(null)
+  const [deploySrvId, setDeploySrvId] = useState<number | null>(null)
   // Только id, а не сам объект: модалка обязана видеть свежий сервер после каждой
   // перезагрузки списка. С копией, снятой в момент открытия, галочка внутри не
   // перерисовывалась — клик срабатывал, но выглядел как проигнорированный, и
@@ -3680,7 +3772,7 @@ export function BackupsPage({
   }
 
   const load = useCallback(() => {
-    listServers()
+    return listServers()
       .then((s) => {
         setServers(s)
         setErr(null)
@@ -3707,6 +3799,7 @@ export function BackupsPage({
     && (linkSrvSec.sec === 'mirror' || !s.last_report?.backup_server?.present))
   const openSrv = openMirror ? undefined : srvHosts.find(({ s }) => s.id === openSrvId)
   const covSrv = (servers ?? []).find((x) => x.id === covId) ?? null
+  const deploySrv = (servers ?? []).find((x) => x.id === deploySrvId)
 
   const allHosts = (servers ?? [])
     .map((s) => ({ s, d: s.last_report?.backup }))
@@ -4010,7 +4103,7 @@ export function BackupsPage({
             <div className="loc-results">
               {noBackupReqView.map((s) => (
                 <NoBackupRow key={s.id} server={s} canAct={!isViewer} focus={focusId === s.id}
-                  onSetup={() => setSetupSrv(s)} onDeploy={() => setDeploySrv(s)} onChanged={load} />
+                  onSetup={() => setSetupSrv(s)} onDeploy={() => setDeploySrvId(s.id)} onChanged={load} />
               ))}
             </div>
           </div>
@@ -4110,7 +4203,7 @@ export function BackupsPage({
               <div className="loc-results">
                 {noBackupOptView.map((s) => (
                   <NoBackupRow key={s.id} server={s} canAct={!isViewer}
-                    onSetup={() => setSetupSrv(s)} onDeploy={() => setDeploySrv(s)}
+                    onSetup={() => setSetupSrv(s)} onDeploy={() => setDeploySrvId(s.id)}
                     onCoverage={(s.backup_audit?.length ?? 0) > 0 ? () => setCovId(s.id) : undefined}
                     onChanged={load} />
                 ))}
@@ -4213,9 +4306,10 @@ export function BackupsPage({
       )}
       {deploySrv && (
         <DeployServerModal
+          key={deploySrv.id}
           server={deploySrv}
-          onClose={() => setDeploySrv(null)}
-          onDone={() => { setDeploySrv(null); load() }}
+          onClose={() => setDeploySrvId(null)}
+          onRefresh={load}
         />
       )}
     </div>

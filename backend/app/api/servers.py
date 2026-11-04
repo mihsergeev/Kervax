@@ -2934,8 +2934,10 @@ async def _orchestrate_deploy_server(session_factory, job_id: int, params: dict)
     _steps, save, step = _job_runner(session_factory, job_id, params.get("_user", ""), "deploy_server")
     try:
         # долгий шаг: apt update/install + docker pull образа
-        ok, out = await step("deploy-server", params["node_id"], "deploy_server",
-                             {"port": params["port"]}, 400)
+        payload = {"port": params["port"]}
+        if params["storage_mount"]:
+            payload["storage_mount"] = params["storage_mount"]
+        ok, out = await step("deploy-server", params["node_id"], "deploy_server", payload, 720)
         if not ok:
             hint = (out or "").replace("\r", " ").strip()
             return await save("error", hint[:250] or "не удалось развернуть rest-server")
@@ -3108,13 +3110,22 @@ async def backup_server_deploy(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "на этой ноде rest-server уже развёрнут")
     # агент не отличает «helper есть, сервер не развёрнут» от «ничего нет» (backup_server=nil),
     # поэтому готовность определяем по версиям setup-скриптов
-    if not (rep.get("setup_versions") or {}).get("backupserver-setup"):
+    helper = (rep.get("setup_versions") or {}).get("backupserver-setup")
+    if not helper:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "на ноде нет helper'а бэкап-сервера — сначала выполните backupserver-setup.sh",
         )
+    mount = body.storage_mount
+    if mount not in ("", "/"):
+        if _ver_key(node.agent_version or rep.get("agent_version")) < (2, 63) or _ver_key(helper) < (0, 39):
+            raise HTTPException(status.HTTP_409_CONFLICT, "для выбора раздела нужны агент 2.63+ и backupserver-setup 0.39+")
+        if not any(d.get("mount") == mount for d in rep.get("disks") or [] if isinstance(d, dict)):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "этой точки монтирования нет в отчете агента")
+    if body.tls and body.port == 64101:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "порт 64101 зарезервирован для HTTPS")
     node_ip = _pick_ip(node)
-    if not node_ip:
+    if body.tls and not node_ip:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "не удалось определить IP ноды")
     job = BackupSetupJob(server_id=node.id, backup_server_id=node.id, status="running", steps=[])
     session.add(job)
@@ -3124,7 +3135,7 @@ async def backup_server_deploy(
     )
     params = {
         "node_id": node.id, "node_ip": node_ip, "node_hostname": node.hostname or "",
-        "port": body.port, "tls": body.tls, "_user": user.username,
+        "port": body.port, "tls": body.tls, "storage_mount": mount, "_user": user.username,
     }
     task = asyncio.create_task(
         _orchestrate_deploy_server(request.app.state.session_factory, job.id, params)
@@ -3299,15 +3310,20 @@ async def backup_setup_status(
 
 async def _backup_server_for(session, repo_url: str):
     """Бэкап-сервер, на который смотрит repo-URL клиента, и имя репо в нём."""
-    m = re.match(r"rest:[a-z]+://([^:/]+)", repo_url or "")
-    if not m:
+    if not (repo_url or "").startswith(("rest:http://", "rest:https://")):
         return None, ""
-    host = m.group(1)
-    name = (repo_url or "").rstrip("/").rsplit("/", 1)[-1]
+    try:
+        url = urlsplit(repo_url[5:])
+    except ValueError:
+        return None, ""
+    host = url.hostname
+    name = url.path.rstrip("/").rsplit("/", 1)[-1]
+    if not host:
+        return None, name
     for cand in await session.scalars(select(Server).where(Server.enabled.is_(True))):
         if not ((cand.last_report or {}).get("backup_server") or {}).get("present"):
             continue
-        if host in (cand.external_ip or "", cand.agent_ip or "", cand.hostname or ""):
+        if host in ((cand.external_ip or "").lower(), (cand.agent_ip or "").lower(), (cand.hostname or "").lower()):
             return cand, name
     return None, name
 
@@ -3356,8 +3372,13 @@ async def backup_credentials(
             d = _decode(out)
             await audit.record(session, user.username, "backup_credentials_view", server.name, f"srv={server_id}")
             url = d.get("repo_url", "")
+            bs, name = await _backup_server_for(session, url)
+            data_dir = ((bs.last_report or {}).get("backup_server") or {}).get("data_dir") if bs else None
+            repo_local = f"{data_dir.rstrip('/')}/{name}" if isinstance(data_dir, str) and data_dir and name else ""
+            if not re.fullmatch(r"(?:/[A-Za-z0-9._-]+)+", repo_local) or {".", ".."}.intersection(repo_local.split("/")):
+                repo_local = ""
             return BackupCredsOut(
-                repo_url=url, repopass=d.get("repopass", ""),
+                repo_url=url, repo_local=repo_local, repopass=d.get("repopass", ""),
                 cacert_file=d.get("cacert_file", ""),
                 cacert_pem=await _fetch_cacert_pem(factory, session, url),
                 source="client",
@@ -3487,8 +3508,7 @@ async def backup_setup_script() -> PlainTextResponse:
 
 @agent_router.get("/backupserver-setup.sh")
 async def backupserver_setup_script() -> PlainTextResponse:
-    """Скрипт включения статистики сервера бэкапов: ставит read-only helper в /lib65
-    + sudoers. Запускается root'ом на бэкап-сервере (панель показывает команду)."""
+    """Установка helper'а сбора статистики и спула для развёртывания rest-server из панели."""
     path = os.path.join(get_settings().agent_dist_dir, "backupserver-setup.sh")
     if not os.path.exists(path):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "backupserver-setup.sh не найден")

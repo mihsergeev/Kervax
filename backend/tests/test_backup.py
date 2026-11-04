@@ -618,7 +618,7 @@ def test_merge_group_renames_an_old_group_by_hand():
     assert 'rewrite $rl --host "$host" --new-host "$to" --forget' in fn
     assert fn.index('"$apply" != "--apply"') < fn.index("rewrite $rl")
     assert "7 * 86400" in fn and "nothing to merge into" in fn and 'rm -f "$GROUPS_DIR/$repo.json"' in fn
-    assert 'merge-group)      shift; cmd_merge_group "$@" ;;' in src
+    assert 'merge-group)      shift; with_storage cmd_merge_group "$@" ;;' in src
 
 
 async def test_archive_endpoint_and_late_reasons_in_the_server_list(client, auth_headers):

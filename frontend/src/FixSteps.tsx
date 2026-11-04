@@ -45,7 +45,7 @@ export function FixCmd({ cmd, onCopy, className = '' }: { cmd: string; onCopy?: 
   return (
     <div className={`agent-advice-cmd ${className}`.trim()}>
       <pre>{text}</pre>
-      <button className="ghost" onClick={(e) => {
+      <button type="button" className="ghost" onClick={(e) => {
         e.stopPropagation()
         navigator.clipboard?.writeText(text)
         onCopy?.()

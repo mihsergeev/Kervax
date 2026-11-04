@@ -3704,7 +3704,7 @@ export function backupSetupStatus(serverId: number, jobId: number): Promise<Back
 // Прогресс поллится тем же backupSetupStatus.
 export function deployBackupServer(
   serverId: number,
-  body: { port: number; tls: boolean },
+  body: { port: number; tls: boolean; storage_mount?: string },
 ): Promise<BackupSetupJob> {
   return api<BackupSetupJob>(`/api/servers/${serverId}/backup-server/deploy`, {
     method: 'POST',

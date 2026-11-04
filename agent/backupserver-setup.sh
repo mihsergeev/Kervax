@@ -103,15 +103,14 @@ fi
 #       kervax-mread whose key line pins the mirror's address and forces kervax-mirror-serve, which
 #       only lists an allowed repository or sends its files as a tar; stats report the SSH port and
 #       host key the mirror pins, and which mirror may read what and when it last did
-KERVAX_SETUP_VERSION=0.38  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.39: new servers can keep repositories on a selected mounted filesystem
+KERVAX_SETUP_VERSION=0.39  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
 # Only on a backup server. Elsewhere there are no restic repositories to report on.
 KERVAX_SETUP_WHEN="[ -d /app/rest-server ] || [ -d /app/rest-server-tls ] || [ -d /srv/rest-server ] || (command -v docker >/dev/null 2>&1 && docker ps 2>/dev/null | grep -qi rest-server)"
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
-echo "$KERVAX_SETUP_VERSION" > /var/lib/kervax/versions/backupserver-setup.ver
-chmod 0644 /var/lib/kervax/versions/backupserver-setup.ver  # explicit: the agent (kervax) must read it
 # the file and spool scheme needs no sudo - drop the old sudoers rule (if any)
 rm -f /etc/sudoers.d/kervax-backupserver 2>/dev/null || true
 # spool: the agent (kervax) drops requests (needs -wx on the directory) and reads answers (r-x)
@@ -131,8 +130,6 @@ if systemctl cat kervax-agent >/dev/null 2>&1; then
 [Service]
 ReadWritePaths=/var/lib/kervax
 DROPIN
-  systemctl daemon-reload 2>/dev/null || true
-  systemctl try-restart kervax-agent 2>/dev/null || true
 fi
 
 # Written next to the old one and swapped in with mv: bash reads a running script as it goes,
@@ -146,6 +143,72 @@ set -euo pipefail
 DATA=/app/rest-server/data
 HTPASSWD="$DATA/.htpasswd"
 COMPOSE=/app/rest-server/docker-compose.yml
+STORAGE_FILE=/app/rest-server/.kervax-storage-mount
+DEPLOYED_FILE=/app/rest-server/.kervax-deployed
+STORAGE_MOUNT=""
+STORAGE_MARKER=""
+
+storage_mount_ok() {
+  [ "${#1}" -le 512 ] && [[ "$1" =~ ^(/[A-Za-z0-9._-]+)+$ ]] && [[ "$1/" != */./* && "$1/" != */../* ]]
+}
+
+# Spool input is unprivileged. All components must stay under root control, including
+# the mount root, so a local user cannot swap in a symlink before a privileged write.
+secure_storage_path() {
+  local dir="$1" owner mode
+  while [ "$dir" != / ] && [ -n "$dir" ]; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
+    read -r owner mode < <(stat -c '%u %a' -- "$dir") || return 1
+    [ "$owner" = 0 ] && (( (8#$mode & 8#22) == 0 )) || return 1
+    dir="${dir%/*}"
+  done
+}
+
+check_storage_mount() {
+  local mount="$1"
+  storage_mount_ok "$mount" && secure_storage_path "$mount" || {
+    echo "unsafe storage mount: $mount (use a root-owned path without symlinks or group/other write access)" >&2; return 2;
+  }
+  if ! mountpoint -q -- "$mount" || [ "$(stat -c %d -- "$mount")" = "$(stat -c %d /)" ]; then
+    echo "storage is not mounted on a separate filesystem: $mount" >&2; return 2
+  fi
+}
+
+set_storage_path() {
+  STORAGE_MOUNT="$1"
+  DATA="$STORAGE_MOUNT/kervax-rest-server/data"
+  HTPASSWD="$DATA/.htpasswd"
+}
+
+read_storage() {
+  local mount
+  if ! secure_storage_path "${STORAGE_FILE%/*}" || [ -L "$STORAGE_FILE" ] || [ ! -f "$STORAGE_FILE" ] || ! {
+      IFS= read -r mount && IFS= read -r STORAGE_MARKER
+    } < "$STORAGE_FILE" || ! storage_mount_ok "$mount" || ! [[ "$STORAGE_MARKER" =~ ^[a-zA-Z0-9]{16}$ ]]; then
+    echo "invalid storage configuration: $STORAGE_FILE" >&2; return 2
+  fi
+  set_storage_path "$mount"
+}
+
+load_storage() {
+  [ -e "$STORAGE_FILE" ] || [ -L "$STORAGE_FILE" ] || return 0
+  read_storage || return 2
+  check_storage_mount "$STORAGE_MOUNT" && secure_storage_path "$DATA" \
+      && [ -f "$DATA/.kervax-volume-$STORAGE_MARKER" ] && [ ! -L "$DATA/.kervax-volume-$STORAGE_MARKER" ] || {
+    echo "backup storage is unavailable: $DATA" >&2; return 2;
+  }
+}
+
+data_volume() {
+  if [ -n "$STORAGE_MOUNT" ]; then
+    # Both bind sources must exist. The unique file is created on the selected filesystem
+    # only, so even a directory with the same name on the underlying root FS cannot be used.
+    printf '      - type: bind\n        source: "%s"\n        target: /data\n        bind:\n          create_host_path: false\n' "$DATA"
+    printf '      - type: bind\n        source: "%s/.kervax-volume-%s"\n        target: /kervax-storage-ready\n        read_only: true\n        bind:\n          create_host_path: false\n' "$DATA" "$STORAGE_MARKER"
+  else
+    printf '      - "%s:/data"\n' "$DATA"
+  fi
+}
 
 # The actual rest-server port. The panel allows deploying it on a custom port (the form has a
 # field), while client provisioning used to use the CONSTANT 64100 - a server on a different
@@ -375,13 +438,25 @@ valid_ip()   { [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$1" =~ ^[0-9A-
 valid_num()  { [[ "$1" =~ ^[0-9]+$ ]]; }
 
 cmd_stats() {
+  local running=false
+  if command -v docker >/dev/null 2>&1; then
+    [ "$(docker inspect -f '{{.State.Running}}' rest-server 2>/dev/null)" = "true" ] && running=true
+  fi
+  if [ ! -f "$DEPLOYED_FILE" ] && [ "$running" = false ] && { generated_compose || [ -f "$STORAGE_FILE" ]; }; then
+    echo '{"present":false}'; return
+  fi
+  if ! load_storage; then
+    printf '{"present":true,"running":false,"storage_unavailable":true,"helper_version":%s,"port":%s,"data_dir":"%s","repos":[]}\n' \
+      "$HELPER_VER" "$(rest_port)" "$(json_escape "$DATA")"
+    return
+  fi
   if [ ! -d "$DATA" ]; then echo '{"present":false}'; return; fi
   # the REAL version from the binary rather than the compose tag: a "latest" tag lied - an old
   # image (0.11) could be stuck on disk, docker does not re-pull it and the panel believed it
   # was current.
   local ver="" cid
-  cid="$(docker ps -qf 'name=rest-server' 2>/dev/null | head -1)"
-  [ -n "$cid" ] && ver="$(docker exec "$cid" rest-server --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  cid="$(docker ps -qf 'name=rest-server' 2>/dev/null | head -1 || true)"
+  [ -n "$cid" ] && ver="$(docker exec "$cid" rest-server --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
   # fall back to the compose tag if the container is missing or did not answer
   [ -n "$ver" ] || { [ -f "$COMPOSE" ] && ver="$(grep -oE 'rest-server:[A-Za-z0-9._-]+' "$COMPOSE" | head -1 | cut -d: -f2)"; }
   local repos_json="" extra_json="" repo name snaps last locked lock_ts valid size prune kl kd kw km
@@ -532,27 +607,32 @@ cmd_stats() {
   # disk, and the node's overall disk metric says nothing about backup storage filling up.
   # df -P: POSIX output, one line per filesystem (without -P long device names wrap).
   local dfl d_total=0 d_used=0 d_free=0
-  dfl="$(df -PB1 "$DATA" 2>/dev/null | awk 'NR==2{printf "%s %s %s", $2, $3, $4}')"
+  dfl="$(df -PB1 "$DATA" 2>/dev/null | awk 'NR==2{printf "%s %s %s", $2, $3, $4}' || true)"
   case "$dfl" in
     [0-9]*)
       d_total="${dfl%% *}"; dfl="${dfl#* }"
       d_used="${dfl%% *}"; d_free="${dfl##* }" ;;
   esac
   # whether our TLS front exists (tells the panel which transport it may offer)
-  local tls=false; [ -f "$(tls_dir)/cert.pem" ] && tls=true
-  # whether the container IS RUNNING: the agent can see that only through the docker proxy, and
-  # a fresh backup server usually has none, so without this field the panel considered the
-  # rest-server stopped and sent a false alert. The helper, running as root, knows for sure.
-  local running=false
-  if command -v docker >/dev/null 2>&1; then
-    [ "$(docker inspect -f '{{.State.Running}}' rest-server 2>/dev/null)" = "true" ] && running=true
+  local tls=false
+  if [ -f "$(tls_dir)/cert.pem" ]; then
+    if ! grep -q '^# generated by kervax backupserver-setup$' "$TLS_DIR/docker-compose.yml" 2>/dev/null \
+        || { [ -f "$TLS_DIR/.kervax-deployed" ] && [ "$(docker inspect -f '{{.State.Running}}' kervax-rest-tls 2>/dev/null)" = true ]; }; then
+      tls=true
+    fi
   fi
   # port is the ACTUAL rest-server port: the panel builds the client's repository address from
   # it. It used to substitute a constant and missed a server deployed on a different port.
   printf '{"present":true,"version":"%s","helper_version":%s,"running":%s,"port":%s,"tls_front":%s,"tls_port":%s,"data_dir":"%s","disk_total":%s,"disk_used":%s,"disk_free":%s,"repos":[%s]}\n' \
     "$ver" "$HELPER_VER" "$running" "$(rest_port)" "$tls" "$TLS_PORT" "$(json_escape "$DATA")" "$d_total" "$d_used" "$d_free" "$repos_json"
 }
-refresh_stats() { cmd_stats > "$STATE_DIR/backupserver.json.tmp" 2>/dev/null && mv -f "$STATE_DIR/backupserver.json.tmp" "$STATE_DIR/backupserver.json" && chmod 0644 "$STATE_DIR/backupserver.json"; }
+refresh_stats() {
+  local tmp
+  tmp="$(mktemp "$STATE_DIR/.backupserver.XXXXXX")" || return 2
+  if ! cmd_stats > "$tmp" 2>/dev/null || ! chmod 0644 "$tmp" || ! mv -fT "$tmp" "$STATE_DIR/backupserver.json"; then
+    rm -f "$tmp"; return 2
+  fi
+}
 
 # The rest-server port is published by docker on 0.0.0.0, and docker puts its own iptables rules
 # ahead of ufw. Without ufw-docker (DOCKER-USER jumping to ufw-user-forward) the per-client ufw
@@ -631,6 +711,9 @@ write_prune_script() {
     printf 'METRICS_FILE_ALT=%q\n' "$METRICS_DIR/restic_server_$name.prom"
     printf 'GROUPS_FILE=%q\n' "$GROUPS_DIR/$name.json"
     printf 'KEEP=(--keep-last %q --keep-daily %q --keep-weekly %q --keep-monthly %q)\n' "$kl" "$kd" "$kw" "$km"
+    if [ -n "$STORAGE_MOUNT" ]; then
+      printf '"%s" storage-dir >/dev/null || exit 2\n' "$HELPER_PATH"
+    fi
     cat <<'PRUNE_BODY'
 set -a; . "$ENV_FILE"; set +a  # restic is a child process: without export it will not see the repository
 mkdir -p "$(dirname "$LOG")" "$(dirname "$METRICS_FILE")" "$(dirname "$METRICS_FILE_ALT")"
@@ -1148,20 +1231,30 @@ apt_q() {
 
 # Installed only from the distribution's own repositories (no curl|sh from foreign domains).
 ensure_pkgs() {
-  local need=() p
+  local need=() p compose_version compose_package="" need_compose=0
   command -v docker    >/dev/null 2>&1 || need+=(docker.io)
-  docker compose version >/dev/null 2>&1 || need+=(docker-compose-v2)
+  docker compose version >/dev/null 2>&1 || need_compose=1
   command -v htpasswd  >/dev/null 2>&1 || need+=(apache2-utils)
   command -v bunzip2   >/dev/null 2>&1 || need+=(bzip2)
-  [ ${#need[@]} -eq 0 ] && return 0
-  command -v apt-get >/dev/null 2>&1 || { echo "packages are required (${need[*]}) but apt-get is missing - install them manually" >&2; return 2; }
+  [ ${#need[@]} -eq 0 ] && [ "$need_compose" -eq 0 ] && return 0
+  command -v apt-get >/dev/null 2>&1 || { echo "install Docker with Compose v2, htpasswd and bzip2 before deployment (apt-get is unavailable)" >&2; return 2; }
   apt_q update || true
-  for p in "${need[@]}"; do
-    APT_TIMEOUT=600 apt_q install "$p" \
-      || { echo "could not install $p" >&2; return 2; }
-  done
+  if [ "$need_compose" -eq 1 ]; then
+    for p in docker-compose-v2 docker-compose-plugin docker-compose; do
+      compose_version="$(LC_ALL=C apt-cache policy "$p" | awk '/Candidate:/ {print $2; exit}')"
+      if [[ "${compose_version#*:}" =~ ^[0-9] ]] && dpkg --compare-versions "${compose_version#*:}" ge 2; then
+        compose_package="$p"; break
+      fi
+    done
+    if [ -z "$compose_package" ]; then
+      echo "Docker Compose v2 is unavailable in the configured APT repositories; install the Docker Compose plugin and retry" >&2
+      return 2
+    fi
+    need+=("$compose_package")
+  fi
+  APT_TIMEOUT=300 apt_q install "${need[@]}" || { echo "could not install ${need[*]}" >&2; return 2; }
   systemctl enable --now docker >/dev/null 2>&1 || true
-  return 0
+  docker compose version >/dev/null 2>&1 || { echo "Docker Compose plugin is unavailable after package installation" >&2; return 2; }
 }
 
 # restic on the backup server: the system one, otherwise RESTIC_TARGET_VER checked against the
@@ -1201,30 +1294,91 @@ restic_fetch() {
   printf '%s' "$tmp"
 }
 
+generated_compose() { grep -q '^# generated by kervax backupserver-setup$' "$COMPOSE" 2>/dev/null; }
+
+probe_rest_server() {
+  local container="$1" url="$2" code="" i
+  shift 2
+  for i in {1..10}; do
+    if [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" = true ] \
+        && code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$@" "$url")" && [ "$code" = 401 ]; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "$container did not return HTTP 401 at $url (last response: ${code:-none}); check docker logs $container" >&2
+  return 2
+}
+
+prepare_storage() {
+  local requested="$1" mount tmp
+  if [ -e "$STORAGE_FILE" ] || [ -L "$STORAGE_FILE" ]; then
+    read_storage || return 2
+    mount="$STORAGE_MOUNT"
+    if [ -n "$requested" ] && [ "$requested" != "$mount" ]; then
+      echo "this backup server already uses storage $mount; moving repositories is a separate operation" >&2; return 2
+    fi
+    if [ -f "$DEPLOYED_FILE" ]; then load_storage; return; fi
+  elif [ -z "$requested" ] || [ "$requested" = / ]; then
+    install -d -m 0700 "$DATA"
+    return
+  else
+    mount="$requested"
+    check_storage_mount "$mount" || return 2
+    if [ -e "$COMPOSE" ] || [ -L "$COMPOSE" ] || [ -e "$DATA" ] || [ -L "$DATA" ]; then
+      echo "a backup server layout already exists; cannot change its storage to $mount" >&2; return 2
+    fi
+    if [ -e "$mount/kervax-rest-server" ] || [ -L "$mount/kervax-rest-server" ]; then
+      echo "storage directory already exists: $mount/kervax-rest-server" >&2; return 2
+    fi
+    secure_storage_path "${STORAGE_FILE%/*}" || { echo "unsafe rest-server project directory" >&2; return 2; }
+    tmp="$(mktemp "$STORAGE_FILE.XXXXXXXXXXXXXXXX")" || return 2
+    STORAGE_MARKER="${tmp##*.}"
+    if ! printf '%s\n%s\n' "$mount" "$STORAGE_MARKER" > "$tmp" || ! mv -fT "$tmp" "$STORAGE_FILE"; then rm -f "$tmp"; return 2; fi
+  fi
+  set_storage_path "$mount"
+  check_storage_mount "$mount" || return 2
+  # Keep the mount busy while creating its directories and use paths relative to it.
+  if ! (cd -- "$mount" && [ "$(stat -c %d .)" != "$(stat -c %d /)" ] \
+      && { [ ! -e kervax-rest-server ] && [ ! -L kervax-rest-server ] || secure_storage_path "$mount/kervax-rest-server"; } \
+      && { [ ! -e kervax-rest-server/data ] && [ ! -L kervax-rest-server/data ] || secure_storage_path "$DATA"; } \
+      && install -d -m 0700 kervax-rest-server kervax-rest-server/data \
+      && { [ -f "kervax-rest-server/data/.kervax-volume-$STORAGE_MARKER" ] \
+        || (umask 077; set -o noclobber; : > "kervax-rest-server/data/.kervax-volume-$STORAGE_MARKER"); }); then
+    echo "could not create safe backup storage on $mount" >&2; return 2
+  fi
+  load_storage
+}
+
 cmd_deploy_server() {
-  local port="${1:-$REST_PORT}"
+  local port="${1:-$REST_PORT}" requested="${2:-}" fd
   valid_num "$port" || { echo "bad port" >&2; return 2; }
   [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || { echo "port outside the range 1024-65535" >&2; return 2; }
+  if [ -n "$requested" ] && [ "$requested" != / ]; then check_storage_mount "$requested" || return 2; fi
+  exec {fd}> "$STATE_DIR/bsrv-deploy.lock" && flock -n "$fd" || { echo "backup server deployment is already running" >&2; return 2; }
   ensure_pkgs || return 2
   ensure_restic_srv || return 2
   # the upper directories are 0700 (as on existing servers): below them live prune-env files
   # with repository passwords - local unprivileged users may not even list them
-  install -d -m 0700 /app/rest-server /app/rest-server/system
-  install -d -m 0755 "$PRUNE_DIR" "$ENV_DIR" "$LOG_DIR" "$METRICS_DIR"
+  install -d -m 0700 /app/rest-server /app/rest-server/system || return 2
+  install -d -m 0755 "$PRUNE_DIR" "$ENV_DIR" "$LOG_DIR" "$METRICS_DIR" || return 2
   # not chmod'ed when it exists: on a server that backs itself up backup-setup makes it
   # root:bx231 1775 for the backup run's own metrics, and 0755 here would make that run fail
-  [ -d "$NE_METRICS_DIR" ] || install -d -m 0755 "$NE_METRICS_DIR"
-  install -d -m 0700 "$DATA"
+  [ -d "$NE_METRICS_DIR" ] || install -d -m 0755 "$NE_METRICS_DIR" || return 2
+  prepare_storage "$requested" || return 2
   # htpasswd must exist: with --private-repos an empty file means nobody gets in
-  [ -f "$HTPASSWD" ] || { : > "$HTPASSWD"; chown root:root "$HTPASSWD"; chmod 0600 "$HTPASSWD"; }
+  if [ -n "$STORAGE_MOUNT" ] && [ -L "$HTPASSWD" ]; then echo "unsafe htpasswd symlink" >&2; return 2; fi
+  [ -f "$HTPASSWD" ] || (umask 077; : > "$HTPASSWD") || return 2
   # an EXISTING compose file is left alone: it may carry caddy labels, networks or tuning for a
   # particular server shared by several projects. Deploying onto a live server must not break
-# its configuration.
-  local existed=0
-  if [ -f "$COMPOSE" ]; then
-    existed=1
+  # its configuration. A generated file from a failed first deploy can be retried.
+  local existed=0 pending=0
+  if [ -f "$COMPOSE" ] && { ! generated_compose || [ -f "$DEPLOYED_FILE" ]; }; then
+    existed=1; port="$(rest_port)"
   else
-    cat > "$COMPOSE" <<COMPOSEEOF
+    pending=1
+    cat > "$COMPOSE" <<COMPOSEEOF || return 2
+# generated by kervax backupserver-setup
 services:
   rest-server:
     hostname: rest-server
@@ -1234,31 +1388,33 @@ services:
     ports:
       - "$port:8000"
     volumes:
-      - "$DATA:/data"
+$(data_volume)
     environment:
       OPTIONS: "--append-only --path /data --private-repos"
 COMPOSEEOF
-    chmod 0644 "$COMPOSE"
+    chmod 0644 "$COMPOSE" || return 2
   fi
   local rlog; rlog="$(mktemp /tmp/kv-rs.XXXXXX)" || { echo "mktemp failed" >&2; return 2; }
-  ( cd /app/rest-server && docker compose up -d ) >"$rlog" 2>&1 \
-    || { echo "docker compose up failed: $(tr '\n' ' ' <"$rlog")" >&2; rm -f "$rlog"; return 2; }
+  if ! (cd /app/rest-server && timeout -k 10 240 docker compose up -d) >"$rlog" 2>&1; then
+    echo "docker compose up failed: $(tr '\n' ' ' <"$rlog")" >&2
+    rm -f "$rlog"
+    [ "$pending" -eq 0 ] || (cd /app/rest-server && timeout 30 docker compose down >/dev/null 2>&1) || true
+    return 2
+  fi
   rm -f "$rlog"
-  # health: with an empty htpasswd the rest-server must answer 401 - it listens and requires auth
-  local code="" i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$port/" 2>/dev/null || echo 000)"
-    [ "$code" != "000" ] && break
-    sleep 1
-  done
-  [ "$code" = "000" ] && { echo "rest-server does not answer on 127.0.0.1:$port" >&2; return 2; }
-  refresh_stats
+  if ! probe_rest_server rest-server "http://127.0.0.1:$port/"; then
+    [ "$pending" -eq 0 ] || (cd /app/rest-server && timeout 30 docker compose down >/dev/null 2>&1) || true
+    refresh_stats || true
+    return 2
+  fi
+  [ "$pending" -eq 0 ] || touch "$DEPLOYED_FILE" || return 2
+  refresh_stats || return 2
   local ufw_state="inactive"
   command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active' && ufw_state="active"
   if [ "$existed" -eq 1 ]; then
-    echo "OK rest-server was already deployed and is running (port $port, HTTP $code, ufw $ufw_state)"
+    echo "OK rest-server was already deployed and is running (port $port, HTTP 401, ufw $ufw_state)"
   else
-    echo "OK rest-server deployed: port $port, append-only plus private-repos, HTTP $code, ufw $ufw_state"
+    echo "OK rest-server deployed: port $port, data $DATA, append-only plus private-repos, HTTP 401, ufw $ufw_state"
   fi
   ufw_docker_note || true
 }
@@ -1426,6 +1582,7 @@ cmd_deploy_tls_front() {
     dns_note=" (the DNS name was not a valid host name and was left out of the certificate)"; san_dns=""
   fi
   command -v docker >/dev/null 2>&1 || { echo "no docker" >&2; return 2; }
+  [ "$(rest_port)" != "$TLS_PORT" ] || { echo "rest-server HTTP already uses port $TLS_PORT" >&2; return 2; }
   install -d -m 0755 "$TLS_DIR"
   # MIGRATION of the 0.14 layout (system/kervax-tls -> its own directory). Strictly BEFORE
   # generating the certificate: the certificate is moved rather than reissued, otherwise
@@ -1453,7 +1610,8 @@ cmd_deploy_tls_front() {
   # a second rest-server with native TLS over the same data; the image is BAKED in (like the
   # main one, not chosen by the panel). The entrypoint adds --path /data --htpasswd-file
   # /data/.htpasswd itself; OPTIONS carries the rest.
-  cat > "$TLS_DIR/docker-compose.yml" <<COMPOSEEOF
+  cat > "$TLS_DIR/docker-compose.yml" <<COMPOSEEOF || return 2
+# generated by kervax backupserver-setup
 services:
   rest-server-tls:
     image: $REST_IMAGE
@@ -1465,14 +1623,16 @@ services:
     environment:
       OPTIONS: "--append-only --path /data --private-repos --tls --tls-cert /certs/cert.pem --tls-key /certs/key.pem"
     volumes:
-      - "$DATA:/data"
+$(data_volume)
       - "$TLS_DIR/cert.pem:/certs/cert.pem:ro"
       - "$TLS_DIR/key.pem:/certs/key.pem:ro"
 COMPOSEEOF
   local tlog; tlog="$(mktemp /tmp/kv-tls.XXXXXX)" || { echo "mktemp failed" >&2; return 2; }
-  ( cd "$TLS_DIR" && docker compose up -d ) >"$tlog" 2>&1 || { echo "rest-tls up failed: $(tr '\n' ' ' <"$tlog")" >&2; rm -f "$tlog"; return 2; }
+  ( cd "$TLS_DIR" && timeout -k 10 180 docker compose up -d ) >"$tlog" 2>&1 || { echo "rest-tls up failed: $(tr '\n' ' ' <"$tlog")" >&2; rm -f "$tlog"; return 2; }
   rm -f "$tlog"
-  refresh_stats
+  probe_rest_server kervax-rest-tls "https://127.0.0.1:$TLS_PORT/" --insecure || { refresh_stats || true; return 2; }
+  touch "$TLS_DIR/.kervax-deployed" || return 2
+  refresh_stats || return 2
   echo "OK native TLS rest-server on :$TLS_PORT$dns_note"
   ufw_docker_note || true
 }
@@ -1873,8 +2033,10 @@ res_write() {  # $1 id, $2 ok, $3 output
   printf 'ok=%s\noutput=%s\n' "$2" "$3" > "$tmp" && chmod 0644 "$tmp" && mv -fT "$tmp" "$RES_DIR/$1.res" || rm -f "$tmp"
 }
 
+with_storage() { load_storage && "$@"; }
+
 cmd_process_spool() {
-  local req id action name hpass repopass client_ip kl kd kw km san_ip san_dns port out ok k v line pubkey
+  local req id action name hpass repopass client_ip kl kd kw km san_ip san_dns port out ok k v line pubkey storage_mount
   local -a repos
   find "$RES_DIR" -maxdepth 1 -type f -name '*.res' -mmin +10 -delete 2>/dev/null || true
   for req in "$REQ_DIR"/*.req; do
@@ -1883,7 +2045,7 @@ cmd_process_spool() {
     # the agent names requests <command id>-<nanoseconds>; a symlink or anything else is not a request
     if [ -L "$req" ] || [ ! -f "$req" ] || [[ ! "$id" =~ ^[0-9A-Za-z_-]{1,64}$ ]]; then rm -f "$req"; continue; fi
     action=""; name=""; hpass=""; repopass=""; client_ip=""; kl=3; kd=7; kw=4; km=6; san_ip=""; san_dns=""; port="$REST_PORT"
-    pubkey=""; repos=()
+    pubkey=""; storage_mount=""; repos=()
     # read the whole line and split on the first '=' (this keeps a trailing '=' inside values)
     while IFS= read -r line; do
       k="${line%%=*}"; v="${line#*=}"
@@ -1891,21 +2053,21 @@ cmd_process_spool() {
         action) action="$v";; name) name="$v";; hpass) hpass="$v";; repopass) repopass="$v";;
         client_ip) client_ip="$v";; keep_last) kl="$v";; keep_daily) kd="$v";;
         keep_weekly) kw="$v";; keep_monthly) km="$v";; san_ip) san_ip="$v";; san_dns) san_dns="$v";;
-        port) port="$v";;
+        port) port="$v";; storage_mount) storage_mount="$v";;
         pubkey) pubkey="$v";; repo) repos+=("$v");;
       esac
     done < <(head -c 65536 "$req")
     rm -f "$req"  # secrets do not linger on disk
     out=""; ok=false
     case "$action" in
-      deploy_server)    if out="$(cmd_deploy_server "$port" 2>&1)"; then ok=true; fi ;;
-      update_image)     if out="$(cmd_update_image 2>&1)"; then ok=true; fi ;;
-      provision_client) if out="$(cmd_provision_client "$name" "$hpass" "$repopass" "$client_ip" "$kl" "$kd" "$kw" "$km" 2>&1)"; then ok=true; fi ;;
-      deploy_tls_front) if out="$(cmd_deploy_tls_front "$san_ip" "$san_dns" 2>&1)"; then ok=true; fi ;;
+      deploy_server)    if out="$(cmd_deploy_server "$port" "$storage_mount" 2>&1)"; then ok=true; fi ;;
+      update_image)     if out="$(with_storage cmd_update_image 2>&1)"; then ok=true; fi ;;
+      provision_client) if out="$(with_storage cmd_provision_client "$name" "$hpass" "$repopass" "$client_ip" "$kl" "$kd" "$kw" "$km" 2>&1)"; then ok=true; fi ;;
+      deploy_tls_front) if out="$(with_storage cmd_deploy_tls_front "$san_ip" "$san_dns" 2>&1)"; then ok=true; fi ;;
       get_cert)         if out="$(cmd_get_cert 2>&1)"; then ok=true; fi ;;
       allow_tls)        if out="$(cmd_allow_tls "$client_ip" 2>&1)"; then ok=true; fi ;;
       get_client_creds) if out="$(cmd_get_client_creds "$name" 2>&1)"; then ok=true; fi ;;
-      mirror_allow)     if out="$(cmd_mirror_allow "$name" "$client_ip" "$pubkey" ${repos[@]+"${repos[@]}"} 2>&1)"; then ok=true; fi ;;
+      mirror_allow)     if out="$(with_storage cmd_mirror_allow "$name" "$client_ip" "$pubkey" ${repos[@]+"${repos[@]}"} 2>&1)"; then ok=true; fi ;;
       *) out="unknown action" ;;
     esac
     res_write "$id" "$ok" "$(printf '%s' "$out" | tr '\n' '\r')" || true
@@ -1915,25 +2077,26 @@ cmd_process_spool() {
 STATE_DIR=/var/lib/kervax
 case "${1:-}" in
   stats)            cmd_stats ;;
-  regen-prune)      cmd_regen_prune ;;
-  adopt-legacy)     shift; cmd_adopt_legacy "$@" ;;
+  storage-dir)      load_storage && printf '%s\n' "$DATA" ;;
+  regen-prune)      with_storage cmd_regen_prune ;;
+  adopt-legacy)     shift; with_storage cmd_adopt_legacy "$@" ;;
   refresh)          refresh_stats ;;
   deploy-server)    shift; cmd_deploy_server "$@" ;;
-  update-image)     cmd_update_image ;;
+  update-image)     with_storage cmd_update_image ;;
   restic-update)    cmd_restic_update ;;
-  forget-group)     shift; cmd_forget_group "$@" ;;
-  merge-group)      shift; cmd_merge_group "$@" ;;
+  forget-group)     shift; with_storage cmd_forget_group "$@" ;;
+  merge-group)      shift; with_storage cmd_merge_group "$@" ;;
   dedup-cron)       cmd_dedup_cron ;;
-  prune-off)        shift; cmd_prune_switch off "$@" ;;
-  prune-on)         shift; cmd_prune_switch on "$@" ;;
-  provision-client) shift; cmd_provision_client "$@" ;;
-  deploy-tls-front) shift; cmd_deploy_tls_front "$@" ;;
+  prune-off)        shift; with_storage cmd_prune_switch off "$@" ;;
+  prune-on)         shift; with_storage cmd_prune_switch on "$@" ;;
+  provision-client) shift; with_storage cmd_provision_client "$@" ;;
+  deploy-tls-front) shift; with_storage cmd_deploy_tls_front "$@" ;;
   get-cert)         cmd_get_cert ;;
   allow-tls)        shift; cmd_allow_tls "$@" ;;
   get-client-creds) shift; cmd_get_client_creds "$@" ;;
-  mirror-allow)     shift; cmd_mirror_allow "$@" ;;
+  mirror-allow)     shift; with_storage cmd_mirror_allow "$@" ;;
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|allow-tls <ip>|get-client-creds <name>|mirror-allow <mirror> <ip> <pubkey> [repo...]|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|storage-dir|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port] [storage-mount]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|allow-tls <ip>|get-client-creds <name>|mirror-allow <mirror> <ip> <pubkey> [repo...]|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
@@ -1949,7 +2112,6 @@ cat > /lib65/kervax/kervax-mirror-serve.new <<'SERVE_EOF'
 # but the time of the last read.
 set -uo pipefail
 export LC_ALL=C
-DATA=/app/rest-server/data
 ALLOW_D=/etc/kervax/mirror-allow
 SERVED_D=/var/lib/kervax/mirror-served
 RE_REL='^(config|keys/[0-9a-f]{64}|snapshots/[0-9a-f]{64}|index/[0-9a-f]{64}|data/[0-9a-f]{2}/[0-9a-f]{64})$'
@@ -1960,6 +2122,7 @@ cmd="${SSH_ORIGINAL_COMMAND:-}"
 [[ "$cmd" =~ ^(list|get)\ ([A-Za-z0-9][A-Za-z0-9._-]{0,127})$ ]] || deny "unknown request"
 op="${BASH_REMATCH[1]}"; repo="${BASH_REMATCH[2]}"
 [ -f "$ALLOW_D/$m" ] && grep -qxF -- "$repo" "$ALLOW_D/$m" || deny "$repo is not allowed"
+DATA="$(/lib65/kervax/kervax-backupserver-helper storage-dir)" || deny "backup storage is unavailable"
 dir="$DATA/$repo"
 [ -d "$dir" ] && [ ! -L "$dir" ] && cd "$dir" || deny "no repository $repo"
 mark() { install -d -m 0755 "$SERVED_D" 2>/dev/null; touch "$SERVED_D/$m--$repo" 2>/dev/null || true; }
@@ -2006,10 +2169,9 @@ else
 fi
 
 # one immediate run (so the file appears) plus a cron entry every minute (stats are cheap)
-"$HELPER" stats > "$STATS.tmp" 2>/dev/null && mv -f "$STATS.tmp" "$STATS" || true
-chmod 0644 "$STATS" 2>/dev/null || true
+"$HELPER" refresh
 cat > "$CRON" <<CRON_EOF
-* * * * * root $HELPER stats > $STATS.tmp 2>/dev/null && mv -f $STATS.tmp $STATS && chmod 0644 $STATS
+* * * * * root $HELPER refresh
 CRON_EOF
 chmod 0644 "$CRON"
 
@@ -2030,9 +2192,9 @@ Unit=kervax-bsrv-req.service
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
-systemctl daemon-reload 2>/dev/null || true
-systemctl enable --now kervax-bsrv-req.path >/dev/null 2>&1 || true
-"$HELPER" process-spool >/dev/null 2>&1 || true
+systemctl daemon-reload
+systemctl enable --now kervax-bsrv-req.path >/dev/null
+systemctl is-active --quiet kervax-bsrv-req.path
 
 # The scripts of already provisioned clients are copies of the previous template: they are
 # refreshed right away, otherwise fixes (rotation metrics, --group-by) would reach new clients
@@ -2040,6 +2202,12 @@ systemctl enable --now kervax-bsrv-req.path >/dev/null 2>&1 || true
 "$HELPER" regen-prune 2>/dev/null | sed 's/^/backupserver-setup: /' || true
 # ...and the cleanups the ansible role scheduled in root's crontab are not run a second time
 "$HELPER" dedup-cron 2>&1 | sed 's/^/backupserver-setup: /' || true
+
+echo "$KERVAX_SETUP_VERSION" > /var/lib/kervax/versions/backupserver-setup.ver
+chmod 0644 /var/lib/kervax/versions/backupserver-setup.ver  # the unprivileged agent reads it
+if systemctl cat kervax-agent >/dev/null 2>&1; then
+  systemctl try-restart kervax-agent
+fi
 
 echo "backupserver-setup: done -> $HELPER; statistics in $STATS (cron every minute), provisioning through the spool $REQ_DIR."
 echo "backupserver-setup: current statistics:"

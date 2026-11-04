@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.62"
+const version = "2.63"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -975,6 +975,8 @@ type backupCommand struct {
 	DumpDir     string `json:"dump_dir,omitempty"`     // dump_setup: каталог дампов
 	DumpKeep    int    `json:"dump_keep,omitempty"`    // dump_setup: сколько последних хранить
 	DumpMinFree int    `json:"dump_minfree,omitempty"` // dump_setup: минимум свободного места, %
+
+	StorageMount string `json:"storage_mount,omitempty"` // deploy_server: точка монтирования для данных
 	// unit_journal: журнал юнита (Name, или _all / _kernel) за Since минут, не больше Lines
 	// строк, приоритет не ниже Prio (err / warning / info)
 	Since int    `json:"since,omitempty"`
@@ -8751,12 +8753,14 @@ func collectBackupServer(dk *dockerInfo) *backupServerInfo {
 			DiskUsed      int64      `json:"disk_used"`
 			DiskFree      int64      `json:"disk_free"`
 			Repos         []repoStat `json:"repos"`
+
+			StorageUnavailable bool `json:"storage_unavailable"`
 		}
 		if json.Unmarshal(b, &st) == nil && st.Present {
 			bs.Present = true
 			// без docker-прокси агент не видит состояние контейнера — верим helper'у (root).
 			// Иначе свежий бэкап-сервер выглядел бы остановленным (ложный алерт).
-			if !seenInDocker {
+			if !seenInDocker || st.StorageUnavailable {
 				bs.Running = st.Running
 			}
 			if st.Version != "" && bs.Version == "" {
@@ -8952,7 +8956,14 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 			postBackupResult(panelURL, token, cmd.ID, false, "неверные параметры провижининга")
 			return
 		}
-		res, out := spoolServerRequest(cmd.ID, lines)
+		wait := 90 * time.Second
+		switch cmd.Action {
+		case "deploy_server":
+			wait = 11 * time.Minute
+		case "deploy_tls_front":
+			wait = 4 * time.Minute
+		}
+		res, out := spoolInFor(bsrvReqDir, bsrvResDir, cmd.ID, lines, "backupserver-setup", wait)
 		postBackupResult(panelURL, token, cmd.ID, res, out)
 		return
 	case "timesync":
@@ -9047,7 +9058,14 @@ func backupServerLines(cmd backupCommand) ([]string, bool) {
 		if cmd.Port < 1024 || cmd.Port > 65535 {
 			return nil, false
 		}
-		return []string{"action=deploy_server", fmt.Sprintf("port=%d", cmd.Port)}, true
+		lines := []string{"action=deploy_server", fmt.Sprintf("port=%d", cmd.Port)}
+		if cmd.StorageMount != "" {
+			if !backupStorageMountOK(cmd.StorageMount) {
+				return nil, false
+			}
+			lines = append(lines, "storage_mount="+cmd.StorageMount)
+		}
+		return lines, true
 	case "update_image":
 		// обновить образ rest-server до зашитого в helper — параметров нет
 		return []string{"action=update_image"}, true
@@ -9317,9 +9335,10 @@ func spoolBackupRequest(cmdID int, lines []string) (bool, string) {
 	return spoolIn(backupReqDir, backupResDir, cmdID, lines, "backup-setup")
 }
 
-// spoolServerRequest — запрос в спул бэкап-сервера (bsrv-req/res).
-func spoolServerRequest(cmdID int, lines []string) (bool, string) {
-	return spoolIn(bsrvReqDir, bsrvResDir, cmdID, lines, "backupserver-setup")
+var backupStorageMountRe = regexp.MustCompile(`^(?:/[A-Za-z0-9._-]+)+$`)
+
+func backupStorageMountOK(mount string) bool {
+	return mount == "/" || (len(mount) <= 512 && backupStorageMountRe.MatchString(mount) && filepath.Clean(mount) == mount)
 }
 
 // spoolTimesyncRequest — запрос в спул синхронизации времени (tsync-req/res).

@@ -24,14 +24,14 @@ cat > "$T/bin/curl" <<EOF
 #!/usr/bin/env bash
 echo "argv: \$*" >> "$T/curl.log"
 case "\$*" in *"-K -"*) echo "stdin: \$(cat)" >> "$T/curl.log" ;; esac
-printf 200
+case "\$*" in *--insecure*) printf 401 ;; *) printf 200 ;; esac
 EOF
 cat > "$T/bin/restic" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in version*) echo "restic 0.19.1 compiled with go1.24 on linux/amd64" ;; *--json*) echo "[]" ;; esac
 exit 0
 EOF
-printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/docker"
+printf '#!/usr/bin/env bash\ncase "$*" in "inspect "*" kervax-rest-tls") echo true ;; esac\nexit 0\n' > "$T/bin/docker"
 printf '#!/usr/bin/env bash\necho "$*" >> %s/ufw.log\nexit 0\n' "$T" > "$T/bin/ufw"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$T/bin/crontab"
 chmod 0755 "$T/bin/"*

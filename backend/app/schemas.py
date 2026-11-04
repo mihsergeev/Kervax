@@ -1526,6 +1526,14 @@ class BackupServerDeployIn(BaseModel):
 
     port: int = Field(64100, ge=1024, le=65535)
     tls: bool = True  # поднять self-signed TLS-фронт на 64101
+    storage_mount: str = Field("", max_length=512, pattern=r"^(?:|/|(?:/[A-Za-z0-9._-]+)+)$")
+
+    @field_validator("storage_mount")
+    @classmethod
+    def _storage_mount(cls, value: str) -> str:
+        if {".", ".."}.intersection(value.split("/")):
+            raise ValueError("нужен абсолютный путь точки монтирования без . и ..")
+        return value
 
 
 class HelperAdvice(BaseModel):

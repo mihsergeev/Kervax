@@ -77,6 +77,7 @@ import { StackedAreaChart, type ChartMark, type Series } from './charts/StackedA
 import { OnboardBlock } from './OnboardBlock'
 import { diskHealth, diskUsage, fmtSetupVersion, limText, memLimFacts, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, srvMuted, tallyTile, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
+import linuxTux from './assets/linux-tux.svg'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
 import { useEscape } from './useEscape'
@@ -6166,13 +6167,15 @@ function AgentPlatformChoice({ value, onChange }: { value: AgentPlatform; onChan
       <div className="agent-platform-options">
         <label>
           <input type="radio" name={name} checked={value === 'linux'} onChange={() => onChange('linux')} />
-          <span aria-hidden="true">🐧</span> Linux
+          <img className="agent-platform-logo" src={linuxTux} alt="" />
+          <span>Linux</span>
         </label>
         <label>
           <input type="radio" name={name} checked={value === 'windows'} onChange={() => onChange('windows')} />
-          <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
-            <path d="M0 0h7v7H0zm9 0h7v7H9zM0 9h7v7H0zm9 0h7v7H9z" />
-          </svg> Windows
+          <svg className="agent-platform-logo windows" viewBox="0 0 24 24" fill="#0078D4" aria-hidden="true" focusable="false">
+            <path d="M0 0h11.4v11.4H0zM12.6 0H24v11.4H12.6zM0 12.6h11.4V24H0zM12.6 12.6H24V24H12.6z" />
+          </svg>
+          <span>Windows</span>
         </label>
       </div>
     </fieldset>

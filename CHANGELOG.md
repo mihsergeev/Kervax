@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.93] - 2026-11-04
+
+- The Add Server dialog now uses large Linux and Windows logos. Linux remains selected by default.
+- The backup-server dialog matches the panel and picks up helper installation from the next agent report without reopening the dialog.
+- New backup servers can store restic repositories on a selected mounted volume. The dialog shows free space and the final directory. Deployment checks that the volume is mounted before creating storage.
+- The panel verifies that rest-server responds and displays deployment progress and errors.
+- Separate storage volumes require Linux agent 2.63 and backupserver-setup 0.39 or later.
+
 ## [1.8.92] - 2026-11-04
 
 ### Fixed

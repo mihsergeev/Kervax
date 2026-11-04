@@ -1791,6 +1791,19 @@ button.ghost.sw-tog-btn { align-self: flex-start; margin: 0; padding: 0.15rem 0.
   flex-direction: column;
   gap: 0.55rem;
 }
+.backup-deploy-modal {
+  width: 34rem;
+}
+.backup-deploy-modal .clients-head {
+  gap: 0.75rem;
+}
+.backup-deploy-modal h3,
+.backup-deploy-modal code {
+  overflow-wrap: anywhere;
+}
+.backup-deploy-modal select {
+  width: 100%;
+}
 .retention-row {
   display: flex;
   gap: 0.5rem;
@@ -2608,9 +2621,11 @@ select:focus {
 .agent-platform legend { margin-bottom: 0.4rem; }
 .agent-platform-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; }
 .agent-platform-options label {
-  display: flex; align-items: center; justify-content: center; gap: 0.5rem;
-  border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem; min-height: 2.5rem; cursor: pointer;
+  position: relative; display: grid; place-items: center; align-content: center; gap: 0.55rem;
+  border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 0.5rem; font-weight: 600; cursor: pointer;
 }
+.agent-platform-logo { display: block; width: 3.25rem; height: 3.25rem; object-fit: contain; }
+.agent-platform-logo.windows { padding: 0.25rem; box-sizing: border-box; }
 .agent-platform-options label:has(:checked) {
   color: var(--accent); border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, transparent);

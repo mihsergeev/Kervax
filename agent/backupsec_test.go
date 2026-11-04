@@ -10,6 +10,22 @@ import (
 	"time"
 )
 
+func TestBackupServerDeployStorage(t *testing.T) {
+	for mount, want := range map[string]bool{
+		"": true, "/": true, "/backup": true, "/srv/archive-2": true,
+		"relative": false, "/backup/../other": false, "/backup//other": false,
+		"/backup\naction=update_image": false, "/backup:$HOME": false,
+	} {
+		lines, ok := backupServerLines(backupCommand{Action: "deploy_server", Port: 64100, StorageMount: mount})
+		if ok != want {
+			t.Errorf("mount %q: got ok %v, want %v", mount, ok, want)
+		}
+		if want && mount != "" && (len(lines) != 3 || lines[2] != "storage_mount="+mount) {
+			t.Errorf("mount %q: unexpected spool lines %q", mount, lines)
+		}
+	}
+}
+
 func TestLocalProbeTarget(t *testing.T) {
 	for _, p := range []siteProbe{
 		{URL: "http://example.com/"},

@@ -247,7 +247,7 @@ def test_helpers_and_agent_agree_on_actions():
     assert 'const mirrorReqDir = "/var/lib/kervax/mirror-req"' in main
     assert 'REQ_DIR="$STATE_DIR/mirror-req"' in ms and 'RES_DIR="$STATE_DIR/mirror-res"' in ms
     assert '"action=set"' in main and '"action=pull"' in main and "set)  if out=" in ms and "pull) systemctl" in ms
-    assert 'mirror_allow)     if out="$(cmd_mirror_allow' in bs
+    assert 'mirror_allow)     if out="$(with_storage cmd_mirror_allow' in bs
     assert re.search(r"pubkey\) pubkey=\"\$v\";; repo\) repos\+=", bs)
     # имя учетки на основном одно и то же
     assert "REMOTE_USER=kervax-mread" in ms and "MREAD_USER=kervax-mread" in bs

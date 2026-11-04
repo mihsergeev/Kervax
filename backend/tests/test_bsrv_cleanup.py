@@ -264,9 +264,9 @@ def test_helper_turns_cleanup_off_and_keeps_it_off():
     """helper 0.34: prune-off / prune-on, regen-prune и adopt-legacy сохраняют выключенное состояние."""
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.38" in src and "\r" not in src
-    assert 'prune-off)        shift; cmd_prune_switch off "$@" ;;' in src
-    assert 'prune-on)         shift; cmd_prune_switch on "$@" ;;' in src
+    assert "KERVAX_SETUP_VERSION=0.39" in src and "\r" not in src
+    assert 'prune-off)        shift; with_storage cmd_prune_switch off "$@" ;;' in src
+    assert 'prune-on)         shift; with_storage cmd_prune_switch on "$@" ;;' in src
     regen = src[src.index("cmd_regen_prune() {"):]
     regen = regen[:regen.index("\n}\n")]
     assert 'write_prune_script "$name" "$kl" "$kd" "$kw" "$km" keep' in regen
