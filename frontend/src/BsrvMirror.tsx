@@ -6,7 +6,7 @@
 import { Fragment, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  backupMirrorPull, backupMirrorRole, backupMirrorSync, backupRepoMirror,
+  backupMirrorPull, backupMirrorRole, backupMirrorSync, backupRepoMirror, backupRepoMirrors,
   type MirrorCopy, type MirrorReport, type Server,
 } from './api'
 import { CountryFlag } from './CountryFlag'
@@ -18,10 +18,83 @@ import { toastError } from './toast'
 import { useI18n } from './i18n'
 import { fmtBytes } from './units'
 import type { RepoTone } from './bsrvRepos'
+import { backupDiskTone } from './bsrvStorage'
 import {
-  HELPER, ago, copyKey, copyShort, copyTone, entryDrift, errText, frozenText, isMirror, mirrorNotReady, mirrorReport,
-  running, syncNotes, when,
+  HELPER, MIRROR_HELPER_MIN, ago, copyKey, copyShort, copyTone, entryDrift, errText, frozenText, isMirror,
+  mirrorNotReady, mirrorReport, running, syncNotes, verLt, when,
 } from './bsrvMirrorState'
+
+export function RepoMirrorSelection({ server: s, repos, servers, canAct, onChanged }: {
+  server: Server; repos: string[]; servers: Server[]; canAct: boolean; onChanged: () => void
+}) {
+  const { t } = useI18n()
+  const [selected, setSelected] = useState<string[]>([])
+  const [pick, setPick] = useState('')
+  const [busy, setBusy] = useState(false)
+  const mirrors = servers.filter((m) => m.id !== s.id && isMirror(m)).sort((a, b) => a.name.localeCompare(b.name))
+  const ready = mirrors.filter((m) => !mirrorNotReady(m, t))
+  const chosen = repos.filter((r) => selected.includes(r))
+  const target = ready.find((m) => String(m.id) === pick) ?? ready[0]
+  const assigned = Object.keys(s.backup_mirror ?? {}).length
+  if (!repos.length || (!canAct && !assigned)) return null
+
+  const save = async (mirrorId: number | null) => {
+    setBusy(true)
+    try {
+      await backupRepoMirrors(s.id, chosen, mirrorId)
+      setSelected([])
+      onChanged()
+    } catch (e) {
+      toastError(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <details className="repo-mirror">
+      <summary className="repo-mirror-h">{t('Вторая копия')}{assigned > 0 && ` · ${assigned}`}</summary>
+      <div className="muted small">{t('Резервный сервер забирает новые снапшоты после бэкапа. Удаления с основного на копию не переходят.')}</div>
+      {canAct && !ready.length && (
+        <div className="muted small">{mirrors.length
+          ? mirrors.map((m) => `${m.name} · ${mirrorNotReady(m, t)}`).join(', ')
+          : t('Добавьте сервер в разделе «Резервные серверы».')}</div>
+      )}
+      <div className="repo-mirror-choices">
+        {repos.map((repo) => {
+          const entry = s.backup_mirror?.[repo]
+          const dest = servers.find((m) => m.id === entry?.mirror)
+          if (!canAct && !entry) return null
+          return (
+            <label key={repo} className="repo-mirror-choice">
+              {canAct && <input type="checkbox" checked={selected.includes(repo)} disabled={busy || (!target && !entry)}
+                onChange={(e) => setSelected(e.target.checked ? [...selected, repo] : selected.filter((r) => r !== repo))} />}
+              <span className="mono">{repo}</span>
+              {entry && <span className="muted small">{dest?.name ?? `#${entry.mirror}`}</span>}
+            </label>
+          )
+        })}
+      </div>
+      {canAct && (
+        <div className="repo-acts">
+          {ready.length > 0 && <>
+            <select className="modal-sort" aria-label={t('Резервный сервер')} value={target?.id ?? ''}
+              onChange={(e) => setPick(e.target.value)} disabled={busy}>
+              {ready.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+            <button className="ghost row-act" disabled={busy || !chosen.length || !target || chosen.every((r) => s.backup_mirror?.[r]?.mirror === target.id)}
+              onClick={() => target && save(target.id)}>{t('Копировать выбранные ({n})', { n: chosen.length })}</button>
+          </>}
+          {chosen.some((r) => s.backup_mirror?.[r]) && (
+            <button className="ghost row-act" disabled={busy} onClick={() => save(null)}
+              title={t('Резервный больше не забирает новое, копия на нем остается. Удалить ее можно только на нем самом.')}>
+              {t('Перестать копировать')}
+            </button>
+          )}
+        </div>
+      )}
+    </details>
+  )
+}
 
 /** "Копия на резервном" в карточке репозитория основного сервера бэкапов. */
 export function RepoMirrorBlock({ server: s, repo, servers, canAct, onChanged }: {
@@ -51,7 +124,7 @@ export function RepoMirrorBlock({ server: s, repo, servers, canAct, onChanged }:
       <div className="repo-mirror">
         <div className="repo-mirror-h">{t('Копия на резервном')}</div>
         <div className="muted small">
-          {t('Резервный сам забирает копию раз в сутки учеткой только для чтения. Взломав этот сервер или клиента, удалить ее с резервного нельзя.')}
+          {t('Резервный сервер забирает новые снапшоты после бэкапа. Удаления с основного на копию не переходят.')}
         </div>
         {ready.length ? (
           <div className="repo-acts">
@@ -72,6 +145,7 @@ export function RepoMirrorBlock({ server: s, repo, servers, canAct, onChanged }:
   }
   const m = servers.find((x) => x.id === entry.mirror)
   const rep = m ? mirrorReport(m) : null
+  const protectedCopy = !!rep?.helper && !verLt(rep.helper, MIRROR_HELPER_MIN)
   const c = rep?.copies.find((x) => x.src === entry.src && x.repo === repo)
   const drift = m ? entryDrift(s, repo, m, t) : ''
   const notes = syncNotes(s, entry.mirror, t)
@@ -79,6 +153,7 @@ export function RepoMirrorBlock({ server: s, repo, servers, canAct, onChanged }:
   let line: string
   if (!m) line = t('резервного сервера больше нет в панели')
   else if (!rep) line = t('{m} не присылает отчет о копиях (helper mirror-setup)', { m: m.name })
+  else if (!protectedCopy) line = t('нужен mirror-setup {v} или новее', { v: MIRROR_HELPER_MIN })
   else if (!c) line = drift || t('ждет первой перекачки')
   else if (c.frozen) line = t('копия заморожена: {why}. Ничего не удаляется и не забирается, пока на резервном не разморозят', { why: frozenText(c, t) })
   else if (running(c, rep)) line = t('забирается прямо сейчас, в копии {sz}', { sz: fmtBytes(c.bytes, '0') })
@@ -95,9 +170,11 @@ export function RepoMirrorBlock({ server: s, repo, servers, canAct, onChanged }:
       <div className={tone === 'bad' ? 't-down' : tone === 'warn' ? 't-degraded' : undefined}>{line}</div>
       {c && c.gone_files > 0 && (
         <div className="muted small">
-          {t('Пропало на основном и держится в копии еще до {d} дн.: {n} файлов, {sz}', {
-            d: rep?.keep_days ?? 0, n: c.gone_files, sz: fmtBytes(c.gone_bytes, '0'),
-          })}
+          {protectedCopy
+            ? t('Удалено на основном, сохранено в копии: {n} файлов, {sz}', { n: c.gone_files, sz: fmtBytes(c.gone_bytes, '0') })
+            : t('Пропало на основном и держится в копии еще до {d} дн.: {n} файлов, {sz}', {
+              d: rep?.keep_days ?? 0, n: c.gone_files, sz: fmtBytes(c.gone_bytes, '0'),
+            })}
         </div>
       )}
       {drift && c && <div className="t-degraded small">{drift}</div>}
@@ -173,8 +250,8 @@ export function MirrorModal({ server: s, servers, canAct, onChanged, onClose }: 
         {rep && (
           <div className="srv-meta srv-meta-line">
             <span className="srv-meta-item"><span className="srv-meta-k">{t('копии')}</span> <span className="mono">{rep.data_dir}</span></span>
-            <span className="srv-meta-item"><span className="srv-meta-k">{t('удаленное на основном держится')}</span> {t('{n} дн.', { n: rep.keep_days })}</span>
-            <span className="srv-meta-item"><span className="srv-meta-k">{t('забирает в')}</span> {rep.pull_at}</span>
+            {verLt(rep.helper, MIRROR_HELPER_MIN) && <span className="srv-meta-item"><span className="srv-meta-k">{t('удаленное на основном держится')}</span> {t('{n} дн.', { n: rep.keep_days })}</span>}
+            <span className="srv-meta-item"><span className="srv-meta-k">{t('ежедневная сверка')}</span> {rep.pull_at}</span>
             <span className="srv-meta-item"><span className="srv-meta-k">mirror-setup</span> {rep.helper}</span>
             <span className="srv-meta-item"><span className="srv-meta-k">{t('обновлено')}</span> {fmtRel(s.last_seen)}</span>
           </div>
@@ -196,7 +273,7 @@ export function MirrorModal({ server: s, servers, canAct, onChanged, onClose }: 
                 {pct != null && rep && (
                   <NetTile label={t('Место на диске')} value={`${pct}%`}
                     sub={t('свободно {f} из {tt}', { f: fmtBytes(rep.disk_free), tt: fmtBytes(rep.disk_total) })}
-                    tone={pct >= 90 ? 'bad' : pct >= 80 ? 'warn' : 'ok'} />
+                    tone={backupDiskTone(rep.disk_total, rep.disk_free)} />
                 )}
                 {rep && (
                   <NetTile label={t('Следующая перекачка')} value={rep.running ? t('идет') : rep.next_run ? when(rep.next_run) : '—'}
@@ -256,12 +333,13 @@ export function MirrorModal({ server: s, servers, canAct, onChanged, onClose }: 
 
 function CopyDetail({ c, rep, primary }: { c: MirrorCopy; rep: MirrorReport; primary?: Server }) {
   const { t } = useI18n()
+  const protectedCopy = !verLt(rep.helper, MIRROR_HELPER_MIN)
   const tone = copyTone(c, rep)
   const issues: { tone: RepoTone; head: string; why: string; cmd?: string }[] = []
   if (c.frozen)
     issues.push({
       tone: 'bad', head: t('Копия заморожена'),
-      why: t('{why}. Так бывает, когда основной взломали или репозиторий стерли; бывает и после большой чистки. Пока копия заморожена, из нее ничего не удаляется и ничего нового не берется. Если потеря ожидаемая, разморозьте на резервном: то, что сейчас на основном, станет точкой отсчета, а пропавшее там продержится в копии еще срок хранения.', { why: frozenText(c, t) }),
+      why: t('{why}. Если потеря ожидаемая, разморозьте копирование на резервном. Текущее содержимое основного станет точкой отсчета.', { why: frozenText(c, t) }),
       cmd: `${HELPER} unfreeze ${c.src} ${c.repo}`,
     })
   else if (c.enabled && tone === 'bad')
@@ -307,7 +385,8 @@ function CopyDetail({ c, rep, primary }: { c: MirrorCopy; rep: MirrorReport; pri
         <NetTile label={t('Снапшоты')} value={String(c.snaps)}
           sub={lag ? t('свежий снапшот основного еще не здесь ({ago})', { ago: ago(c.src_newest, t) }) : t('на основном {n}', { n: c.src_snaps })} />
         <NetTile label={t('Удалено на основном')} value={String(c.gone_files)}
-          sub={t('держится еще до {d} дн., {sz}', { d: rep.keep_days, sz: fmtBytes(c.gone_bytes, '0') })} />
+          sub={protectedCopy ? t('сохранено в копии, {sz}', { sz: fmtBytes(c.gone_bytes, '0') })
+            : t('держится еще до {d} дн., {sz}', { d: rep.keep_days, sz: fmtBytes(c.gone_bytes, '0') })} />
         {rep.check_days > 0 && (
           <NetTile label={t('Проверка хешей')} value={c.check_ts ? ago(c.check_ts, t) : t('не было')}
             sub={t('каждый файл раз в {n} дн.', { n: rep.check_days })} tone={c.check_bad ? 'warn' : c.check_ts ? 'ok' : undefined} />
@@ -341,7 +420,9 @@ function MirrorHowTo({ rep }: { rep: MirrorReport }) {
       {open && (
         <div className="muted small mirror-howto-b">
           <p>{t('Резервный сам заходит на основной по SSH учеткой kervax-mread, которой можно только читать выбранные репозитории. У основного нет ни ключа, ни входа сюда. Файлы restic зашифрованы и названы по sha256 содержимого: копия берет файл, только если хеш совпал, и никогда не перезаписывает то, что уже есть.')}</p>
-          <p>{t('Удаленное на основном держится в копии {d} дн. Если за одну перекачку пропало {p}% снапшотов или данных или сменился config, копия замораживается. Сроки и время меняются только на резервном, в /etc/kervax/mirror.conf.', { d: rep.keep_days, p: rep.freeze_pct })}</p>
+          <p>{verLt(rep.helper, MIRROR_HELPER_MIN)
+            ? t('Удаленное на основном держится в копии {d} дн. Если за одну перекачку пропало {p}% снапшотов или данных или сменился config, копия замораживается. Сроки и время меняются только на резервном, в /etc/kervax/mirror.conf.', { d: rep.keep_days, p: rep.freeze_pct })
+            : t('Удаления на основном не переходят на резервный. Копирование приостанавливается при потере {p}% снапшотов или данных или смене config.', { p: rep.freeze_pct })}</p>
           <p>{t('Восстановить из копии: restic -r <каталог копии> с паролем репозитория из сейфа. Саму копию не трогайте: если restic попросит починить индекс, делайте restic repair index на отдельной копии этого каталога.')}</p>
           <FixCmd cmd={`${HELPER} status`} />
         </div>

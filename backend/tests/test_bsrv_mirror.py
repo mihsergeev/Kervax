@@ -4,17 +4,25 @@
 их сам учеткой только для чтения на основном, панель только называет, что копировать: удалить копию,
 сменить адрес известного основного и разморозить копию она не может."""
 import asyncio
+import io
+import os
 import re
+import subprocess
+import sys
+import tarfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import pytest
+from sqlalchemy import select
 
 from app import bsrv_mirror as bm
 from app import collector
 from app.api import bsrv_mirror as api
+from app.models import BackupCommand
 from app.setup_scripts import setup_needed
 
 AGENT = Path(__file__).resolve().parents[2] / "agent"
@@ -34,8 +42,8 @@ def _primary_report(repos=("web-a", "db-b"), mirrors=None) -> dict:
 
 def _mirror_report(copies=None, sources=None, **extra) -> dict:
     now = int(time.time())
-    return {**BASE, "clock_unix": now, "setup_versions": {"mirror-setup": "0.1"},
-            "extras": {"backup-mirror": {"v": 1, "ts": now, "pubkey": PUB, "copies": copies or [],
+    return {**BASE, "clock_unix": now, "setup_versions": {"mirror-setup": "0.2"},
+            "extras": {"backup-mirror": {"v": 1, "ts": now, "helper": "0.2", "pubkey": PUB, "copies": copies or [],
                                         "sources": sources or {}, "running": False, "current": "", **extra}}}
 
 
@@ -163,6 +171,69 @@ async def test_only_admin_and_old_agent_refused(client: httpx.AsyncClient, auth_
     assert r.status_code == 400 and "0.38" in r.json()["detail"]
 
 
+async def test_bulk_selection_and_pull_after_snapshot(client, auth_headers, monkeypatch):
+    sent = _fake_commands(monkeypatch)
+    primary, ptok = await _server(client, auth_headers, "source-a")
+    mirror, mtok = await _server(client, auth_headers, "mirror-a")
+    url = f"/api/servers/{primary}/backup/repo-mirrors"
+    await client.post(f"/api/servers/{mirror}/backup/mirror-role", json={"on": True}, headers=auth_headers)
+    p = _primary_report(repos=("web-a", "db-b", "other"), mirrors={bm.mirror_name(mirror): {"repos": ["web-a", "db-b"]}})
+    for repo in p["backup_server"]["repos"]:
+        repo["last_activity"] = 0
+    await _report(client, ptok, p, "203.0.113.5")
+    await _report(client, mtok, _mirror_report(helper="0.1"), "198.51.100.20")
+    r = await client.post(url, json={"repos": ["web-a", "db-b"], "mirror_id": mirror}, headers=auth_headers)
+    assert r.status_code == 400 and "0.2" in r.json()["detail"]
+    assert not sent
+    await _report(client, mtok, _mirror_report(), "198.51.100.20")
+    r = await client.post(url, json={"repos": ["web-a", "missing"], "mirror_id": mirror}, headers=auth_headers)
+    assert r.status_code == 400 and not sent
+    r = await client.post(url, json={"repos": ["web-a", "db-b", "web-a"], "mirror_id": mirror}, headers=auth_headers)
+    assert r.status_code == 200 and set(r.json()["backup_mirror"]) == {"web-a", "db-b"}
+    await _settle()
+    assert len(sent) == 2 and sent[0][2]["repos"] == ["db-b", "web-a"]
+
+    factory = client._transport.app.state.session_factory
+    now = datetime.now(timezone.utc)
+    sources = {"source-a": {"repos": ["web-a", "db-b"]}}
+    tick = lambda: bm.queue_pulls(factory, now, collector.seen_online)
+    await _report(client, mtok, _mirror_report(sources=sources), "198.51.100.20")
+    await tick()
+    async with factory() as session:
+        assert await session.scalar(select(BackupCommand)) is None
+
+    # A new snapshot on an unselected repository does not trigger copying.
+    stamp = int(now.timestamp())
+    p["backup_server"]["repos"][2]["last_activity"] = stamp
+    await _report(client, ptok, p, "203.0.113.5")
+    await tick()
+    async with factory() as session:
+        assert await session.scalar(select(BackupCommand)) is None
+
+    p["backup_server"]["repos"][0]["last_activity"] = stamp
+    await _report(client, ptok, p, "203.0.113.5")
+    await tick()
+    await tick()
+    async with factory() as session:
+        cmd, = list(await session.scalars(select(BackupCommand)))
+        assert (cmd.server_id, cmd.action, cmd.mode) == (mirror, "mirror", "pull")
+        cmd.status = "done"
+        cmd.created_at = now - timedelta(minutes=11)
+        await session.commit()
+    await _report(client, mtok, _mirror_report(sources=sources, copies=[
+        {"src": "source-a", "repo": "web-a", "src_newest": stamp},
+    ]), "198.51.100.20")
+    await tick()
+    async with factory() as session:
+        assert len(list(await session.scalars(select(BackupCommand)))) == 1
+
+    # Stopping one repo leaves the other assignment intact and waits for new configuration.
+    r = await client.post(url, json={"repos": ["db-b"], "mirror_id": None}, headers=auth_headers)
+    assert r.status_code == 200 and set(r.json()["backup_mirror"]) == {"web-a"}
+    await _settle()
+    assert sent[-1][2]["sources"][0]["repos"] == ["web-a"]
+
+
 def _srv(**kw):
     d = {"id": 1, "name": "x", "external_ip": "", "agent_ip": "", "agent_version": "2.57", "backup_mirror": None,
          "backup_mirror_role": False, "last_report": {}}
@@ -255,7 +326,7 @@ def test_helpers_and_agent_agree_on_actions():
 
 def test_mirror_helper_rules():
     ms = _src("mirror-setup.sh")
-    assert "\nKERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR" in ms
+    assert "\nKERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR" in ms
     # ставится только туда, где панель сделала сервер резервным
     assert "/api/agent/mirror-wanted" in ms
     # скрипты в /lib65, не в /usr
@@ -263,7 +334,7 @@ def test_mirror_helper_rules():
     # перекачка не от root и в песочнице, которая пишет только в свой каталог
     assert "-p User=\"$MUSER\"" in ms and "ProtectSystem=strict" in ms and 'ReadWritePaths="$stg"' in ms
     # файл берется, только если sha256 совпал с именем, и никогда не перезаписывается
-    assert '[ "$h" != "${rel##*/}" ]' in ms and 'mv -n "$f" "$copy/$rel"' in ms
+    assert 'sha256sum --check --status "$stg/sums"' in ms and 'mv -nT -- "$f" "$copy/$rel"' in ms
     # панель через спул умеет только set и pull: удалить, разморозить, сменить адрес - только руками
     spool = ms[ms.index("cmd_process_spool() {"):]
     spool = spool[:spool.index("\n}\n")]
@@ -272,15 +343,65 @@ def test_mirror_helper_rules():
     assert 'mv -f "$HELPER.new" "$HELPER"' in ms
 
 
-def test_serve_only_reads():
+@pytest.mark.skipif(sys.platform != "linux", reason="the mirror reader uses Linux file descriptors")
+def test_serve_only_reads(tmp_path):
     bs = _src("backupserver-setup.sh")
-    serve = bs[bs.index("<<'SERVE_EOF'"):bs.index("\nSERVE_EOF\n")]
-    assert "^(list|get)\\ " in serve
-    # удаляет только свой временный список имен
-    rms = [x.strip() for x in serve.splitlines() if re.search(r"\brm\b", x)]
-    assert rms == ["trap 'rm -f \"$tmp\"' EXIT"] and "> \"$dir" not in serve
-    assert "tar --no-recursion --ignore-failed-read -cf -" in serve
     # sudo без pty: иначе поток tar гнется
     assert "!use_pty" in bs and 'env_keep += "SSH_ORIGINAL_COMMAND"' in bs
     # ключ резервного привязан к его адресу и к одной команде
     assert 'restrict,from="%s",command="sudo -n %s %s"' in bs
+    serve = bs.split("<<'SERVE_EOF'\n", 1)[1].split("\nSERVE_EOF\n", 1)[0]
+    allow_dir = tmp_path / "allow"
+    allow_dir.mkdir()
+    (allow_dir / "mirror").write_text("repo\nalias\n")
+    storage = tmp_path / "storage"
+    repo = storage / "repo"
+    (repo / "data" / "ab").mkdir(parents=True)
+    (repo / "keys").mkdir()
+    (repo / "config").write_bytes(b"config")
+    (repo / "data" / "ab" / ("ab" * 32)).write_bytes(b"approved")
+    other = storage / "other"
+    (other / "data" / "cd").mkdir(parents=True)
+    secret = other / "data" / "cd" / ("cd" * 32)
+    secret.write_bytes(b"unapproved fixture")
+    (repo / "data" / "cd").symlink_to(secret.parent)
+    (repo / "keys" / ("a" * 64)).symlink_to(secret)
+    os.link(secret, repo / "keys" / ("b" * 64))
+    (storage / "alias").symlink_to(other)
+    helper = tmp_path / "storage-helper"
+    helper.write_text(f"#!/bin/sh\nprintf '%s\\n' '{storage}'\n")
+    helper.chmod(0o755)
+    serve = serve.replace("/etc/kervax/mirror-allow", str(allow_dir))
+    serve = serve.replace("/var/lib/kervax/mirror-served", str(tmp_path / "served"))
+    serve = serve.replace("/lib65/kervax/kervax-backupserver-helper", str(helper))
+
+    def request(command, path=""):
+        return subprocess.run(
+            [sys.executable, "-I", "-c", serve, "mirror"],
+            env={**os.environ, "SSH_ORIGINAL_COMMAND": command},
+            input=path.encode(), capture_output=True, timeout=5,
+        )
+
+    pack = "data/ab/" + "ab" * 32
+    listed = request("list repo")
+    assert listed.returncode == 0, listed.stderr
+    assert {line.split()[0] for line in listed.stdout.decode().splitlines()} == {"config", pack, "end"}
+    assert listed.stdout.splitlines()[-1] == b"end 2"
+    fetched = request("get repo", f"{pack}\n")
+    assert fetched.returncode == 0, fetched.stderr
+    with tarfile.open(fileobj=io.BytesIO(fetched.stdout)) as archive:
+        assert archive.getnames() == [pack]
+        assert archive.extractfile(pack).read() == b"approved"
+    for command, path in [
+        ("list alias", ""),
+        ("get alias", f"data/cd/{'cd' * 32}\n"),
+        ("get repo", f"data/cd/{'cd' * 32}\n"),
+        ("get repo", f"keys/{'a' * 64}\n"),
+        ("get repo", f"keys/{'b' * 64}\n"),
+        ("get repo", "../other/config\n"),
+        ("list other", ""),
+        ("sh", ""),
+    ]:
+        denied = request(command, path)
+        assert denied.returncode == 2 and b"refused:" in denied.stderr
+        assert b"unapproved fixture" not in denied.stdout

@@ -10,10 +10,9 @@
 #  * restic files are encrypted and (config aside) named by the sha256 of their content, so they are
 #    copied as they are, without repository passwords, and a file is taken only when its sha256
 #    matches its name. A file already in the copy is never overwritten;
-#  * a file removed on the main server (prune, forget, or an intruder) stays in the copy KEEP_DAYS
-#    more (set here, in /etc/kervax/mirror.conf). When one run sees a large part of the repository
-#    gone at once, its config replaced or removed, the copy freezes: nothing is removed from it and
-#    nothing new is taken until root on this server runs `unfreeze`;
+#  * a file removed on the main server (prune, forget, or an intruder) stays in the copy.
+#    When one run sees a large part of the repository gone at once, its config replaced or removed,
+#    the copy freezes: nothing new is taken until root on this server runs `unfreeze`;
 #  * the panel can only add a repository to the list, pause it or ask for a pull now (the mirror
 #    action through the spool). It cannot remove a copy, change the address or host key of a main
 #    server already on the list, or unfreeze - those are commands for root on this server;
@@ -41,7 +40,8 @@ fi
 
 # 0.1: copies of chosen repositories pulled over SSH from the main backup servers, checked by
 #      sha256, removals reach the copy only after KEEP_DAYS, a large loss at once freezes the copy
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.2: keep repository files regardless of deletions at the source; accept only complete pulls
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Only where the panel made this server a mirror (Backups -> Mirror servers). Being a mirror is a
 # decision of a person, not a property of the node: the playbook and the installer ask the panel.
 KERVAX_SETUP_WHEN="sed -n s/^token=//p /etc/kervax-agent.conf | curl -fsS -m 15 --data-binary @- $(sed -n s/^url=//p /etc/kervax-agent.conf 2>/dev/null)/api/agent/mirror-wanted | grep -qx yes"
@@ -84,8 +84,8 @@ if [ ! -f "$CONF" ]; then
 # Where the copies live, one directory per main server and repository. Change it before the
 # first copy (or move the directory yourself and change it then).
 DATA=/srv/kervax-mirror
-# A file removed on the main server stays in the copy this many days
-KEEP_DAYS=30
+# Retention for locally detected damaged files in quarantine
+QUARANTINE_DAYS=30
 # The copy freezes when one run sees this share (%) of its snapshots or data gone at once
 FREEZE_PCT=50
 # Daily pull, local time of this server
@@ -111,6 +111,9 @@ if systemctl cat kervax-agent >/dev/null 2>&1 \
   systemctl try-restart kervax-agent 2>/dev/null || true
 fi
 
+# Do not report an upgrade while a pull is still running the old deletion policy.
+exec 9> /run/kervax-mirror.lock
+flock -w 60 9 || { echo "mirror-setup: a pull is running, try later" >&2; exit 2; }
 # Written next to the old one and swapped in with mv: bash reads a running script as it goes.
 cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
@@ -134,30 +137,31 @@ REMOTE_USER=kervax-mread
 LOCK=/run/kervax-mirror.lock
 CURRENT=/run/kervax-mirror.current
 PULL_UNIT=kervax-mirror-pull
-# one request to the main server takes at most this much (bytes / files), so a broken
-# connection costs one batch and the next run goes on from what is already in the copy
+# Bound the size of each transfer request to the main server.
 BATCH_BYTES=$((4 * 1024 * 1024 * 1024))
 BATCH_FILES=2000
 # restic file names: config plus everything named by the sha256 of its content
 RE_REL='^(config|keys/[0-9a-f]{64}|snapshots/[0-9a-f]{64}|index/[0-9a-f]{64}|data/[0-9a-f]{2}/[0-9a-f]{64})$'
 
-DATA=/srv/kervax-mirror; KEEP_DAYS=30; FREEZE_PCT=50; PULL_AT=07:30; CHECK_DAYS=7; MIN_FREE_PCT=5
+DATA=/srv/kervax-mirror; QUARANTINE_DAYS=30; FREEZE_PCT=50; PULL_AT=07:30; CHECK_DAYS=7; MIN_FREE_PCT=5
 # The settings are read, not sourced, and every value is checked: a broken value keeps the default
 load_conf() {
-  local k v line
+  local k v line legacy_days="" quarantine_days=""
   [ -f "$CONF" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|'#'*) continue ;; esac
     k="${line%%=*}"; v="${line#*=}"; v="${v%%#*}"; v="${v%"${v##*[![:space:]]}"}"
     case "$k" in
       DATA) [[ "$v" =~ ^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$ ]] && [[ "$v" != *..* ]] && DATA="$v" ;;
-      KEEP_DAYS) [[ "$v" =~ ^[0-9]{1,4}$ ]] && [ "$v" -ge 1 ] && KEEP_DAYS="$v" ;;
+      KEEP_DAYS) [[ "$v" =~ ^[0-9]{1,4}$ ]] && [ "$v" -ge 1 ] && legacy_days="$((10#$v))" ;;
+      QUARANTINE_DAYS) [[ "$v" =~ ^[0-9]{1,4}$ ]] && [ "$v" -ge 1 ] && quarantine_days="$((10#$v))" ;;
       FREEZE_PCT) [[ "$v" =~ ^[0-9]{1,3}$ ]] && [ "$v" -ge 1 ] && [ "$v" -le 100 ] && FREEZE_PCT="$v" ;;
       PULL_AT) [[ "$v" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] && PULL_AT="$v" ;;
       CHECK_DAYS) [[ "$v" =~ ^[0-9]{1,3}$ ]] && CHECK_DAYS="$v" ;;
       MIN_FREE_PCT) [[ "$v" =~ ^[0-9]{1,2}$ ]] && MIN_FREE_PCT="$v" ;;
     esac
   done < "$CONF"
+  QUARANTINE_DAYS="${quarantine_days:-${legacy_days:-30}}"
   return 0
 }
 
@@ -294,37 +298,40 @@ drop_check() {  # prev cur
     }' "$1" "$2"
 }
 
-# take what the transfer left in the staging directory into the copy. Prints "files bytes bad"
+# An SSH command may succeed even when tar skipped a file that disappeared since the listing.
+# Verify the entire transfer before publishing any new repository files.
+verify_staging() {  # stg
+  local stg="$1"
+  (cd "$stg/files" && find . -regextype posix-extended -regex "\./${RE_REL#^}" \
+    -type f -links 1 -printf '%P %s\n' | sort) > "$stg/got" || return 1
+  awk '{ print $1, $2 }' "$stg/need" | sort | cmp -s - "$stg/got" || return 1
+  awk '
+    $1 == "config" { if ($2 < 1 || $2 > 65536) exit 1; next }
+    {
+      h = substr($1, length($1) - 63)
+      if ($1 ~ /^data\// && substr($1, 6, 2) != substr(h, 1, 2)) exit 1
+      print h "  " $1
+    }' "$stg/need" > "$stg/sums" || return 1
+  [ ! -s "$stg/sums" ] || (cd "$stg/files" && sha256sum --check --status "$stg/sums")
+}
+
+# Data and indexes precede snapshots. On the first pull config is published last, so restic
+# cannot open a new copy until all of its repository files are present.
 ingest() {  # stg copy
-  local stg="$1" copy="$2" rel h f files=0 bytes=0 bad=0 sz
-  [ -d "$stg/files" ] || { echo "0 0 0"; return 0; }
-  find "$stg/files" -type f -printf '%P\n' | grep -E "$RE_REL" | grep -v '^config$' > "$stg/got" || true
-  : > "$stg/sums"
-  if [ -s "$stg/got" ]; then
-    (cd "$stg/files" && xargs -d '\n' -r sha256sum -- < "$stg/got") > "$stg/sums" 2>/dev/null || true
-  fi
-  while read -r h rel; do
+  local stg="$1" copy="$2" rel sz f files=0 bytes=0
+  while read -r rel sz _; do
     f="$stg/files/$rel"
-    [ -f "$f" ] && [ ! -L "$f" ] || continue
-    # the name is the sha256 of the content; a data file also sits under its first two characters
-    if [ "$h" != "${rel##*/}" ] || { [[ "$rel" == data/* ]] && [ "${rel:5:2}" != "${h:0:2}" ]; }; then
-      bad=$((bad + 1)); continue
-    fi
-    [ -e "$copy/$rel" ] && continue
-    install -d -m 0700 "$copy/${rel%/*}"
-    sz="$(stat -c %s "$f")"
-    chown root:root "$f" && chmod 0600 "$f" && mv -n "$f" "$copy/$rel" || continue
+    if [ -e "$copy/$rel" ] || [ -L "$copy/$rel" ]; then continue; fi
+    if [ "$rel" != config ]; then install -d -m 0700 "$copy/${rel%/*}" || return 1; fi
+    chown root:root "$f" && chmod 0600 "$f" && mv -nT -- "$f" "$copy/$rel" || return 1
     files=$((files + 1)); bytes=$((bytes + sz))
-  done < "$stg/sums"
-  # a file the main server sent that is not in the sums was not readable or had a foreign name
-  bad=$((bad + $(wc -l < "$stg/got") - $(wc -l < "$stg/sums")))
-  [ "$bad" -ge 0 ] || bad=0
-  echo "$files $bytes $bad"
+  done < "$stg/need"
+  echo "$files $bytes"
 }
 
 pull_one() {  # src repo
   local src="$1" repo="$2" host port hk copy st stg now budget dfl total free rc fail err line
-  local reason detail res
+  local reason detail nf nb
   copy="$(copy_dir "$src" "$repo")"; st="$(state_dir "$src" "$repo")"; stg="$DATA/.staging/$src--$repo"
   install -d -m 0700 "$copy" "$st"
   [ -f "$st/added" ] || date +%s > "$st/added"
@@ -369,7 +376,18 @@ pull_one() {  # src repo
   err="$(grep -v '^[[:space:]]*$' "$stg/err" 2>/dev/null | tail -n 3 | tr '\n' ' ' | cut -c1-300 || true)"
   [ -n "$fail" ] || [ "$rc" -eq 0 ] || fail=run
   if [ ! -f "$stg/list.ok" ]; then
+    if [ -f "$copy/config" ] && [ ! -f "$st/accept-next" ] &&
+       grep -qxF -- "refused: no repository $repo" "$stg/err"; then
+      freeze "$src" "$repo" repo_gone "the repository is gone"
+      fail_status "$src" "$repo" frozen "repo_gone the repository is gone"
+      rm -rf "$stg"; return 0
+    fi
     fail_status "$src" "$repo" "${fail:-run}" "${err:-the transfer stopped (code $rc)}"
+    rm -rf "$stg"; return 0
+  fi
+  if [ -f "$copy/config" ] && ! grep -q '^config ' "$stg/list"; then
+    freeze "$src" "$repo" config_gone "the config file is gone"
+    fail_status "$src" "$repo" frozen "config_gone the config file is gone"
     rm -rf "$stg"; return 0
   fi
   # a whole listing: first, did the main server lose a large part of the repository at once?
@@ -382,59 +400,43 @@ pull_one() {  # src repo
       rm -rf "$stg"; return 0
     fi
   fi
-  # config: taken once, after that it must stay the same (a new config is a new repository)
-  if [ -f "$stg/files/config" ] && [ ! -L "$stg/files/config" ]; then
-    if [ ! -f "$copy/config" ]; then
-      [ "$(stat -c %s "$stg/files/config")" -le 65536 ] && install -m 0600 "$stg/files/config" "$copy/config"
-    elif ! cmp -s "$stg/files/config" "$copy/config"; then
-      freeze "$src" "$repo" config_changed "the config of the repository changed"
-      fail_status "$src" "$repo" frozen "config_changed the config of the repository changed"
-      rm -rf "$stg"; return 0
-    fi
+  if [ ! -f "$stg/fetched" ] || [ "$rc" -ne 0 ]; then
+    fail_status "$src" "$repo" "${fail:-run}" "${err:-the transfer stopped (code $rc)}"
+    rm -rf "$stg"; return 0
   fi
-  res="$(ingest "$stg" "$copy")"
-  set -- $res
-  local nf="$1" nb="$2" bad="$3"
-  # what the copy has now, when each file was last seen on the main server, and what to remove:
-  # a file gone from the main server longer than KEEP_DAYS ago
-  (cd "$copy" && find . -type f -printf '%P %s %T@\n') | grep -E '^(config|keys/|snapshots/|index/|data/)' | sort -k1,1 > "$stg/copy" || true
-  touch "$st/seen"
-  awk -v now="$now" -v keep="$((KEEP_DAYS * 86400))" -v seen="$stg/seen.new" -v rm_list="$stg/remove" -v stat="$stg/stat" '
-    FILENAME == ARGV[1] { first[$1] = $2; last[$1] = $3; next }
-    FILENAME == ARGV[2] { cur[$1] = 1; ns++; if ($1 ~ /^snapshots\//) { cs++; if ($3 > cn) cn = $3 } sb += $2; next }
+  if ! grep -q '^config ' "$stg/list" || ! verify_staging "$stg"; then
+    fail_status "$src" "$repo" integrity "missing, unexpected or damaged repository files in the transfer"
+    set_status "$src" "$repo" bad_new 1
+    rm -rf "$stg"; return 0
+  fi
+  # An existing config must stay the same (a new config is a new repository).
+  if [ -f "$copy/config" ] && ! cmp -s "$stg/files/config" "$copy/config"; then
+    freeze "$src" "$repo" config_changed "the config of the repository changed"
+    fail_status "$src" "$repo" frozen "config_changed the config of the repository changed"
+    rm -rf "$stg"; return 0
+  fi
+  local ingested
+  ingested="$(ingest "$stg" "$copy")" || return 1
+  read -r nf nb <<< "$ingested"
+  # Count retained files missing from the source. The source listing is never a deletion list.
+  (cd "$copy" && find . -type f -printf '%P %s %T@\n') | grep -E "${RE_REL%\$} " > "$stg/copy" || return 1
+  awk '
+    FILENAME == ARGV[1] { cur[$1] = 1; ns++; if ($1 ~ /^snapshots\//) { cs++; if ($3 > cn) cn = $3 } sb += $2; next }
     {
-      f = ($1 in first) ? first[$1] : now
-      l = ($1 in cur) ? now : (($1 in last) ? last[$1] : now)
-      if (!($1 in cur)) {
-        if (l < now - keep) { print $1 > rm_list; rmn++; next }
-        gn++; gb += $2
-      }
-      print $1, f, l > seen
+      if (!($1 in cur)) { gn++; gb += $2 }
       files++; bytes += $2
       if ($1 ~ /^snapshots\//) { snaps++; if (int($3) > newest) newest = int($3) }
     }
     END {
-      printf "files=%d\nbytes=%.0f\nsnaps=%d\nnewest=%d\nsrc_files=%d\nsrc_bytes=%.0f\nsrc_snaps=%d\nsrc_newest=%d\ngone_files=%d\ngone_bytes=%.0f\nremoved=%d\n", \
-        files, bytes, snaps, newest, ns, sb, cs, cn, gn, gb, rmn > stat
-    }' "$st/seen" "$stg/list" "$stg/copy"
-  touch "$stg/remove" "$stg/seen.new"
-  while read -r rel; do
-    [[ "$rel" =~ $RE_REL ]] && rm -f -- "$copy/$rel"
-  done < "$stg/remove"
-  [ -s "$stg/remove" ] && logger -t kervax-mirror "copy $src/$repo: $(wc -l < "$stg/remove") files gone from $src more than $KEEP_DAYS days ago removed" 2>/dev/null || true
-  mv -f "$stg/seen.new" "$st/seen"
-  cp -f "$stg/list" "$st/list.prev"
-  rm -f "$st/accept-next"
-  # a run that stopped half way still took what came whole; it is not "ok" until it is complete
+      printf "files=%d\nbytes=%.0f\nsnaps=%d\nnewest=%d\nsrc_files=%d\nsrc_bytes=%.0f\nsrc_snaps=%d\nsrc_newest=%d\ngone_files=%d\ngone_bytes=%.0f\n", \
+        files, bytes, snaps, newest, ns, sb, cs, cn, gn, gb
+    }' "$stg/list" "$stg/copy" > "$stg/stat" || return 1
+  install -m 0600 "$stg/list" "$st/list.next" && mv -fT "$st/list.next" "$st/list.prev" || return 1
+  rm -f "$st/accept-next" || return 1
   local -a kvs=()
   while IFS='=' read -r k v; do kvs+=("$k" "$(num "$v")"); done < "$stg/stat"
-  if [ -f "$stg/fetched" ]; then
-    set_status "$src" "$repo" "${kvs[@]}" last_try "$now" last_ok "$now" err_code "" err "" \
-      new_files "$nf" new_bytes "$nb" bad_new "$bad"
-  else
-    set_status "$src" "$repo" "${kvs[@]}" last_try "$now" err_code "${fail:-run}" \
-      err "$(printf '%s' "${err:-the transfer stopped (code $rc)}" | cut -c1-300)" new_files "$nf" new_bytes "$nb" bad_new "$bad"
-  fi
+  set_status "$src" "$repo" "${kvs[@]}" last_try "$now" last_ok "$now" err_code "" err "" \
+    new_files "$nf" new_bytes "$nb" bad_new 0 || return 1
   rm -rf "$stg"
 }
 
@@ -465,10 +467,10 @@ check_one() {  # src repo
     done < <(cd "$copy" && xargs -d '\n' -r sha256sum -- < "$st/check.list" 2>/dev/null || true)
   fi
   rm -f "$st/check.list"
-  # what was moved aside stays KEEP_DAYS for a look, the log of damaged files as long
-  [ -d "$st/bad" ] && find "$st/bad" -type f -mtime +"$KEEP_DAYS" -delete 2>/dev/null || true
+  # This retention applies only to files already quarantined after a local hash failure.
+  [ -d "$st/bad" ] && find "$st/bad" -type f -mtime +"$QUARANTINE_DAYS" -delete 2>/dev/null || true
   if [ -f "$st/badlog" ]; then
-    awk -v t="$((now - KEEP_DAYS * 86400))" '$1 >= t' "$st/badlog" > "$st/badlog.n" && mv -f "$st/badlog.n" "$st/badlog"
+    awk -v t="$((now - QUARANTINE_DAYS * 86400))" '$1 >= t' "$st/badlog" > "$st/badlog.n" && mv -f "$st/badlog.n" "$st/badlog"
   fi
   set_status "$src" "$repo" check_ts "$now" check_files "$n" check_bad "$bad"
 }
@@ -618,16 +620,16 @@ cmd_report() {
         fr=true; fts="$(num "$(cut -f1 "$st/frozen" | head -n1)")"; frw="$(cut -f2- "$st/frozen" | head -n1 | tr '\t' ' ' | cut -c1-200)"
       fi
       bl=0; [ -f "$st/badlog" ] && bl="$(grep -c . "$st/badlog" || true)"
-      local o="{\"src\":\"$src\",\"repo\":\"$repo\",\"enabled\":$enabled,\"added\":$(num "$(cat "$st/added" 2>/dev/null || true)"),\"frozen\":$fr,\"frozen_ts\":$fts,\"frozen_why\":\"$(json_escape "$frw")\",\"bad_files\":$(num "$bl")"
-      for k in last_try last_ok files bytes snaps newest src_files src_bytes src_snaps src_newest gone_files gone_bytes removed new_files new_bytes bad_new check_ts check_files check_bad; do
+      local o="{\"src\":\"$src\",\"repo\":\"$repo\",\"enabled\":$enabled,\"added\":$(num "$(cat "$st/added" 2>/dev/null || true)"),\"frozen\":$fr,\"frozen_ts\":$fts,\"frozen_why\":\"$(json_escape "$frw")\",\"bad_files\":$(num "$bl"),\"removed\":0"
+      for k in last_try last_ok files bytes snaps newest src_files src_bytes src_snaps src_newest gone_files gone_bytes new_files new_bytes bad_new check_ts check_files check_bad; do
         o="$o,\"$k\":$(num "$(kv "$st/status" "$k")")"
       done
       o="$o,\"err_code\":\"$(json_escape "$(kv "$st/status" err_code | cut -c1-24)")\",\"err\":\"$(json_escape "$(kv "$st/status" err | cut -c1-300)")\"}"
       copies="${copies:+$copies,}$o"
     done
   fi
-  printf '{"v":1,"ts":%s,"helper":"%s","pubkey":"%s","data_dir":"%s","keep_days":%s,"freeze_pct":%s,"pull_at":"%s","check_days":%s,"min_free_pct":%s,"disk_total":%s,"disk_free":%s,"running":%s,"current":"%s","next_run":%s,"sources":{%s},"copies":[%s]}\n' \
-    "$now" "$ver" "$(json_escape "$pk")" "$(json_escape "$DATA")" "$KEEP_DAYS" "$FREEZE_PCT" "$PULL_AT" "$CHECK_DAYS" "$MIN_FREE_PCT" \
+  printf '{"v":1,"ts":%s,"helper":"%s","pubkey":"%s","data_dir":"%s","keep_days":%s,"quarantine_days":%s,"freeze_pct":%s,"pull_at":"%s","check_days":%s,"min_free_pct":%s,"disk_total":%s,"disk_free":%s,"running":%s,"current":"%s","next_run":%s,"sources":{%s},"copies":[%s]}\n' \
+    "$now" "$ver" "$(json_escape "$pk")" "$(json_escape "$DATA")" "$QUARANTINE_DAYS" "$QUARANTINE_DAYS" "$FREEZE_PCT" "$PULL_AT" "$CHECK_DAYS" "$MIN_FREE_PCT" \
     "$d_total" "$d_free" "$running" "$(json_escape "$cur")" "$(num "$next")" "$srcs" "$copies"
 }
 
@@ -635,7 +637,7 @@ cmd_report() {
 cmd_status() {
   local st src repo
   load_conf
-  echo "copies in $DATA, removals reach a copy after $KEEP_DAYS days, freeze at $FREEZE_PCT% gone at once"
+  echo "copies in $DATA, source deletions leave the copy intact, freeze at $FREEZE_PCT% gone at once"
   for src in $(sources); do
     echo "$src: $(kv "$SRC_D/$src" host):$(kv "$SRC_D/$src" port), repositories: $(kv "$SRC_D/$src" repos)"
     [ -f "$SRC_D/$src.pending" ] && echo "  waits for 'accept $src': $(kv "$SRC_D/$src.pending" host):$(kv "$SRC_D/$src.pending" port) $(kv "$SRC_D/$src.pending" hostkey | cut -c1-40)..."
@@ -651,26 +653,29 @@ cmd_status() {
   done
 }
 
-# unfreeze <src> <repo>: the loss was expected (a large prune, the repository started anew). What
-# the main server has now becomes the reference, and every file missing there gets KEEP_DAYS more
+# unfreeze <src> <repo>: the loss was expected (a large prune, the repository started anew).
+# The next successful pull uses the current source as its reference and keeps the retained files.
 cmd_unfreeze() {
-  local src="${1:-}" repo="${2:-}" st now
+  local src="${1:-}" repo="${2:-}" st copy archive
   name_ok "$src" && name_ok "$repo" || { echo "usage: unfreeze <server> <repository>" >&2; return 2; }
   load_conf
+  exec 9> "$LOCK"
+  flock -w 60 9 || { echo "a pull is running, try later" >&2; return 2; }
   st="$(state_dir "$src" "$repo")"
   [ -f "$st/frozen" ] || { echo "$src/$repo is not frozen"; return 0; }
-  now="$(date +%s)"
-  [ -f "$st/seen" ] && awk -v now="$now" '{ print $1, $2, now }' "$st/seen" > "$st/seen.n" && mv -f "$st/seen.n" "$st/seen"
   if cut -f2 "$st/frozen" | grep -q '^config'; then
-    echo "the config changed: the old copy is kept in $(copy_dir "$src" "$repo").old-$now, a new copy starts"
-    mv "$(copy_dir "$src" "$repo")" "$(copy_dir "$src" "$repo").old-$now"
-    rm -f "$st/seen" "$st/list.prev"
+    copy="$(copy_dir "$src" "$repo")"; archive="$copy.old-$(date +%s)"
+    if [ -d "$copy" ]; then
+      [ ! -e "$archive" ] && mv -T -- "$copy" "$archive" || return 1
+      echo "the old copy is kept in $archive, a new copy starts"
+    fi
+    rm -f "$st/list.prev" "$st/status"
   fi
   touch "$st/accept-next"
   rm -f "$st/frozen"
   set_status "$src" "$repo" err_code "" err ""
   logger -t kervax-mirror "copy $src/$repo unfrozen by hand" 2>/dev/null || true
-  echo "$src/$repo unfrozen: the next pull takes the main server as it is now, files missing there stay $KEEP_DAYS more days"
+  echo "$src/$repo unfrozen: the next pull takes the main server as it is now and keeps existing files"
   refresh_report
 }
 
@@ -735,6 +740,7 @@ esac
 HELPER_EOF
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chown root:root "$HELPER"
+exec 9>&-
 
 cat > /etc/systemd/system/kervax-mirror-pull.service <<UNIT_EOF
 [Unit]

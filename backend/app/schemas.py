@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -1852,12 +1852,20 @@ class BackupRepoMuteIn(BaseModel):
     muted: bool
 
 
+BackupMirrorRepoName = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")]
+
+
 class BackupRepoMirrorIn(BaseModel):
     """Держать копию репозитория сервера бэкапов на резервном (mirror_id) или перестать (None).
     Перестать - значит только не забирать новое: копия на резервном остается, удалить ее можно
     лишь командой на нем самом."""
 
-    repo: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    repo: BackupMirrorRepoName
+    mirror_id: int | None = None
+
+
+class BackupRepoMirrorsIn(BaseModel):
+    repos: list[BackupMirrorRepoName] = Field(min_length=1, max_length=1000)
     mirror_id: int | None = None
 
 

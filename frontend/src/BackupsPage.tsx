@@ -39,8 +39,9 @@ import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditName
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
-import { MirrorModal, MirrorsCard, RepoMirrorBlock } from './BsrvMirror'
+import { MirrorModal, MirrorsCard, RepoMirrorBlock, RepoMirrorSelection } from './BsrvMirror'
 import { isMirror } from './bsrvMirrorState'
+import { backupDiskTone } from './bsrvStorage'
 import { CoverageAudit } from './CoverageAudit'
 import { helperText } from './helperText'
 import { bulkCleanupScript, safeRepoName } from './bulkCleanupScript'
@@ -124,6 +125,10 @@ const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boo
 function diskPct(info: BackupServerInfo): number | null {
   const total = info.disk_total || 0
   return total ? Math.min(100, Math.round(((info.disk_used || 0) / total) * 100)) : null
+}
+
+function diskFree(info: BackupServerInfo): number {
+  return info.disk_free ?? Math.max((info.disk_total || 0) - (info.disk_used || 0), 0)
 }
 
 // Куда бэкапится: имя сервера бэкапов, за ним адрес, порт и канал (serverUtils.backupDest). Имя -
@@ -1873,6 +1878,7 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
   onGo: (sec: string) => void
 }) {
   const { t } = useI18n()
+  const { isAdmin } = useAuth()
   const [busy, setBusy] = useState(false)
   // что раскрыто под кнопками: форма архива, команда удаления или снятия лока
   const [open, setOpen] = useState<'' | 'archive' | 'rm' | 'unlock'>('')
@@ -2051,7 +2057,7 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
         <dt>{t('Каталог')}</dt>
         <dd className="mono">{`${dataDir}/${r.name}`}</dd>
       </dl>
-      <RepoMirrorBlock server={s} repo={r.name} servers={servers} canAct={canAct} onChanged={onChanged} />
+      <RepoMirrorBlock server={s} repo={r.name} servers={servers} canAct={isAdmin} onChanged={onChanged} />
       <RepoGroups server={s} repo={r.name} ext={bsrvExtra(s)} canAct={canAct} onChanged={onChanged} />
     </>
   )
@@ -2422,6 +2428,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   onChanged: () => void; onMoveStorage: () => void; onClose: () => void; underlay: boolean
 }) {
   const { t } = useI18n()
+  const { isAdmin } = useAuth()
   const [q, setQ] = useState('')
   const [sort, setSort] = useState<'problems' | 'name' | 'size' | 'age' | 'snapshots' | 'growth'>('problems')
   const [active, setActive] = useState<string>(() => (BSRV_SEC_IDS.has(initialSec ?? '') ? initialSec! : 'overview'))
@@ -2496,7 +2503,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   // выбранный пропал из списка (фильтр, ушел в архив) - первый, то есть самый проблемный
   const selRepo = repoGroups.flatMap((g) => g.list).find((r) => r.name === sel) ?? repoGroups[0]?.list[0]
   const pct = diskPct(info)
-  const free = info.disk_free ?? Math.max((info.disk_total || 0) - (info.disk_used || 0), 0)
+  const free = diskFree(info)
   const srvOld = !!info.version && verLt(info.version, RESTSRV_TARGET)
   const tlsPort = info.tls_port || 64101
   const now = Date.now() / 1000
@@ -2719,7 +2726,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
                         label={t('Место на диске')}
                         value={`${pct}%`}
                         sub={t('свободно {f} из {tt}', { f: fmtBytes(free), tt: fmtBytes(info.disk_total) })}
-                        tone={pct >= 90 ? 'bad' : pct >= 80 ? 'warn' : 'ok'}
+                        tone={backupDiskTone(info.disk_total ?? 0, free)}
                         title={info.data_dir || undefined}
                       />
                     </button>
@@ -2766,6 +2773,8 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
 
             {cur.id === 'repos' && (
               <div className="srv-sec">
+                <RepoMirrorSelection server={s} repos={every.filter((r) => r.valid).map((r) => r.name).sort()}
+                  servers={servers} canAct={isAdmin} onChanged={onChanged} />
                 {growers.length > 0 && (
                   <div className="muted small">
                     {t('За прогон клиенты добавляют около {s}: {top}', {
@@ -3025,6 +3034,7 @@ function BackupServerRow({ server: s, info, onOpen }: { server: Server; info: Ba
   const archivedN = (info.repos ?? []).length - repos.length
   const bad = repos.filter((r) => repoBad(r, ctx)).length
   const pct = diskPct(info)
+  const diskTone = backupDiskTone(info.disk_total ?? 0, diskFree(info))
   // и покрытие тоже: бэкап-сервер в списке клиентов не рендерится, так что его
   // заглушённые пункты покрытия иначе оказались бы только в сводке
   const repoMutes = collectMutes(s, t, ['repo', 'audit'])
@@ -3053,7 +3063,7 @@ function BackupServerRow({ server: s, info, onOpen }: { server: Server; info: Ba
           {pct != null && (
             <>
               {' · '}
-              <span className={pct >= 90 ? 't-down' : pct >= 80 ? 't-degraded' : ''}>{t('диск занят на {p}%', { p: pct })}</span>
+              <span className={diskTone === 'bad' ? 't-down' : diskTone === 'warn' ? 't-degraded' : ''}>{t('диск занят на {p}%', { p: pct })}</span>
             </>
           )}
         </div>
@@ -3887,7 +3897,7 @@ export function BackupsPage({
   const srvStat = srvHosts.map(({ s, d }) => {
     const ctx = repoCtx(s)
     const repos = (d.repos ?? []).filter((r) => !ctx.archived.has(r.name))
-    return { name: s.name, repos: repos.length, pct: diskPct(d) ?? -1 }
+    return { name: s.name, repos: repos.length, pct: diskPct(d) ?? -1, tone: backupDiskTone(d.disk_total ?? 0, diskFree(d)) }
   })
   const repoN = srvStat.reduce((a, x) => a + x.repos, 0)
   const pctMax = Math.max(-1, ...srvStat.map((x) => x.pct))
@@ -4041,7 +4051,7 @@ export function BackupsPage({
               ok={pctMax >= 0 && fullest ? (srvStat.length > 1
                 ? t('диск больше всех занят у {name}: {p}%', { name: fullest.name, p: pctMax })
                 : t('диск занят на {p}%', { p: pctMax })) : undefined}
-              okTone={pctMax >= 80 ? 'warn' : 'muted'}
+              okTone={fullest && fullest.tone !== 'ok' ? 'warn' : 'muted'}
               foot={t('репозиториев: {n}', { n: repoN })}
               {...tileProps('servers')}
               onOpen={tileProps('servers').onClick}

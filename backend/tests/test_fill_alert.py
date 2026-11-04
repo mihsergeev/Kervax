@@ -1,6 +1,7 @@
 """Алерт заполнения диска: выдержка, гистерезис отбоя, быстрое заполнение и мигание (app/fill_alert.py)."""
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select
 
 from app import collector, fill_alert
@@ -210,3 +211,75 @@ def test_home_shows_disk_only_after_hold():
     assert disk({"disk": 2}) == [(2, "Диск 83%", "disk@2")]  # объявленный - до отбоя
     rep["disks"][0]["used"] = 97
     assert disk({}) == [(3, "Диск 97% 🚨", "disk")]
+
+
+_TB = 1024**4
+
+
+@pytest.mark.parametrize(("total", "free", "level"), [
+    (80 * _TB, 89 * _TB // 10, 0),
+    (80 * _TB, 3 * _TB, 0),  # 96% занято, но больше 2 ТБ свободно
+    (80 * _TB, 2 * _TB, 0),
+    (80 * _TB, 2 * _TB - 1, 3),
+    (10 * _TB, _TB, 0),
+    (10 * _TB, _TB - 1, 2),
+    (10 * _TB, 0, 3),
+])
+@pytest.mark.parametrize("mirror", [False, True])
+def test_backup_storage_needs_both_free_space_limits(total, free, level, mirror):
+    disk = {"mount": "/store", "total": total, "used": total - free, "avail": free}
+    storage = {"data_dir": "/store/repos", "disk_total": total, "disk_used": total - free, "disk_free": free}
+    report = {"disks": [disk]}
+    if mirror:
+        report["extras"] = {"backup-mirror": {**storage, "v": 1, "ts": NOW.timestamp()}}
+    else:
+        report["backup_server"] = {**storage, "present": True}
+    s = Server(name="node", token_hash="x", enabled=True, last_seen=NOW, offline_after_seconds=120,
+               disk_warn_percent=85, disk_alert_percent=90, disk_crit_percent=95, last_report=report,
+               alert_state={"disk_since": (NOW - timedelta(minutes=31)).isoformat()})
+
+    current, context = collector._server_conditions(s, NOW)["disk"]
+    assert current == context["raw"] == level
+    problems = [p["level"] for p in collector.server_problems(s, NOW) if p["kind"] == "disk"]
+    assert problems == ([level] if level else [])
+
+
+async def test_backup_storage_telegram_leaves_other_disks_on_normal_thresholds(tmp_path, monkeypatch):
+    engine, factory = await _panel(tmp_path)
+    sent = _sender(monkeypatch)
+
+    async def tick(minute, *, root_used=60, backup_free=3 * _TB):
+        at = NOW + timedelta(minutes=minute)
+        total = 80 * _TB
+        async with factory() as session:
+            srv = await session.scalar(select(Server))
+            srv.last_seen = at
+            srv.last_report = {
+                "uptime_seconds": 100000,
+                "disks": [
+                    {"mount": "/", "total": 100, "used": root_used},
+                    {"mount": "/store", "total": total, "used": total - backup_free, "avail": backup_free},
+                ],
+                "backup_server": {"present": True, "running": True, "data_dir": "/backup",
+                                  "disk_total": total, "disk_used": total - backup_free, "disk_free": backup_free},
+            }
+            await session.commit()
+        await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), at)
+
+    await tick(0)
+    await tick(31)
+    assert sent == []
+    await tick(32, root_used=97)
+    assert len(sent) == 1 and "<b>Диск / заполнен на 97%</b>" in sent[0]
+    await tick(33)
+    await tick(64)
+    assert len(sent) == 2 and "снова в норме" in sent[1]
+    await tick(65, backup_free=2 * _TB - 1)
+    assert len(sent) == 3 and "<b>Диск /store заполнен на 98%</b>" in sent[2]
+    await tick(66, root_used=83)
+    async with factory() as session:
+        srv = await session.scalar(select(Server))
+        assert not any(p["kind"] == "disk" for p in collector.server_problems(srv, NOW + timedelta(minutes=66)))
+    await tick(97, root_used=83)
+    assert len(sent) == 4 and "снова в норме" in sent[3]
+    await engine.dispose()

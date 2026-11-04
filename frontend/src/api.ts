@@ -3886,6 +3886,13 @@ export function backupRepoMirror(id: number, repo: string, mirrorId: number | nu
   })
 }
 
+export function backupRepoMirrors(id: number, repos: string[], mirrorId: number | null): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/backup/repo-mirrors`, {
+    method: 'POST',
+    body: JSON.stringify({ repos, mirror_id: mirrorId }),
+  })
+}
+
 export function backupMirrorRole(id: number, on: boolean): Promise<Server> {
   return api<Server>(`/api/servers/${id}/backup/mirror-role`, { method: 'POST', body: JSON.stringify({ on }) })
 }

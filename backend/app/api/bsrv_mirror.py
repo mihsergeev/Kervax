@@ -18,7 +18,7 @@ from app.api.relay import _by_token
 from app.api.servers import _bcmd_create, _bcmd_wait, _get_or_404, _out, _setup_tasks
 from app.deps import AdminUser, SessionDep
 from app.models import BackupCommand, Server
-from app.schemas import BackupCommandOut, BackupMirrorRoleIn, BackupRepoMirrorIn, ServerOut
+from app.schemas import BackupCommandOut, BackupMirrorRoleIn, BackupRepoMirrorIn, BackupRepoMirrorsIn, ServerOut
 
 log = logging.getLogger(__name__)
 
@@ -103,15 +103,25 @@ def _repo_names(srv) -> set[str]:
 @router.post("/{server_id}/backup/repo-mirror", response_model=ServerOut)
 async def backup_repo_mirror(server_id: int, body: BackupRepoMirrorIn, request: Request, user: AdminUser,
                              session: SessionDep) -> ServerOut:
-    """Держать копию репозитория на резервном сервере или перестать. Перестать - резервный больше не
-    забирает новое, копия на нем остается (удалить ее можно только командой на нем самом)."""
+    return await _set_repo_mirrors(server_id, {body.repo}, body.mirror_id, request, user, session)
+
+
+@router.post("/{server_id}/backup/repo-mirrors", response_model=ServerOut)
+async def backup_repo_mirrors(server_id: int, body: BackupRepoMirrorsIn, request: Request, user: AdminUser,
+                              session: SessionDep) -> ServerOut:
+    """Изменить только выбранные репозитории. Остановка копирования сохраняет файлы на резервном."""
+    return await _set_repo_mirrors(server_id, set(body.repos), body.mirror_id, request, user, session)
+
+
+async def _set_repo_mirrors(server_id, repos, mirror_id, request, user, session) -> ServerOut:
     s = await _get_or_404(server_id, session, user)
+    await session.refresh(s, with_for_update=True)
     now = datetime.now(timezone.utc)
     ent = dict(s.backup_mirror or {})
-    old = ent.get(body.repo) if isinstance(ent.get(body.repo), dict) else None
     mirrors: set[int] = set()
-    if body.mirror_id is not None:
-        m = await _get_or_404(body.mirror_id, session, user)
+    src = ""
+    if mirror_id is not None:
+        m = await _get_or_404(mirror_id, session, user)
         if m.id == s.id:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "копию держат на другом сервере, не на этом же")
         if not bm.is_mirror(m):
@@ -119,10 +129,9 @@ async def backup_repo_mirror(server_id: int, body: BackupRepoMirrorIn, request: 
         why = bm.why_not_mirror(m, now) or bm.why_not_primary(s, now)
         if why:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, why)
-        if body.repo not in _repo_names(s):
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"на {s.name} нет репозитория {body.repo}")
-        if old and old.get("mirror") == m.id:
-            return _out(s, now)
+        missing = repos - _repo_names(s)
+        if missing:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"на {s.name} нет репозитория {min(missing)}")
         # имя основного на резервном: то же, что у других репозиториев этого сервера там, иначе из
         # имени сервера; совпало с другим основным того же резервного - с id
         src = next((e["src"] for e in bm.entries(s).values() if e["mirror"] == m.id), "")
@@ -131,19 +140,27 @@ async def backup_repo_mirror(server_id: int, body: BackupRepoMirrorIn, request: 
             others = list(await session.scalars(select(Server).where(Server.id != s.id, Server.backup_mirror.is_not(None))))
             if any(e["src"] == src and e["mirror"] == m.id for o in others for e in bm.entries(o).values()):
                 src = f"{src}-{s.id}"
-        ent[body.repo] = {"mirror": m.id, "src": src, "ts": now.isoformat(), "by": user.username}
-        mirrors.add(m.id)
-    elif old is None:
+    changed = []
+    for repo in sorted(repos):
+        old = ent.get(repo)
+        old_id = old.get("mirror") if isinstance(old, dict) else None
+        if old_id == mirror_id:
+            continue
+        changed.append(repo)
+        if isinstance(old_id, int):
+            mirrors.add(old_id)
+        if mirror_id is None:
+            ent.pop(repo, None)
+        else:
+            ent[repo] = {"mirror": mirror_id, "src": src, "ts": now.isoformat(), "by": user.username}
+            mirrors.add(mirror_id)
+    if not changed:
         return _out(s, now)
-    else:
-        ent.pop(body.repo, None)
-    if old and isinstance(old.get("mirror"), int):
-        mirrors.add(old["mirror"])
     s.backup_mirror = ent or None
     await session.commit()
     await session.refresh(s)
-    await audit.record(session, user.username, "backup_repo_mirror" if body.mirror_id else "backup_repo_unmirror",
-                       body.repo[:120], f"srv={server_id} mirror={body.mirror_id or (old or {}).get('mirror')}")
+    await audit.record(session, user.username, "backup_repo_mirror" if mirror_id else "backup_repo_unmirror",
+                       ", ".join(changed)[:120], f"srv={server_id} mirror={mirror_id} repos={len(changed)}")
     _start_sync(request, {s.id}, mirrors, user.username)
     return _out(s, now)
 
@@ -190,8 +207,10 @@ async def backup_mirror_sync(server_id: int, request: Request, user: AdminUser, 
 async def backup_mirror_pull(server_id: int, user: AdminUser, session: SessionDep) -> BackupCommandOut:
     """Забрать копии на резервном сейчас, не дожидаясь ночи."""
     s = await _get_or_404(server_id, session, user)
-    if not bm.is_mirror(s) or not bm.agent_ok(s):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{s.name} не резервный или агент старше {bm.AGENT_MIN}")
+    if not bm.is_mirror(s):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{s.name} не резервный сервер")
+    if why := bm.why_not_mirror(s, datetime.now(timezone.utc)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, why)
     c = BackupCommand(server_id=s.id, action="mirror", mode="pull", created_by=user.username)
     session.add(c)
     await session.commit()

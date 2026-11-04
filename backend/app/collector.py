@@ -3480,6 +3480,51 @@ def _fill_low(s: Server) -> float | None:
     return float(min(on)) if on else None
 
 
+_BACKUP_DISK_FREE_LIMIT = 2 * 1024**4  # ТБ в панели отображаются по 1024
+
+
+def _backup_disk_space(s: Server, disks: list[dict], now: datetime) -> dict[str, tuple[int, int]]:
+    """Тома с основными репозиториями или их копиями: точка монтирования -> (всего, доступно)."""
+    primary = (s.last_report or {}).get("backup_server") or {}
+    mirror = bsrv_mirror.mirror_report(s, now)
+    out: dict[str, tuple[int, int]] = {}
+    for storage in (primary if primary.get("present") else None, mirror):
+        if not storage:
+            continue
+        total, path = storage.get("disk_total"), storage.get("data_dir")
+        if not isinstance(total, int) or total <= 0:
+            continue
+        path = path if isinstance(path, str) and path.startswith("/") else ""
+        free = storage.get("disk_free")
+        # df каталога уже разыменовал симлинки. При разных путях ищем тот же том по размеру.
+        matches = [d for d in disks if d["total"] == total and d.get("mount")]
+        mount_disk = max((d for d in matches if path == d["mount"] or path.startswith(d["mount"].rstrip("/") + "/")),
+                         key=lambda d: len(d["mount"]), default=None)
+        if mount_disk is None and len(matches) == 1:
+            mount_disk = matches[0]
+        if free is None and mount_disk is not None:
+            free = mount_disk.get("avail")
+        used = storage.get("disk_used")
+        if free is None and isinstance(used, int):
+            free = max(total - used, 0)
+        mount = mount_disk["mount"] if mount_disk else path
+        if mount and isinstance(free, int):
+            out[mount] = (total, free)
+    return out
+
+
+def _disk_fill_sample(s: Server, now: datetime) -> tuple[float, str | None, bool]:
+    """Заполнение худшего подходящего раздела. Для томов бэкапов важны оба порога."""
+    rep = s.last_report or {}
+    disks = [d for d in rep.get("disks") or [] if isinstance(d, dict) and d.get("total")]
+    storage = _backup_disk_space(s, disks, now)
+    samples = [(d["used"] / d["total"] * 100, d.get("mount"), False)
+               for d in disks if d.get("mount") not in storage]
+    samples.extend((100 - max(free, 0) / total * 100, mount, True) for mount, (total, free) in storage.items()
+                   if free * 10 < total and free < _BACKUP_DISK_FREE_LIMIT)
+    return max(samples, key=lambda x: x[0], default=(0.0, None, False))
+
+
 def _fmt_files(n: float) -> str:
     return f"{n / 1e6:.1f} млн" if n >= 1e6 else f"{n / 1e3:.0f} тыс." if n >= 1e3 else str(int(n))
 
@@ -4380,20 +4425,21 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
     # заглушенное тоже должно быть видно (в "Заглушено")
     crit, prob, warn = s.disk_crit_percent, s.disk_alert_percent, s.disk_warn_percent
 
-    def fill_lvl(key: str, value: float) -> int:
+    def fill_lvl(key: str, value: float, *, hold: bool = True) -> int:
         raw = 3 if crit and value >= crit else 2 if prob and value >= prob else 1 if warn and value >= warn else 0
-        told = int(state.get(key, 0) or 0)
+        told = int(state.get(key, 0) or 0) if hold else 0
         if told:
             return max(told, raw)
         return raw if raw >= fill_alert.CRIT or (raw and _held_long(s, state, key, now, fill_alert.HOLD_S)) else 0
 
-    dsk = [d for d in rep.get("disks") or [] if isinstance(d, dict) and d.get("total")]
-    if dsk:
-        dpct = max(d["used"] / d["total"] * 100 for d in dsk)
-        lvl = fill_lvl("disk", dpct)
-        if lvl:
-            add("disk", lvl, f"Диск {round(dpct)}%" + (" 🚨" if lvl >= 3 else ""), "diskfill",
-                "disk" if lvl >= 3 else f"disk@{lvl}")
+    dpct, mount, _ = _disk_fill_sample(s, now)
+    announced_mounts = state.get("disk_who") or []
+    backup_host = _bsrv_role(rep, s) or bsrv_mirror.is_mirror(s)
+    hold_disk = not backup_host or not announced_mounts or mount in announced_mounts
+    lvl = fill_lvl("disk", dpct, hold=hold_disk)
+    if lvl and (dpct or mount):
+        add("disk", lvl, f"Диск {round(dpct)}%" + (" 🚨" if lvl >= 3 else ""), "diskfill",
+            "disk" if lvl >= 3 else f"disk@{lvl}")
     ino = [d for d in rep.get("disks") or [] if isinstance(d, dict) and d.get("inodes")]
     if ino:
         wi = max(ino, key=lambda d: (d.get("inodes_used") or 0) / d["inodes"])
@@ -5746,24 +5792,25 @@ async def web_deploys(session: AsyncSession, since: datetime,
     return out
 
 
-def _fill_now(rep: dict) -> tuple[float, float]:
-    """Худший раздел по месту и по inode в отчете, %."""
-    ds = [d for d in rep.get("disks") or [] if isinstance(d, dict)]
-    sp = max((d["used"] / d["total"] * 100 for d in ds if d.get("total")), default=0.0)
-    ino = max(((d.get("inodes_used") or 0) / d["inodes"] * 100 for d in ds if d.get("inodes")), default=0.0)
-    return sp, ino
-
-
 async def fill_history(session: AsyncSession, servers: list[Server],
                        now: datetime) -> dict[int, dict[str, list[tuple[float, float]]]]:
     """{server_id: {"disk"|"inode": [(unix, %)]}} худшего раздела за окно быстрого заполнения -
     только для серверов, у которых что-то уже выше нижнего порога: остальным выдержка не грозит.
     Один запрос на тик по истории метрик (ServerMetric.disks пишется с каждым отчетом)."""
     ids = []
+    disk_mounts = {}
     for s in servers:
         low = _fill_low(s)
-        if low is not None and max(_fill_now(s.last_report or {})) >= low:
+        if low is None:
+            continue
+        rep = s.last_report or {}
+        pct, mount, _ = _disk_fill_sample(s, now)
+        ino = max(((d.get("inodes_used") or 0) / d["inodes"] * 100
+                   for d in rep.get("disks") or [] if isinstance(d, dict) and d.get("inodes")), default=0.0)
+        if max(pct, ino) >= low:
             ids.append(s.id)
+            if _bsrv_role(rep, s) or bsrv_mirror.is_mirror(s):
+                disk_mounts[s.id] = mount
     out: dict[int, dict[str, list[tuple[float, float]]]] = {}
     if not ids:
         return out
@@ -5776,7 +5823,8 @@ async def fill_history(session: AsyncSession, servers: list[Server],
         ds = [d for d in disks or [] if isinstance(d, dict)]
         t = _aware(ts).timestamp()
         h = out.setdefault(sid, {"disk": [], "inode": []})
-        sp = [float(d["pct"]) for d in ds if d.get("pct") is not None]
+        sp = [float(d["pct"]) for d in ds if d.get("pct") is not None
+              and (sid not in disk_mounts or d.get("mount") == disk_mounts[sid])]
         ip = [float(d["ipct"]) for d in ds if d.get("ipct") is not None]
         if sp:
             h["disk"].append((t, max(sp)))
@@ -6540,34 +6588,38 @@ def _server_conditions(s: Server, now: datetime,
         sustain("mem", memp >= s.mem_alert_percent,
                 {"value": round(memp), "threshold": s.mem_alert_percent, "cause": ""},
                 below=memp < s.mem_alert_percent - _HYST)
-    if rep.get("disks"):
-        worst, worst_mount = max(
-            ((d["used"] / d["total"] * 100, d.get("mount")) for d in rep["disks"] if d.get("total")),
-            default=(0.0, None), key=lambda x: x[0],
-        )
+    worst, worst_mount, backup_storage = _disk_fill_sample(s, now)
+    backup_host = _bsrv_role(rep, s) or bsrv_mirror.is_mirror(s)
+    if rep.get("disks") or worst_mount or (state.get("disk") and backup_host):
         crit, prob, warn = s.disk_crit_percent, s.disk_alert_percent, s.disk_warn_percent
         low = _fill_low(s)
 
-        def fill(key: str, value: float, ctx: dict) -> None:
+        def fill(key: str, value: float, ctx: dict, *, storage: bool = False) -> None:
             """Уровень по порогам сейчас -> уровень алерта: выдержка, гистерезис отбоя, критичное и
             быстрое заполнение без выдержки (app/fill_alert.py). Пока алерт висит, уровень не
             снижается, поэтому порог в тексте - по уровню алерта, а не по текущему значению."""
             raw = 3 if crit and value >= crit else 2 if prob and value >= prob else 1 if warn and value >= warn else 0
-            lvl, extra = fill_alert.step(state, key, value, raw, low, now, (fill_hist or {}).get(key))
+            step_value = value
+            if (key == "disk" and backup_host and not raw
+                    and state.get("disk_who") and ctx.get("mount") not in state["disk_who"]):
+                step_value = 0
+                ctx["value"] = None  # процент другого тома нельзя сравнивать с объявленным
+            lvl, extra = fill_alert.step(state, key, step_value, raw, low, now, (fill_hist or {}).get(key))
             thr = {3: crit, 2: prob, 1: warn}.get(lvl) or 0
             # raw - что на диске прямо сейчас: известным проблемам и закрытию подключения нужна
             # сама беда, а не алерт с выдержкой, иначе в выдержке отметка решила бы, что беда ушла
-            ctx.update(threshold=thr, level=lvl, since=extra["since"], cool=extra["cool"], fast=extra["fast"],
+            ctx.update(threshold=max(90, thr) if storage and thr else thr,
+                       level=lvl, since=extra["since"], cool=extra["cool"], fast=extra["fast"],
                        raw=raw)
             if key == "disk":
                 ctx["severity"] = {3: "критично", 2: "проблема", 1: "предупреждение"}.get(lvl, "")
             out[key] = (lvl, ctx)
 
-        fill("disk", worst, {"value": round(worst), "cause": "", "mount": worst_mount})
+        fill("disk", worst, {"value": round(worst), "cause": "", "mount": worst_mount}, storage=backup_storage)
         # Inode кончаются отдельно от места: миллионы мелких файлов (сессии PHP, кэш) забивают
         # ФС, когда df показывает свободные гигабайты, и ничего нового не создать. Пороги те
         # же, что у места. Считают агенты 2.15+, у btrfs inode нет вовсе.
-        ino = [d for d in rep["disks"] if d.get("inodes")]
+        ino = [d for d in rep.get("disks") or [] if d.get("inodes")]
         if ino:
             wi = max(ino, key=lambda d: (d.get("inodes_used") or 0) / d["inodes"])
             ipct = (wi.get("inodes_used") or 0) / wi["inodes"] * 100
@@ -9670,6 +9722,8 @@ async def collector_loop(
             await stage("разбор дисков по прогнозу", request_disk_analysis(
                 session_factory, datetime.now(timezone.utc)))
             await stage("зависшие команды", _expire_commands(session_factory))
+            await stage("вторые копии бэкапов", bsrv_mirror.queue_pulls(
+                session_factory, datetime.now(timezone.utc), seen_online))
             await stage("левые запросы к панели", request_watch.check(
                 session_factory, settings, datetime.now(timezone.utc)))
             # автобан: белый список панели на ноды и сводка банов раз в сутки (или в час)

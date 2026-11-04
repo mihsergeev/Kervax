@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.95] - 2026-11-05
+
+- The Repositories tab lets you select repositories with checkboxes and choose a server for their second copy.
+- The second server pulls new snapshots after backup. Source deletions leave existing copies intact. This requires mirror-setup 0.2 or later on the second server.
+- The source helper 0.41 restricts mirror reads to the selected repositories, including when the source contains symlinks.
+- Backup storage warns about free space only when it drops below both 10% and 2 TB.
+
 ## [1.8.94] - 2026-11-04
 
 - Backup-server setup shows progress by stage and waits for the agent to confirm the selected storage path.

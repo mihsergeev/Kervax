@@ -105,7 +105,8 @@ fi
 #       host key the mirror pins, and which mirror may read what and when it last did
 # 0.39: new servers can keep repositories on a selected mounted filesystem
 # 0.40: an empty server deployed by the panel can move to a selected filesystem
-KERVAX_SETUP_VERSION=0.40  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.41: the mirror reader rejects symlinks and uses descriptor-relative reads
+KERVAX_SETUP_VERSION=0.41  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -1891,7 +1892,14 @@ mirrors_json() {
   done
   echo "{$out}"
 }
+ensure_mirror_python() {
+  if [ ! -x /usr/bin/python3 ]; then
+    command -v apt-get >/dev/null 2>&1 && APT_TIMEOUT=600 apt_q install python3 || true
+    [ -x /usr/bin/python3 ] || { echo "python3 is required for mirror access" >&2; return 2; }
+  fi
+}
 ensure_mread_user() {
+  ensure_mirror_python || return 2
   if ! id "$MREAD_USER" >/dev/null 2>&1; then
     useradd --system --home-dir "$MREAD_HOME" --no-create-home --shell /bin/sh "$MREAD_USER" \
       || { echo "could not create the user $MREAD_USER" >&2; return 2; }
@@ -2288,50 +2296,167 @@ case "${1:-}" in
   allow-tls)        shift; cmd_allow_tls "$@" ;;
   get-client-creds) shift; cmd_get_client_creds "$@" ;;
   mirror-allow)     shift; with_storage cmd_mirror_allow "$@" ;;
+  ensure-mirror-python) ensure_mirror_python ;;  # installer preflight for existing keys
   process-spool)    cmd_process_spool ;;
   *) echo "usage: $0 {stats|storage-dir|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port] [storage-mount]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|allow-tls <ip>|get-client-creds <name>|mirror-allow <mirror> <ip> <pubkey> [repo...]|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
+# Existing mirror keys must keep working through upgrades. Without keys, install
+# Python only when the first mirror is authorized.
+if [ -s /var/lib/kervax-mread/.ssh/authorized_keys ]; then
+  bash "$HELPER.new" ensure-mirror-python
+fi
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"
 chmod 0755 "$HELPER"; chown root:root "$HELPER"
 
 # What a mirror server may read here (0.38): the forced command of kervax-mread, run as root through
 # sudo. Harmless by itself: without mirror-allow there is no user, no key and no sudoers rule.
 cat > /lib65/kervax/kervax-mirror-serve.new <<'SERVE_EOF'
-#!/usr/bin/env bash
-# Kervax: what a mirror server may read from this backup server. The forced command of kervax-mread
-# (its key line in /var/lib/kervax-mread/.ssh/authorized_keys names the mirror), run as root through
-# sudo: list a repository allowed to that mirror, or send files of it as a tar. It writes nothing
-# but the time of the last read.
-set -uo pipefail
-export LC_ALL=C
-ALLOW_D=/etc/kervax/mirror-allow
-SERVED_D=/var/lib/kervax/mirror-served
-RE_REL='^(config|keys/[0-9a-f]{64}|snapshots/[0-9a-f]{64}|index/[0-9a-f]{64}|data/[0-9a-f]{2}/[0-9a-f]{64})$'
-m="${1:-}"
-deny() { logger -t kervax-mirror-serve "mirror ${m:-?}: refused: $1" 2>/dev/null || true; echo "refused: $1" >&2; exit 2; }
-[[ "$m" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || deny "bad mirror name"
-cmd="${SSH_ORIGINAL_COMMAND:-}"
-[[ "$cmd" =~ ^(list|get)\ ([A-Za-z0-9][A-Za-z0-9._-]{0,127})$ ]] || deny "unknown request"
-op="${BASH_REMATCH[1]}"; repo="${BASH_REMATCH[2]}"
-[ -f "$ALLOW_D/$m" ] && grep -qxF -- "$repo" "$ALLOW_D/$m" || deny "$repo is not allowed"
-DATA="$(/lib65/kervax/kervax-backupserver-helper storage-dir)" || deny "backup storage is unavailable"
-dir="$DATA/$repo"
-[ -d "$dir" ] && [ ! -L "$dir" ] && cd "$dir" || deny "no repository $repo"
-mark() { install -d -m 0755 "$SERVED_D" 2>/dev/null; touch "$SERVED_D/$m--$repo" 2>/dev/null || true; }
-case "$op" in
-  list)
-    # name, size, whole seconds of mtime; the closing line tells a whole listing from a cut one
-    find config keys snapshots index data -type f -printf '%p %s %T@\n' 2>/dev/null \
-      | sed 's/\.[0-9]*$//' | grep -E "${RE_REL%\$} [0-9]+ [0-9]+\$" | awk '{ print } END { print "end " NR }'
-    mark ;;
-  get)
-    tmp="$(mktemp)" || deny "no temp file"
-    trap 'rm -f "$tmp"' EXIT
-    head -n 100000 | grep -E "$RE_REL" > "$tmp" || true
-    tar --no-recursion --ignore-failed-read -cf - -T "$tmp" 2>/dev/null
-    mark ;;
-esac
+#!/usr/bin/python3 -I
+# Forced SSH command for kervax-mread. Reads allowed restic files and records the last read.
+import contextlib
+import errno
+import os
+from pathlib import Path
+import re
+import stat
+import subprocess
+import sys
+import syslog
+import tarfile
+
+ALLOW_D = Path("/etc/kervax/mirror-allow")
+SERVED_D = Path("/var/lib/kervax/mirror-served")
+STORAGE_HELPER = "/lib65/kervax/kervax-backupserver-helper"
+NAME = r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}"
+HEX = r"[0-9a-f]"
+HASH = HEX + "{64}"
+PREFIX = HEX + "{2}"
+REL = re.compile(rf"config|(?:keys|snapshots|index)/{HASH}|data/{PREFIX}/{HASH}")
+ABSENT = (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def deny(message):
+    syslog.syslog(syslog.LOG_WARNING, f"refused: {message}")
+    print(f"refused: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+@contextlib.contextmanager
+def directory(name, parent=None, flags=DIR_FLAGS):
+    fd = os.open(name, flags, dir_fd=parent)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def regular(info):
+    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+
+
+def files_at(fd, prefix, pattern):
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            if re.fullmatch(pattern, entry.name):
+                try:
+                    info = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if regular(info):
+                    yield prefix + entry.name, info
+
+
+def list_files(root):
+    yield from files_at(root, "", "config")
+    for name in ("keys", "snapshots", "index", "data"):
+        try:
+            with directory(name, root) as fd:
+                if name != "data":
+                    yield from files_at(fd, name + "/", HASH)
+                    continue
+                for prefix in os.listdir(fd):
+                    if re.fullmatch(PREFIX, prefix):
+                        try:
+                            with directory(prefix, fd) as pack_dir:
+                                yield from files_at(pack_dir, f"data/{prefix}/", HASH)
+                        except OSError as exc:
+                            if exc.errno not in ABSENT:
+                                raise
+        except OSError as exc:
+            if exc.errno not in ABSENT:
+                raise
+
+
+def send_files(root):
+    with tarfile.open(fileobj=sys.stdout.buffer, mode="w|", copybufsize=1024 * 1024) as archive:
+        for _ in range(100000):
+            line = sys.stdin.buffer.readline(256)
+            if not line:
+                return
+            name = line.decode("ascii", errors="replace").rstrip("\n")
+            if not REL.fullmatch(name):
+                deny("invalid repository file name")
+            with contextlib.ExitStack() as stack:
+                fd = root
+                *parts, filename = name.split("/")
+                for part in parts:
+                    fd = stack.enter_context(directory(part, fd))
+                # Open the inode without invoking any device/FIFO operations, then pin it
+                # across fstat and the read even if the source replaces the path in between.
+                path_fd = os.open(filename, os.O_PATH | os.O_NOFOLLOW, dir_fd=fd)
+                stack.callback(os.close, path_fd)
+                info = os.fstat(path_fd)
+                if not regular(info):
+                    deny("repository file is not regular")
+                member = tarfile.TarInfo(name)
+                member.size = info.st_size
+                member.mtime = int(info.st_mtime)
+                member.mode = 0o600
+                with open(f"/proc/self/fd/{path_fd}", "rb") as file:
+                    archive.addfile(member, file)
+        if sys.stdin.buffer.read(1):
+            deny("too many repository files requested")
+
+
+mirror = sys.argv[1] if len(sys.argv) > 1 else ""
+if not re.fullmatch(NAME, mirror):
+    deny("bad mirror name")
+command = re.fullmatch(rf"(list|get) ({NAME})", os.environ.get("SSH_ORIGINAL_COMMAND", ""))
+if not command:
+    deny("unknown request")
+operation, repo = command.groups()
+try:
+    allowed = (ALLOW_D / mirror).read_text(encoding="ascii").splitlines()
+except (OSError, UnicodeError):
+    allowed = []
+if repo not in allowed:
+    deny(f"{repo} is not allowed")
+try:
+    storage = subprocess.check_output([STORAGE_HELPER, "storage-dir"], universal_newlines=True).strip()
+    with directory(storage, flags=os.O_RDONLY | os.O_DIRECTORY) as storage_fd, contextlib.ExitStack() as stack:
+        try:
+            root = stack.enter_context(directory(repo, storage_fd))
+        except OSError as exc:
+            if exc.errno in ABSENT:
+                deny(f"no repository {repo}")
+            raise
+        if operation == "list":
+            count = 0
+            for name, info in list_files(root):
+                print(f"{name} {info.st_size} {max(0, int(info.st_mtime))}")
+                count += 1
+            print(f"end {count}", flush=True)
+        else:
+            send_files(root)
+except (OSError, subprocess.CalledProcessError):
+    deny("cannot read the repository")
+try:
+    SERVED_D.mkdir(exist_ok=True)
+    (SERVED_D / f"{mirror}--{repo}").touch()
+except OSError:
+    pass
 SERVE_EOF
 chmod 0755 /lib65/kervax/kervax-mirror-serve.new && chown root:root /lib65/kervax/kervax-mirror-serve.new \
   && mv -f /lib65/kervax/kervax-mirror-serve.new /lib65/kervax/kervax-mirror-serve

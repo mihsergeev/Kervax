@@ -8508,6 +8508,10 @@ button.inv-dd-btn { font-size: 0.82rem; padding: 0.28rem 0.7rem; }
    окно резервного */
 .repo-mirror { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); font-size: 0.87rem; line-height: 1.5; }
 .repo-mirror-h { font-weight: 650; }
+.repo-mirror > summary { cursor: pointer; }
+.repo-mirror > summary + div { margin-top: 8px; }
+.repo-mirror-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 4px 12px; max-height: 220px; overflow: auto; margin: 8px 0; }
+.repo-mirror-choice { display: flex; gap: 8px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
 .mirror-row { display: grid; grid-template-columns: 10px minmax(8rem, max-content) minmax(0, 1fr) auto; gap: 10px; align-items: center; cursor: pointer; }
 .mirror-make { display: flex; flex-direction: column; gap: 6px; padding: 10px 4px 2px; }
 .mirror-main { display: flex; flex-direction: column; gap: 12px; padding: 14px 18px 18px; }

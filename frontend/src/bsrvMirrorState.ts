@@ -11,6 +11,7 @@ export const HELPER = '/lib65/kervax/kervax-mirror-helper'
 const STALE_S = 50 * 3600
 const FIRST_S = 26 * 3600
 const AGENT_MIN = '2.57'
+export const MIRROR_HELPER_MIN = '0.2'
 
 export type T = (k: string, p?: Record<string, string | number>) => string
 
@@ -77,6 +78,7 @@ export function errText(c: MirrorCopy, t: T): string {
     ssh: t('основной не пустил по SSH'),
     list: t('список файлов с основного пришел неполным'),
     get: t('перекачка оборвалась'),
+    integrity: t('в полученной копии отсутствуют или повреждены файлы'),
     space: t('на резервном не хватает места'),
     config: t('нет адреса или ключа основного'),
     run: t('перекачка упала'),
@@ -94,6 +96,7 @@ export function frozenText(c: MirrorCopy, t: T): string {
     empty: t('репозиторий на основном пуст'),
     config_gone: t('на основном пропал config репозитория'),
     config_changed: t('на основном сменился config: это другой репозиторий'),
+    repo_gone: t('репозиторий исчез с основного сервера'),
   }
   if (!m[code]) return c.frozen_why
   // helper пишет "snapshots 15 of 17 ..." или "data <байт> of <байт> ...": показываем сколько из скольких
@@ -172,5 +175,6 @@ export function mirrorNotReady(m: Server, t: T): string {
   if (!m.agent_version || verLt(m.agent_version, AGENT_MIN)) return t('нужен агент {v} или новее', { v: AGENT_MIN })
   const r = mirrorReport(m)
   if (!r) return t('не стоит helper mirror-setup')
+  if (!r.helper || verLt(r.helper, MIRROR_HELPER_MIN)) return t('нужен mirror-setup {v} или новее', { v: MIRROR_HELPER_MIN })
   return ''
 }
