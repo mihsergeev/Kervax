@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.94] - 2026-11-04
+
+- Backup-server setup shows progress by stage and waits for the agent to confirm the selected storage path.
+- Empty backup servers created by the panel can switch from the system volume to another mounted volume and keep the existing credentials and HTTPS certificate. This requires Linux agent 2.63 and backupserver-setup 0.40 or later.
+- The Repositories tab distinguishes an empty server from missing statistics and stops offering the installation command when the helper is already installed.
+- New backup servers require an explicit storage choice. Refreshing the panel loads the current interface.
+
 ## [1.8.93] - 2026-11-04
 
 - The Add Server dialog now uses large Linux and Windows logos. Linux remains selected by default.

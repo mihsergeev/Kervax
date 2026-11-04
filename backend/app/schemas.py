@@ -1520,13 +1520,8 @@ class BackupToHttpsIn(BaseModel):
     client_ids: list[int] = Field(min_length=1, max_length=200)
 
 
-class BackupServerDeployIn(BaseModel):
-    """Развернуть rest-server на ноде с нуля. Образ и режим (--append-only --private-repos)
-    зашиты в helper и панелью НЕ управляются — иначе это вектор ослабления защиты."""
-
-    port: int = Field(64100, ge=1024, le=65535)
-    tls: bool = True  # поднять self-signed TLS-фронт на 64101
-    storage_mount: str = Field("", max_length=512, pattern=r"^(?:|/|(?:/[A-Za-z0-9._-]+)+)$")
+class BackupServerStorageIn(BaseModel):
+    storage_mount: str = Field(max_length=512, pattern=r"^(?:/[A-Za-z0-9._-]+)+$")
 
     @field_validator("storage_mount")
     @classmethod
@@ -1534,6 +1529,15 @@ class BackupServerDeployIn(BaseModel):
         if {".", ".."}.intersection(value.split("/")):
             raise ValueError("нужен абсолютный путь точки монтирования без . и ..")
         return value
+
+
+class BackupServerDeployIn(BackupServerStorageIn):
+    """Развернуть rest-server на ноде с нуля. Образ и режим (--append-only --private-repos)
+    зашиты в helper и панелью НЕ управляются — иначе это вектор ослабления защиты."""
+
+    port: int = Field(64100, ge=1024, le=65535)
+    tls: bool = True  # поднять self-signed TLS-фронт на 64101
+    storage_mount: str = Field("", max_length=512, pattern=r"^(?:|/|(?:/[A-Za-z0-9._-]+)+)$")
 
 
 class HelperAdvice(BaseModel):

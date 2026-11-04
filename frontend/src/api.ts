@@ -3700,6 +3700,13 @@ export function backupSetup(serverId: number, body: BackupSetupBody): Promise<Ba
 export function backupSetupStatus(serverId: number, jobId: number): Promise<BackupSetupJob> {
   return api<BackupSetupJob>(`/api/servers/${serverId}/backup/setup/${jobId}`)
 }
+
+export function moveBackupServerStorage(serverId: number, storageMount: string): Promise<BackupSetupJob> {
+  return api<BackupSetupJob>(`/api/servers/${serverId}/backup-server/storage`, {
+    method: 'POST',
+    body: JSON.stringify({ storage_mount: storageMount }),
+  })
+}
 // развернуть rest-server на ноде с нуля (docker/restic/htpasswd + append-only контейнер).
 // Прогресс поллится тем же backupSetupStatus.
 export function deployBackupServer(

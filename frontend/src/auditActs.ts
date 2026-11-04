@@ -142,6 +142,7 @@ export const ACT: Record<string, string> = {
   backup_mirror_sync: 'отправил настройки копий заново',
   backup_mirror_pull: 'запустил перекачку копий на резервном',
   backup_server_deploy: 'развернул сервер бэкапов',
+  backup_server_move_storage: 'сменил раздел хранения бэкапов',
   backup_server_enable_tls: 'включил TLS на сервере бэкапов',
   backup_to_https: 'перевел бэкап сервера на https',
   backup_credentials_view: 'посмотрел доступы бэкапа',

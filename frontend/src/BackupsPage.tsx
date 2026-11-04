@@ -13,6 +13,7 @@ import {
   deployBackupServer,
   enableBackupTls,
   listServers,
+  moveBackupServerStorage,
   setCustomBackupIgnored,
   type BackupArchiveEntry,
   type BackupCommand,
@@ -2415,10 +2416,10 @@ const BSRV_SECTIONS: SecDef[] = [
 ]
 const BSRV_SEC_IDS = new Set(BSRV_SECTIONS.map((x) => x.id))
 
-function BackupServerModal({ server: s, info, servers, canAct, initialSec, onChanged, onClose }: {
+function BackupServerModal({ server: s, info, servers, canAct, initialSec, onChanged, onMoveStorage, onClose, underlay }: {
   server: Server; info: BackupServerInfo; servers: Server[]; canAct: boolean
   initialSec?: string | null // из ссылки алерта или с главной: ?backupsrv=id&sec=cleanup
-  onChanged: () => void; onClose: () => void
+  onChanged: () => void; onMoveStorage: () => void; onClose: () => void; underlay: boolean
 }) {
   const { t } = useI18n()
   const [q, setQ] = useState('')
@@ -2469,6 +2470,13 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
     .sort((a, b) => b.g - a.g)
   const growTotal = growers.reduce((a, x) => a + x.g, 0)
   const ext = bsrvExtra(s)
+  const statsReady = !!info.helper_version || !!ext || info.repos !== undefined
+  const canMoveStorage = canAct && statsReady && !every.length && info.data_dir === DEFAULT_BSRV_STORAGE
+  const chooseStorage = canMoveStorage && (
+    <div className="backup-manage-actions">
+      <button className="ghost" onClick={onMoveStorage}>{t('Выбрать другой раздел')}</button>
+    </div>
+  )
   // вкладка "Чистка": пункты с причинами и шагами считает бэкенд (app/bsrv_cleanup.py)
   const cl = s.bsrv_cleanup ?? null
   // репозитории, где старье не уходит, кроме тех, что уже в плашке старого скрипта: там та же беда
@@ -2561,8 +2569,8 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
     for (const x of offLines(s, t)) add('cleanup', { level: 1, count: x.n, text: x.text })
     if (s.bsrv_restic_old)
       add('server', { level: 1, text: t('на сервере бэкапов старый restic {v} - обновите', { v: s.bsrv_restic_old }) })
-    if (!every.length)
-      add('repos', { level: 1, text: t('статистики репозиториев нет: включите ее (backupserver-setup)') })
+    if (!statsReady)
+      add('repos', { level: 1, text: t('Панель пока не получила статистику репозиториев.') })
     const dbs = audit.filter((x) => x.kind === 'db')
     if (dbs.length && !s.db_dumps_ok)
       add('coverage', {
@@ -2572,7 +2580,8 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
       })
   }
   const ok: Record<string, string> = {
-    repos: all.length ? t('репозиториев: {n}, все в порядке', { n: all.length }) : '',
+    repos: all.length ? t('репозиториев: {n}, все в порядке', { n: all.length })
+      : statsReady && !every.length ? t('Репозиториев пока нет.') : '',
     archive: t('репозиториев: {n}, {sz}', { n: archivedRepos.length, sz: fmtBytes(archivedBytes) }),
     cleanup: ext ? t('чистка и проверка идут у всех') : t('нет данных'),
     server: subOf(
@@ -2630,7 +2639,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   )
 
   return createPortal(
-    <div className="modal-backdrop">
+    <div className="modal-backdrop" inert={underlay}>
       <div className="card detail detail-server hs-modal" onClick={(e) => e.stopPropagation()}>
         <div className="detail-head">
           <div className="detail-title">
@@ -2765,8 +2774,18 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
                     })}
                   </div>
                 )}
-                {all.length === 0 ? (
-                  <EnableServerStats />
+                {!every.length ? (
+                  statsReady ? <>
+                    <div className="srv-empty">{t('Репозиториев пока нет.')}</div>
+                    {chooseStorage}
+                  </> : s.last_report?.setup_versions?.['backupserver-setup'] ? (
+                    <div className="srv-empty">
+                      {t('Helper установлен. Панель пока не получила статистику репозиториев.')}
+                      <div className="backup-manage-actions">
+                        <button className="ghost" onClick={onChanged}>{t('Проверить снова')}</button>
+                      </div>
+                    </div>
+                  ) : <EnableServerStats />
                 ) : repos.length === 0 ? (
                   <div className="srv-empty">{t('Ничего не найдено.')}</div>
                 ) : (
@@ -2903,6 +2922,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
                   {info.data_dir && row(t('данные'), info.data_dir)}
                   {pct != null && row(t('Место на диске'), `${pct}% · ${t('свободно {f} из {tt}', { f: fmtBytes(free), tt: fmtBytes(info.disk_total) })}`)}
                 </div>
+                {chooseStorage}
                 {canAct && srvOld && <RestServerUpdate server={s} info={info} onChanged={onChanged} />}
                 {!info.tls_front && (
                   <div className="net-note">
@@ -3296,8 +3316,10 @@ const DEFAULT_EXCLUDES = [
 ]
 
 // Состояние helper'а и список разделов приходят в очередном отчёте агента.
-function DeployServerModal({ server: s, onClose, onRefresh }: {
-  server: Server; onClose: () => void; onRefresh: () => Promise<void>
+const DEFAULT_BSRV_STORAGE = '/app/rest-server/data'
+
+function DeployServerModal({ server: s, move, onClose, onRefresh }: {
+  server: Server; move: boolean; onClose: () => void; onRefresh: () => Promise<void>
 }) {
   const { t, lang } = useI18n()
   const titleId = useId()
@@ -3314,10 +3336,10 @@ function DeployServerModal({ server: s, onClose, onRefresh }: {
   const disks = (s.last_report?.disks ?? []).filter(({ mount }) => mount.length <= 512
     && /^(?:\/[A-Za-z0-9._-]+)+$/.test(mount)
     && !mount.split('/').some((part) => part === '.' || part === '..'))
-  const selected = mount === '/' || disks.some((disk) => disk.mount === mount)
+  const selected = (!move && mount === '/') || disks.some((disk) => disk.mount === mount)
   const customMount = selected && mount !== '/'
-  const path = selected ? (customMount ? mount + '/kervax-rest-server/data' : '/app/rest-server/data') : ''
-  const needsHelper = !helper || (customMount && !verAtLeast(String(helper), '0.39'))
+  const path = selected ? (customMount ? mount + '/kervax-rest-server/data' : DEFAULT_BSRV_STORAGE) : ''
+  const needsHelper = !helper || (customMount && !verAtLeast(String(helper), move ? '0.40' : '0.39'))
   const needsAgent = customMount && !verAtLeast(s.agent_version || s.last_report?.agent_version, '2.63')
   const cmd = `curl -fsSL ${window.location.origin}/api/agent/backupserver-setup.sh | sudo bash`
   const portNumber = Number(port)
@@ -3325,8 +3347,11 @@ function DeployServerModal({ server: s, onClose, onRefresh }: {
     && !(tls && portNumber === 64101)
   const running = job?.status === 'running'
   const jobId = job?.id
-  const tlsIncomplete = tlsRetry || (tls && job?.steps.some((step) => step.step === 'deploy-server' && step.ok))
+  const tlsIncomplete = !move && (tlsRetry || (tls && job?.steps.some((step) => step.step === 'deploy-server' && step.ok)))
   const serverPresent = s.last_report?.backup_server?.present
+  const report = s.last_report?.backup_server
+  const reported = !!(report?.running && report.data_dir === path && (move || !tls || report.tls_front))
+  const confirmed = job?.status === 'done' && reported
   const canClose = !busy && (!running || pollFailed)
   const localize = (message: string) => lang === 'en' ? trBackend(message) : message
   const close = () => {
@@ -3335,6 +3360,10 @@ function DeployServerModal({ server: s, onClose, onRefresh }: {
     onClose()
   }
   useEscape(close)
+
+  useEffect(() => {
+    if (job?.status === 'done') void onRefresh()
+  }, [job?.status, onRefresh])
 
   useEffect(() => {
     if (!running || jobId == null || pollFailed) return
@@ -3371,7 +3400,9 @@ function DeployServerModal({ server: s, onClose, onRefresh }: {
     setErr(null)
     setBusy(true)
     try {
-      setJob(await deployBackupServer(s.id, { port: portNumber, tls, storage_mount: mount }))
+      setJob(await (move
+        ? moveBackupServerStorage(s.id, mount)
+        : deployBackupServer(s.id, { port: portNumber, tls, storage_mount: mount })))
     } catch (e) {
       setErr(e instanceof Error ? localize(e.message) : t('Ошибка'))
     } finally {
@@ -3392,38 +3423,56 @@ function DeployServerModal({ server: s, onClose, onRefresh }: {
     }
   }
 
-  const stepLabel: Record<string, string> = {
-    'deploy-server': t('rest-server (docker, restic, htpasswd)'),
-    'tls-front': t('TLS-фронт на бэкап-сервере'),
-  }
+  const stages = move ? [{ id: 'move-storage', label: t('Подключение выбранного раздела') }]
+    : [
+      ...(!tlsRetry ? [{ id: 'deploy-server', label: t('Запуск rest-server') }] : []),
+      ...(tls ? [{ id: 'tls-front', label: t('Проверка HTTPS') }] : []),
+    ]
+  const completed = job?.steps.filter((step) => step.ok && stages.some(({ id }) => id === step.step)).length ?? 0
+  const progressLabel = t('Этапы развёртывания')
 
   return createPortal(
-    <div className="modal-backdrop" onClick={close}>
+    <div className="modal-backdrop backup-deploy-backdrop" onClick={close}>
       <div className="card modal backup-deploy-modal" role="dialog" aria-modal="true" aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}>
         <div className="clients-head">
-          <h3 id={titleId}>{t('Сделать бэкап-сервером')}: {s.name}</h3>
+          <h3 id={titleId}>{move ? t('Раздел для хранения бэкапов') : t('Сделать бэкап-сервером')}: {s.name}</h3>
           <button className="ghost" onClick={close} disabled={!canClose}>{t('Закрыть')}</button>
         </div>
-        {job ? (
+        {job || busy ? (
           <div className="backup-setup-progress" aria-live="polite">
-            {job.steps.map((st) => (
-              <div key={st.step} className={`setup-step ${st.ok ? 't-up' : 't-down'}`}>
-                <span className="mono">{st.ok ? '✓' : '✗'}</span> {stepLabel[st.step] || st.step}
-                {!st.ok && st.detail && <span className="muted small"> - {localize(st.detail)}</span>}
+            {path && <div className="muted small">{t('Каталог репозиториев')} <code>{path}</code></div>}
+            <progress className="backup-deploy-progress" aria-label={progressLabel}
+              max={stages.length + 2} value={job ? 1 + completed + Number(confirmed) : 0} />
+            {!job && <div className="muted small">{t('Отправляем команду…')}</div>}
+            {stages.map(({ id, label }, index) => {
+              const step = job?.steps.find((item) => item.step === id)
+              const active = running && !pollFailed && !step && index === completed
+              return <div key={id} className={`setup-step ${step ? step.ok ? 't-up' : 't-down' : 'muted'}`}>
+                <span aria-hidden="true" className="mono">{step ? step.ok ? '✓' : '✗' : '○'}</span>
+                <span>{label}{active && ` · ${t('выполняется…')}`}</span>
+                {step && !step.ok && step.detail && <span className="muted small">{localize(step.detail)}</span>}
               </div>
-            ))}
-            {running && !pollFailed && (
-              <div className="setup-step muted"><span className="sdot sdot-unknown" /> {t('выполняется…')}</div>
-            )}
+            })}
             {pollFailed && <>
               <div className="form-error small">{t('Не удалось получить статус развёртывания.')}</div>
               <div className="backup-manage-actions">
                 <button onClick={() => setPollFailed(false)}>{t('Проверить статус')}</button>
               </div>
             </>}
-            {job.status === 'done' && <div className="setup-final t-up">✓ {t('бэкап-сервер развёрнут')}</div>}
-            {job.status === 'error' && <>
+            {job?.status === 'done' && <>
+              <div className="setup-final t-up">✓ {move ? t('Раздел подключён') : t('бэкап-сервер развёрнут')}</div>
+              <div className={`setup-step ${confirmed ? 't-up' : 'muted'}`}>
+                <span aria-hidden="true">{confirmed ? '✓' : '○'}</span>
+                <span>{confirmed ? t('Агент подтвердил состояние') : t('Ждём отчёт агента с новым состоянием')}</span>
+              </div>
+              {!confirmed && <div className="backup-manage-actions">
+                <button className="ghost" onClick={() => void refresh()} disabled={refreshing}>
+                  {refreshing ? '…' : t('Проверить снова')}
+                </button>
+              </div>}
+            </>}
+            {job?.status === 'error' && <>
               <div className="setup-final form-error">{job.message ? localize(job.message) : t('Ошибка')}</div>
               {err && <div className="form-error small" role="alert">{err}</div>}
               {tlsIncomplete && !serverPresent && (
@@ -3442,12 +3491,12 @@ function DeployServerModal({ server: s, onClose, onRefresh }: {
           </div>
         ) : (
           <form className="backup-setup-form" onSubmit={(e) => { e.preventDefault(); void run() }}>
-            {helper && <>
+            <>
               <label>
                 <span className="backup-manage-label">{t('Раздел для хранения бэкапов')}</span>
                 <select className="field-inp" value={mount} onChange={(e) => setMount(e.target.value)} disabled={busy}>
                   <option value="" disabled>{t('Выберите раздел')}</option>
-                  <option value="/">{t('Стандартный каталог')}</option>
+                  {!move && <option value="/">{t('Системный раздел · {path}', { path: DEFAULT_BSRV_STORAGE })}</option>}
                   {mount && !selected && <option value={mount} disabled>{mount}</option>}
                   {disks.map((disk) => {
                     const free = disk.avail ?? disk.total - disk.used
@@ -3459,6 +3508,8 @@ function DeployServerModal({ server: s, onClose, onRefresh }: {
               </label>
               {path && <div className="muted small">{t('Каталог репозиториев')} <code>{path}</code></div>}
               {mount && !selected && <div className="form-error small">{t('Выбранного раздела больше нет в отчёте агента.')}</div>}
+            </>
+            {move ? <div className="muted small">{t('Смена раздела доступна для пустого хранилища. rest-server ненадолго перезапустится.')}</div> : <>
               <label>
                 <span className="backup-manage-label">{t('Порт rest-server')}</span>
                 <input className="field-inp backup-time-inp" type="number" min={1024} max={65535}
@@ -3486,9 +3537,9 @@ function DeployServerModal({ server: s, onClose, onRefresh }: {
               <button type="button" className="ghost" onClick={() => void refresh()} disabled={busy || refreshing}>
                 {refreshing ? '…' : t('Проверить снова')}
               </button>
-              {helper && <button type="submit" disabled={busy || !selected || !portValid || !s.online || needsHelper || needsAgent}>
-                {busy ? '…' : t('Развернуть')}
-              </button>}
+              <button type="submit" disabled={busy || !selected || !portValid || !s.online || needsHelper || needsAgent}>
+                {move ? t('Подключить раздел') : t('Развернуть')}
+              </button>
             </div>
           </form>
         )}
@@ -3732,6 +3783,7 @@ export function BackupsPage({
   const [linkSrvSec, setLinkSrvSec] = useState<{ id: number | null; sec: string | null }>({ id: openSrvHostId, sec: openSrvSec })
   const [setupSrv, setSetupSrv] = useState<Server | null>(null)
   const [deploySrvId, setDeploySrvId] = useState<number | null>(null)
+  const [moveSrvId, setMoveSrvId] = useState<number | null>(null)
   // Только id, а не сам объект: модалка обязана видеть свежий сервер после каждой
   // перезагрузки списка. С копией, снятой в момент открытия, галочка внутри не
   // перерисовывалась — клик срабатывал, но выглядел как проигнорированный, и
@@ -3799,7 +3851,7 @@ export function BackupsPage({
     && (linkSrvSec.sec === 'mirror' || !s.last_report?.backup_server?.present))
   const openSrv = openMirror ? undefined : srvHosts.find(({ s }) => s.id === openSrvId)
   const covSrv = (servers ?? []).find((x) => x.id === covId) ?? null
-  const deploySrv = (servers ?? []).find((x) => x.id === deploySrvId)
+  const deploySrv = (servers ?? []).find((x) => x.id === (moveSrvId ?? deploySrvId))
 
   const allHosts = (servers ?? [])
     .map((s) => ({ s, d: s.last_report?.backup }))
@@ -4281,6 +4333,8 @@ export function BackupsPage({
           canAct={!isViewer}
           initialSec={linkSrvSec.id === openSrv.s.id ? linkSrvSec.sec : null}
           onChanged={load}
+          onMoveStorage={() => setMoveSrvId(openSrv.s.id)}
+          underlay={moveSrvId !== null}
           onClose={() => {
             setOpenSrvId(null)
             setLinkSrvSec({ id: null, sec: null })
@@ -4306,9 +4360,10 @@ export function BackupsPage({
       )}
       {deploySrv && (
         <DeployServerModal
-          key={deploySrv.id}
+          key={`backup-deploy-${deploySrv.id}`}
           server={deploySrv}
-          onClose={() => setDeploySrvId(null)}
+          move={moveSrvId !== null}
+          onClose={() => { setDeploySrvId(null); setMoveSrvId(null) }}
           onRefresh={load}
         />
       )}

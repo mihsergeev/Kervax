@@ -132,6 +132,7 @@ from app.schemas import (
     BackupAudit,
     BackupResultIn,
     BackupServerDeployIn,
+    BackupServerStorageIn,
     BackupToHttpsIn,
     BackupToHttpsJobOut,
     BackupSetupIn,
@@ -2931,16 +2932,22 @@ async def _orchestrate_deploy_server(session_factory, job_id: int, params: dict)
     """Поднять rest-server на ноде с нуля (helper ставит docker/restic/htpasswd из штатных
     реп дистрибутива и запускает контейнер с --append-only --private-repos) + опц. TLS-фронт.
     Секретов на этом этапе нет: репозитории и пароли появятся позже, при настройке клиентов."""
-    _steps, save, step = _job_runner(session_factory, job_id, params.get("_user", ""), "deploy_server")
+    move = params.get("move_storage", False)
+    _steps, save, step = _job_runner(session_factory, job_id, params.get("_user", ""), "move_storage" if move else "deploy_server")
     try:
         # долгий шаг: apt update/install + docker pull образа
         payload = {"port": params["port"]}
         if params["storage_mount"]:
             payload["storage_mount"] = params["storage_mount"]
-        ok, out = await step("deploy-server", params["node_id"], "deploy_server", payload, 720)
+        ok, out = await step("move-storage" if move else "deploy-server", params["node_id"], "deploy_server", payload, 720)
         if not ok:
+            if move:
+                lines = (out or "").splitlines()
+                return await save("error", lines[-1][:250] if lines else "не удалось перенести хранилище")
             hint = (out or "").replace("\r", " ").strip()
             return await save("error", hint[:250] or "не удалось развернуть rest-server")
+        if move:
+            return await save("done", "хранилище перенесено")
         if params["tls"]:
             ok, out = await step("tls-front", params["node_id"], "deploy_tls_front",
                                  {"san_ip": params["node_ip"], "san_dns": params["node_hostname"]}, 300)
@@ -3117,7 +3124,9 @@ async def backup_server_deploy(
             "на ноде нет helper'а бэкап-сервера — сначала выполните backupserver-setup.sh",
         )
     mount = body.storage_mount
-    if mount not in ("", "/"):
+    if not mount:
+        raise HTTPException(status.HTTP_409_CONFLICT, "обновите страницу и выберите раздел для хранилища")
+    if mount != "/":
         if _ver_key(node.agent_version or rep.get("agent_version")) < (2, 63) or _ver_key(helper) < (0, 39):
             raise HTTPException(status.HTTP_409_CONFLICT, "для выбора раздела нужны агент 2.63+ и backupserver-setup 0.39+")
         if not any(d.get("mount") == mount for d in rep.get("disks") or [] if isinstance(d, dict)):
@@ -3140,6 +3149,45 @@ async def backup_server_deploy(
     task = asyncio.create_task(
         _orchestrate_deploy_server(request.app.state.session_factory, job.id, params)
     )
+    _setup_tasks.add(task)
+    task.add_done_callback(_setup_tasks.discard)
+    return BackupSetupJobOut.model_validate(job)
+
+
+@router.post("/{server_id}/backup-server/storage", response_model=BackupSetupJobOut)
+async def backup_server_move_storage(
+    server_id: int, body: BackupServerStorageIn, request: Request, user: CurrentUser,
+    session: SessionDep,
+) -> BackupSetupJobOut:
+    """Перенос пустого хранилища, развернутого панелью. Helper повторно проверяет диск и данные."""
+    node = await _get_or_404(server_id, session, user)
+    rep = node.last_report or {}
+    bs = rep.get("backup_server") or {}
+    helper = (rep.get("setup_versions") or {}).get("backupserver-setup")
+    last = node.last_seen
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=min(max(node.offline_after_seconds, 30), 300))
+    if (last is None or last.replace(tzinfo=last.tzinfo or timezone.utc) < cutoff
+            or not bs.get("present") or not bs.get("helper_version")):
+        raise HTTPException(status.HTTP_409_CONFLICT, "нужен свежий отчет helper бэкап-сервера")
+    if _ver_key(node.agent_version or rep.get("agent_version")) < (2, 63) or _ver_key(helper) < (0, 40):
+        raise HTTPException(status.HTTP_409_CONFLICT, "для переноса нужны агент 2.63+ и backupserver-setup 0.40+")
+    mount = body.storage_mount
+    if not any(d.get("mount") == mount for d in rep.get("disks") or [] if isinstance(d, dict)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "этой точки монтирования нет в отчете агента")
+    data_dir = bs.get("data_dir")
+    if data_dir not in ("/app/rest-server/data", f"{mount}/kervax-rest-server/data"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "перенос доступен только для штатного хранилища")
+    if data_dir == "/app/rest-server/data" and bs.get("repos"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "в хранилище уже есть репозитории")
+    port = bs.get("port")
+    if not isinstance(port, int) or not 1024 <= port <= 65535:
+        raise HTTPException(status.HTTP_409_CONFLICT, "в отчете helper отсутствует порт rest-server")
+    job = BackupSetupJob(server_id=node.id, backup_server_id=node.id, status="running", steps=[])
+    session.add(job)
+    await session.commit()
+    await audit.record(session, user.username, "backup_server_move_storage", f"{node.name} {mount}", f"srv={server_id}")
+    params = {"node_id": node.id, "port": port, "storage_mount": mount, "move_storage": True, "_user": user.username}
+    task = asyncio.create_task(_orchestrate_deploy_server(request.app.state.session_factory, job.id, params))
     _setup_tasks.add(task)
     task.add_done_callback(_setup_tasks.discard)
     return BackupSetupJobOut.model_validate(job)
