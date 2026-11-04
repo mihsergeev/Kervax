@@ -7964,6 +7964,8 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
 /* Роли сервера рядом с именем (RoleChips.tsx): вид как у плашки GPU, у каждой роли свой цвет.
    Не зеленый/желтый/красный статусов и не синий групп */
 .role-chip { --rc: #a78bfa; display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.68rem; font-weight: 600; letter-spacing: 0.03em; padding: 0.05rem 0.4rem; border-radius: 6px; border: 1px solid color-mix(in srgb, var(--rc) 45%, transparent); color: var(--rc); background: color-mix(in srgb, var(--rc) 10%, transparent); flex-shrink: 0; white-space: nowrap; }
+.role-legacy { --rc: #94a3b8; }
+:root[data-theme='light'] .role-legacy { --rc: #475569; }
 .role-chip svg { width: 0.8rem; height: 0.8rem; flex-shrink: 0; }
 /* длинная плашка (VPN: "VLESS, AmneziaWG, OpenVPN") на телефоне не шире строки: обрезается, целиком в подсказке */
 .role-chip { max-width: 100%; min-width: 0; }

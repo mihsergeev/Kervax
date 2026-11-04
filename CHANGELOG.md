@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.92] - 2026-11-04
+
+### Fixed
+- Legacy Linux agents now have a dedicated badge in the server list and details, styled like other server badges.
+
 ## [1.8.91] - 2026-11-04
 
 ### Fixed

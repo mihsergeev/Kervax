@@ -6606,6 +6606,7 @@ const EN: Record<string, string> = {
     'The agent reaches the panel through relay {name}',
   'через ретранслятор {name}':
     'via relay {name}',
+  'Легаси-агент с ручным обновлением': 'Legacy agent with manual updates',
   'Нода Kubernetes':
     'Kubernetes node',
   'Сервисы LLM: {list}':

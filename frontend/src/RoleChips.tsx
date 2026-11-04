@@ -13,6 +13,12 @@ const svg = (body: ReactNode) => (
 )
 
 const ICON = {
+  legacy: svg(
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="m7 9 3 3-3 3m6 0h4" />
+    </>,
+  ),
   // база данных: хранилище бэкапов
   backup: svg(
     <>
@@ -86,6 +92,8 @@ export function RoleChips({ s, servers, t, onRelay, onVpn, mesh }: {
   mesh?: boolean // и участие в меше (Tailscale на обычной ноде): только в карточке, в списке шумит
 }) {
   const out: ReactNode[] = []
+  if (s.agent_version?.endsWith('-legacy'))
+    out.push(<Chip key="legacy" role="legacy" icon={ICON.legacy} title={t('Легаси-агент с ручным обновлением')}>Legacy</Chip>)
   if (s.last_report?.backup_server?.present)
     out.push(<Chip key="backup" role="backup" icon={ICON.backup} title={t('Сервер бэкапов (rest-server)')}>{t('бэкап-сервер')}</Chip>)
   // Ретранслятор Kervax (app/relay.py): у самого - чьи агенты через него ходят (выбрали его в
