@@ -21,7 +21,7 @@ TOPIC = {
     "offline": "📡", "reboot": "🔄", "cpu": "⚡", "cpu_spin": "🌀", "mem": "🧠", "oom": "🧠",
     "mem_leak": "📈", "mem_limit": "🧠", "pressure": "🫁", "temp": "🌡", "throttle": "🌡", "disktemp": "🌡",
     "gpu_heat": "🌡", "clock": "🕐", "dns": "🌐", "disk": "💽", "inode": "💽", "disk_forecast": "💽",
-    "disk_health": "💽", "disk_slow": "🐢", "net_health": "📶", "link": "🔗", "traffic": "📊",
+    "disk_health": "💽", "disk_slow": "🐢", "backup_transfer": "💾", "net_health": "📶", "link": "🔗", "traffic": "📊",
     "conntrack": "🔗", "listen_gone": "🔌", "exposed": "🔓", "port_new": "🚪", "cf_realip": "🎭", "access_change": "🔑",
     "access_risk": "🗝", "ssh_risk": "🔐", "docker_sock": "🐳", "docker_risk": "🐳", "units": "⚙️",
     "unit_loop": "⚙️", "workers": "👷", "cron_stuck": "⏲", "log_errors": "📜", "queue": "🐇",
@@ -94,6 +94,7 @@ RECOVERY = {
     "kube_node": "ноды кластера снова готовы", "mem_leak": "память больше не растет",
     "mem_limit": "больше не упирается в лимит памяти",
     "listen_gone": "пропавшие порты снова слушают", "disk_slow": "диск больше не тормозит",
+    "backup_transfer": "просадка скорости бэкапа больше не наблюдается",
     "web_cert": "сертификаты снова в сроке", "web_config": "конфиги снова в порядке",
     "webfiles": "признаков взлома в файлах сайтов больше нет",
     "db_health": "базы снова в порядке", "ssh_risk": "SSH больше не в опасности",
@@ -551,9 +552,9 @@ def _short(key: str, ctx: dict, s, level: int):
             if stuck:
                 facts.append(tg_fmt.fact("Завис" if len(stuck) == 1 else "Зависли", tg_fmt.names(stuck)))
         return what, facts
-    if key in ("net_health", "disk_slow", "kube_node"):
+    if key in ("net_health", "disk_slow", "backup_transfer", "kube_node"):
         texts = ([t for _l, _r, t in items] if key == "net_health" and items
-                 else [ctx.get("detail") or ""] if key == "disk_slow" else list(items or []))
+                 else [ctx.get("detail") or ""] if key in ("disk_slow", "backup_transfer") else list(items or []))
         if not texts or not texts[0]:
             return None
         what, facts = tg_fmt.split_detail(texts[0])

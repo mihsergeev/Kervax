@@ -1877,6 +1877,7 @@ const EN: Record<string, string> = {
   'Сервер: пропал порт': 'Server: port gone',
   'пропавший порт': 'gone port',
   'Диск тормозит': 'Disk is slow',
+  'Скорость бэкапа': 'Backup transfer speed',
   // сертификаты nginx
   'Веб-сервер: сертификат истекает': 'Web server: certificate expires',
   'сертификат {l} истек {n} дн назад ({f})': 'certificate {l} expired {n} days ago ({f})',

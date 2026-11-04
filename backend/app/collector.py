@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_state, backup_verify
 from app import report_progress
-from app import bsrv_mirror
+from app import backup_transfer, bsrv_mirror
 from app import home_mute, kube_coverage, os_support
 from app import mute_watch
 from app import request_watch
@@ -357,7 +357,8 @@ _SRV_SECTION = {
     "net_health": "nethealth",
     "link": "links", "traffic": "traffic", "vpn_torrent": "vpnflow", "vpn_heavy": "vpnflow", "gre_down": "gre",
     "access_change": "changes", "mem_leak": "memleak", "mem_limit": "memlimit", "ssh_risk": "ssh", "access_risk": "access",
-    "listen_gone": "exposure", "disk_slow": "disklat", "gpu": "gpu", "gpu_heat": "gpu", "autoban": "web",
+    "listen_gone": "exposure", "disk_slow": "disklat", "backup_transfer": "diskio",
+    "gpu": "gpu", "gpu_heat": "gpu", "autoban": "web",
 }
 
 
@@ -2249,6 +2250,8 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "пропавшие порты снова слушаются или сняты с наблюдения"
     if key == "disk_slow":
         return "задержка диска снова в норме"
+    if key == "backup_transfer":
+        return "просадка скорости бэкапа больше не наблюдается"
     if key == "web_cert":
         return "сертификаты веб-серверов снова в сроке"
     if key == "web_config":
@@ -3901,19 +3904,14 @@ _PSI_MEM_FULL = 10.0
 _PSI_MEM_SOME = 40.0
 _PSI_IO_FULL = 50.0
 _PSI_IO_SOME = 80.0
-# Сервер бэкапов (backup_server.present): диск грузит его работа - prune и check репозиториев
-# restic, прием бэкапов. На двух HDD в RAID1 prune одного репозитория 17 минут читал дерево
-# снапшотов, процессы ждали диск 55-60% времени, и алерт приходил каждый день в одно время, а отбой
-# через два часа. Бэкапы при этом проходят, зависших нет, делать нечего. Давление только по диску
-# на таком сервере алертит, если держится дольше _BSRV_IO_HOLD_S: столько не идет ни один prune,
-# значит что-то не так (prune крутится без конца, диск умирает). Зависшие в D, память и дескрипторы -
-# как у всех.
-# Так же - пока бэкап идет на самом сервере (backup_busy): холодная копия на сетевом хранилище каждый
+# На хранилище бэкапов ожидание диска видно на графике. Алертим по просадке передачи
+# (backup_transfer), зависшим задачам и реальным ошибкам дисков.
+# Пока свой бэкап идет на обычном сервере (backup_busy): холодная копия на сетевом хранилище каждый
 # час тянет к себе бэкапы других серверов, и процессы ждали хранилище по 3-4 часа каждое утро -
 # красная тревога и отбой на его обычной работе. Свое задание запущено или стартовало за последний
 # час (_BK_RECENT_S), в базе идет дамп. Задания чаще чем раз в полчаса (метрики раз в 5 минут) - не
 # окно бэкапа, иначе окно было бы всегда. Бэкап кончился, а диск все ждут - выдержка снова обычная
-_BSRV_IO_HOLD_S = 6 * 3600
+_BACKUP_JOB_IO_HOLD_S = 6 * 3600
 _BK_RECENT_S = 3600
 _BK_FREQ_S = 1800
 # Зависшие процессы (агент 2.40, dstate.stuck) - как их видит ядро (hung_task): тот же процесс в D
@@ -3971,7 +3969,7 @@ def pressure_hint(rep: dict) -> str:
     return ""
 
 
-def pressure_problems(rep: dict, going: bool = False) -> list[tuple[int, str, str]]:
+def pressure_problems(rep: dict, going: bool = False, *, disk_io: bool = True) -> list[tuple[int, str, str]]:
     """(уровень, ресурс, текст) по свежему отчету: память и диск по PSI, зависшие процессы,
     файловые дескрипторы. Пусто - все в норме или агент старше 2.26.
     Память кончилась на всем сервере (app/mem_starve.py) - ресурс "thrash" вместо "mem", у него
@@ -3993,9 +3991,9 @@ def pressure_problems(rep: dict, going: bool = False) -> list[tuple[int, str, st
     elif ms >= _PSI_MEM_SOME:
         out.append((1, "mem", f"не хватает памяти: процессы ждут память {ms:.0f}% времени"))
     io_f, io_s = val("io_full_60"), val("io_some_60")
-    if io_f >= _PSI_IO_FULL:
+    if disk_io and io_f >= _PSI_IO_FULL:
         out.append((2, "io", f"диск не успевает: все процессы разом ждут диск {io_f:.0f}% времени"))
-    elif io_s >= _PSI_IO_SOME:
+    elif disk_io and io_s >= _PSI_IO_SOME:
         out.append((1, "io", f"диск не успевает: процессы ждут диск {io_s:.0f}% времени"))
     stuck, hung = dstate_stuck(rep)
     if stuck or hung:
@@ -4039,23 +4037,19 @@ def backup_busy(rep: dict) -> str:
 
 
 def pressure_hold_s(rep: dict, pr: list[tuple[int, str, str]], s: Server | None = None) -> float | None:
-    """Своя выдержка алерта о давлении: на сервере бэкапов и пока на сервере идет бэкап, когда ждут
-    только диск (см. _BSRV_IO_HOLD_S); кончилась память на всем сервере - mem_starve.HOLD_S, если общая
+    """Своя выдержка алерта о давлении: пока на сервере идет свой бэкап, когда ждут
+    только диск; кончилась память на всем сервере - mem_starve.HOLD_S, если общая
     выдержка сервера не короче. None - общая выдержка сервера."""
     if any(r == "thrash" for _l, r, _t in pr):
         ss = getattr(s, "alert_sustain_seconds", None)
         return float(min(mem_starve.HOLD_S, _SUSTAIN_DEFAULT if ss is None else max(int(ss), 0)))
-    if pr and all(r == "io" for _l, r, _t in pr) and (_bsrv_role(rep, s) or backup_busy(rep)):
-        return _BSRV_IO_HOLD_S
+    if pr and all(r == "io" for _l, r, _t in pr) and backup_busy(rep):
+        return _BACKUP_JOB_IO_HOLD_S
     return None
 
 
-def bsrv_io_note(hold_s: float | None, rep: dict | None = None, s: Server | None = None) -> str:
-    """Пояснение к давлению на сервере бэкапов или во время бэкапа, которое все-таки дошло до алерта"""
-    if not hold_s:
-        return ""
-    if rep is None or _bsrv_role(rep, s):
-        return f"на сервере бэкапов так бывает во время prune и check, но не дольше {hold_s // 3600:.0f} ч"
+def bsrv_io_note(hold_s: float, rep: dict) -> str:
+    """Пояснение к длительному ожиданию диска во время собственного бэкапа."""
     job = backup_busy(rep)
     return f"во время бэкапа{f' ({job})' if job else ''} так бывает, но не дольше {hold_s // 3600:.0f} ч"
 
@@ -4642,11 +4636,11 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
         add("backup_mirror", lvl, "; ".join(txt[:2]) + (f" и еще {len(txt) - 2}" if len(txt) > 2 else ""),
             _BSRV_SEC["backup_mirror"], "backup_mirror", section="backups", srv=True)
     # Сервер задыхается: как и у алерта, только то, что держится дольше выдержки
-    pr = pressure_problems(rep, state.get("pressure_res") == "thrash")
+    pr = pressure_problems(rep, state.get("pressure_res") == "thrash", disk_io=not backup_host)
     pr_hold = pressure_hold_s(rep, pr, s)
     if pr and _held_long(s, state, "pressure", now, pr_hold):
         add("pressure", pr[0][0], "; ".join(t for _l, _r, t in pr[:3])
-            + (f" ({bsrv_io_note(pr_hold, rep, s)})" if pr_hold and pr[0][1] != "thrash" else "") + _routine_tail(state, "pressure", now),
+            + (f" ({bsrv_io_note(pr_hold, rep)})" if pr_hold and pr[0][1] != "thrash" else "") + _routine_tail(state, "pressure", now),
             "pressure", "pressure", state.get("pressure_since"))
     nets = net_problems(rep)
     if nets and _held_long(s, state, "net_health", now):
@@ -4671,10 +4665,16 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
     for x in listen_watch.problems(s, now):
         add("listen_gone", 1, x["text"], "exposure", listen_watch.MUTE_PREFIX + x["port"])
     # Диск тормозит: как и у алерта, только то, что держится дольше выдержки
-    dl, dtext = disk_slow(rep)
-    if dl and _held_long(s, state, "disk_slow", now):
-        add("disk_slow", dl, dtext + _routine_tail(state, "disk_slow", now), "disklat", "disk_slow",
-            state.get("disk_slow_since"))
+    if backup_host:
+        sample, complete = backup_transfer.observe(s, now, state.get(backup_transfer.STATE))
+        level, detail, since = backup_transfer.problem(sample) if complete else (0, "", None)
+        if level:
+            add("backup_transfer", level, detail, "diskio", "backup_transfer", since)
+    else:
+        dl, dtext = disk_slow(rep)
+        if dl and _held_long(s, state, "disk_slow", now):
+            add("disk_slow", dl, dtext + _routine_tail(state, "disk_slow", now), "disklat", "disk_slow",
+                state.get("disk_slow_since"))
     # GPU (helper gpu-setup): драйвер, пропавшая карта, Xid и сбойная память - сразу, перегрев -
     # как у алерта, когда держится дольше выдержки
     for lv, txt, _k, g_since in gpu_mod.problems(rep, now):
@@ -6476,7 +6476,8 @@ def _server_conditions(s: Server, now: datetime,
                        web_err: tuple[float, float, int, dict, float] | None = None,
                        pod_names: dict[str, str] | None = None,
                        fill_hist: dict[str, list[tuple[float, float]]] | None = None,
-                       metric_hist: list[tuple[float, dict[str, float]]] | None = None) -> dict[str, tuple[int, dict]]:
+                       metric_hist: list[tuple[float, dict[str, float]]] | None = None, *,
+                       report_epoch: bool = False) -> dict[str, tuple[int, dict]]:
     """Пороги сервера: ключ → (уровень, контекст для шаблона текста). Уровень 0 =
     норма; для диска 1=предупреждение(≥warn), 2=проблема(≥alert), 3=критично(≥crit).
     fill_hist - заполнение худшего раздела за последние минуты ({"disk"|"inode": [(unix, %)]},
@@ -7043,12 +7044,12 @@ def _server_conditions(s: Server, now: datetime,
                                              "sig": [f["key"] for f in cr], "items": cr})
     # Сервер задыхается (агент 2.26): уровень - худшая из причин, выдержка - как у CPU и RAM
     if online and any(rep.get(k) for k in ("psi", "dstate", "fds")):
-        pr = pressure_problems(rep, state.get("pressure_res") == "thrash")
+        pr = pressure_problems(rep, state.get("pressure_res") == "thrash", disk_io=not backup_host)
         pr_hold = pressure_hold_s(rep, pr, s)
         pctx = {"detail": "; ".join(t for _l, _r, t in pr[:3]), "res": pr[0][1] if pr else "", "cause": "",
                 "hint": pressure_hint(rep), "items": pr}
         if pr_hold and pr[0][1] != "thrash":
-            pctx["_note"] = bsrv_io_note(pr_hold, rep, s)
+            pctx["_note"] = bsrv_io_note(pr_hold, rep)
         sustain_lvl("pressure", pr[0][0] if pr else 0, cool_s=_CALM_S, ctx=pctx, hold_s=pr_hold)
     # Сеть ноды: потери TCP, очередь accept, conntrack, ошибки и дропы интерфейсов
     if online and (rep.get("tcp") or rep.get("net_ifaces")):
@@ -7106,7 +7107,11 @@ def _server_conditions(s: Server, now: datetime,
                                                "sig": [x["key"] for x in lg], "items": lg,
                                                "parts": [(x["key"], x["text"]) for x in lg]})
     # Диск тормозит: задержка выше порога держится дольше выдержки
-    if online and rep.get("disk_devs"):
+    if online and backup_host:
+        sample, complete = backup_transfer.observe(s, now, state.get(backup_transfer.STATE), restart=report_epoch)
+        level, detail, since = backup_transfer.problem(sample) if complete else (0, "", None)
+        out["backup_transfer"] = (level, {"detail": detail, "since": since, "sample": sample, "_complete": complete})
+    elif online and rep.get("disk_devs"):
         dl, dtext = disk_slow(rep)
         sustain_lvl("disk_slow", dl, {"detail": dtext}, cool_s=_CALM_S)
     # GPU (helper gpu-setup): драйвер, пропавшая карта, Xid - без выдержки, как у дисков: сами не
@@ -7634,24 +7639,46 @@ async def evaluate_servers(
             st.get(report_progress.KEY), s.last_report or {}, now)
         if progress is not None and progress != st.get(report_progress.KEY):
             apply(s.id, report_progress.KEY, progress)
+        rep = s.last_report or {}
+        backup_host = _bsrv_role(rep, s) or bsrv_mirror.is_mirror(s)
+        reset = {}
+        if talking and report_fresh:
+            retired = ["disk_slow"] if backup_host else ["backup_transfer"]
+            if backup_host and st.get("pressure_res") == "io":
+                retired.append("pressure")
+            for key in retired:
+                if st.get(key) and not st.get(f"{key}_quiet") and not st.get(f"{key}_hush"):
+                    quiet_closed.append((s, key, "для этой роли сервера действует другая проверка диска"))
+                tail = _closed_tail(key, st)
+                tail += [(f"{key}_{suffix}", None) for suffix in ("since", "from", "cool", "was", "quiet", "res")]
+                for state_key, value in tail:
+                    if st.get(state_key):
+                        apply(s.id, state_key, value)
+                        reset[state_key] = value
+            if not backup_host and st.get(backup_transfer.STATE):
+                apply(s.id, backup_transfer.STATE, None)
         # Own per-object holds are evaluated inside _server_conditions. A new
         # observation epoch must start them afresh before deriving a zero level.
         original_state = s.alert_state
         if report_epoch:
-            reset = {f"{key}_hold": None for key in _OWN_SETTLE}
+            reset.update({f"{key}_hold": None for key in _OWN_SETTLE})
             for token in original_state or {}:
                 if ((token.endswith("_cool") and token[:-5] in settings_store.SERVER_ALERT_KINDS)
                         or token == "web_5xx_since"):
                     reset[token] = None
                     if st.get(token) is not None:
                         apply(s.id, token, None)
+        if reset:
             s.alert_state = {**(original_state or {}), **reset}
         try:
             conds = _server_conditions(s, now, web_err.get(s.id), pod_names, fill_hist.get(s.id),
-                                       metric_hist.get(s.id, []))
+                                       metric_hist.get(s.id, []), report_epoch=report_epoch)
         finally:
-            if report_epoch:
+            if reset:
                 s.alert_state = original_state
+        transfer = conds.get("backup_transfer", (0, {}))[1]
+        if talking and report_fresh and transfer.get("_complete") and transfer["sample"] != st.get(backup_transfer.STATE):
+            apply(s.id, backup_transfer.STATE, transfer["sample"])
         for fk in flap_back:
             # тот же текст, что у обычного отбоя: "CPU снова в норме, 79%", а не без цифры
             recoveries.append(_server_alert_text(
@@ -8697,18 +8724,18 @@ async def evaluate_servers(
 
         # Висячий лок дольше суток: чистка и проверка репозитория не идут. Раньше он был
         # одной из причин backup_repo и терялся в общем списке, без возраста и без того,
-        # что из него следует. Шлем при появлении нового залоченного и раз в сутки, пока
-        # лок не снят.
+        # что из него следует. Шлем при появлении нового залоченного репозитория.
         bsrv = (s.last_report or {}).get("backup_server") or {}
         lr = rules.get("backup_lock")
-        if online_now and bsrv.get("present") and "backup_lock" not in mutes:
+        if online_now and report_fresh and bsrv.get("present") and not bsrv.get("storage_unavailable") \
+                and bsrv_mirror.bsrv_report(s, now) is not None and "backup_lock" not in mutes:
             locks = long_locked_repos(bsrv, set(s.backup_repo_mutes or []), now)
             names = [n for n, _d in locks]
             prev = st.get("backup_locks") if isinstance(st.get("backup_locks"), dict) else {}
             prev_names = list(prev.get("repos") or [])
             prev_ts = float(prev.get("ts") or 0)
             lock_ok = lr and lr["enabled"] and _rule_scope_ok(lr, s)
-            due = bool(set(names) - set(prev_names)) or now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT
+            due = bool(set(names) - set(prev_names))
             if locks and lock_ok and due:
                 items = [f"{n} ({d} дн)" for n, d in locks]
                 shown = ", ".join(items[:6]) + (f" и еще {len(items) - 6}" if len(items) > 6 else "")
@@ -8746,16 +8773,17 @@ async def evaluate_servers(
                 rec_apply.append((s.id, "backup_checks", {}))
 
         # Резервный сервер бэкапов: копия отстала (две суток без удачной перекачки), заморожена
-        # (на основном разом пропало многое) или в ней испортились файлы. Как с проверкой: при новой
-        # беде и раз в сутки, пока не уйдет; отбой, когда все копии снова в порядке.
+        # (на основном разом пропало многое) или в ней испортились файлы. Сообщаем о новых проблемах,
+        # отбой - когда все копии снова в порядке.
         mr = rules.get("backup_mirror")
-        if online_now and "backup_mirror" not in mutes:
-            mp = bsrv_mirror.problems(s, now)
+        mirror_report = bsrv_mirror.mirror_report(s, now)
+        if online_now and report_fresh and mirror_report is not None and "backup_mirror" not in mutes:
+            mp = bsrv_mirror.copy_problems(mirror_report, now)
             prev = st.get("backup_mirror") if isinstance(st.get("backup_mirror"), dict) else {}
             prev_keys = list(prev.get("keys") or [])
             prev_ts = float(prev.get("ts") or 0)
             keys = sorted(mp)
-            due = bool(set(keys) - set(prev_keys)) or now.timestamp() - prev_ts >= _BACKUP_REPO_REALERT
+            due = bool(set(keys) - set(prev_keys))
             if mp and mr and mr["enabled"] and _rule_scope_ok(mr, s) and due:
                 txt = [t for _l, t in sorted(mp.values(), key=lambda x: -x[0])]
                 fires.append(srv_fire(s, "backup_mirror", mr, {

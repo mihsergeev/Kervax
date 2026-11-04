@@ -58,6 +58,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'webfiles', label: 'Признаки взлома в файлах сайтов' },
   { k: 'listen_gone', label: 'Сервер: пропал порт' },
   { k: 'disk_slow', label: 'Диск тормозит' },
+  { k: 'backup_transfer', label: 'Скорость бэкапа' },
   { k: 'gpu', label: 'GPU: драйвер, пропала карта, ошибки Xid' },
   { k: 'gpu_heat', label: 'GPU: перегрев' },
   { k: 'llm', label: 'LLM: не отвечает, очередь, задержки' },

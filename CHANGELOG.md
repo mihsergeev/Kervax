@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.96] - 2026-11-05
+
+- On backup servers, disk latency spikes and disk wait stay on the charts. Disk errors still trigger alerts.
+- An active transfer alerts after 30 minutes below 25% of its observed rate or an hour with almost no traffic and writes. A confirmed second-copy pull can also report a stall from startup.
+- Transfer incidents notify once and send one recovery. Stale repository locks and second-copy problems notify when a new item is affected.
+
 ## [1.8.95] - 2026-11-05
 
 - The Repositories tab lets you select repositories with checkboxes and choose a server for their second copy.

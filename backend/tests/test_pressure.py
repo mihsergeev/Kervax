@@ -296,26 +296,13 @@ BSRV = {"present": True}
 BUSY = dict(CALM, psi=dict(CALM["psi"], io_some_60=63.0, io_full_60=57.0), backup_server=BSRV)
 
 
-def test_backup_server_io_hold():
-    pr = collector.pressure_problems(BUSY)
-    assert collector.pressure_hold_s(BUSY, pr) == 6 * 3600
-    # обычный сервер, зависший процесс или память - общая выдержка
-    assert collector.pressure_hold_s(dict(BUSY, backup_server={}), pr) is None
-    stuck = dict(BUSY, dstate=_ds(6, [dict(PG, sec=430)]))
-    assert collector.pressure_hold_s(stuck, collector.pressure_problems(stuck)) is None
-    mem = dict(BUSY, psi=dict(BUSY["psi"], mem_full_60=22.0))
-    assert collector.pressure_hold_s(mem, collector.pressure_problems(mem)) is None
-    assert collector.pressure_hold_s(CALM, []) is None
-
-    s = _srv(BUSY, {"pressure_since": (NOW - timedelta(minutes=40)).isoformat()})
+def test_backup_server_io_wait_is_graph_only():
+    state = {"pressure_since": (NOW - timedelta(hours=7)).isoformat()}
+    s = _srv(BUSY, state)
     assert collector._server_conditions(s, NOW)["pressure"][0] == 0
     assert not [p for p in collector.server_problems(s, NOW) if p["kind"] == "pressure"]
-    s.alert_state = {"pressure_since": (NOW - timedelta(hours=6, minutes=1)).isoformat()}
-    lvl, ctx = collector._server_conditions(s, NOW)["pressure"]
-    assert lvl == 2 and ctx["_note"] == "на сервере бэкапов так бывает во время prune и check, но не дольше 6 ч"
-    rows = [p for p in collector.server_problems(s, NOW) if p["kind"] == "pressure"]
-    assert [p["text"] for p in rows] == ["диск не успевает: все процессы разом ждут диск 57% времени "
-                                         "(на сервере бэкапов так бывает во время prune и check, но не дольше 6 ч)"]
+    mirror = _srv(dict(BUSY, backup_server=None), state, backup_mirror_role=True)
+    assert collector._server_conditions(mirror, NOW)["pressure"][0] == 0
     # обычный сервер с тем же давлением - как раньше, через 15 минут
     s = _srv(dict(BUSY, backup_server={}), {"pressure_since": (NOW - timedelta(minutes=16)).isoformat()})
     assert collector._server_conditions(s, NOW)["pressure"][0] == 2
@@ -328,17 +315,10 @@ async def test_backup_server_prune_no_alert(tmp_path, monkeypatch):
     for _ in range(20):
         await tick(5, dict(CALM, backup_server=BSRV))
     assert [m for m in sent if "🫁" in m or "дышит" in m] == []
-    # затянулось на 6 ч - алерт с пояснением
+    # Даже затяжной prune не доказывает, что передача бэкапа зависла.
     for _ in range(74):
         await tick(5, BUSY)
-    from app.alerts import full_text
-
-    got = [m for m in sent if m.startswith("🔴🫁 ")]
-    assert len(got) == 1 and "<b>Сервер ждет диск</b>" in got[0], sent
-    # пояснение про сервер бэкапов - подробность для истории, в чат не идет
-    assert "prune" not in got[0]
-    assert full_text(got[0]).endswith(
-        "\n↳ на сервере бэкапов так бывает во время prune и check, но не дольше 6 ч"), sent
+    assert [m for m in sent if "🫁" in m or "дышит" in m] == []
     await engine.dispose()
 
 
@@ -407,6 +387,3 @@ def test_io_wait_during_own_backup_is_held():
     # зависший процесс - как у всех, несмотря на бэкап
     stuck = dict(PULL, dstate=_ds(6, [dict(PG, sec=430)]))
     assert collector.pressure_hold_s(stuck, collector.pressure_problems(stuck)) is None
-    # резервный сервер бэкапов - роль, как rest-server
-    mirror = _srv(dict(BUSY, backup_server=None), backup_mirror_role=True)
-    assert collector.pressure_hold_s(mirror.last_report, pr, mirror) == 6 * 3600

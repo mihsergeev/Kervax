@@ -65,7 +65,7 @@ INFRA = frozenset({
     # бэкапы
     "backup_missing", "backup_failed", "backup_stale", "backup_growth", "backup_restore", "backup_dump",
     "backup_dump_space", "backup_cron", "backup_custom", "backup_repo", "backup_unmonitored",
-    "backup_prune", "backup_check", "backup_mirror", "backup_lock", "backup_rotation",
+    "backup_prune", "backup_check", "backup_mirror", "backup_lock", "backup_rotation", "backup_transfer",
 })
 
 _DEV_NAME = re.compile(r"(?:^|[-_.])(?:dev|develop|stage|staging|test|testing)(?:$|[-_.\d])", re.I)

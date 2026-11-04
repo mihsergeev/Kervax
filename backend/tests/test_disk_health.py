@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 
 from app.collector import disk_health_block, disk_health_problems, disk_health_text
@@ -163,7 +164,8 @@ def test_text_limit():
     assert disk_health_text(probs).splitlines()[-1] == "↳ и еще 2"
 
 
-async def test_disk_health_alert_lifecycle(tmp_path, monkeypatch):
+@pytest.mark.parametrize("backup_host", [False, True])
+async def test_disk_health_alert_lifecycle(tmp_path, monkeypatch, backup_host):
     """Сквозной: развалившийся RAID -> алерт; тот же набор поломок - тишина; новая поломка
     при том же уровне - новое сообщение; починили - отбой."""
     from app import collector
@@ -178,7 +180,7 @@ async def test_disk_health_alert_lifecycle(tmp_path, monkeypatch):
 
     def report(block: dict) -> dict:
         return {"clock_unix": int(now.timestamp()), "uptime_seconds": 100000,
-                "extras": {"disk-health": block}}
+                "extras": {"disk-health": block}, "backup_server": {"present": backup_host}}
 
     async with factory() as s:
         s.add(Server(name="k8s-d", token_hash="x", enabled=True, backup_not_required=True,
