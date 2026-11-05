@@ -2961,6 +2961,23 @@ export type ServiceInfo = {
   engine?: string // redis | pg | mysql
   where?: string // подпись в карточке: «Redis, контейнер X, db 1», «PostgreSQL, на хосте, база app»
   failed?: QueueFailed // упавшие задачи; у laravel_failed (таблица failed_jobs) очередей нет, только они
+  qdrant?: QdrantInfo // метаданные узла; содержимое точек агент не читает
+}
+export type QdrantInfo = {
+  scope: 'node'
+  state: 'ok' | 'partial' | 'auth_required' | 'unavailable'
+  reason?: 'api' | 'timeout' | 'limit' | 'address'
+  version?: string
+  collections_total?: number
+  collections?: {
+    name: string
+    points_count?: number
+    indexed_vectors_count?: number
+    status?: 'green' | 'yellow' | 'grey' | 'red'
+    optimizer_status?: 'ok' | 'error'
+  }[]
+  points_approximate: true
+  truncated?: boolean
 }
 export type DBStat = {
   engine: string // pg | mysql | clickhouse | redis

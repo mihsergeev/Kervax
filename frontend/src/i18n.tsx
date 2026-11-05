@@ -11,6 +11,27 @@ export type Lang = 'ru' | 'en'
 // Ключ = русская строка (дефолт). Значение = английский перевод.
 // Отсутствующий ключ → возвращается русский (мягкий фолбэк).
 const EN: Record<string, string> = {
+  'Состояние': 'State',
+  'Метрики Qdrant закрыты авторизацией. Доступность сервера проверяется отдельно.': 'Qdrant metrics require authentication. Server availability is checked separately.',
+  'Метрики Qdrant недоступны. Доступность сервера проверяется отдельно.': 'Qdrant metrics are unavailable. Server availability is checked separately.',
+  'Получена часть метрик Qdrant. Неизвестные значения отмечены прочерком.': 'Some Qdrant metrics are available. Unknown values are shown as a dash.',
+  'Данные этого узла': 'Data from this node',
+  'Коллекции Qdrant': 'Qdrant collections',
+  'Коллекция': 'Collection',
+  'Коллекций': 'Collections',
+  'Точек, примерно': 'Points, approximate',
+  'Индексированных векторов': 'Indexed vectors',
+  'Готова': 'Ready',
+  'Индексация': 'Indexing',
+  'Ожидает оптимизации': 'Awaiting optimization',
+  'Ошибка оптимизации': 'Optimization error',
+  'Показана часть коллекций.': 'Some collections are shown.',
+  'Числа точек приблизительные. Значения разных узлов могут включать реплики и не складываются.': 'Point counts are approximate. Values from different nodes may include replicas and are not added together.',
+  'Матрица сервисов': 'Service matrix',
+  'Веб и прокси': 'Web and proxies',
+  'Нет сервисов': 'No services',
+  'Открыть {service} на {server}': 'Open {service} on {server}',
+  'Показать еще {n}: {category}, {server}': 'Show {n} more: {category}, {server}',
   'Дополнительные IP источников агента': 'Additional agent source IPs',
   'Для NAT или HTTP-прокси: до 16 отдельных IPv4 или IPv6, по одному в строке. Основной IP учитывается автоматически. После его замены старый разрешен только если явно добавлен в этот список.':
     'For NAT or an HTTP proxy: up to 16 individual IPv4 or IPv6 addresses, one per line. The main IP is included automatically. After replacing it, the old address is allowed only if explicitly added to this list.',

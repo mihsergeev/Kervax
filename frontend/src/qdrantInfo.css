@@ -1,0 +1,11 @@
+.qdrant-info { min-width: 0; }
+.qdrant-summary { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: .9rem; }
+.qdrant-summary strong { margin-left: 4px; font-variant-numeric: tabular-nums; }
+.qdrant-info p { margin: 8px 0; }
+.qdrant-collections { max-width: 100%; overflow-x: auto; margin-top: 14px; }
+.qdrant-collections table { width: 100%; border-collapse: collapse; text-align: left; font-size: .88rem; }
+.qdrant-collections th { color: var(--text-muted); font-weight: 500; }
+.qdrant-collections th, .qdrant-collections td { padding: 9px 12px; border-bottom: 1px solid var(--border); }
+.qdrant-collections th:first-child, .qdrant-collections td:first-child { padding-left: 0; }
+.qdrant-collections td:first-child { max-width: 240px; overflow-wrap: anywhere; }
+.qdrant-collections th:not(:first-child), .qdrant-collections td:not(:first-child) { white-space: nowrap; font-variant-numeric: tabular-nums; }

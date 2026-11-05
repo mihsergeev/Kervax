@@ -1,0 +1,251 @@
+{
+  "reviewed": "2026-11-05",
+  "usage": "Identify installed third-party services. Logos and names remain trademarks of their owners; no endorsement is implied. Assets are bundled locally without runtime external requests. Existing inline logos remain from Simple Icons (CC0-1.0). No generic database glyph is substituted for an unknown brand.",
+  "collection_license_file": "LICENSE-Simple-Icons.txt",
+  "assets": [
+    {
+      "name": "HAProxy",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/haproxy.svg",
+      "brand_source": "https://github.com/simple-icons/simple-icons/pull/15025#issuecomment-5835041111",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": null
+    },
+    {
+      "name": "ScyllaDB",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/scylladb.svg",
+      "brand_source": "https://www.scylladb.com/media-kit",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": "https://www.scylladb.com/media-kit"
+    },
+    {
+      "name": "ArangoDB",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/arangodb.svg",
+      "brand_source": "https://www.arangodb.com/resources/logos",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": "https://www.arangodb.com/resources/logos"
+    },
+    {
+      "name": "SurrealDB",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/surrealdb.svg",
+      "brand_source": "https://github.com/surrealdb/surrealdb/blob/b5b4601b09b8f1c1334675bbeb4e7408df8dc882/img/logo.svg",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": null
+    },
+    {
+      "name": "Cassandra",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/apachecassandra.svg",
+      "brand_source": "https://www.apache.org/logos",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Apache-2.0",
+      "guidelines": "https://www.apache.org/foundation/marks"
+    },
+    {
+      "name": "PM2",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/pm2.svg",
+      "brand_source": "https://pm2.keymetrics.io",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": null
+    },
+    {
+      "name": "vLLM",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/vllm.svg",
+      "brand_source": "https://github.com/vllm-project/media-kit/blob/79b2ea5db25b723f2d81dae203a87c5b9a076722/vLLM-Logo.svg",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": null
+    },
+    {
+      "name": "TEI",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/huggingface.svg",
+      "brand_source": "https://huggingface.co/brand",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": "https://huggingface.co/brand"
+    },
+    {
+      "name": "Weaviate",
+      "file": "weaviate.svg",
+      "asset_url": "https://raw.githubusercontent.com/weaviate/weaviate-io/main/static/img/site/weaviate-logo-icon.svg",
+      "license": "No standalone asset license published; official brand mark used for identification",
+      "sha256": "8d6fa8dcfb40e749ae92921c25fb77a6f590ebec1d19f6c52711ff28dd78413b"
+    },
+    {
+      "name": "Chroma",
+      "file": "chroma.svg",
+      "asset_url": "https://raw.githubusercontent.com/chroma-core/chroma/main/docs/mintlify/images/favicon.svg",
+      "license": "Apache-2.0 repository; see LICENSE-Chroma.txt",
+      "sha256": "dcbd0b1c44052cf5caaa3db9182bd7e8e70afeb7f82709b329371f4beff99cf6"
+    },
+    {
+      "name": "SGLang",
+      "file": "sglang.svg",
+      "asset_url": "https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo_square.svg",
+      "license": "Apache-2.0; see LICENSE-SGLang.txt",
+      "sha256": "09ccea391ea4da9d896d6fae0f31e5a52a456bfe837f266a99a69c2242d95fe3"
+    },
+    {
+      "name": "LiteLLM",
+      "file": "litellm.svg",
+      "asset_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/ui/litellm-dashboard/public/assets/logos/litellm_monogram.svg",
+      "license": "MIT; see LICENSE-LiteLLM.txt",
+      "sha256": "02337eb46a7722050880941e4c7eec33dac35b088d629cdbebca3579d3dfa2fd",
+      "local_changes": "SVG coordinate separators normalized; geometry unchanged"
+    },
+    {
+      "name": "LiteLLM dark",
+      "file": "litellm-dark.svg",
+      "asset_url": "https://raw.githubusercontent.com/BerriAI/litellm/main/ui/litellm-dashboard/public/assets/logos/litellm_monogram_dark.svg",
+      "license": "MIT; see LICENSE-LiteLLM.txt",
+      "sha256": "d114c0cb9c3fe1328cfadaafd73bca314e1657d83cedf6a1821360cd111b810b",
+      "local_changes": "SVG coordinate separators normalized; geometry unchanged"
+    },
+    {
+      "name": "ZooKeeper",
+      "file": "zookeeper.svg",
+      "asset_url": "https://raw.githubusercontent.com/apache/zookeeper/master/zookeeper-website/public/images/logo.svg",
+      "license": "Apache-2.0; see LICENSE-ZooKeeper.txt",
+      "sha256": "e4940a9fb3829d152d2a455d9d4e01642e84741e5855ebb31d07b1f1fa8a15cc"
+    },
+    {
+      "name": "RethinkDB",
+      "file": "rethinkdb.png",
+      "asset_url": "https://raw.githubusercontent.com/rethinkdb/www/master/favicon.png",
+      "license": "Apache-2.0 website repository; see LICENSE-RethinkDB.txt",
+      "sha256": "0055d1e4214683c289eef9f7d97550d442b09753a09d5b97087f4d649db0cae5"
+    },
+    {
+      "name": "Supervisor",
+      "file": "supervisor.png",
+      "asset_url": "https://raw.githubusercontent.com/Supervisor/supervisor/main/supervisor/ui/images/icon.png",
+      "license": "Repoze Public License; see LICENSES-Supervisor.txt and LICENSE-Supervisor.txt",
+      "sha256": "8b70f1acb389ff3b74ae69df8d9e347f5bd117970817a2193e66a5143f978907"
+    },
+    {
+      "name": "Memcached",
+      "file": "memcached.png",
+      "asset_url": "https://raw.githubusercontent.com/memcached/memcached.github.io/master/static/images/memcached_link_125.png",
+      "license": "No standalone asset license published; official brand mark used for identification",
+      "sha256": "ffa37c80413f408e6a35ad9605c3406736380375e1dabc30cb208011d154db0c"
+    },
+    {
+      "name": "MS SQL Server",
+      "file": "sqlserver.svg",
+      "asset_url": "https://cdn-dynmedia-1.microsoft.com/is/content/microsoftcorp/1065066-Icon-SQLServer-16x16",
+      "license": "Microsoft trademark; official product mark from https://www.microsoft.com/en-us/sql-server, used for identification",
+      "sha256": "b6edca95da7ee5278dcdb6e446f9eec6f66ab4d03198f0ec00ca22be2f1dffae"
+    },
+    {
+      "name": "Celery",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/celery.svg",
+      "brand_source": "https://github.com/celery/celery/blob/4d77ddddb10797011dc10dd2e4e1e7a7467b8431/docs/images/favicon.ico",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": null
+    },
+    {
+      "name": "Sidekiq",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/sidekiq.svg",
+      "brand_source": "https://sidekiq.org/about.html",
+      "collection_license": "CC0-1.0",
+      "brand_license": "CC-BY-SA-4.0",
+      "guidelines": null
+    },
+    {
+      "name": "Laravel",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/laravel.svg",
+      "brand_source": "https://github.com/laravel/art/tree/5a8325b064634b900f25dbb6f1cafd888b2d2211",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": null
+    },
+    {
+      "name": "Yii",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/yii.svg",
+      "brand_source": "https://www.yiiframework.com",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": null
+    },
+    {
+      "name": "Symfony",
+      "representation": "inline path in engineIcon.tsx",
+      "collection": "simple-icons@16.36.0",
+      "asset_url": "https://github.com/simple-icons/simple-icons/blob/16.36.0/icons/symfony.svg",
+      "brand_source": "https://symfony.com/logo",
+      "collection_license": "CC0-1.0",
+      "brand_license": "Trademark rights retained by owner",
+      "guidelines": "https://symfony.com/trademark"
+    },
+    {
+      "name": "RQ",
+      "file": "rq.png",
+      "asset_url": "https://raw.githubusercontent.com/rq/rq/master/docs/favicon.png",
+      "license": "BSD-2-Clause-style (original license disclaimer also includes non-endorsement); see LICENSE-rq.txt",
+      "sha256": "ab35d2944666414da39e97a289cc5e93e05b69442a44f5ffb9d261555a8c0e27"
+    },
+    {
+      "name": "BullMQ",
+      "file": "bullmq.ico",
+      "asset_url": "https://bullmq.io/images/favicon.ico",
+      "license": "No standalone website asset license published; official brand mark used for identification. BullMQ software is MIT (LICENSE-bullmq.txt).",
+      "sha256": "16978fb571c54b0215f64eaeb3c98ffed418594953b9d4ee4347031390f67d7f"
+    },
+    {
+      "name": "Oban",
+      "file": "oban.svg",
+      "asset_url": "https://raw.githubusercontent.com/oban-bg/oban/main/assets/oban-logo.svg",
+      "license": "Apache-2.0; see LICENSE-oban.txt",
+      "sha256": "3669b0f79e3198ee76422beb6d25c209a2fa5c20744abd35125fd4285fce0cc8"
+    },
+    {
+      "name": "pg-boss",
+      "file": "pgboss.svg",
+      "asset_url": "https://raw.githubusercontent.com/timgit/pg-boss/master/packages/dashboard/app/assets/pg-boss-favicon.svg",
+      "license": "MIT; see LICENSE-pgboss.txt",
+      "sha256": "aba42f11939292c7a76e09d5fc847fa967427e3cab7bbb31fe0ef6f7c968718d"
+    },
+    {
+      "name": "Hangfire",
+      "file": "hangfire.png",
+      "asset_url": "https://raw.githubusercontent.com/HangfireIO/Hangfire.io/master/favicon-32x32.png",
+      "license": "No standalone asset license published; official brand mark used for identification",
+      "sha256": "b7062c0ae3421f349125ec1e0ab4608c4665030b93b93ee7b84e3ef5739eb0a6"
+    },
+    {
+      "name": "River",
+      "file": "river.ico",
+      "asset_url": "https://raw.githubusercontent.com/riverqueue/riverui/master/public/favicon.ico",
+      "license": "MPL-2.0; see LICENSE-river.txt",
+      "sha256": "cead58e4c929dfa621ac130e1cbcfdfacb2f8907675723d2e7a2659dd37e3a62"
+    }
+  ]
+}

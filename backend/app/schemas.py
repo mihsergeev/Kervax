@@ -2034,7 +2034,11 @@ class AgentReportIn(BaseModel):
     # уровня, поэтому его ОБЯЗАТЕЛЬНО объявлять здесь: незадекларированное pydantic молча
     # выбрасывает, и в last_report оно бы не доехало.
     db_engines: list[str] = []
-    # прикладные метрики сервисов (очереди RabbitMQ и т.п.) — читаются без секретов
+    # Прикладные метрики без секретов: RabbitMQ queues; Qdrant metadata (scope=node).
+    # Qdrant counters are optional: absence means unknown, not zero. points_count is
+    # approximate and is NOT a vector count; indexed_vectors_count remains separate.
+    # state=auth_required/unavailable reports API access, not database health. Keep
+    # list[dict] for old/new agents and preserve nested metadata in last_report.
     services: list[dict] = []
     # веб-серверы/прокси (nginx/envoy/traefik/…) + сайты, которые обслуживают. Тоже верхний
     # уровень → обязателен здесь, иначе pydantic выбросит и в last_report не доедет.

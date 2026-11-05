@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.64"
+const version = "2.65"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -527,10 +527,11 @@ type kubePod struct {
 	// Только у подов с перезапусками: как кончился прошлый запуск контейнера, который
 	// перезапускался последним (kubectl describe: Last State). По нему панель пишет причину
 	// в алерте и в разделе "Перезапуски": OOMKilled при лимите, убит по пробе, exit 1 и строка лога
-	Last *kubeLast `json:"last,omitempty"`
-	ip   string    // podIP: нужен агенту для скрейпа метрик, в отчёт НЕ уходит (строчная = не сериализуется)
-	uid  string    // metadata.uid: по нему под находится в cgroup ноды
-	ctrl string    // контроллер; в отчет - только у подов этой ноды (Ctrl)
+	Last  *kubeLast `json:"last,omitempty"`
+	ip    string    // podIP: нужен агенту для скрейпа метрик, в отчёт НЕ уходит (строчная = не сериализуется)
+	local bool      // cgroup пода найдена на этой ноде; не опрашиваем БД соседних нод
+	uid   string    // metadata.uid: по нему под находится в cgroup ноды
+	ctrl  string    // контроллер; в отчет - только у подов этой ноды (Ctrl)
 }
 
 // kubeLast - прошлое завершение контейнера пода (lastState.terminated). Probe/PMsg - из событий
@@ -581,6 +582,7 @@ type serviceInfo struct {
 	Source string      `json:"source,omitempty"` // «под ns/name» или «контейнер name»
 	Queues []queueStat `json:"queues,omitempty"`
 	Total  int         `json:"total,omitempty"` // всего очередей (список может быть урезан)
+	Qdrant *qdrantInfo `json:"qdrant,omitempty"`
 }
 
 // сколько очередей максимум шлём: у клиента их 77, гонять все в КАЖДОМ отчёте — мусор.
@@ -815,12 +817,13 @@ type dockerContainer struct {
 	// Кто поднимет его после перезагрузки, если не докер: docker run --rm без restart
 	// policy обычно запускает юнит systemd (ExecStart=docker run --rm --name ...), и restart no
 	// у такого контейнера - не ошибка. Unit - этот юнит, UnitOn - он включен (enable).
-	AutoRm  bool   `json:"auto_rm,omitempty"`
-	Unit    string `json:"unit,omitempty"`
-	UnitOn  bool   `json:"unit_on,omitempty"`
-	imageID string // id образа: по нему дата сборки из /images/json
-	ip      string // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
-	id      string // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
+	AutoRm      bool   `json:"auto_rm,omitempty"`
+	Unit        string `json:"unit,omitempty"`
+	UnitOn      bool   `json:"unit_on,omitempty"`
+	imageID     string // id образа: по нему дата сборки из /images/json
+	ip          string // IP контейнера для скрейпа метрик; в отчёт НЕ уходит (строчная)
+	id          string // id контейнера: по нему процесс находит свой контейнер (cpu_groups)
+	hostNetwork bool   // HostConfig.NetworkMode=host: API локального workload доступен на loopback
 }
 
 // права процесса из /proc/<pid>/status. Uid - наименьший из real, effective, saved и fs: при
@@ -5120,6 +5123,7 @@ func collect(prev sample) (report, sample) {
 	r.GPUPCI = gpuOnPCI("/sys/bus/pci/devices", time.Now())
 	r.LLM = collectLLM("/proc", cn, pn, time.Now())
 	r.Services = collectServices(dk, r.Kube)
+	r.Services = append(r.Services, collectQdrantServices(dk, r.Kube, cur.procs, "/proc")...)
 	r.WebServices = collectWebServices(r.Kube)
 	r.DBStats = collectDBStats()
 	r.KubeExpiry, r.Flux = collectKubeExpiry()
@@ -6430,6 +6434,7 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 			Pid       int
 		}
 		HostConfig struct {
+			NetworkMode   string
 			RestartPolicy struct {
 				Name              string
 				MaximumRetryCount int
@@ -6472,6 +6477,7 @@ func dockerInspect(cl *http.Client, id string, dc *dockerContainer) {
 		Dir: lab("project.working_dir"), Files: lab("project.config_files")}
 	dc.Restarts = ins.RestartCount
 	dc.Policy = ins.HostConfig.RestartPolicy.Name
+	dc.hostNetwork = ins.HostConfig.NetworkMode == "host"
 	dc.MaxRetry = ins.HostConfig.RestartPolicy.MaximumRetryCount
 	dc.AutoRm = ins.HostConfig.AutoRemove
 	if ins.State.Health != nil {
@@ -7718,6 +7724,7 @@ func kubePods(cl *http.Client, kc *kubeConf) ([]kubePod, bool) {
 			Phase: p.Status.Phase, Node: p.Spec.NodeName, Reason: p.Status.Reason,
 			uid: p.Metadata.UID,
 		}
+		_, kp.local = mem[kp.uid]
 		if len(kp.uid) >= 8 {
 			kp.U = kp.uid[:8]
 		}

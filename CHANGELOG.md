@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.100] - 2026-11-05
+
+- Services now uses a compact matrix: one desktop row per server, three service categories and a +N button for overflow. Search, groups, filters and service details remain available.
+- Service chips use locally bundled official brand logos instead of generic symbols.
+- Qdrant details show version, collection count, approximate point counts, indexed vectors and collection status. Read-only collection is bounded; protected or unavailable APIs show unknown values without new alerts.
+
+Agent 2.65. Server helpers and database migration 0143 are unchanged.
+
 ## [1.8.99] - 2026-11-05
 
 - Services recognizes Qdrant, Milvus, Weaviate and Chroma in Docker and Kubernetes, plus Qdrant, Milvus and Weaviate running directly on a host. Client, exporter and operator images are excluded.

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ApiError,
@@ -35,7 +35,8 @@ import { fmtRel } from './ServersPage'
 import { FixSteps, useFixDone } from './FixSteps'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
-import { EngineIcon } from './engineIcon'
+import { EngineIcon, hasEngineIcon } from './engineIcon'
+import { QdrantInfo } from './QdrantInfo'
 import { CRON_MUTE, FPM_MUTE, LOGERR_MUTE, QFAIL_MUTE, QSTUCK_MUTE, WORKER_MUTE } from './mutes'
 import { OsIcon } from './osIcon'
 import { CountryFlag } from './CountryFlag'
@@ -139,7 +140,8 @@ type SvcItem = {
   inKube?: boolean // СУБД в поде: инвентарь снимает helper ноды, где под крутится (nsenter, dbstat-setup 0.17)
   pods?: string[] // ns/name подов СУБД
   away?: string[] // ноды этих подов, кроме этой
-  svc?: ServiceInfo // метрики (очереди RabbitMQ)
+  svc?: ServiceInfo // метрики очередей
+  qdrant?: ServiceInfo['qdrant']
   sites?: string[] // домены/сайты веб-сервиса (из k8s Ingress или nginx -T)
   web?: boolean // это веб-сервер/прокси — если доменов нет, объясняем почему
   db?: DBStat[] // инвентарь СУБД: ВСЕ инстансы этого движка на ноде (хелпер dbstat-setup)
@@ -884,9 +886,11 @@ function buildByServer(
     const items: SvcItem[] = []
     const seen = new Set<string>()
     for (const svc of s.last_report?.services ?? []) {
-      const kind = svc.kind === 'rabbitmq' ? 'RabbitMQ' : svc.kind
+      const kind = svc.kind === 'rabbitmq' ? 'RabbitMQ' : svc.kind === 'qdrant' ? 'Qdrant' : svc.kind
       seen.add(kind)
-      items.push({ kind, where: svc.source || '', svc })
+      // Vector metadata belongs to storage, not the queue section. Older reports
+      // can still contain discovery-only Qdrant entries without metadata.
+      items.push({ kind, where: svc.source || '', ...(kind === 'Qdrant' ? { qdrant: svc.qdrant } : { svc }) })
     }
     // очереди от helper'а queues-setup: в Redis (Celery, Sidekiq, RQ, BullMQ, Laravel, Yii) и в таблицах
     // баз (Yii, Laravel, Symfony, Delayed Job, Solid Queue, GoodJob, Que, Oban, River, pg-boss, Hangfire)
@@ -2019,7 +2023,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const tileLabel = (sec: string, label: string) =>
     info[sec].fresh ? <>{label} <FreshChip since={info[sec].fresh!} /></> : label
   // версия движка, если ее знает инвентарь баз
-  const verOf = (it: SvcItem) => it.db?.map((d) => d.version).find(Boolean)
+  const verOf = (it: SvcItem) => it.qdrant?.version || it.db?.map((d) => d.version).find(Boolean)
   // строка под именем: по пункту на вид сервиса, сколько их и где - в подсказке
   const metaKinds = [...new Set(srv.items.map((it) => it.kind))].map((kind) => {
     const xs = srv.items.filter((it) => it.kind === kind)
@@ -2258,7 +2262,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
                       </div>
                     </div>
                     {it.where && <div className="net-sub mono">{it.where}</div>}
-                    {it.db ? (
+                    {it.qdrant ? <QdrantInfo data={it.qdrant} /> : it.db ? (
                       <DbInventory db={it.db} t={t}
                         health={(s.db_health ?? []).filter((h) => DB_ENGINE_LABEL[h.engine] === it.kind)} />
                     ) : (
@@ -2478,8 +2482,84 @@ function svcHit(f: SFilter, r: SrvServices, ctx: SitesCtx, t: TFn): string | nul
   return null
 }
 
-// Строка ноды: иконки ее сервисов (сразу видно, что где крутится) и чипы бед - переполненные
-// очереди, конфиг веб-сервера с ошибкой, проблемы баз. Справа число сервисов, цвет по худшему
+const MATRIX_COLUMNS = ['Базы и хранилища', 'Веб и прокси', 'Остальное'] as const
+
+// The matrix follows the inventory categories; summaries keep their existing filter semantics.
+const STORAGE_KINDS = new Set([
+  ...Object.values(DB_ENGINE_LABEL), ...VECTOR_DATABASES, 'MongoDB', 'Valkey', 'InfluxDB',
+  'VictoriaMetrics', 'etcd', 'CockroachDB', 'ScyllaDB', 'ArangoDB', 'RethinkDB', 'Memcached',
+  'SurrealDB', 'MS SQL Server', 'Elasticsearch', 'Cassandra', 'ZooKeeper', 'Kafka', 'Neo4j',
+  'CouchDB', 'MinIO', 'Consul', 'HashiCorp Vault',
+])
+const matrixColumn = (it: SvcItem) => it.web ? 1 : STORAGE_KINDS.has(it.kind) ? 0 : 2
+const itemIcon = (it: SvcItem) => it.svc && !hasEngineIcon(it.kind)
+  ? QUEUE_ENGINE_ICON[it.svc.engine || ''] || (it.svc.kind === 'rabbitmq' ? 'RabbitMQ' : it.kind)
+  : it.kind
+
+// Measure whole chips, reserving room for +N. Names never wrap or push another column away.
+// Both a chip and +N open the existing full server card, including every instance and location.
+function ServiceCell({ items, label, server, onOpen }: {
+  items: SvcItem[]; label: string; server: string; onOpen: () => void
+}) {
+  const { t } = useI18n()
+  const cell = useRef<HTMLDivElement>(null)
+  const measure = useRef<HTMLDivElement>(null)
+  const [visible, setVisible] = useState(items.length)
+  const kinds = [...new Set(items.map((it) => it.kind))]
+  const signature = items.map((it) => `${it.kind}\n${it.where}`).join('\n')
+  useLayoutEffect(() => {
+    const node = cell.current, ruler = measure.current
+    if (!node || !ruler) return
+    const fit = () => {
+      const chips = [...ruler.querySelectorAll<HTMLElement>('.svc-matrix-chip')]
+      const gap = parseFloat(getComputedStyle(ruler).columnGap) || 0
+      const width = node.clientWidth
+      const total = chips.reduce((n, chip) => n + chip.getBoundingClientRect().width, 0) + Math.max(0, chips.length - 1) * gap
+      if (total <= width) { setVisible(chips.length); return }
+      const more = ruler.querySelector<HTMLElement>('.svc-matrix-more')!
+      let used = more.getBoundingClientRect().width, n = 0
+      for (const chip of chips) {
+        const next = chip.getBoundingClientRect().width + gap
+        if (used + next > width) break
+        used += next
+        n++
+      }
+      setVisible(n)
+    }
+    fit()
+    const observer = new ResizeObserver(fit)
+    observer.observe(node)
+    document.fonts.ready.then(fit)
+    return () => observer.disconnect()
+  }, [signature, t])
+  const chip = (kind: string, measuring = false) => {
+    const xs = items.filter((it) => it.kind === kind)
+    const title = [kind, ...xs.map((it) => it.where).filter(Boolean)].join('\n')
+    const content = <><EngineIcon name={itemIcon(xs[0])} /><span>{kind}</span>{xs.length > 1 && <span className="muted">×{xs.length}</span>}</>
+    return measuring
+      ? <span key={kind} className="svc-matrix-chip">{content}</span>
+      : <button key={kind} type="button" className="svc-matrix-chip" title={title} onClick={onOpen}
+          aria-label={t('Открыть {service} на {server}', { service: kind, server })}>{content}</button>
+  }
+  const hidden = kinds.length - Math.min(visible, kinds.length)
+  return <div role="cell" className="svc-matrix-cell">
+    <span className="svc-matrix-mobile-label">{label}</span>
+    <div ref={cell} className="svc-matrix-services">
+      {kinds.length ? <>
+        {kinds.slice(0, visible).map((kind) => chip(kind))}
+        {hidden > 0 && <button type="button" className="svc-matrix-more" onClick={onOpen}
+          title={kinds.slice(visible).join(', ')}
+          aria-label={t('Показать еще {n}: {category}, {server}', { n: hidden, category: label, server })}>+{hidden}</button>}
+      </> : <span className="muted svc-matrix-empty" aria-label={t('Нет сервисов')}>—</span>}
+      <div ref={measure} className="svc-matrix-measure" aria-hidden="true">
+        {kinds.map((kind) => chip(kind, true))}
+        <span className="svc-matrix-more">+{kinds.length}</span>
+      </div>
+    </div>
+  </div>
+}
+
+// One desktop row per server. The full descriptions remain in the server card and labels.
 function HostRow({ srv, showGroup, only, hint, onOpen }: {
   srv: SrvServices
   showGroup?: boolean
@@ -2498,49 +2578,30 @@ function HostRow({ srv, showGroup, only, hint, onOpen }: {
   const dbBad = (s.db_health ?? []).filter((h) => h.problems.length)
   const dbp = dbBad.flatMap((h) => h.problems)
   const tone = cfg || dbp.some((p) => p.level >= 2) ? 't-down' : hot || dbp.length ? 't-degraded' : ''
+  const issues = [
+    hot > 0 && t('переполнены: {list}', { list: hotNames.join(', ') }),
+    cfg > 0 && t('конфиг с ошибкой: {list}', { list: cfgBad.map((c) => c.where || c.server).join(', ') }),
+    ...dbp.map((p) => p.text), hint,
+  ].filter(Boolean).join('\n')
+  const count = `${items.length} ${svcWord(items.length, t)}`
+  const details = [s.name, showGroup && s.group_name, count, issues].filter(Boolean).join('\n')
   return (
-    <button className="loc-res loc-res-btn hs-host" onClick={onOpen}>
-      <span className={`lk-dot ${s.online ? 'lk-dot-ok' : 'lk-dot-bad'}`} title={s.online ? t('на связи') : t('не на связи')} />
-      <div className="hs-host-main">
-        <div className="hs-host-name">
+    <div role="row" className={`svc-matrix-row ${tone}`}>
+      <div role="cell" className="svc-matrix-server">
+        <button type="button" className="svc-matrix-node" onClick={onOpen} title={details} aria-label={details}>
+          <span className={`lk-dot ${s.online ? 'lk-dot-ok' : 'lk-dot-bad'}`} title={s.online ? t('на связи') : t('не на связи')} />
           <OsIcon os={s.os} />
           <CountryFlag code={s.country} />
-          {s.name}
-          {showGroup && s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
-          {hot > 0 && (
-            <span className="type-chip off chip-names" title={t('переполненные очереди')}>📨 {shortList(hotNames, t, 2)}</span>
-          )}
-          {cfg > 0 && (
-            <span className="type-chip off chip-names" title={t('конфиг веб-сервера не проходит проверку')}>
-              🧾 {shortList(cfgBad.map((c) => c.where || c.server), t, 2)}
-            </span>
-          )}
-          {dbp.length > 0 && (
-            <span className={`type-chip chip-names${dbp.some((p) => p.level >= 2) ? ' off' : ' t-degraded'}`}
-              title={dbp.map((p) => p.text).join('\n')}>
-              🛢 {shortList(dbBad.map((h) => h.container || DB_ENGINE_LABEL[h.engine] || h.engine), t, 2)}
-            </span>
-          )}
-        </div>
-        <div className="svc-row-icons">
-          {/* одинаковые сервисы на ноде (два LiteLLM, три TEI) - один чип со счетчиком, где - в подсказке */}
-          {[...new Set(items.map((it) => it.kind))].map((kind) => {
-            const xs = items.filter((it) => it.kind === kind)
-            const where = xs.map((x) => x.where).filter(Boolean).join('\n')
-            return (
-              <span key={kind} className="svc-chip" title={where ? `${kind}\n${where}` : kind}>
-                <span className="svc-ico"><EngineIcon name={kind} /></span> {kind}
-                {xs.length > 1 && <span className="muted"> ({xs.length})</span>}
-              </span>
-            )
-          })}
-        </div>
-        {hint && <div className="hs-host-hit">{hint}</div>}
+          <span className="svc-matrix-name">{s.name}</span>
+          <span className={`svc-matrix-count mono ${tone}`} title={count}>{items.length}</span>
+          {issues && <span className={`svc-matrix-issue ${tone}`} title={issues} aria-hidden="true">!</span>}
+        </button>
+        {showGroup && s.group_name && <span className="svc-matrix-group muted" title={s.group_name}>{s.group_name}</span>}
+        {hint && <span className="svc-matrix-hint muted" title={hint}>{hint}</span>}
       </div>
-      <div className={`hs-host-count mono ${tone}`}>
-        {items.length}<span className="muted"> {svcWord(items.length, t)}</span>
-      </div>
-    </button>
+      {MATRIX_COLUMNS.map((label, i) => <ServiceCell key={label} label={t(label)} server={s.name}
+        items={items.filter((it) => matrixColumn(it) === i)} onOpen={onOpen} />)}
+    </div>
   )
 }
 
@@ -2562,6 +2623,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
 }) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
+  const pl = usePlural()
   const [servers, setServers] = useState<Server[] | null>(null)
   // Домены под мониторингом. null = учётке недоступен раздел «Сайты» (403) — тогда
   // ни галочек, ни кнопок: показывать «добавь монитор» тому, кто его не увидит, незачем.
@@ -2703,7 +2765,6 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const filterEmpty: Record<SFilter | 'problems', string> = {
     db: t('Баз данных не найдено.'), web: t('Веб-серверов не найдено.'), queues: t('Очередей нет.'), problems: t('Проблем нет.'),
   }
-  const pl = usePlural()
   const webNote = subOf(
     cfgBad.length > 0 && t('конфиг с ошибкой: {list}', { list: names(cfgBad) }),
     certs.length > 0 && t('сертификаты истекают: {list}', { list: names(certs.map((c) => c.label)) }),
@@ -2829,7 +2890,10 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
                   <span className="net-n">{g.items.length}</span>
                 </div>
               </div>
-              <div className="loc-results">
+              <div className="svc-matrix" role="table" aria-label={t('Матрица сервисов')}>
+                <div className="svc-matrix-header" role="row">
+                  {[t('Сервер'), ...MATRIX_COLUMNS.map((label) => t(label))].map((label) => <span role="columnheader" key={label}>{label}</span>)}
+                </div>
                 {g.items.map((r) => (
                   <HostRow key={r.server.id} srv={r} showGroup={groupBy !== 'group'} onOpen={() => setOpenId(r.server.id)}
                     only={tile && tile !== 'problems' ? SVC_OF[tile] : undefined}
