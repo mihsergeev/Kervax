@@ -176,5 +176,7 @@ export function mirrorNotReady(m: Server, t: T): string {
   const r = mirrorReport(m)
   if (!r) return t('не стоит helper mirror-setup')
   if (!r.helper || verLt(r.helper, MIRROR_HELPER_MIN)) return t('нужен mirror-setup {v} или новее', { v: MIRROR_HELPER_MIN })
+  if (!r.pubkey?.startsWith('ssh-ed25519 ')) return t('сервер еще не сообщил SSH-ключ')
+  if (!(m.external_ip || m.agent_ip)?.trim()) return t('у сервера нет адреса для подключения к основному')
   return ''
 }

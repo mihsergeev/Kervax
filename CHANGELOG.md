@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.98] - 2026-11-05
+
+- The backup server card has a dedicated Second copy tab with repository selection, destination setup and copy status.
+- Repository selections stay checked while a reserve server is set up. Copying becomes available once the panel receives its readiness report.
+
 ## [1.8.97] - 2026-11-05
 
 - Open server alerts remember the highest reported severity. Returning to that level stays quiet. Disk latency sends one alert per incident, even when the slowest disk changes.

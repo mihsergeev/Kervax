@@ -7,7 +7,7 @@ import { Fragment, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   backupMirrorPull, backupMirrorRole, backupMirrorSync, backupRepoMirror, backupRepoMirrors,
-  type MirrorCopy, type MirrorReport, type Server,
+  type MirrorCopy, type MirrorReport, type RepoStat, type Server,
 } from './api'
 import { CountryFlag } from './CountryFlag'
 import { FixCmd } from './FixSteps'
@@ -24,75 +24,164 @@ import {
   mirrorNotReady, mirrorReport, running, syncNotes, verLt, when,
 } from './bsrvMirrorState'
 
-export function RepoMirrorSelection({ server: s, repos, servers, canAct, onChanged }: {
-  server: Server; repos: string[]; servers: Server[]; canAct: boolean; onChanged: () => void
+function mirrorCandidates(servers: Server[]): Server[] {
+  // Пустые бэкап-серверы подходят, но действующие хранилища и Windows сюда не входят.
+  return servers.filter((s) => !isMirror(s) && !s.last_report?.backup_server?.repos?.length
+    && s.last_report?.platform !== 'windows' && !s.agent_version?.startsWith('windows-'))
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+export function RepoMirrorSelection({ active, server: s, repos, servers, canAct, onChanged }: {
+  active: boolean; server: Server; repos: RepoStat[]; servers: Server[]; canAct: boolean
+  onChanged: () => Promise<void>
 }) {
   const { t } = useI18n()
   const [selected, setSelected] = useState<string[]>([])
   const [pick, setPick] = useState('')
+  const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
-  const mirrors = servers.filter((m) => m.id !== s.id && isMirror(m)).sort((a, b) => a.name.localeCompare(b.name))
-  const ready = mirrors.filter((m) => !mirrorNotReady(m, t))
-  const chosen = repos.filter((r) => selected.includes(r))
-  const target = ready.find((m) => String(m.id) === pick) ?? ready[0]
-  const assigned = Object.keys(s.backup_mirror ?? {}).length
-  if (!repos.length || (!canAct && !assigned)) return null
+  const [result, setResult] = useState('')
+  if (!active) return null
 
-  const save = async (mirrorId: number | null) => {
+  const others = servers.filter((m) => m.id !== s.id)
+  const mirrors = others.filter(isMirror).sort((a, b) => a.name.localeCompare(b.name))
+  const candidates = canAct ? mirrorCandidates(others) : []
+  const available = repos.filter((r) => r.valid && (canAct || s.backup_mirror?.[r.name]))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  const visible = available.filter((r) => r.name.toLowerCase().includes(query.trim().toLowerCase()))
+  const chosen = available.filter((r) => selected.includes(r.name))
+  const total = chosen.every((r) => r.size_bytes !== undefined)
+    ? chosen.reduce((sum, r) => sum + (r.size_bytes ?? 0), 0)
+    : null
+  const defaultTarget = mirrors.find((m) => !mirrorNotReady(m, t)) ?? mirrors[0]
+  const target = pick ? [...mirrors, ...candidates].find((m) => String(m.id) === pick) : defaultTarget
+  const registering = !!target && !isMirror(target)
+  const notReady = target && !registering ? mirrorNotReady(target, t) : ''
+  const enableCopy = !!target && !registering && !notReady
+    && chosen.some((r) => s.backup_mirror?.[r.name]?.mirror !== target.id)
+  const stopping = chosen.filter((r) => s.backup_mirror?.[r.name])
+
+  const run = async (action?: () => Promise<void>) => {
     setBusy(true)
+    setResult('')
     try {
-      await backupRepoMirrors(s.id, chosen, mirrorId)
-      setSelected([])
-      onChanged()
+      await action?.()
+      await onChanged()
     } catch (e) {
       toastError(e)
     } finally {
       setBusy(false)
     }
   }
+  const save = (mirrorId: number | null) => run(async () => {
+    await backupRepoMirrors(s.id, (mirrorId === null ? stopping : chosen).map((r) => r.name), mirrorId)
+    setSelected([])
+    setResult(mirrorId === null
+      ? t('Копирование остановлено. Сохраненные копии остаются на резервном сервере.')
+      : t('Настройки сохранены. Резервный сервер получит список репозиториев.'))
+  })
+
+  if (!available.length) return (
+    <div className="srv-empty">{t(canAct ? 'Нет репозиториев для копирования.' : 'Вторая копия пока не настроена.')}</div>
+  )
+
   return (
-    <details className="repo-mirror">
-      <summary className="repo-mirror-h">{t('Вторая копия')}{assigned > 0 && ` · ${assigned}`}</summary>
-      <div className="muted small">{t('Резервный сервер забирает новые снапшоты после бэкапа. Удаления с основного на копию не переходят.')}</div>
-      {canAct && !ready.length && (
-        <div className="muted small">{mirrors.length
-          ? mirrors.map((m) => `${m.name} · ${mirrorNotReady(m, t)}`).join(', ')
-          : t('Добавьте сервер в разделе «Резервные серверы».')}</div>
-      )}
-      <div className="repo-mirror-choices">
-        {repos.map((repo) => {
-          const entry = s.backup_mirror?.[repo]
-          const dest = servers.find((m) => m.id === entry?.mirror)
-          if (!canAct && !entry) return null
-          return (
-            <label key={repo} className="repo-mirror-choice">
-              {canAct && <input type="checkbox" checked={selected.includes(repo)} disabled={busy || (!target && !entry)}
-                onChange={(e) => setSelected(e.target.checked ? [...selected, repo] : selected.filter((r) => r !== repo))} />}
-              <span className="mono">{repo}</span>
-              {entry && <span className="muted small">{dest?.name ?? `#${entry.mirror}`}</span>}
-            </label>
-          )
-        })}
-      </div>
-      {canAct && (
-        <div className="repo-acts">
-          {ready.length > 0 && <>
-            <select className="modal-sort" aria-label={t('Резервный сервер')} value={target?.id ?? ''}
-              onChange={(e) => setPick(e.target.value)} disabled={busy}>
-              {ready.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
-            </select>
-            <button className="ghost row-act" disabled={busy || !chosen.length || !target || chosen.every((r) => s.backup_mirror?.[r]?.mirror === target.id)}
-              onClick={() => target && save(target.id)}>{t('Копировать выбранные ({n})', { n: chosen.length })}</button>
-          </>}
-          {chosen.some((r) => s.backup_mirror?.[r]) && (
-            <button className="ghost row-act" disabled={busy} onClick={() => save(null)}
-              title={t('Резервный больше не забирает новое, копия на нем остается. Удалить ее можно только на нем самом.')}>
-              {t('Перестать копировать')}
+    <div className="srv-sec">
+      <p className="muted small repo-copy-intro">
+        {t('Резервный сервер забирает новые снапшоты после бэкапа. Удаления с основного на копию не переходят.')}
+      </p>
+      <div className={`repo-copy-layout${canAct ? '' : ' repo-copy-readonly'}`}>
+        <section className="repo-copy-panel" aria-label={t('Репозитории')}>
+          <div className="repo-copy-list-head">
+            <h4>{t('Репозитории')} <span className="muted">{available.length}</span></h4>
+            <input type="search" aria-label={t('Фильтр: имя репозитория…')}
+              placeholder={t('Фильтр: имя репозитория…')} value={query} onChange={(e) => setQuery(e.target.value)} />
+          </div>
+          {visible.length ? visible.map((r) => {
+            const entry = s.backup_mirror?.[r.name]
+            const dest = others.find((m) => m.id === entry?.mirror)
+            const report = dest && mirrorReport(dest)
+            const copy = report && report.copies.find((c) => c.src === entry?.src && c.repo === r.name)
+            const tone = copy && report ? copyTone(copy, report) : entry && !dest ? 'bad' : entry ? 'warn' : 'mute'
+            let status = t('Копирование выключено')
+            if (copy && report) {
+              status = copy.err_code && !copy.frozen && !running(copy, report) ? errText(copy, t) : copyShort(copy, report, t)
+            } else if (entry) {
+              if (!dest) status = t('резервного сервера больше нет в панели')
+              else if (!report) status = t('ожидается отчет резервного')
+              else status = t('ждет первой перекачки')
+            }
+            const checked = selected.includes(r.name)
+            const Row = canAct ? 'label' : 'div'
+            return (
+              <Row key={r.name} className={`repo-copy-row${checked ? ' on' : ''}`}>
+                {canAct && <input type="checkbox" aria-label={r.name} checked={checked} disabled={busy}
+                  onChange={(e) => {
+                    const next = e.target.checked
+                    setSelected((prev) => next ? [...prev, r.name] : prev.filter((n) => n !== r.name))
+                    setResult('')
+                  }} />}
+                <span className="repo-copy-name">
+                  <b className="mono">{r.name}</b>
+                  <span className="repo-copy-status muted small">
+                    <span className={`lk-dot${TONE_DOT[tone]}`} />
+                    {dest ? `${dest.name} · ${status}` : status}
+                  </span>
+                </span>
+                {r.size_bytes !== undefined && <span className="muted small">{fmtBytes(r.size_bytes)}</span>}
+              </Row>
+            )
+          }) : <div className="muted small">{t('Репозитории не найдены.')}</div>}
+        </section>
+        {canAct && (
+          <section className="repo-copy-panel repo-copy-target" aria-label={t('Куда копировать')}>
+            <h4>{t('Куда копировать')}</h4>
+            {mirrors.length || candidates.length ? (
+              <select className="modal-sort" aria-label={t('Резервный сервер')} value={target?.id ?? ''}
+                disabled={busy} onChange={(e) => { setPick(e.target.value); setResult('') }}>
+                <option value="" disabled>{t('Выберите сервер')}</option>
+                {mirrors.length > 0 && <optgroup label={t('Резервные серверы')}>
+                  {mirrors.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </optgroup>}
+                {candidates.length > 0 && <optgroup label={t('Можно подключить')}>
+                  {candidates.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </optgroup>}
+              </select>
+            ) : <p className="muted small">{t('Добавьте отдельный сервер в разделе «Серверы».')}</p>}
+            {target && (registering ? (
+              <button className="ghost" disabled={busy} onClick={() => run(async () => {
+                await backupMirrorRole(target.id, true)
+                setPick(String(target.id))
+              })}>{t('Сделать резервным')}</button>
+            ) : notReady ? (
+              <>
+                <div className="repo-fix repo-fix-warn small" role="status">
+                  <div>{t('Сервер отмечен резервным, но копировать на него пока нельзя: {why}.', { why: notReady })}</div>
+                  <div>{t('Helper mirror-setup ставится плейбуком kervax_helpers.yml: сервер уже в "Требует действий".')}</div>
+                </div>
+                {/^[a-zA-Z0-9_.][a-zA-Z0-9_.-]*$/.test(target.name)
+                  && <FixCmd cmd={`ansible-playbook playbooks/kervax_helpers.yml -l ${target.name}`} />}
+                <button className="ghost" disabled={busy} onClick={() => run()}>{t('Проверить снова')}</button>
+              </>
+            ) : <span className="repo-copy-status small" role="status"><span className="lk-dot lk-dot-ok" />{t('Сервер готов')}</span>)}
+            <div className="repo-copy-selection" aria-live="polite">
+              <b>{t('Выбрано: {n}', { n: chosen.length })}</b>
+              {chosen.length > 0 && total !== null && <span className="muted small">{t('Объем репозиториев: {sz}', { sz: fmtBytes(total) })}</span>}
+            </div>
+            <button disabled={busy || !enableCopy} onClick={() => target && save(target.id)}>
+              {t('Копировать выбранные ({n})', { n: chosen.length })}
             </button>
-          )}
-        </div>
-      )}
-    </details>
+            {stopping.length > 0 && (
+              <button className="ghost" disabled={busy} onClick={() => save(null)}
+                title={t('Резервный больше не забирает новое, копия на нем остается. Удалить ее можно только на нем самом.')}>
+                {t('Перестать копировать')}
+              </button>
+            )}
+            {result && <div className="small" role="status">{result}</div>}
+          </section>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -282,7 +371,7 @@ export function MirrorModal({ server: s, servers, canAct, onChanged, onClose }: 
               </div>
               {copies.length === 0 ? (
                 <div className="srv-empty">
-                  {t('Копий пока нет. Выберите репозиторий в окне основного сервера бэкапов (раздел "Репозитории") и нажмите "Держать копию".')}
+                  {t('Копий пока нет. Откройте вкладку «Вторая копия» на основном бэкап-сервере и выберите репозитории.')}
                 </div>
               ) : (
                 <div className="bsrv-md">
@@ -439,10 +528,7 @@ export function MirrorsCard({ servers, canAct, onOpen, onChanged }: {
   const [pick, setPick] = useState('')
   const [busy, setBusy] = useState(false)
   const mirrors = servers.filter(isMirror).sort((a, b) => a.name.localeCompare(b.name))
-  // кандидаты: сервер без rest-server с репозиториями (пустые бэкап-серверы как раз такие)
-  const cands = servers
-    .filter((s) => !isMirror(s) && !(s.last_report?.backup_server?.repos?.length))
-    .sort((a, b) => a.name.localeCompare(b.name))
+  const cands = mirrorCandidates(servers)
   if (!mirrors.length && !canAct) return null
   const make = async () => {
     if (!pick) return

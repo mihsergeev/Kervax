@@ -2414,6 +2414,7 @@ function EnableTls({ server: s, onChanged }: { server: Server; onChanged: () => 
 const BSRV_SECTIONS: SecDef[] = [
   { id: 'overview', label: 'Сводка', group: '' },
   { id: 'repos', label: 'Репозитории', group: 'Репозитории' },
+  { id: 'copies', label: 'Вторая копия', group: 'Репозитории' },
   { id: 'archive', label: 'Архив', group: 'Репозитории' },
   { id: 'cleanup', label: 'Чистка', group: 'Репозитории' },
   { id: 'server', label: 'Сервер', group: 'Нода' },
@@ -2425,7 +2426,7 @@ const BSRV_SEC_IDS = new Set(BSRV_SECTIONS.map((x) => x.id))
 function BackupServerModal({ server: s, info, servers, canAct, initialSec, onChanged, onMoveStorage, onClose, underlay }: {
   server: Server; info: BackupServerInfo; servers: Server[]; canAct: boolean
   initialSec?: string | null // из ссылки алерта или с главной: ?backupsrv=id&sec=cleanup
-  onChanged: () => void; onMoveStorage: () => void; onClose: () => void; underlay: boolean
+  onChanged: () => Promise<void>; onMoveStorage: () => void; onClose: () => void; underlay: boolean
 }) {
   const { t } = useI18n()
   const { isAdmin } = useAuth()
@@ -2527,6 +2528,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   const shown: Record<string, boolean> = {
     overview: true,
     repos: true,
+    copies: isAdmin || Object.keys(s.backup_mirror ?? {}).length > 0,
     archive: archivedRepos.length > 0,
     cleanup: all.length > 0,
     server: true,
@@ -2589,6 +2591,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   const ok: Record<string, string> = {
     repos: all.length ? t('репозиториев: {n}, все в порядке', { n: all.length })
       : statsReady && !every.length ? t('Репозиториев пока нет.') : '',
+    copies: t('Настроено репозиториев: {n}', { n: Object.keys(s.backup_mirror ?? {}).length }),
     archive: t('репозиториев: {n}, {sz}', { n: archivedRepos.length, sz: fmtBytes(archivedBytes) }),
     cleanup: ext ? t('чистка и проверка идут у всех') : t('нет данных'),
     server: subOf(
@@ -2601,6 +2604,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   }
   const infoSec: Record<string, SecInfo> = {}
   for (const { id } of BSRV_SECTIONS) infoSec[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
+  infoSec.copies.idle = true
   // не проблема, но и не "все в порядке": старый rest-server, трафик без HTTPS
   const soft = (id: string, line: string) => {
     if (!infoSec[id].level) infoSec[id] = { ...infoSec[id], level: 1, line }
@@ -2771,10 +2775,11 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
               </div>
             )}
 
+            <RepoMirrorSelection active={cur.id === 'copies'} server={s} repos={every}
+              servers={servers} canAct={isAdmin} onChanged={onChanged} />
+
             {cur.id === 'repos' && (
               <div className="srv-sec">
-                <RepoMirrorSelection server={s} repos={every.filter((r) => r.valid).map((r) => r.name).sort()}
-                  servers={servers} canAct={isAdmin} onChanged={onChanged} />
                 {growers.length > 0 && (
                   <div className="muted small">
                     {t('За прогон клиенты добавляют около {s}: {top}', {

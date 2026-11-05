@@ -8508,10 +8508,27 @@ button.inv-dd-btn { font-size: 0.82rem; padding: 0.28rem 0.7rem; }
    окно резервного */
 .repo-mirror { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); font-size: 0.87rem; line-height: 1.5; }
 .repo-mirror-h { font-weight: 650; }
-.repo-mirror > summary { cursor: pointer; }
-.repo-mirror > summary + div { margin-top: 8px; }
-.repo-mirror-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: 4px 12px; max-height: 220px; overflow: auto; margin: 8px 0; }
-.repo-mirror-choice { display: flex; gap: 8px; align-items: center; min-width: 0; overflow-wrap: anywhere; }
+.repo-copy-intro { margin: 0; }
+.repo-copy-layout { display: grid; grid-template-columns: minmax(0, 3fr) minmax(230px, 2fr); align-items: start; gap: 12px; }
+.repo-copy-layout.repo-copy-readonly { grid-template-columns: minmax(0, 1fr); }
+.repo-copy-panel { min-width: 0; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.repo-copy-panel h4, .repo-copy-panel p { margin: 0; }
+.repo-copy-list-head, .repo-copy-target, .repo-copy-selection, .repo-copy-name { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.repo-copy-list-head { margin-bottom: 6px; }
+.repo-copy-selection, .repo-copy-name { gap: 3px; }
+.repo-copy-row { display: flex; flex-direction: row; align-items: center; gap: 10px; min-height: 46px; margin: 4px 0; padding: 6px 8px; border: 1px solid transparent; border-radius: 8px; color: var(--text); }
+label.repo-copy-row { cursor: pointer; }
+.repo-copy-row.on, .repo-copy-row:focus-within { border-color: var(--accent); }
+.repo-copy-row.on { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.repo-copy-row input { width: 1rem; height: 1rem; flex: none; margin: 0; cursor: inherit; accent-color: var(--accent); }
+.repo-copy-row .repo-copy-name { flex: 1; overflow-wrap: anywhere; }
+.repo-copy-status { display: flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.repo-copy-target .modal-sort { width: 100%; min-width: 0; }
+.repo-copy-target .agent-advice-cmd { flex-wrap: wrap; }
+.repo-copy-target .agent-advice-cmd pre { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .repo-copy-layout { grid-template-columns: minmax(0, 1fr); }
+}
 .mirror-row { display: grid; grid-template-columns: 10px minmax(8rem, max-content) minmax(0, 1fr) auto; gap: 10px; align-items: center; cursor: pointer; }
 .mirror-make { display: flex; flex-direction: column; gap: 6px; padding: 10px 4px 2px; }
 .mirror-main { display: flex; flex-direction: column; gap: 12px; padding: 14px 18px 18px; }
