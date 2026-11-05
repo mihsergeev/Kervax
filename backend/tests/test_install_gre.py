@@ -380,4 +380,4 @@ def test_helper_asks_the_panel_through_the_tunnel_of_the_install_command(tmp_pat
         "prefix": 30, "mtu": 1476}
     assert calls.count("systemctl restart kervax-gre.service") == 1
     assert "connect=10.254.0.1" in agent.read_text()
-    assert re.search(r"^KERVAX_SETUP_VERSION=0\.2 ", (AGENT / "gre-setup.sh").read_text(encoding="utf-8"), re.M)
+    assert re.search(r"^KERVAX_SETUP_VERSION=0\.3 ", (AGENT / "gre-setup.sh").read_text(encoding="utf-8"), re.M)
