@@ -50,6 +50,19 @@ function Get-LocalAddress {
     return ''
 }
 
+function Get-ServiceInventory {
+    try {
+        # Query only service identity and state. Never collect executable paths or accounts.
+        $items = @(Get-CimInstance -ClassName Win32_Service -Property Name, DisplayName, State, StartMode -OperationTimeoutSec 10 | ForEach-Object {
+            @{ name = [string]$_.Name; display_name = [string]$_.DisplayName; state = [string]$_.State; start_mode = [string]$_.StartMode }
+        })
+        return @{ complete = $true; collected_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); items = $items }
+    } catch {
+        # Failed enumeration is unknown telemetry, never an empty healthy inventory.
+        return @{ complete = $false; collected_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); items = @() }
+    }
+}
+
 function New-Report {
     $os = Get-CimInstance -ClassName Win32_OperatingSystem -OperationTimeoutSec 10
     $computer = Get-CimInstance -ClassName Win32_ComputerSystem -OperationTimeoutSec 10
@@ -80,10 +93,11 @@ function New-Report {
         }
     })
 
+    $serviceInventory = Get-ServiceInventory
     $now = [DateTimeOffset]::UtcNow
     return @{
         platform = 'windows'
-        agent_version = 'windows-0.2.1'
+        agent_version = 'windows-0.3.0'
         local_ip = Get-LocalAddress
         hostname = $env:COMPUTERNAME
         os = $os.Caption.Substring(0, [Math]::Min(128, $os.Caption.Length))
@@ -95,6 +109,7 @@ function New-Report {
         mem_total = $memTotal
         mem_free = $memFree
         disks = $disks
+        windows_services = $serviceInventory
     }
 }
 

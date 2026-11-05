@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.102] - 2026-11-05
+
+- Second-copy repositories can verify a sample restore weekly on the mirror, using restic content verification and SHA256 comparisons. The Second copy tab shows the date, result and missing or stale verification.
+- Recovery passwords stay on the mirror in root-only files. Restore probes have no network access and read the repository without write or delete permissions; each run checks up to five files, not the entire backup.
+- Windows servers can monitor selected services. Stopped or paused services trigger one incident; confirmed recovery sends one recovery notification. Missing or stale service data does not clear an incident.
+- Qdrant health alerts are opt-in: API failures and collection errors are reported, while normal optimization is ignored. Incomplete or protected metadata cannot confirm recovery.
+- The Fixed action for Windows services and Qdrant requires fresh, complete evidence; unknown telemetry cannot close an incident.
+
+Windows collector 0.3.0, mirror helper 0.3 and database migration 0145. Agent 2.65 and other server helpers are unchanged. Existing Windows collectors and mirror helpers need an update to use the new collection and restore probes.
+
 ## [1.8.101] - 2026-11-05
 
 - LLM recovery alerts now follow 15 minutes of continuously confirmed health, without the extra hour of delay.

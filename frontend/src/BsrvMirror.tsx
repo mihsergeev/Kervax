@@ -21,7 +21,7 @@ import type { RepoTone } from './bsrvRepos'
 import { backupDiskTone } from './bsrvStorage'
 import {
   HELPER, MIRROR_HELPER_MIN, ago, copyKey, copyShort, copyTone, entryDrift, errText, frozenText, isMirror,
-  mirrorNotReady, mirrorReport, running, syncNotes, verLt, when,
+  mirrorNotReady, mirrorReport, running, syncNotes, verLt, verifyText, verifyTone, when,
 } from './bsrvMirrorState'
 
 function mirrorCandidates(servers: Server[]): Server[] {
@@ -127,6 +127,11 @@ export function RepoMirrorSelection({ active, server: s, repos, servers, canAct,
                     <span className={`lk-dot${TONE_DOT[tone]}`} />
                     {dest ? `${dest.name} · ${status}` : status}
                   </span>
+                  {entry && <span className="repo-copy-status muted small">
+                    <span className={`lk-dot${TONE_DOT[copy ? verifyTone(copy) : 'warn']}`} />
+                    {t('Восстановление второй копии')}: {copy ? verifyText(copy, t) : t('Еще не проверялось')}
+                    {!!copy?.verify_ts && ` · ${when(copy.verify_ts)}`}
+                  </span>}
                 </span>
                 {r.size_bytes !== undefined && <span className="muted small">{fmtBytes(r.size_bytes)}</span>}
               </Row>
@@ -257,6 +262,7 @@ export function RepoMirrorBlock({ server: s, repo, servers, canAct, onChanged }:
         {t('Копия на резервном')} <b className="mono">{m?.name ?? `#${entry.mirror}`}</b>
       </div>
       <div className={tone === 'bad' ? 't-down' : tone === 'warn' ? 't-degraded' : undefined}>{line}</div>
+      {c && <RestoreProof c={c} rep={rep!} canAct={canAct} />}
       {c && c.gone_files > 0 && (
         <div className="muted small">
           {protectedCopy
@@ -399,7 +405,7 @@ export function MirrorModal({ server: s, servers, canAct, onChanged, onClose }: 
                         </optgroup>
                       ))}
                     </select>
-                    {cur && rep && <CopyDetail c={cur} rep={rep} primary={srcServer(cur.src)} />}
+                    {cur && rep && <CopyDetail c={cur} rep={rep} primary={srcServer(cur.src)} canAct={canAct} />}
                   </div>
                 </div>
               )}
@@ -420,7 +426,7 @@ export function MirrorModal({ server: s, servers, canAct, onChanged, onClose }: 
   )
 }
 
-function CopyDetail({ c, rep, primary }: { c: MirrorCopy; rep: MirrorReport; primary?: Server }) {
+function CopyDetail({ c, rep, primary, canAct }: { c: MirrorCopy; rep: MirrorReport; primary?: Server; canAct: boolean }) {
   const { t } = useI18n()
   const protectedCopy = !verLt(rep.helper, MIRROR_HELPER_MIN)
   const tone = copyTone(c, rep)
@@ -442,6 +448,8 @@ function CopyDetail({ c, rep, primary }: { c: MirrorCopy; rep: MirrorReport; pri
     issues.push({ tone: 'warn', head: t('Испорченные файлы в копии'), why: t('Проверка нашла {n} файлов, не совпавших со своим хешем: они отложены в сторону и заберутся с основного заново. Стоит проверить диск резервного.', { n: c.check_bad }) })
   if (c.bad_new)
     issues.push({ tone: 'warn', head: t('Основной отдал испорченные файлы'), why: t('{n} файлов с основного не совпали со своим хешем и в копию не взяты: на основном они испорчены или подменены.', { n: c.bad_new }) })
+  if (c.enabled && c.verify_status !== undefined && verifyTone(c) !== 'ok')
+    issues.push({ tone: verifyTone(c), head: t('Восстановление второй копии'), why: verifyText(c, t) })
   if (!c.enabled)
     issues.push({ tone: 'mute', head: t('На паузе'), why: t('Копирование снято в панели: новое не забирается, копия хранится как есть. Удалить ее можно только на резервном.'), cmd: `${HELPER} drop ${c.src} ${c.repo} --yes` })
   const lag = c.src_newest && c.newest && c.src_newest > c.newest ? c.src_newest - c.newest : 0
@@ -481,6 +489,7 @@ function CopyDetail({ c, rep, primary }: { c: MirrorCopy; rep: MirrorReport; pri
             sub={t('каждый файл раз в {n} дн.', { n: rep.check_days })} tone={c.check_bad ? 'warn' : c.check_ts ? 'ok' : undefined} />
         )}
       </div>
+      <RestoreProof c={c} rep={rep} canAct={canAct} />
       <dl className="repo-kv">
         <dt>{t('Основной')}</dt>
         <dd>{primary ? primary.name : c.src}{rep.sources[c.src] && <span className="muted mono"> {rep.sources[c.src].host}:{rep.sources[c.src].port}</span>}</dd>
@@ -494,6 +503,35 @@ function CopyDetail({ c, rep, primary }: { c: MirrorCopy; rep: MirrorReport; pri
         )}
       </dl>
     </>
+  )
+}
+
+function RestoreProof({ c, rep, canAct }: { c: MirrorCopy; rep: MirrorReport; canAct: boolean }) {
+  const { t } = useI18n()
+  const supported = !verLt(rep.helper, '0.3')
+  const tone = verifyTone(c)
+  return (
+    <div className={`repo-fix repo-fix-${tone === 'bad' ? 'bad' : 'mute'}`}>
+      <div className="repo-mirror-h">{t('Восстановление второй копии')}</div>
+      <div className={tone === 'ok' ? undefined : 't-degraded'}>
+        {supported ? verifyText(c, t) : t('Для проверки нужен mirror-setup 0.3 или новее')}
+        {!!c.verify_ts && ` · ${when(c.verify_ts)}`}
+      </div>
+      <div className="muted small">
+        {t('Раз в неделю: до 5 файлов из копии на резервном в отдельный временный каталог, проверка restic и SHA256. Проверяется выборка, а не весь бэкап.')}
+      </div>
+      {canAct && supported && (
+        <>
+          {c.verify_status !== 'ok' && (
+            <>
+              <div className="muted small">{t('На резервном root вводит пароль репозитория из сейфа. Пароль хранится только там, в файле с правами 0600; в команду его не добавляйте.')}</div>
+              <FixCmd cmd={`${HELPER} set-password ${c.src} ${c.repo}`} />
+            </>
+          )}
+          <FixCmd cmd={`${HELPER} verify ${c.src} ${c.repo}`} />
+        </>
+      )}
+    </div>
   )
 }
 

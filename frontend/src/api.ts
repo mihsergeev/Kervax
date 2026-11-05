@@ -2348,6 +2348,12 @@ export type MirrorCopy = {
   check_ts: number
   check_files: number
   check_bad: number
+  verify_ts?: number
+  verify_status?: 'ok' | 'failed' | 'unknown' | ''
+  verify_code?: string
+  verify_files?: number
+  verify_bytes?: number
+  verify_snapshot?: string
   err_code: string // ssh | list | get | space | config | run | frozen
   err: string
 }
@@ -2420,7 +2426,11 @@ export const BACKUP_HTTP_MUTE = 'bkhttp:repo'
 // on 1 - то, что глушит заглушка, сейчас есть (w - что именно), 0 - тихо; t - с какого момента так
 export type MuteLive = { on: 0 | 1; t: string; w?: string }
 
+export type WindowsService = { name: string; display_name: string; state: string; start_mode: string; selected: boolean }
+
 export type Server = {
+  windows_service_names?: string[] | null
+  windows_services?: { complete: boolean; items: WindowsService[] } | null
   id: number
   name: string
   group_name: string
@@ -2433,6 +2443,7 @@ export type Server = {
   external_ip: string
   country?: string // ISO-код страны по IP (офлайн-таблица на бэкенде)
   queue_alert_depth?: number // с какой глубины очереди RabbitMQ алертить (0 = выкл)
+  qdrant_monitor_enabled?: boolean
   queue_alert_over?: Record<string, number> // переопределения по очередям
   // контейнеры, по которым алерт уже ушёл: {имя: 'down'|'loop'}. Считать это на
   // фронте нельзя — crash-loop определяется по приросту RestartCount в окне,
@@ -3199,6 +3210,7 @@ export type LlmSvc = {
   pub_port?: number | null // проброшенный порт контейнера на хосте
 }
 export type ServerForm = {
+  windows_service_names?: string[]
   name: string
   group_name?: string
   agent_ip?: string
@@ -3280,6 +3292,7 @@ export function updateServer(
     backup_anytime?: boolean
     db_dumps_ok?: boolean
     queue_alert_depth?: number // порог глубины очереди RabbitMQ (0 = выкл)
+    qdrant_monitor_enabled?: boolean
     queue_alert_over?: Record<string, number> // порог по конкретной очереди
     disk_autofix?: boolean // авто-очистка диска (меняет только админ)
     parent_id?: number | null // за каким сервером стоит, null - ни за кем

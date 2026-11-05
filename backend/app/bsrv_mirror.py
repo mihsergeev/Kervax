@@ -31,6 +31,7 @@ REPORT_FRESH_S = 15 * 60
 STALE_S = 50 * 3600
 # Новая копия: первая перекачка большого репозитория идет долго, но к концу суток должна закончиться
 FIRST_S = 26 * 3600
+VERIFY_STALE_S = 10 * 86400
 
 
 def mirror_name(mirror_id: int) -> str:
@@ -284,6 +285,9 @@ def copy_problems(rep: dict, now: datetime) -> dict[str, tuple[int, str]]:
             if not last_ok and added and ts - added > FIRST_S:
                 out[key] = (2, f"{key}: первая копия так и не забрана" + (f": {err}" if err else ""))
                 continue
+        if c.get("verify_status") == "failed":
+            out[key] = (2, f"{key}: проверка восстановления второй копии не прошла")
+            continue
         bad = int(c.get("check_bad") or 0)
         if bad:
             out[key] = (1, f"{key}: на резервном испортились файлы копии ({bad}), они отложены и заберутся заново")
@@ -291,6 +295,18 @@ def copy_problems(rep: dict, now: datetime) -> dict[str, tuple[int, str]]:
         if int(c.get("bad_new") or 0):
             out[key] = (1, f"{key}: основной отдал файлы, не совпавшие с хешем ({int(c['bad_new'])}): на нем они "
                            "испорчены или подменены")
+            continue
+        # Older helpers have no restore probe. Unknown is explicitly a warning,
+        # never evidence that the destination can be restored.
+        if "verify_status" in c:
+            status = c.get("verify_status")
+            verified = float(c.get("verify_ts") or 0)
+            if status != "ok" or not verified or not c.get("verify_files") or not c.get("verify_snapshot"):
+                why = ("на резервном не настроен пароль восстановления" if c.get("verify_code") == "password_missing"
+                       else "результат восстановления второй копии неизвестен")
+                out[key] = (1, f"{key}: {why}")
+            elif ts - verified > VERIFY_STALE_S:
+                out[key] = (1, f"{key}: восстановление второй копии не проверялось больше 10 дней")
     return out
 
 

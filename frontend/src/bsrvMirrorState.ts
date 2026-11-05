@@ -69,8 +69,30 @@ export function copyTone(c: MirrorCopy, rep: MirrorReport): RepoTone {
     if (c.last_ok && now - c.last_ok > STALE_S) return 'bad'
     if (!c.last_ok && c.added && now - c.added > FIRST_S) return 'bad'
   }
+  if (c.verify_status === 'failed') return 'bad'
   if (c.check_bad || c.bad_new || (c.err_code && c.err_code !== 'frozen')) return 'warn'
+  if (c.verify_status !== undefined && verifyTone(c) !== 'ok') return 'warn'
   return 'ok'
+}
+
+/** Restore proof is independent of ciphertext copy/hash checks. */
+export function verifyTone(c: MirrorCopy): RepoTone {
+  if (c.verify_status === 'failed') return 'bad'
+  return c.verify_status === 'ok' && !!c.verify_ts && !!c.verify_files && !!c.verify_snapshot
+    && Date.now() / 1000 - c.verify_ts <= 10 * 86400 ? 'ok' : 'warn'
+}
+
+export function verifyText(c: MirrorCopy, t: T): string {
+  if (c.verify_status === 'failed') return t('Восстановление не прошло')
+  if (c.verify_code === 'password_missing') return t('Нужен пароль на резервном')
+  if (c.verify_code === 'password_permissions') return t('Нужны права 0600 и владелец root у файла пароля')
+  if (c.verify_code === 'open') return t('Репозиторий не открылся: проверьте пароль и копию')
+  if (c.verify_code === 'no_sample') return t('Нет подходящих файлов для проверки')
+  if (!c.verify_ts) return t('Еще не проверялось')
+  if (c.verify_status === 'ok' && verifyTone(c) === 'ok')
+    return t('SHA256 совпал: {n} файлов', { n: c.verify_files ?? 0 })
+  if (c.verify_status === 'ok') return t('Проверка устарела')
+  return t('Результат неизвестен')
 }
 
 export function errText(c: MirrorCopy, t: T): string {

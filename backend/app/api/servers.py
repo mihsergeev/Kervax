@@ -18,6 +18,7 @@ from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Re
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 
+from app import windows_services
 from app import backup_unit
 from app import backup_verify
 from app import gre as gre_mod, relay as relay_mod
@@ -98,6 +99,7 @@ from app.models import (
     ServerMetric,
     ServerTraffic,
     ServerUsage,
+    TgAlert,
     User,
     WebErrorSample,
 )
@@ -386,6 +388,7 @@ def _out(
     o.db_fails = db_health.fails(server.last_report or {}, now)
     o.gpu = gpu_mod.view(server.last_report or {}, now)
     o.gpu_sum = gpu_mod.summary(server.last_report or {}, now)
+    o.windows_services = windows_services.view(server, now)
     o.llm = gpu_mod.llm_view(server.last_report or {}, (server.alert_state or {}).get("llm_base"),
                              (server.alert_state or {}).get("llm_lat"), now) or None
     o.vpn = vpn_mod.view(server.last_report or {}, now.timestamp())
@@ -1912,6 +1915,18 @@ async def update_server(
 ) -> ServerOut:
     server = await _get_or_404(server_id, session, user)
     fields = body.model_dump(exclude_unset=True)
+    if fields.get("qdrant_monitor_enabled", False) is None:
+        fields.pop("qdrant_monitor_enabled")
+    if fields.get("qdrant_monitor_enabled") is False and server.qdrant_monitor_enabled:
+        # An explicit opt-out closes tracking quietly; it is not a recovery.
+        server.alert_state = {k: v for k, v in (server.alert_state or {}).items()
+                              if k != "qdrant" and not k.startswith("qdrant_")}
+        await session.execute(sa_update(TgAlert).where(
+            TgAlert.kind == "qdrant", TgAlert.ref == f"srv:{server.id}",
+            TgAlert.resolved_at.is_(None),
+        ).values(resolved_at=datetime.now(timezone.utc)))
+    if fields.get("windows_service_names") and (server.last_report or {}).get("platform") != "windows":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Выбор служб доступен только для Windows")
     autofix = fields.pop("disk_autofix", None)
     autofix_changed = autofix is not None and autofix != server.disk_autofix
     # панель начнет сама запускать удаление на ноде: решение админа, не редактора

@@ -1,3 +1,4 @@
+import { WindowsServicesCard } from './WindowsServicesCard'
 import { localizeInstallCmd, withGre, withProxy } from './installProxy'
 import { InstallPath, type InstallMode } from './InstallPath'
 import { Fragment, type ReactNode, useCallback, useEffect, useId, useRef, useState } from 'react'
@@ -853,7 +854,7 @@ const DETAIL_SECTIONS: SecDef[] = [
   { id: 'timeline', label: 'Хронология', group: 'События' },
 ]
 const SEC_IDS = new Set(DETAIL_SECTIONS.map((x) => x.id))
-const WINDOWS_SECTIONS = new Set(['overview', 'cpu', 'mem', 'disk', 'deps', 'alerts', 'timeline'])
+const WINDOWS_SECTIONS = new Set(['overview', 'cpu', 'mem', 'disk', 'units', 'deps', 'alerts', 'timeline'])
 // разделы с графиками: у них переключатель периода
 const CHART_SECS = new Set(['cpu', 'mem', 'disk', 'net', 'gpu', 'web'])
 // карта сервера на сводке: ресурсы там плитками, здесь остальное, у чего есть состояние
@@ -7824,7 +7825,9 @@ function ServerDetail({
           </div>
         )}
 
-        {active === 'units' && (
+        {active === 'units' && windows && <div className="srv-sec"><WindowsServicesCard key={`${s.id}:${JSON.stringify(s.windows_service_names ?? [])}`} server={s} isViewer={isViewer} onChanged={onChanged} /></div>}
+
+        {active === 'units' && !windows && (
           <div className="srv-sec">
             <div className="net-cards">
               <LoopingUnits server={s} onChanged={onChanged} />

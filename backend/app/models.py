@@ -757,11 +757,14 @@ class Server(Base):
                                                                default=lambda: [7, 1])
     # Глубина очереди RabbitMQ, с которой алертим. 0 = выключено для всей ноды.
     queue_alert_depth: Mapped[int] = mapped_column(Integer, default=0)
+    qdrant_monitor_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     # Переопределения по КОНКРЕТНЫМ очередям: {"<источник>|<vhost>/<имя>": порог},
     # 0 = эту очередь не алертить. Источник в ключе обязателен: на ноде бывает
     # несколько инстансов RabbitMQ (dev/stage), и имена очередей в них совпадают.
     queue_alert_over: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     disk_temp_alert_c: Mapped[int] = mapped_column(Integer, default=0)  # порог темп. диска, °C (0=выкл)
+    # Windows service names selected by the operator; an empty list disables monitoring.
+    windows_service_names: Mapped[list | None] = mapped_column(JSON, nullable=True)
     # типы алертов, заглушённые ДЛЯ ЭТОГО сервера (переопределяют глобальные правила)
     alert_mutes: Mapped[list | None] = mapped_column(JSON, nullable=True)
     offline_after_seconds: Mapped[int] = mapped_column(Integer, default=120)

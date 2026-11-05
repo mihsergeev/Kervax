@@ -27,6 +27,7 @@ MORNING_HOUR = 9
 # поштучный снуз на время; если нет, "1 ч" и "до утра" глушат вид целиком (ненадолго), а
 # "насовсем" - все равно только эти вещи.
 ITEM_MUTE: dict[str, tuple[str, bool]] = {
+    "windows_service": ("winsvc:", True),
     "units": ("unit:", True), "workers": ("worker:", True), "queue_stuck": ("qstuck:", True),
     "queue_failed": ("qfail:", True), "cron_stuck": ("cron:", True), "log_errors": ("logerr:", True),
     "fpm": ("fpm:", True), "vpn_torrent": ("torrent:", True), "vpn_heavy": ("vpnheavy:", True), "gitlab": ("gitlab:", True), "autoban": ("autoban:", True),

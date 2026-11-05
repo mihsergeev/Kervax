@@ -8621,3 +8621,22 @@ label.repo-copy-row { cursor: pointer; }
   .home-attention-row { flex-wrap: wrap; }
   .home-recheck-wrap { margin-left: auto; }
 }
+
+/* Windows service selection uses stable service names, including long custom names. */
+.windows-service-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.25rem 0.7rem;
+  align-items: center;
+  padding: 0.6rem 0.2rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+.windows-service-row input { width: auto; margin: 0; }
+.windows-service-name { min-width: 0; overflow-wrap: anywhere; font-size: 0.88rem; }
+.windows-service-state { white-space: nowrap; }
+@media (max-width: 600px) {
+  .windows-service-row { grid-template-columns: auto minmax(0, 1fr); }
+  .windows-service-row input { grid-row: 1 / 3; }
+  .windows-service-state { grid-column: 2; }
+}

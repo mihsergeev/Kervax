@@ -37,7 +37,7 @@ STATE = frozenset({
     "cpu", "mem", "temp", "throttle", "conntrack", "db_conn", "disktemp", "disk", "inode", "pressure",
     "net_health", "link", "disk_slow", "dns", "clock", "units", "kube_pod", "kube_node", "flux_down",
     "flux_stale", "kube_cron", "listen_gone", "cron_stuck", "queue_stuck", "queue_failed", "workers", "fpm",
-    "mem_limit", "gpu", "gpu_heat", "llm", "cpu_spin", "db_health", "web_config", "gre_down", "autoban",
+    "mem_limit", "gpu", "gpu_heat", "llm", "qdrant", "windows_service", "cpu_spin", "db_health", "web_config", "gre_down", "autoban",
     "vpn_torrent", "vpn_heavy",
 })
 KINDS = WINDOW | STATE
@@ -145,6 +145,8 @@ def left(s, kind: str, now: datetime, web_err=None, pod_names=None) -> str:
         lvl, ctx = collector._server_conditions(s, now, web_err, pod_names).get(kind, (0, {}))
     finally:
         s.alert_state = saved
+    if kind in ("windows_service", "qdrant") and ctx.get("_complete") is not True:
+        return "не получилось проверить, попробуйте через минуту"
     if items:
         return "; ".join(str(p.get("text") or "") for p in items[:2])
     if lvl <= 0 and int(ctx.get("raw") or 0) <= 0 and (kind == "web_5xx" or not ctx.get("since")):

@@ -288,6 +288,27 @@ def test_stale_report_is_no_report():
     assert bm.problems(_srv(last_report=old), datetime.now(timezone.utc)) == {}
 
 
+def test_destination_restore_unknown_failed_stale_and_ok_are_distinct():
+    now = datetime.now(timezone.utc)
+    copy = {"src": "primary", "repo": "repo", "enabled": True, "last_ok": now.timestamp(),
+            "verify_ts": now.timestamp(), "verify_status": "ok", "verify_files": 5,
+            "verify_snapshot": "a" * 64}
+
+    def problem(**changes):
+        return bm.copy_problems({"copies": [{**copy, **changes}]}, now).get("primary/repo")
+
+    assert problem() is None
+    assert problem(verify_status="failed")[0] == 2
+    assert problem(verify_status="failed", check_bad=2)[0] == 2
+    assert problem(verify_status="unknown")[0] == 1
+    assert "не настроен пароль" in problem(verify_status="unknown", verify_code="password_missing")[1]
+    assert problem(verify_status="")[0] == 1
+    assert problem(verify_files=0)[0] == 1
+    assert problem(verify_snapshot="")[0] == 1
+    assert "10 дней" in problem(verify_ts=now.timestamp() - 11 * 86400)[1]
+    assert problem(enabled=False, verify_status="unknown") is None
+
+
 def test_alert_registered_and_links_to_the_mirror_section():
     from app import settings_store, srv_short
     assert "backup_mirror" in settings_store.SERVER_ALERT_KINDS
@@ -326,7 +347,7 @@ def test_helpers_and_agent_agree_on_actions():
 
 def test_mirror_helper_rules():
     ms = _src("mirror-setup.sh")
-    assert "\nKERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR" in ms
+    assert "\nKERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR" in ms
     # ставится только туда, где панель сделала сервер резервным
     assert "/api/agent/mirror-wanted" in ms
     # скрипты в /lib65, не в /usr

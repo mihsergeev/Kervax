@@ -109,6 +109,23 @@ def test_frontend_list_matches():
     assert set(re.findall(r"'([a-z_0-9]+)'", body)) == set(fixed.KINDS)
 
 
+async def test_qdrant_mark_requires_explicit_complete_observation(monkeypatch):
+    # Qdrant's adapter is optional here: absent/offline/disabled has no condition.
+    # An unobserved state must never acknowledge recovery, even with no problems.
+    server = _srv()
+    original = server.alert_state
+    monkeypatch.setattr(collector, "server_problems", lambda *args, **kw: [])
+    for conditions, allowed in [({}, False), ({"qdrant": (0, {})}, False),
+                                ({"qdrant": (0, {"_complete": False})}, False),
+                                ({"qdrant": (2, {"_complete": True, "detail": "Qdrant down"})}, False),
+                                ({"qdrant": (0, {"_complete": True})}, True)]:
+        monkeypatch.setattr(collector, "_server_conditions", lambda *args, **kw: conditions)
+        result = await fixed.mark(None, server, "qdrant", "operator", "checked", NOW)
+        assert bool(result) is not allowed
+        assert bool((server.alert_fixed or {}).get("qdrant")) is allowed
+        assert server.alert_state is original
+
+
 # ---------------------------------------------------------------- цикл алертов
 
 

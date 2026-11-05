@@ -18,6 +18,8 @@
 #    server already on the list, or unfreeze - those are commands for root on this server;
 #  * the transfer runs as the unprivileged user kervax-mirror in a sandboxed systemd unit that can
 #    write only to its staging directory; root then checks every file and moves it into the copy.
+# Optional restore probes use a recovery password entered locally by root on this destination;
+# the panel and sources have no password delivery or destination write operation.
 # What the panel shows comes from /var/lib/kervax/report.d/backup-mirror.json.
 # Run as root.
 set -euo pipefail
@@ -41,7 +43,8 @@ fi
 # 0.1: copies of chosen repositories pulled over SSH from the main backup servers, checked by
 #      sha256, removals reach the copy only after KEEP_DAYS, a large loss at once freezes the copy
 # 0.2: keep repository files regardless of deletions at the source; accept only complete pulls
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.3: weekly sandboxed restore from the destination, with an optional local recovery password
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Only where the panel made this server a mirror (Backups -> Mirror servers). Being a mirror is a
 # decision of a person, not a property of the node: the playbook and the installer ask the panel.
 KERVAX_SETUP_WHEN="sed -n s/^token=//p /etc/kervax-agent.conf | curl -fsS -m 15 --data-binary @- $(sed -n s/^url=//p /etc/kervax-agent.conf 2>/dev/null)/api/agent/mirror-wanted | grep -qx yes"
@@ -52,10 +55,18 @@ apt_q() {
     apt-get -q -y -o DPkg::Lock::Timeout=60 -o Dpkg::Options::=--force-confdef \
     -o Dpkg::Options::=--force-confold "$@" </dev/null >/dev/null 2>&1
 }
-for c in ssh ssh-keygen systemd-run tar sha256sum flock; do
+for c in ssh ssh-keygen systemd-run tar sha256sum flock python3 restic setfacl; do
   command -v "$c" >/dev/null 2>&1 && continue
   if [ "$c" = ssh ] || [ "$c" = ssh-keygen ]; then
     command -v apt-get >/dev/null 2>&1 && APT_TIMEOUT=600 apt_q install openssh-client || true
+    command -v "$c" >/dev/null 2>&1 && continue
+  fi
+  if [ "$c" = python3 ] || [ "$c" = restic ]; then
+    command -v apt-get >/dev/null 2>&1 && APT_TIMEOUT=600 apt_q install "$c" || true
+    command -v "$c" >/dev/null 2>&1 && continue
+  fi
+  if [ "$c" = setfacl ]; then
+    command -v apt-get >/dev/null 2>&1 && APT_TIMEOUT=600 apt_q install acl || true
     command -v "$c" >/dev/null 2>&1 && continue
   fi
   echo "mirror-setup: '$c' is required and missing" >&2
@@ -63,6 +74,8 @@ for c in ssh ssh-keygen systemd-run tar sha256sum flock; do
 done
 
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" "$STATE_DIR/versions" "$STATE_DIR/report.d" /etc/kervax
+install -d -o root -g root -m 0700 /etc/kervax/mirror-passwords
+getent group kervax-mirror-read >/dev/null || groupadd --system kervax-mirror-read
 # the user the transfer runs as: no login, no password, its home is root's
 if ! id "$MUSER" >/dev/null 2>&1; then
   useradd --system --home-dir "$HOME_D" --no-create-home --shell /usr/sbin/nologin "$MUSER"
@@ -114,6 +127,170 @@ fi
 # Do not report an upgrade while a pull is still running the old deletion policy.
 exec 9> /run/kervax-mirror.lock
 flock -w 60 9 || { echo "mirror-setup: a pull is running, try later" >&2; exit 2; }
+cat > "$HELPER_DIR/kervax-mirror-verify.py.new" <<'VERIFY_EOF'
+#!/usr/bin/python3 -I
+"""Read-only destination restore probe; installed by mirror-setup, never run as root.
+
+The restore --verify pass compares the restored chunks with the snapshot's content
+IDs. SHA256 additionally compares each restored file with a separate restic dump.
+Only counters, a snapshot ID and fixed error codes leave the private sandbox.
+"""
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+
+MAX_FILES = 5
+MAX_FILE = 8 * 1024 * 1024
+MAX_BYTES = 32 * 1024 * 1024
+MAX_LIST = 16 * 1024 * 1024
+TIMEOUT = 180
+HASH = re.compile(r"[0-9a-f]{64}")
+
+
+class ProbeError(Exception):
+    pass
+
+
+def digest(file):
+    result = hashlib.sha256()
+    for chunk in iter(lambda: file.read(1024 * 1024), b""):
+        result.update(chunk)
+    return result.hexdigest()
+
+
+def safe_path(path):
+    # Literal restic include patterns only: reject glob/control characters and
+    # traversal rather than trying to quote a pattern supplied by a repository.
+    return (isinstance(path, str) and len(path) <= 1024
+            and re.fullmatch(r"/[A-Za-z0-9._ /+\-]+", path) is not None
+            and str(PurePosixPath(path)) == path
+            and all(p not in (".", "..", "") for p in path.split("/")[1:]))
+
+
+def select_files(lines):
+    selected, used, seen = [], 0, set()
+    for line in lines:
+        node = json.loads(line)
+        if node.get("type") != "file":
+            continue
+        path, size = node.get("path"), node.get("size")
+        if (not safe_path(path) or type(size) is not int or not 0 < size <= MAX_FILE
+                or path in seen or used + size > MAX_BYTES):
+            continue
+        seen.add(path)
+        selected.append((path, size))
+        used += size
+        if len(selected) == MAX_FILES:
+            break
+    return selected
+
+
+def file_hash(target, path, size):
+    # Walk by descriptors: no symlink in any restored ancestor or the file itself
+    # can redirect the verification outside the temporary target.
+    fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        *parts, name = path.lstrip("/").split("/")
+        for part in parts:
+            new = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = new
+        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        with os.fdopen(file_fd, "rb") as file:
+            info = os.fstat(file.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size != size:
+                raise ProbeError("mismatch")
+            return digest(file)
+    finally:
+        os.close(fd)
+
+
+def probe(binary, repository, password):
+    import resource
+    deadline = time.monotonic() + TIMEOUT
+    base = [binary, "--repo", repository, "--password-file", password, "--no-lock", "--no-cache"]
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "GOMAXPROCS": "2"}
+    # This cap also applies to restic's output, including a malicious listing or
+    # unexpectedly large restored file. The systemd unit bounds total memory/time.
+    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_BYTES, MAX_BYTES))
+
+    def run(args, output, code):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProbeError("timeout")
+        try:
+            result = subprocess.run(base + args, stdin=subprocess.DEVNULL, stdout=output,
+                                    stderr=subprocess.DEVNULL, env=env, timeout=remaining)
+        except subprocess.TimeoutExpired:
+            raise ProbeError("timeout") from None
+        if result.returncode:
+            raise ProbeError(code)
+        output.seek(0)
+
+    with tempfile.TemporaryDirectory(prefix="kervax-mirror-verify-") as private:
+        with tempfile.TemporaryFile() as output:
+            run(["snapshots", "--json", "--latest", "1"], output, "open")
+            snapshots = json.loads(output.read(MAX_LIST + 1))
+        snapshots = [s for s in snapshots if isinstance(s, dict) and HASH.fullmatch(str(s.get("id", "")))]
+        if not snapshots:
+            raise ProbeError("no_snapshot")
+        snapshot = max(snapshots, key=lambda s: str(s.get("time", "")))["id"]
+        with tempfile.TemporaryFile(mode="w+b") as output:
+            run(["ls", "--json", snapshot], output, "listing")
+            if os.fstat(output.fileno()).st_size > MAX_LIST:
+                raise ProbeError("listing_limit")
+            selected = select_files(output)
+        if not selected:
+            raise ProbeError("no_sample")
+        expected = {}
+        for path, size in selected:
+            with tempfile.TemporaryFile() as output:
+                run(["dump", snapshot, path], output, "read")
+                if os.fstat(output.fileno()).st_size != size:
+                    raise ProbeError("mismatch")
+                expected[path] = digest(output)
+        target = Path(private) / "restore"
+        target.mkdir(mode=0o700)
+        args = ["restore", snapshot, "--target", str(target), "--verify"]
+        for path, _ in selected:
+            args.extend(["--include", path])
+        with tempfile.TemporaryFile() as output:
+            run(args, output, "restore")
+        for path, size in selected:
+            if file_hash(target, path, size) != expected[path]:
+                raise ProbeError("mismatch")
+        return {"status": "ok", "code": "", "files": len(selected),
+                "bytes": sum(size for _, size in selected), "snapshot": snapshot}
+
+
+def main():
+    result = {"status": "unknown", "code": "worker", "files": 0, "bytes": 0, "snapshot": ""}
+    try:
+        password = str(Path(os.environ["CREDENTIALS_DIRECTORY"]) / "password")
+        result = probe(sys.argv[1], sys.argv[2], password)
+    except ProbeError as exc:
+        result["code"] = str(exc)
+        if str(exc) in ("restore", "mismatch", "read"):
+            result["status"] = "failed"
+    except (OSError, ValueError, TypeError, KeyError):
+        # No exception/log text: file paths and repository passwords stay private.
+        pass
+    for key, value in result.items():
+        print(f"{key}={value}")
+
+
+if __name__ == "__main__":
+    main()
+VERIFY_EOF
+chmod 0755 "$HELPER_DIR/kervax-mirror-verify.py.new" && chown root:root "$HELPER_DIR/kervax-mirror-verify.py.new" \
+  && mv -f "$HELPER_DIR/kervax-mirror-verify.py.new" "$HELPER_DIR/kervax-mirror-verify.py"
 # Written next to the old one and swapped in with mv: bash reads a running script as it goes.
 cat > "$HELPER.new" <<'HELPER_EOF'
 #!/usr/bin/env bash
@@ -137,6 +314,9 @@ REMOTE_USER=kervax-mread
 LOCK=/run/kervax-mirror.lock
 CURRENT=/run/kervax-mirror.current
 PULL_UNIT=kervax-mirror-pull
+VERIFY=/lib65/kervax/kervax-mirror-verify.py
+PASSWORD_D=/etc/kervax/mirror-passwords
+VERIFY_DAYS=7
 # Bound the size of each transfer request to the main server.
 BATCH_BYTES=$((4 * 1024 * 1024 * 1024))
 BATCH_FILES=2000
@@ -475,6 +655,94 @@ check_one() {  # src repo
   set_status "$src" "$repo" check_ts "$now" check_files "$n" check_bad "$bad"
 }
 
+# A separate DynamicUser can read only the destination and its recovery credential.
+# It has no source SSH key, network access or write access to either repository.
+verify_one() {  # src repo [force]
+  local src="$1" repo="$2" force="${3:-0}" st copy pw now last tmp k v interval unsafe
+  local status=unknown code=worker files=0 bytes=0 snapshot="" bin
+  st="$(state_dir "$src" "$repo")"; copy="$(copy_dir "$src" "$repo")"
+  [ -f "$copy/config" ] || return 0
+  now="$(date +%s)"; last="$(num "$(kv "$st/status" verify_ts)")"
+  interval=$((VERIFY_DAYS * 86400))
+  [ "$(kv "$st/status" verify_status)" = ok ] || interval=86400
+  [ "$force" = 1 ] || [ "$((now - last))" -ge "$interval" ] || return 0
+  pw="$PASSWORD_D/$src/$repo"
+  if [ ! -f "$pw" ] || [ -L "$pw" ]; then
+    code=password_missing
+  elif [ "$(stat -c '%u:%a:%h' "$pw")" != '0:600:1' ]; then
+    code=password_permissions
+  elif [ -L "$copy" ] || [ -L "$DATA/$src" ]; then
+    code=unsafe_path
+  elif ! bin="$(command -v restic)"; then
+    code=restic_missing
+  elif ! unsafe="$(timeout -k 5 30 find "$copy" \( -type l -o \( ! -type d ! -type f \) -o \( -type f -links +1 \) \) -printf x -quit 2>/dev/null)"; then
+    code=read_permissions
+  elif [ -n "$unsafe" ]; then
+    code=unsafe_path
+  elif ! timeout -k 5 30 setfacl -R -P -m g:kervax-mirror-read:r-X -- "$copy" 2>/dev/null; then
+    code=read_permissions
+  else
+    tmp="$(mktemp "$st/.verify.XXXXXX")"
+    if systemd-run --quiet --wait --pipe --collect \
+      -p DynamicUser=yes -p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=yes \
+      -p SupplementaryGroups=kervax-mirror-read \
+      -p PrivateTmp=yes -p PrivateDevices=yes -p PrivateNetwork=yes \
+      -p ProtectKernelTunables=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes \
+      -p 'CapabilityBoundingSet=' -p RestrictAddressFamilies=AF_UNIX \
+      -p InaccessiblePaths="$DATA $HOME_D /etc/kervax" \
+      -p "BindReadOnlyPaths=$copy:/repository" -p "LoadCredential=password:$pw" \
+      -p RuntimeMaxSec=200 -p MemoryMax=1G -p TasksMax=64 -p LimitFSIZE=32M -p LimitCORE=0 -p UMask=0077 \
+      -p Nice=15 /usr/bin/python3 -I "$VERIFY" "$bin" /repository > "$tmp" 2>/dev/null; then
+      while IFS='=' read -r k v; do
+        case "$k" in
+          status) case "$v" in ok|failed|unknown) status="$v" ;; esac ;;
+          code) [[ "$v" =~ ^[a-z_]{0,32}$ ]] && code="$v" ;;
+          files) [[ "$v" =~ ^[0-5]$ ]] && files="$v" ;;
+          bytes) [[ "$v" =~ ^[0-9]{1,8}$ ]] && [ "$v" -le 33554432 ] && bytes="$v" ;;
+          snapshot) [[ "$v" =~ ^[0-9a-f]{64}$ ]] && snapshot="$v" ;;
+        esac
+      done < "$tmp"
+      if [ "$status" = ok ] && { [ "$files" -eq 0 ] || [ "$bytes" -eq 0 ] || [ -z "$snapshot" ] || [ -n "$code" ]; }; then
+        status=unknown; code=worker
+      fi
+    fi
+    rm -f "$tmp"
+  fi
+  set_status "$src" "$repo" verify_ts "$now" verify_status "$status" verify_code "$code" \
+    verify_files "$files" verify_bytes "$bytes" verify_snapshot "$snapshot"
+}
+
+# Root-only opt-in: prompt on this destination, never in argv, spool or reports.
+cmd_set_password() {
+  local src="${1:-}" repo="${2:-}" password tmp
+  name_ok "$src" && name_ok "$repo" || { echo 'usage: set-password <server> <repository>' >&2; return 2; }
+  install -d -o root -g root -m 0700 "$PASSWORD_D" "$PASSWORD_D/$src"
+  IFS= read -r -s -p 'Recovery password (kept only on this mirror): ' password < /dev/tty || return 2
+  printf '\n' > /dev/tty
+  [ -n "$password" ] || { echo 'empty password, nothing changed' >&2; return 2; }
+  load_conf
+  exec 9> "$LOCK"
+  flock -w 60 9 || { unset password; echo 'a pull is running, try later' >&2; return 2; }
+  tmp="$(mktemp "$PASSWORD_D/$src/.password.XXXXXX")"
+  printf '%s\n' "$password" > "$tmp"; unset password
+  chmod 0600 "$tmp" && chown root:root "$tmp" && mv -fT "$tmp" "$PASSWORD_D/$src/$repo"
+  set_status "$src" "$repo" verify_ts 0 verify_status unknown verify_code pending
+  echo 'Recovery password saved locally. Run verify to test it.'
+}
+
+cmd_verify() {
+  local src="${1:-}" repo="${2:-}"
+  name_ok "$src" && name_ok "$repo" || { echo 'usage: verify <server> <repository>' >&2; return 2; }
+  load_conf
+  exec 9> "$LOCK"
+  flock -w 60 9 || { echo 'a pull is running, try later' >&2; return 2; }
+  [ -f "$(copy_dir "$src" "$repo")/config" ] || { echo 'copy not available' >&2; return 2; }
+  verify_one "$src" "$repo" 1
+  refresh_report
+  echo "restore verification: $(kv "$(state_dir "$src" "$repo")/status" verify_status) ($(kv "$(state_dir "$src" "$repo")/status" verify_code))"
+  [ "$(kv "$(state_dir "$src" "$repo")/status" verify_status)" = ok ]
+}
+
 cmd_pull() {  # [src [repo]]
   local only_src="${1:-}" only_repo="${2:-}" src repo
   exec 9> "$LOCK"
@@ -488,6 +756,7 @@ cmd_pull() {  # [src [repo]]
       [ -z "$only_repo" ] || [ "$repo" = "$only_repo" ] || continue
       pull_one "$src" "$repo" || fail_status "$src" "$repo" run "the pull failed"
       check_one "$src" "$repo" || true
+      verify_one "$src" "$repo" || set_status "$src" "$repo" verify_ts "$(date +%s)" verify_status unknown verify_code worker
       refresh_report
     done
   done
@@ -621,9 +890,10 @@ cmd_report() {
       fi
       bl=0; [ -f "$st/badlog" ] && bl="$(grep -c . "$st/badlog" || true)"
       local o="{\"src\":\"$src\",\"repo\":\"$repo\",\"enabled\":$enabled,\"added\":$(num "$(cat "$st/added" 2>/dev/null || true)"),\"frozen\":$fr,\"frozen_ts\":$fts,\"frozen_why\":\"$(json_escape "$frw")\",\"bad_files\":$(num "$bl"),\"removed\":0"
-      for k in last_try last_ok files bytes snaps newest src_files src_bytes src_snaps src_newest gone_files gone_bytes new_files new_bytes bad_new check_ts check_files check_bad; do
+      for k in last_try last_ok files bytes snaps newest src_files src_bytes src_snaps src_newest gone_files gone_bytes new_files new_bytes bad_new check_ts check_files check_bad verify_ts verify_files verify_bytes; do
         o="$o,\"$k\":$(num "$(kv "$st/status" "$k")")"
       done
+      o="$o,\"verify_status\":\"$(json_escape "$(kv "$st/status" verify_status)")\",\"verify_code\":\"$(json_escape "$(kv "$st/status" verify_code)")\",\"verify_snapshot\":\"$(json_escape "$(kv "$st/status" verify_snapshot)")\""
       o="$o,\"err_code\":\"$(json_escape "$(kv "$st/status" err_code | cut -c1-24)")\",\"err\":\"$(json_escape "$(kv "$st/status" err | cut -c1-300)")\"}"
       copies="${copies:+$copies,}$o"
     done
@@ -730,12 +1000,14 @@ case "${1:-}" in
   pull)          shift; cmd_pull "$@" ;;
   report)        refresh_report ;;
   status)        cmd_status ;;
+  set-password)  shift; cmd_set_password "$@" ;;
+  verify)        shift; cmd_verify "$@" ;;
   unfreeze)      shift; cmd_unfreeze "$@" ;;
   accept)        shift; cmd_accept "$@" ;;
   drop)          shift; cmd_drop "$@" ;;
   apply-conf)    cmd_apply_conf ;;
   process-spool) cmd_process_spool ;;
-  *) echo "usage: $0 {status|pull [server [repository]]|unfreeze <server> <repository>|accept <server>|drop <server> <repository> --yes|apply-conf|report|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {status|pull [server [repository]]|set-password <server> <repository>|verify <server> <repository>|unfreeze <server> <repository>|accept <server>|drop <server> <repository> --yes|apply-conf|report|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 chmod 0755 "$HELPER.new" && mv -f "$HELPER.new" "$HELPER"

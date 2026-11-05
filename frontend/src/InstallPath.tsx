@@ -139,20 +139,20 @@ export function InstallPath({
   useEffect(() => {
     let gone = false
     setErr('')
-    // use - что подставить в команду из ответа: адрес ретранслятора или локации, а для
+    // selectProxy - что подставить в команду из ответа: адрес ретранслятора или локации, а для
     // "напрямую" и своего прокси - свое (панель отвечает пустым адресом)
-    const ask = async (body: Parameters<typeof installVia>[1], use: (p: string) => string) => {
+    const ask = async (body: Parameters<typeof installVia>[1], selectProxy: (p: string) => string) => {
       setBusy(true)
       try {
         const res = await installVia(server.id, body)
         if (!gone) {
-          onProxy(use(res.proxy))
+          onProxy(selectProxy(res.proxy))
           setGre(res.gre)
         }
         viaRelay.current = body.mode === 'relay'
       } catch (e) {
         if (!gone) {
-          onProxy(use(''))
+          onProxy(selectProxy(''))
           setErr(e instanceof Error ? e.message : t('Ошибка'))
         }
       } finally {

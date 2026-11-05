@@ -47,10 +47,10 @@ const AREAS: { id: string; label: string; kinds: string[] }[] = [
   { id: 'load', label: 'Нагрузка и память', kinds: ['cpu', 'mem', 'temp', 'throttle', 'pressure', 'cpu_spin', 'oom', 'mem_leak', 'mem_limit'] },
   { id: 'disk', label: 'Диск', kinds: ['disk', 'disk_forecast', 'inode', 'disk_health', 'disk_slow', 'disktemp', 'backup_transfer'] },
   { id: 'net', label: 'Сеть', kinds: ['conntrack', 'net_health', 'link', 'traffic', 'vpn_torrent', 'vpn_heavy', 'gre_down', 'port_new', 'exposed', 'cf_realip'] },
-  { id: 'svc', label: 'Службы и очереди', kinds: ['units', 'unit_loop', 'workers', 'cron_stuck', 'queue_stuck', 'queue_failed', 'log_errors', 'fpm'] },
+  { id: 'svc', label: 'Службы и очереди', kinds: ['windows_service', 'units', 'unit_loop', 'workers', 'cron_stuck', 'queue_stuck', 'queue_failed', 'log_errors', 'fpm'] },
   { id: 'k8s', label: 'Docker и Kubernetes', kinds: ['docker_restarts', 'kube_restarts', 'kube_pod'] },
   { id: 'web', label: 'Веб', kinds: ['web_5xx', 'web_config', 'web_cert', 'gitlab'] },
-  { id: 'db', label: 'СУБД и бэкап', kinds: ['db_health', 'backup_growth'] },
+  { id: 'db', label: 'СУБД и бэкап', kinds: ['db_health', 'qdrant', 'backup_growth'] },
   { id: 'sec', label: 'Безопасность', kinds: ['ssh_risk', 'access_risk', 'access_change', 'docker_sock', 'docker_risk', 'webfiles', 'autoban', 'bogus_requests'] },
   { id: 'gpu', label: 'GPU и LLM', kinds: ['gpu', 'gpu_heat', 'llm'] },
 ]
@@ -61,7 +61,7 @@ const AREA_OF = new Map(AREAS.flatMap((a) => a.kinds.map((k) => [k, a.id] as con
 const OTHER_AREA: [string, string][] = [
   ['leak:', 'load'], ['memlim:', 'load'], ['oom:', 'load'],
   ['exposed:', 'net'], ['cfip:', 'net'], ['dns', 'net'], ['torrent:', 'net'], ['vpnheavy:', 'net'],
-  ['unit:', 'svc'], ['noboot', 'svc'], ['qstuck:', 'svc'], ['qfail:', 'svc'], ['worker:', 'svc'],
+  ['winsvc:', 'svc'], ['unit:', 'svc'], ['noboot', 'svc'], ['qstuck:', 'svc'], ['qfail:', 'svc'], ['worker:', 'svc'],
   ['cron:', 'svc'], ['logerr:', 'svc'], ['fpm:', 'svc'], ['queue', 'svc'],
   ['restarts:', 'k8s'], ['docker_', 'k8s'], ['kube_', 'k8s'], ['flux_', 'k8s'], ['proxyold:', 'k8s'],
   ['web_5xx:', 'web'], ['gitlab:', 'web'],
@@ -78,7 +78,7 @@ const SECS: SecDef[] = [
   { id: 'gre', label: 'GRE до панели', group: 'Другое' },
   { id: 'del', label: 'Удаление', group: 'Другое' },
 ]
-const WINDOWS_EDIT_SECTIONS = new Set(['srv', 'load', 'disk', 'del'])
+const WINDOWS_EDIT_SECTIONS = new Set(['srv', 'load', 'disk', 'svc', 'del'])
 
 // температуры на ВМ не видны: датчиков нет, алертов по ним не будет
 const HW_ONLY = ['temp', 'disktemp']
@@ -239,7 +239,7 @@ export function ServerEditModal({
   const muted = (k: string) => form.alert_mutes.includes(k)
   const toggle = (k: string) =>
     set({ alert_mutes: muted(k) ? form.alert_mutes.filter((x) => x !== k) : [...form.alert_mutes, k] })
-  const shown = (k: string) => windows ? WINDOWS_ALERT_KINDS.has(k) : !isVm || !HW_ONLY.includes(k)
+  const shown = (k: string) => windows ? WINDOWS_ALERT_KINDS.has(k) : k !== 'windows_service' && (!isVm || !HW_ONLY.includes(k))
   const others = (area: string) => form.alert_mutes.filter((k) => !KNOWN.has(k) && areaOfMute(k) === area)
 
   // в меню у области 🔕: в ней что-то заглушено, само не вернется

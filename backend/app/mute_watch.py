@@ -51,14 +51,14 @@ PROBLEM_KINDS = frozenset({
     "backup_mirror", "backup_restore", "cf_realip", "clock", "conntrack", "cpu", "cpu_spin", "cron_stuck", "db_conn", "db_health",
     "backup_transfer", "disk", "disk_forecast", "disk_health", "disk_slow", "disktemp", "dns", "docker_restarts", "exposed",
     "flux_down", "flux_stale", "fpm", "gitlab", "gpu", "gpu_heat", "inode", "kube_cron", "kube_expiry",
-    "gre_down", "kube_job", "kube_node", "kube_pod", "kube_restarts", "link", "listen_gone", "llm", "log_errors", "mem",
-    "mem_leak", "mem_limit", "net_health", "oom", "port_new", "pressure", "queue", "queue_failed", "queue_stuck",
+    "windows_service", "gre_down", "kube_job", "kube_node", "kube_pod", "kube_restarts", "link", "listen_gone", "llm", "log_errors", "mem",
+    "mem_leak", "mem_limit", "net_health", "oom", "port_new", "pressure", "qdrant", "queue", "queue_failed", "queue_stuck",
     "ssh_risk", "temp", "throttle", "traffic", "unit_loop", "units", "web_5xx", "web_cert", "web_config",
     "vpn_heavy", "vpn_torrent", "webfiles", "workers",
 })
 # Поштучные ключи, которые "Что сломано" отдает своим mute: без поштучных заглушек (shadow) вещь видна там
 # под своим ключом, нет ее там - тихо
-SHADOW_PREFIXES = ("unit:", "qstuck:", "qfail:", "worker:", "cron:", "logerr:", "fpm:", "autoban:", "gitlab:",
+SHADOW_PREFIXES = ("winsvc:", "unit:", "qstuck:", "qfail:", "worker:", "cron:", "logerr:", "fpm:", "autoban:", "gitlab:",
                    "listen:", "leak:", "restarts:", "oom:")
 # Поштучные ключи, которые сборщик проверяет сам (collector.mute_present): поды, Job, CronJob, контейнеры,
 # заглушенные диски (app/drive_mute.py)
@@ -136,6 +136,13 @@ def judge(key: str, conds: dict[str, tuple[int, dict]], probs: list[dict], shado
     probs - "Что сломано" сервера, shadow_probs - то же без поштучных заглушек (None - их нет),
     present - вещи, которые сборщик проверяет сам ({"kube_pod:": {ns/ворклоад: текст}}), muted_items -
     поштучные ключи, заглушенные сейчас (вид целиком судим без них: про них молчит не он)."""
+    if key == "windows_service" or key.startswith("winsvc:"):
+        # Unknown service telemetry must not make a held mute look healthy.
+        ctx = conds.get("windows_service", (0, {}))[1]
+        if not ctx.get("_complete", False):
+            rows = [str(p.get("text") or "") for p in (shadow_probs or probs)
+                    if p.get("kind") == "windows_service" and (key == "windows_service" or p.get("mute") == key)]
+            return (True, _texts(rows)) if rows else None
     if key == SERVER:
         kinds = {k for k, c in conds.items() if _lvl(c) > 0} | {str(p.get("kind")) for p in probs}
         return bool(kinds), _texts([str(p.get("text") or "") for p in probs])

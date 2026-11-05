@@ -23,10 +23,11 @@ TOPIC = {
     "gpu_heat": "🌡", "clock": "🕐", "dns": "🌐", "disk": "💽", "inode": "💽", "disk_forecast": "💽",
     "disk_health": "💽", "disk_slow": "🐢", "backup_transfer": "💾", "net_health": "📶", "link": "🔗", "traffic": "📊",
     "conntrack": "🔗", "listen_gone": "🔌", "exposed": "🔓", "port_new": "🚪", "cf_realip": "🎭", "access_change": "🔑",
+    "windows_service": "⚙️",
     "access_risk": "🗝", "ssh_risk": "🔐", "docker_sock": "🐳", "docker_risk": "🐳", "units": "⚙️",
     "unit_loop": "⚙️", "workers": "👷", "cron_stuck": "⏲", "log_errors": "📜", "queue": "🐇",
     "queue_stuck": "⏳", "queue_failed": "🧨", "fpm": "🐘", "vpn_torrent": "🧲", "vpn_heavy": "📶", "gre_down": "🚇", "gitlab": "🦊", "autoban": "🚫", "web_5xx": "🌐", "web_config": "🧾",
-    "web_cert": "🔏", "webfiles": "🕵️", "db_conn": "🛢", "db_health": "🛢", "gpu": "🎛", "llm": "💬",
+    "web_cert": "🔏", "webfiles": "🕵️", "db_conn": "🛢", "db_health": "🛢", "gpu": "🎛", "llm": "💬", "qdrant": "🛢",
     "docker_down": "🐳", "docker_loop": "🐳", "docker_restarts": "🐳", "kube_pod": "☸️",
     "kube_restarts": "☸️", "kube_job": "☸️", "kube_cron": "☸️", "kube_node": "☸️",
     "kube_expiry": "⏳", "flux_down": "☸️", "flux_stale": "☸️", "backup_missing": "💾",
@@ -75,13 +76,14 @@ RECOVERY = {
     "throttle": "троттлинга больше нет", "disktemp": "диск остыл", "conntrack": "conntrack снова в норме",
     "clock": "часы снова точные", "dns": "DNS снова отвечает", "db_conn": "подключений к СУБД снова хватает",
     "web_5xx": "ошибок 5xx больше нет", "disk_health": "диски снова в порядке",
-    "gpu": "GPU снова в порядке", "gpu_heat": "GPU остыли", "llm": "LLM снова отвечает",
+    "gpu": "GPU снова в порядке", "gpu_heat": "GPU остыли", "llm": "LLM снова отвечает", "qdrant": "Qdrant снова в порядке",
     "queue_stuck": "очереди снова разбираются", "queue_failed": "задачи больше не падают",
     "workers": "воркеры снова работают", "cron_stuck": "кроны больше не висят",
     "log_errors": "ошибок в логах снова обычно", "fpm": "PHP-FPM снова справляется",
     "vpn_torrent": "торрент через VPN больше не качают", "vpn_heavy": "клиенты VPN больше не качают помногу",
     "gre_down": "агент снова ходит в панель через GRE",
     "gitlab": "GitLab снова в порядке", "autoban": "автобан снова в порядке",
+    "windows_service": "выбранные службы Windows снова работают",
     "disk_forecast": "диск больше не грозит заполниться", "units": "упавших юнитов нет",
     "cpu_spin": "пустых циклов больше нет", "backup_growth": "прирост бэкапа снова обычный",
     "docker_sock": "прокси больше не держит docker-сокет", "docker_risk": "контейнеров с root на хосте нет",
@@ -129,7 +131,7 @@ _MODULE = {
     "docker_restarts": ("restarts", "tg_short"), "kube_restarts": ("restarts", "tg_short"),
     "gpu": ("gpu", "tg_short"), "gpu_heat": ("gpu", "tg_short_heat"), "llm": ("gpu", "tg_short_llm"),
     "web_cert": ("web_certs", "tg_short"), "web_config": ("web_config", "tg_short"),
-    "webfiles": ("webfiles", "tg_short"),
+    "webfiles": ("webfiles", "tg_short"), "qdrant": ("qdrant_watch", "tg_short"),
     "disk_forecast": ("disk_forecast", "tg_short"), "backup_growth": ("backup_growth", "tg_short"),
     "oom": ("oom", "tg_short"),
 }
@@ -503,6 +505,10 @@ def _short(key: str, ctx: dict, s, level: int):
         if len(probs) > 1:
             facts = facts[:1] + [f"и еще {len(probs) - 1}"]
         return what, facts
+    if key == "windows_service":
+        fresh = ctx.get("fresh")
+        rows = [r for r in items or [] if not fresh or r["name"].casefold() in fresh]
+        return "Служба Windows не работает", [tg_fmt.names([r["name"] for r in rows])]
     if key == "units":
         if not items:
             return None

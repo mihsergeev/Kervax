@@ -38,7 +38,9 @@ from app import db_health
 from app import access_audit
 from app import docker_risk
 from app import gpu as gpu_mod
+from app import windows_services
 from app import llm_lat
+from app import qdrant_watch
 from app import queue_watch
 from app import workers as workers_mod
 from app import cron_watch
@@ -350,6 +352,7 @@ _SRV_SECTION = {
     "mem": "mem", "oom": "oom",
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
     "kube_expiry": "kube", "flux_down": "kube", "flux_stale": "kube", "kube_pod": "kube", "web_5xx": "web",
+    "windows_service": "units",
     "clock": "clock", "disk_health": "diskhealth", "inode": "diskfill", "disk_forecast": "diskfill", "units": "units",
     "unit_loop": "unitloop",
     "cpu_spin": "cpueat",
@@ -378,7 +381,7 @@ _BSRV_SEC = {"backup_repo": "repos", "backup_lock": "repos", "backup_unmonitored
              "backup_prune": "cleanup", "backup_rotation": "cleanup", "backup_mirror": "mirror"}
 # раздел карточки сервисов ноды по алерту и по проблеме
 _SVC_SEC = {"queue": "queues", "queue_stuck": "queues", "queue_failed": "queues", "workers": "workers", "cron_stuck": "cron", "log_errors": "logs", "fpm": "fpm", "gitlab": "gitlab", "db_conn": "db", "db_health": "db", "web_config": "web", "web_cert": "certs", "webfiles": "files",
-            "llm": "llm"}
+            "llm": "llm", "qdrant": "db"}
 _KUBE_TAB = {"kube_expiry": "expiry", "flux_down": "flux", "flux_stale": "flux", "kube_pod": "pods",
              "kube_cron": "cron", "kube_node": "nodes", "kube_job": "cron", "kube_restarts": "restarts"}
 
@@ -413,6 +416,7 @@ _ALERT_SECTION = {
     "web_config": "services", "webfiles": "services",
     "web_cert": "services",
     "llm": "services",
+    "qdrant": "services",
 }
 
 
@@ -2104,6 +2108,7 @@ _SRV_LABEL = {
     "disk_health": "диски",
     "inode": "inode",
     "disk_forecast": "прогноз заполнения",
+    "windows_service": "службы Windows",
     "units": "юниты systemd",
     "cpu_spin": "процессы в пустом цикле",
     "mem_limit": "у лимита памяти",
@@ -2123,6 +2128,7 @@ _SRV_LABEL = {
     "gpu": "GPU",
     "gpu_heat": "перегрев GPU",
     "llm": "LLM-сервисы",
+    "qdrant": "Qdrant",
     "queue_stuck": "очереди",
     "queue_failed": "упавшие задачи",
 }
@@ -2186,6 +2192,10 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
         return "GPU снова в порядке: драйвер отвечает, все карты на месте, свежих ошибок Xid нет"
     if key == "gpu_heat":
         return "GPU остыли, замедления из-за температуры нет"
+    if key == "qdrant":
+        return "Qdrant снова в порядке"
+    if key == "windows_service":
+        return "выбранные службы Windows снова работают"
     if key == "llm":
         return "LLM-сервисы снова отвечают"
     if key == "queue_stuck":
@@ -2507,6 +2517,7 @@ _KID_LABEL = {"http": "сайты", "tcp_port": "порты", "cert": "серт�
 # контейнеры, поды, воркеры, базы, очереди, сеть до соседей. Пока идет прогрев (app/boot_warmup.py),
 # их новые беды молчат. Диски, бэкапы, сроки и доступы от загрузки не зависят - их не держим
 _BOOT_HOLD = frozenset({
+    "windows_service",
     "units", "kube_pod", "kube_node", "kube_restarts", "docker_restarts", "flux_down", "flux_stale",
     "workers", "fpm", "cron_stuck", "log_errors", "queue_stuck", "queue_failed", "db_conn", "db_health",
     "web_5xx", "listen_gone", "link", "net_health", "dns", "llm", "gpu", "pressure", "cpu", "mem",
@@ -4351,6 +4362,9 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
         out.append({"kind": kind, "level": level, "text": text, "sec": sec, "mute": mute,
                     "since": since or state.get(f"{kind}_from"), **route})
 
+    for svc in windows_services.sample(s, now)[0]:
+        add("windows_service", 2, f"{svc['name']}: служба не работает", "units",
+            windows_services.PREFIX + svc["name"].casefold())
     hb = disk_health_block(rep)
     if hb is not None:
         # заглушенный диск (app/drive_mute.py), пока не стало хуже, - не поломка: он виден в карточке
@@ -4683,6 +4697,9 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
     if gpu_mod.llm_list(rep) and _held_long(s, state, "llm", now):
         for lv, txt, _k in gpu_mod.llm_problems(rep, state.get("llm_base"), state.get("llm_lat"), now):
             add("llm", lv, txt, "llm", "llm", state.get("llm_since"), section="services")
+    if getattr(s, "qdrant_monitor_enabled", False) and _held_long(s, state, "qdrant", now):
+        for lv, text, _key in qdrant_watch.observe(rep)[0]:
+            add("qdrant", lv, text, "db", "qdrant", state.get("qdrant_since"), section="services")
     # Сертификат nginx истекает: ведет в "Сервисы" ноды
     for lv, txt, _key in web_certs.problems(rep, now):
         add("web_cert", lv, txt, "certs", "web_cert", section="services")
@@ -5003,6 +5020,10 @@ def _news_first(ctx: dict, fresh: set[str]) -> dict:
 def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
     """Все, о чем сказал алерт, теперь заглушено человеком или не алертит по замыслу (свой
     helper): уровень упал не потому, что стихло, и отбой слать нельзя."""
+    if key == "windows_service":
+        quiet = windows_services.muted(s, now)
+        selected = windows_services.names(s)
+        return all(k not in selected or k in quiet for k in sig)
     if key == "units":
         muted = units_muted(s, now)
         return all(own_helper_unit(u) or benign_unit(u) or u in muted for u in sig)
@@ -5058,6 +5079,8 @@ def _disk_wear_keys(s: Server, sig: set[str]) -> set[str]:
 def _sig_rule_why(s: Server, key: str, sig: set[str], now: datetime) -> str:
     """Почему объявленное больше не алертит, если это правило панели, а не мьют человека: свой
     helper, служебный юнит, рост памяти, которого хватит надолго. Пусто - заглушил человек."""
+    if key == "windows_service" and any(k not in windows_services.names(s) for k in sig):
+        return "службы исключены из контроля"
     if key == "units":
         muted = units_muted(s, now)
         if any((own_helper_unit(u) or benign_unit(u)) and u not in muted for u in sig):
@@ -6574,6 +6597,8 @@ def _server_conditions(s: Server, now: datetime,
         out[key] = (lvl, ctx)
 
     rep = s.last_report or {}
+    if rep.get("platform") == "windows" and (windows_services.names(s) or state.get("windows_service_sig")):
+        out["windows_service"] = windows_services.conditions(s, now)
     cpu = rep.get("cpu_percent")
     if s.cpu_alert_percent and cpu is not None:
         # cause заполняется в момент отправки (нужна история метрик), но в ctx он
@@ -7130,6 +7155,12 @@ def _server_conditions(s: Server, now: datetime,
             "detail": "; ".join(p[1] for p in lp[:3]), "items": lp,
             "who": sorted({p[2].split(":", 2)[2] for p in lp}), "cool": None,
             "_complete": gpu_mod.llm_recovery_confirmed(rep, state.get("llm_who")),
+        })
+    if online and getattr(s, "qdrant_monitor_enabled", False):
+        qp, complete = qdrant_watch.observe(rep, state.get("qdrant_who"))
+        sustain_lvl("qdrant", max((p[0] for p in qp), default=0), {
+            "detail": "; ".join(p[1] for p in qp[:3]), "items": qp,
+            "who": sorted({p[2] for p in qp}), "_complete": complete,
         })
     # Сертификат nginx истекает или истек (helper webserver-setup 0.24)
     if online and web_certs.block(rep, now) is not None:
@@ -8033,7 +8064,7 @@ async def evaluate_servers(
                 # Медленный признак (память растет день за днем, диск заполнится через дни): ждать
                 # он может до утра, в 3 ночи его не шлем. Состояние не трогаем - утром придет как есть
                 continue
-            tracks_members = key in ("disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "mem_limit", "db_health",
+            tracks_members = key in ("windows_service", "disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "mem_limit", "db_health",
                        "web_config", "web_cert", "webfiles", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
                        "cf_realip",
                        "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm", "gitlab", "autoban",

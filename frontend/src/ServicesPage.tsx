@@ -1828,7 +1828,7 @@ const SVC_SECTIONS: SecDef[] = [
 const SVC_SEC_IDS = new Set(SVC_SECTIONS.map((x) => x.id))
 // раздел карточки по виду проблемы, если бэкенд его не назвал (старый бэкенд в кэше вкладки)
 const SVC_SEC_OF_KIND: Record<string, string> = {
-  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', log_errors: 'logs', fpm: 'fpm', gitlab: 'gitlab', web_cert: 'certs', web_config: 'web', webfiles: 'files', db_health: 'db', db_conn: 'db', llm: 'llm',
+  queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', log_errors: 'logs', fpm: 'fpm', gitlab: 'gitlab', web_cert: 'certs', web_config: 'web', webfiles: 'files', db_health: 'db', db_conn: 'db', qdrant: 'db', llm: 'llm',
 }
 
 function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
@@ -2253,6 +2253,18 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
 
             {cur.id === 'db' && (
               <div className="net-cards">
+                {(s.qdrant_monitor_enabled || dbItems.some((it) => it.kind === 'Qdrant')) && (
+                  <div className="chart-card net-card net-card-wide">
+                    <label className="inline">
+                      <input type="checkbox" checked={!!s.qdrant_monitor_enabled} disabled={isViewer || busy}
+                        onChange={(e) => save({ qdrant_monitor_enabled: e.target.checked })} />
+                      {t('Алерты Qdrant')}
+                    </label>
+                    <div className="net-foot">{t('Недоступность и ошибки коллекций. Один алерт и один отбой. Неполные метрики не подтверждают восстановление.')}</div>
+                    <div className="net-foot">{t('Оптимизация коллекций не вызывает алерт. Используется выдержка алертов сервера.')}</div>
+                    {saveErr && <div role="alert" className="error">{saveErr}</div>}
+                  </div>
+                )}
                 {dbItems.map((it, i) => (
                   <div key={it.kind + i} className="chart-card net-card net-card-wide">
                     <div className="net-head">

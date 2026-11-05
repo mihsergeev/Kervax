@@ -8,6 +8,14 @@ type Rule = [RegExp, string]
 
 // Длинные фразы раньше коротких: "открыто в интернет" входит в "служебное открыто в интернет"
 const PHRASES: Rule[] = [
+  [/Qdrant снова в порядке/g, 'Qdrant is healthy again'],
+  [/Qdrant недоступен/g, 'Qdrant is unavailable'],
+  [/Qdrant: ошибка коллекции/g, 'Qdrant: collection error'],
+  // выбранные службы Windows: короткая тревога, отбой и снятие контроля
+  [/Служба Windows не работает/g, 'Windows service is not running'],
+  [/выбранные службы Windows снова работают/g, 'Selected Windows services are running again'],
+  [/служба не работает/g, 'service is not running'],
+  [/службы исключены из контроля/g, 'services are no longer monitored'],
   // короткая тревога и отбой LLM (app/gpu.py, app/srv_short.py)
   [/LLM-сервисы снова отвечают/g, 'LLM services respond again'],
   [/LLM снова отвечает/g, 'LLM responds again'],

@@ -28,8 +28,8 @@ APP = frozenset({
     "docker_down", "docker_loop", "docker_restarts",
     "kube_pod", "kube_job", "kube_cron", "kube_restarts",
     # службы приложений
-    "units", "unit_loop", "workers", "queue", "queue_stuck", "queue_failed", "cron_stuck",
-    "log_errors", "fpm", "llm", "listen_gone",
+    "windows_service", "units", "unit_loop", "workers", "queue", "queue_stuck", "queue_failed", "cron_stuck",
+    "log_errors", "fpm", "llm", "qdrant", "listen_gone",
     # базы на уровне приложения: коннекты, долгие транзакции, реплики приложения
     "db_conn", "db_health",
     # сайты на нем: 5xx и конфиг веб-сервера, который правят

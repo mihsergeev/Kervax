@@ -45,6 +45,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'disk_health', label: 'Диск: поломка' },
   { k: 'inode', label: 'Диск: inode' },
   { k: 'disk_forecast', label: 'Диск: скоро заполнится' },
+  { k: 'windows_service', label: 'Windows: выбранная служба не работает' },
   { k: 'units', label: 'Systemd: упавшие юниты' },
   { k: 'unit_loop', label: 'Systemd: юниты в цикле перезапусков' },
   { k: 'docker_restarts', label: 'Docker: часто перезапускается' },
@@ -52,6 +53,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'mem_leak', label: 'Память: растет день за днем' },
   { k: 'mem_limit', label: 'Память: уперся в лимит' },
   { k: 'ssh_risk', label: 'SSH: опасный вход' },
+  { k: 'qdrant', label: 'Qdrant: недоступен или ошибка коллекции' },
   { k: 'db_health', label: 'СУБД: реплика, транзакции, запись, VACUUM' },
   { k: 'web_config', label: 'Веб-сервер: конфиг не проходит проверку' },
   { k: 'web_cert', label: 'Веб-сервер: сертификат истекает' },
@@ -267,6 +269,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
       ? `${t('перезапуски пода')}: ${key.slice(4)}`
       : `${t('перезапуски контейнера')}: ${key.replace(/^docker:/, '')}`
   }
+  if (k.startsWith('winsvc:')) return `${t('Служба Windows')}: ${k.slice(7)}`
   if (k.startsWith(UNIT_MUTE)) return `${t('юнит')}: ${k.slice(UNIT_MUTE.length)}`
   if (k.startsWith(DRIVE_MUTE)) return `${t('диск с серийником')} ${k.slice(DRIVE_MUTE.length)}`
   // одна вещь кластера или Docker (кнопки Telegram глушат ее, а не вид целиком): kube_cron:<ns>/<имя>,
@@ -281,7 +284,7 @@ export function muteKindLabel(k: string, t: TFn): string | null {
   return k.startsWith(WEB_MUTE) ? `${t('5xx по логу')}: ${k.slice(WEB_MUTE.length)}` : null
 }
 
-export const WINDOWS_ALERT_KINDS = new Set(['offline', 'reboot', 'cpu', 'mem', 'disk', 'disk_forecast'])
+export const WINDOWS_ALERT_KINDS = new Set(['offline', 'reboot', 'cpu', 'mem', 'disk', 'disk_forecast', 'windows_service'])
 
 // Варианты для ВРЕМЕННОГО приглушения. Отличаются от списка выше уровнями диска:
 // «@N» = молчать про уровни до N включительно (см. _muted в коллекторе). Постоянно

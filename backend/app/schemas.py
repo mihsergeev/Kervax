@@ -1282,6 +1282,17 @@ class ServerCreate(BaseModel):
 
 
 class ServerUpdate(BaseModel):
+    windows_service_names: list[str] | None = Field(default=None, max_length=256)
+
+    @field_validator("windows_service_names")
+    @classmethod
+    def _windows_names(cls, value):
+        if value is None:
+            raise ValueError("Use an empty list to disable service monitoring")
+        if any(not n or n != n.strip() or len(n) > 256 or any(ord(c) < 32 for c in n) for n in value):
+            raise ValueError("Invalid Windows service name")
+        return list({n.casefold(): n for n in value}.values())
+
     name: str | None = Field(default=None, min_length=1, max_length=128)
     group_name: str | None = Field(default=None, max_length=64)
     agent_ip: str | None = Field(default=None, max_length=64)
@@ -1306,6 +1317,7 @@ class ServerUpdate(BaseModel):
     web_5xx_alert_percent: float | None = Field(default=None, ge=0, le=100)
     # порог глубины очереди RabbitMQ (0 = алерты по очередям на ноде выключены)
     queue_alert_depth: int | None = Field(default=None, ge=0, le=10_000_000)
+    qdrant_monitor_enabled: bool | None = None
     # переопределения по очередям: {"<источник>|<vhost>/<имя>": порог}, 0 = не алертить
     queue_alert_over: dict | None = None
     disk_temp_alert_c: int | None = Field(default=None, ge=0, le=120)
@@ -1561,6 +1573,8 @@ class KubeNodeRef(BaseModel):
 
 
 class ServerOut(BaseModel):
+    windows_service_names: list[str] | None = None
+    windows_services: dict | None = None
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -1660,6 +1674,7 @@ class ServerOut(BaseModel):
     db_conn_alert_percent: int
     web_5xx_alert_percent: float = 0.05
     queue_alert_depth: int = 0
+    qdrant_monitor_enabled: bool = False
     # None, а не dict: в БД колонка nullable, и пустое значение приходит как NULL —
     # обязательный dict валил ServerOut пятисоткой на всём списке серверов
     queue_alert_over: dict | None = None
@@ -1998,6 +2013,7 @@ def safe_hostname(value: str) -> str:
 
 
 class AgentReportIn(BaseModel):
+    windows_services: dict | None = None
     platform: Literal["linux", "windows"] = "linux"
     hostname: str = Field(default="", max_length=255)
 
