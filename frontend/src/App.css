@@ -1127,6 +1127,8 @@ label.home-sel-all { display: inline-flex; flex-direction: row; align-items: cen
 .net-cards > .net-card-wide { flex-basis: 100%; }
 .net-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; min-height: 1.6rem; }
 .net-head .row-act { margin: 0; }
+.svc-alert-toggle { display: inline-flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.85rem; }
+.svc-db-card:focus { outline: 1px solid var(--accent); outline-offset: 2px; }
 .net-period { margin-left: 0.5rem; color: var(--text); font-weight: 500; letter-spacing: 0; text-transform: none; }
 .net-prob { color: var(--down); font-size: 0.85rem; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 6px; padding: 0.35rem 0.6rem; }
 .net-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.45rem; }

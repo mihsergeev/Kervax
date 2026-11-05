@@ -130,6 +130,10 @@ export default function App() {
     const p = new URLSearchParams(window.location.search)
     return p.get('services') ? (p.get('queues') === '1' ? 'queues' : p.get('sec')) : null
   })
+  const [openServicesKind, setOpenServicesKind] = useState<string | null>(() => {
+    const p = new URLSearchParams(window.location.search)
+    return p.get('services') ? p.get('service') : null
+  })
   // открыть конкретный элемент в разделе (с главной «Требует внимания»/карточек).
   // srv=true для раздела «Бэкапы» → открыть карточку бэкап-СЕРВЕРА, а не клиента.
   const openTarget = useCallback((sec: Section, id?: number, srv?: boolean, detailSec?: string) => {
@@ -153,6 +157,7 @@ export default function App() {
       else if (sec === 'services') {
         setOpenServicesId(id)
         setOpenServicesSec(detailSec || null)
+        setOpenServicesKind(null)
       }
       else if (sec === 'backups') {
         if (srv) {
@@ -675,9 +680,11 @@ export default function App() {
             onUnauthorized={logout}
             openServerId={openServicesId}
             openSec={openServicesSec}
+            openService={openServicesKind}
             onConsumed={() => {
               setOpenServicesId(null)
               setOpenServicesSec(null)
+              setOpenServicesKind(null)
             }}
             onOpenCheck={(id) => openTarget('sites', id)}
           />

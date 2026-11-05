@@ -941,7 +941,7 @@ function buildByServer(
         if (m.length) it.db = m
       }
     items.sort((a, b) => a.kind.localeCompare(b.kind))
-    if (items.length || hasCron) out.push({ server: s, items })
+    if (items.length || hasCron || s.qdrant_monitor_enabled) out.push({ server: s, items })
   }
   return out.sort((a, b) => a.server.name.localeCompare(b.server.name))
 }
@@ -1831,20 +1831,23 @@ const SVC_SEC_OF_KIND: Record<string, string> = {
   queue: 'queues', queue_stuck: 'queues', workers: 'workers', cron_stuck: 'cron', log_errors: 'logs', fpm: 'fpm', gitlab: 'gitlab', web_cert: 'certs', web_config: 'web', webfiles: 'files', db_health: 'db', db_conn: 'db', qdrant: 'db', llm: 'llm',
 }
 
-function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
+function ServerServicesModal({ srv, onClose, onChanged, initialSec, initialService, sites }: {
   srv: SrvServices
   onClose: () => void
   onChanged: () => void
   initialSec?: string | null // из ссылки алерта: ?services=id&sec=queues (или старое &queues=1)
+  initialService?: string | null
   sites: SitesCtx // «какие домены уже мониторятся» + как завести новый
 }) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
   const s = srv.server
   const [active, setActive] = useState<string>(() => (SVC_SEC_IDS.has(initialSec ?? '') ? initialSec! : 'overview'))
+  const [focusedService, setFocusedService] = useState(initialService ?? null)
   const layoutRef = useRef<HTMLDivElement>(null)
   const go = (id: string) => {
     setActive(id)
+    setFocusedService(null)
     const el = layoutRef.current
     if (el && el.getBoundingClientRect().top < 0) el.scrollIntoView({ block: 'start' })
   }
@@ -1871,6 +1874,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   // СУБД сверху, под ними прочее, что держит данные (Grafana, Prometheus, etcd): их тоже находит аудит
   const isDb = (it: SvcItem) => Object.values(DB_ENGINE_LABEL).includes(it.kind) || VECTOR_DATABASES.has(it.kind)
   const dbItems = srv.items.filter((it) => !it.web && !it.svc && !it.llm && !it.workers && !it.cron && !it.gitlab).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
+  const qdrantIndex = dbItems.findIndex((it) => it.kind === 'Qdrant')
   const llm = s.llm ?? []
   const llmBad = llm.filter((x) => !x.ok && !x.no_metrics).length
   const dbs = dbItems.flatMap((it) => it.db ?? [])
@@ -1934,7 +1938,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
     sites: siteList.length > 0,
     certs: certs.length > 0,
     files: (s.webfiles?.roots ?? []).length > 0,
-    db: dbItems.length > 0,
+    db: dbItems.length > 0 || !!s.qdrant_monitor_enabled,
     queues: rabbit.length > 0,
     workers: wDaemons.length > 0 || (s.workers_skipped ?? []).length > 0,
     cron: cJobs.length > 0,
@@ -1946,6 +1950,25 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const secs = SVC_SECTIONS.filter((x) => shown[x.id])
   const cur = secs.find((x) => x.id === active) ?? secs[0]
   useUrlParam('sec', cur.id === 'overview' ? null : cur.id)
+  useUrlParam('service', focusedService)
+  useEffect(() => {
+    if (cur.id !== 'db' || !focusedService) return
+    const card = [...(layoutRef.current?.querySelectorAll<HTMLElement>('[data-service-kind]') ?? [])]
+      .find((el) => el.dataset.serviceKind === focusedService)
+    if (card) {
+      card.focus({ preventScroll: true })
+      card.scrollIntoView({ block: 'nearest' })
+    }
+  }, [cur.id, focusedService])
+
+  const qdrantAlerts = <div className="svc-alert-toggle"
+    title={t('Недоступность и ошибки коллекций. Один алерт и один отбой. Неполные метрики не подтверждают восстановление.') + ' ' + t('Оптимизация коллекций не вызывает алерт. Используется выдержка алертов сервера.')}>
+    <span>{t('Алерты Qdrant')}</span>
+    <button type="button" role="switch" aria-label={t('Алерты Qdrant')}
+      aria-checked={!!s.qdrant_monitor_enabled} disabled={isViewer || busy}
+      className={`se-sw${s.qdrant_monitor_enabled ? ' se-sw-on' : ''}`}
+      onClick={() => save({ qdrant_monitor_enabled: !s.qdrant_monitor_enabled })} />
+  </div>
 
   // Замечания по разделам - те же проблемы, что в "Что сломано": конфиг и сертификаты веб-сервера,
   // здоровье и коннекты баз, переполненные очереди
@@ -2253,26 +2276,23 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
 
             {cur.id === 'db' && (
               <div className="net-cards">
-                {(s.qdrant_monitor_enabled || dbItems.some((it) => it.kind === 'Qdrant')) && (
+                {s.qdrant_monitor_enabled && qdrantIndex < 0 && (
                   <div className="chart-card net-card net-card-wide">
-                    <label className="inline">
-                      <input type="checkbox" checked={!!s.qdrant_monitor_enabled} disabled={isViewer || busy}
-                        onChange={(e) => save({ qdrant_monitor_enabled: e.target.checked })} />
-                      {t('Алерты Qdrant')}
-                    </label>
-                    <div className="net-foot">{t('Недоступность и ошибки коллекций. Один алерт и один отбой. Неполные метрики не подтверждают восстановление.')}</div>
-                    <div className="net-foot">{t('Оптимизация коллекций не вызывает алерт. Используется выдержка алертов сервера.')}</div>
+                    {qdrantAlerts}
                     {saveErr && <div role="alert" className="error">{saveErr}</div>}
                   </div>
                 )}
                 {dbItems.map((it, i) => (
-                  <div key={it.kind + i} className="chart-card net-card net-card-wide">
+                  <div key={it.kind + i} className="chart-card net-card net-card-wide svc-db-card"
+                    data-service-kind={it.kind} tabIndex={-1}>
                     <div className="net-head">
                       <div className="hs-svc-title">
                         <span className="svc-ico"><EngineIcon name={it.kind} /></span>
                         {it.kind}
                       </div>
+                      {i === qdrantIndex && qdrantAlerts}
                     </div>
+                    {i === qdrantIndex && saveErr && <div role="alert" className="error">{saveErr}</div>}
                     {it.where && <div className="net-sub mono">{it.where}</div>}
                     {it.qdrant ? <QdrantInfo data={it.qdrant} /> : it.db ? (
                       <DbInventory db={it.db} t={t}
@@ -2509,9 +2529,9 @@ const itemIcon = (it: SvcItem) => it.svc && !hasEngineIcon(it.kind)
   : it.kind
 
 // Measure whole chips, reserving room for +N. Names never wrap or push another column away.
-// Both a chip and +N open the existing full server card, including every instance and location.
+// Chips open their service section; +N keeps the complete server inventory reachable.
 function ServiceCell({ items, label, server, onOpen }: {
-  items: SvcItem[]; label: string; server: string; onOpen: () => void
+  items: SvcItem[]; label: string; server: string; onOpen: (item?: SvcItem) => void
 }) {
   const { t } = useI18n()
   const cell = useRef<HTMLDivElement>(null)
@@ -2550,7 +2570,7 @@ function ServiceCell({ items, label, server, onOpen }: {
     const content = <><EngineIcon name={itemIcon(xs[0])} /><span>{kind}</span>{xs.length > 1 && <span className="muted">×{xs.length}</span>}</>
     return measuring
       ? <span key={kind} className="svc-matrix-chip">{content}</span>
-      : <button key={kind} type="button" className="svc-matrix-chip" title={title} onClick={onOpen}
+      : <button key={kind} type="button" className="svc-matrix-chip" title={title} onClick={() => onOpen(xs[0])}
           aria-label={t('Открыть {service} на {server}', { service: kind, server })}>{content}</button>
   }
   const hidden = kinds.length - Math.min(visible, kinds.length)
@@ -2559,7 +2579,7 @@ function ServiceCell({ items, label, server, onOpen }: {
     <div ref={cell} className="svc-matrix-services">
       {kinds.length ? <>
         {kinds.slice(0, visible).map((kind) => chip(kind))}
-        {hidden > 0 && <button type="button" className="svc-matrix-more" onClick={onOpen}
+        {hidden > 0 && <button type="button" className="svc-matrix-more" onClick={() => onOpen()}
           title={kinds.slice(visible).join(', ')}
           aria-label={t('Показать еще {n}: {category}, {server}', { n: hidden, category: label, server })}>+{hidden}</button>}
       </> : <span className="muted svc-matrix-empty" aria-label={t('Нет сервисов')}>—</span>}
@@ -2577,7 +2597,7 @@ function HostRow({ srv, showGroup, only, hint, onOpen }: {
   showGroup?: boolean
   only?: (it: SvcItem) => boolean // нажата плитка: чипы и счетчик - только ее сервисы
   hint?: string | null
-  onOpen: () => void
+  onOpen: (item?: SvcItem) => void
 }) {
   const { t } = useI18n()
   const s = srv.server
@@ -2600,7 +2620,7 @@ function HostRow({ srv, showGroup, only, hint, onOpen }: {
   return (
     <div role="row" className={`svc-matrix-row ${tone}`}>
       <div role="cell" className="svc-matrix-server">
-        <button type="button" className="svc-matrix-node" onClick={onOpen} title={details} aria-label={details}>
+        <button type="button" className="svc-matrix-node" onClick={() => onOpen()} title={details} aria-label={details}>
           <span className={`lk-dot ${s.online ? 'lk-dot-ok' : 'lk-dot-bad'}`} title={s.online ? t('на связи') : t('не на связи')} />
           <OsIcon os={s.os} />
           <CountryFlag code={s.country} />
@@ -2626,10 +2646,11 @@ type SitesCtx = {
   onOpenCheck?: (id: number) => void
 }
 
-export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed, onOpenCheck }: {
+export function ServicesPage({ onUnauthorized, openServerId, openSec, openService, onConsumed, onOpenCheck }: {
   onUnauthorized: () => void
   openServerId?: number | null
   openSec?: string | null // раздел карточки из ссылки: ?services=id&sec=queues
+  openService?: string | null
   onConsumed?: () => void
   onOpenCheck?: (id: number) => void // перейти к монитору в разделе «Сайты»
 }) {
@@ -2646,7 +2667,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   const [wizard, setWizard] = useState<string[] | null>(null)
   const [openId, setOpenId] = useState<number | null>(null)
   // раздел из ссылки - до первого открытия карточки этой ноды
-  const [linkSec, setLinkSec] = useState<{ id: number | null; sec: string | null }>({ id: null, sec: null })
+  const [linkSec, setLinkSec] = useState<{ id: number | null; sec: string | null; service?: string | null }>({ id: null, sec: null })
   const [query, setQuery] = useState('')
   const { tile, setTile, tileProps } = useTileFilter<SFilter | 'problems'>()
   const [searchRo, setSearchRo] = useState(true) // защита от автозаполнения, см. «Бэкапы»
@@ -2699,9 +2720,9 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
   useEffect(() => {
     if (openServerId == null || servers == null) return
     setOpenId(openServerId)
-    setLinkSec({ id: openServerId, sec: openSec ?? null })
+    setLinkSec({ id: openServerId, sec: openSec ?? null, service: openService ?? null })
     onConsumed?.()
-  }, [openServerId, openSec, servers, onConsumed])
+  }, [openServerId, openSec, openService, servers, onConsumed])
   useUrlCard('services', openId)
 
   useEffect(() => {
@@ -2907,7 +2928,12 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
                   {[t('Сервер'), ...MATRIX_COLUMNS.map((label) => t(label))].map((label) => <span role="columnheader" key={label}>{label}</span>)}
                 </div>
                 {g.items.map((r) => (
-                  <HostRow key={r.server.id} srv={r} showGroup={groupBy !== 'group'} onOpen={() => setOpenId(r.server.id)}
+                  <HostRow key={r.server.id} srv={r} showGroup={groupBy !== 'group'} onOpen={(it) => {
+                    const sec = !it ? null : it.web ? 'web' : it.svc ? 'queues' : it.llm ? 'llm'
+                      : it.workers ? 'workers' : it.cron ? 'cron' : it.gitlab ? 'gitlab' : 'db'
+                    setLinkSec({ id: r.server.id, sec, service: sec === 'db' ? it!.kind : null })
+                    setOpenId(r.server.id)
+                  }}
                     only={tile && tile !== 'problems' ? SVC_OF[tile] : undefined}
                     hint={tile === 'problems' ? probHint(r.server.id) : tile ? svcHit(tile, r, sitesCtx, t) : null} />
                 ))}
@@ -2926,6 +2952,7 @@ export function ServicesPage({ onUnauthorized, openServerId, openSec, onConsumed
           }}
           onChanged={load}
           initialSec={linkSec.id === open.server.id ? linkSec.sec : null}
+          initialService={linkSec.id === open.server.id ? linkSec.service : null}
           sites={sitesCtx}
         />
       )}

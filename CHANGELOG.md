@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.103] - 2026-11-05
+
+- Database chips open the Databases and storage section and focus the selected engine. Direct links preserve the selection after reload; other service chips open their own sections.
+- Qdrant alerts use a compact switch in the Qdrant card header. Save failures are shown beside it, viewers cannot change it, and an enabled setting can still be disabled if Qdrant disappears from the inventory.
+
+Agent 2.65, Windows collector 0.3.0, server helpers and database migration 0145 are unchanged.
+
 ## [1.8.102] - 2026-11-05
 
 - Second-copy repositories can verify a sample restore weekly on the mirror, using restic content verification and SHA256 comparisons. The Second copy tab shows the date, result and missing or stale verification.

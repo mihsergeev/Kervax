@@ -19,7 +19,7 @@ const node = (id, name, group, kinds) => ({
   queue_brokers: id === 1 ? ['Celery', 'Sidekiq', 'BullMQ', 'RQ', 'Symfony Messenger'].map(label => ({ kind: label.toLowerCase(), label, engine: 'redis', source: `fixture-${label}`, queues: [], total: 0 })) : [],
 })
 const servers = [node(1, 'alpha-with-a-very-long-server-name-for-overflow', 'Application', storage),
-  node(2, 'beta', 'Application', ['PostgreSQL']), node(3, 'gamma', 'Storage', ['Qdrant'])]
+  node(2, 'beta', 'Application', ['PostgreSQL']), node(3, 'gamma', 'Storage', ['PostgreSQL', 'Qdrant'])]
 const browser = await chromium.launch({ executablePath: process.env.PW_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', headless: true })
 try {
   for (const theme of ['dark', 'light']) {
@@ -32,11 +32,21 @@ try {
       }, { theme, lang })
       const page = await ctx.newPage()
       const errors = []
+      let role = 'admin', failSave = false, writes = 0
+      servers.forEach(server => { server.qdrant_monitor_enabled = false })
       page.on('pageerror', error => errors.push(error.message))
-      await page.route('**/api/**', route => {
+      await page.route('**/api/**', async route => {
         const path = new URL(route.request().url()).pathname
+        if (route.request().method() === 'PATCH' && /^\/api\/servers\/\d+$/.test(path)) {
+          writes++
+          await new Promise(resolve => setTimeout(resolve, 250))
+          if (failSave) return route.fulfill({ status: 500, json: { detail: 'Synthetic save failure' } })
+          const server = servers.find(server => server.id === Number(path.split('/').pop()))
+          Object.assign(server, route.request().postDataJSON())
+          return route.fulfill({ json: server })
+        }
         const data = path === '/api/servers' ? servers
-          : path === '/api/auth/me' ? { id: 1, username: 'fixture', role: 'admin' }
+          : path === '/api/auth/me' ? { id: 1, username: 'fixture', role }
           : path === '/api/checks/known-hosts' ? { hosts: {}, groups: [], ignored: [] }
           : path === '/api/panel-errors/count' ? { count: 0 }
           : path === '/api/branding' ? { logo: false } : {}
@@ -88,6 +98,82 @@ try {
       await page.locator('.hs-modal').getByTitle(lang === 'ru' ? 'Закрыть' : 'Close', { exact: true }).focus()
       await page.keyboard.press('Enter')
       await page.locator('.hs-modal').waitFor({ state: 'hidden' })
+      // A database chip opens its section and focuses that engine, including after F5.
+      await page.setViewportSize({ width: 1440, height: 1000 })
+      const close = () => page.locator('.hs-modal').getByTitle(lang === 'ru' ? 'Закрыть' : 'Close', { exact: true }).click()
+      const gamma = page.locator('.svc-matrix-row').filter({ has: page.locator('.svc-matrix-name', { hasText: 'gamma' }) })
+      await gamma.getByRole('button', { name: /Qdrant/ }).click()
+      const qdrant = page.locator('.svc-db-card[data-service-kind="Qdrant"]')
+      await qdrant.waitFor()
+      assert.equal(new URL(page.url()).searchParams.get('sec'), 'db')
+      assert.equal(new URL(page.url()).searchParams.get('service'), 'Qdrant')
+      assert.equal(await page.evaluate(() => document.activeElement?.dataset.serviceKind), 'Qdrant')
+      await page.reload()
+      await qdrant.waitFor()
+      assert.equal(await page.evaluate(() => document.activeElement?.dataset.serviceKind), 'Qdrant', 'engine focus survives F5')
+      const toggle = qdrant.getByRole('switch')
+      assert.equal(await page.locator('.hs-modal [role="switch"]').count(), 1, 'toggle belongs to Qdrant only')
+      for (const width of [1440, 390]) {
+        await page.setViewportSize({ width, height: 1000 })
+        await page.waitForTimeout(150) // ResizeObserver also updates the matrix behind the modal.
+        const geometry = await qdrant.locator('.svc-alert-toggle').evaluate(el => {
+          const [label, button] = [...el.children].map(el => el.getBoundingClientRect())
+          return { gap: button.left - label.right, alignment: Math.abs((button.top + button.bottom - label.top - label.bottom) / 2), right: el.getBoundingClientRect().right }
+        })
+        assert(geometry.gap >= 0 && geometry.gap < 14 && geometry.alignment < 2 && geometry.right <= width, `inline toggle ${JSON.stringify(geometry)}`)
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'database modal fits viewport')
+        if (out) await page.screenshot({ path: `${out}/database-${theme}-${lang}-${width}.png`, fullPage: true })
+      }
+      await toggle.focus()
+      await page.keyboard.press('Space')
+      await page.waitForFunction(() => document.querySelector('.svc-alert-toggle button')?.disabled === true)
+      await page.waitForFunction(() => document.querySelector('.svc-alert-toggle button')?.getAttribute('aria-checked') === 'true')
+      assert.equal(writes, 1, 'one save per activation')
+      await page.reload()
+      await qdrant.waitFor()
+      assert.equal(await toggle.getAttribute('aria-checked'), 'true', 'setting persists')
+      failSave = true
+      await toggle.click()
+      await qdrant.getByRole('alert').waitFor()
+      assert.equal(await toggle.getAttribute('aria-checked'), 'true', 'failed save preserves enabled setting')
+      failSave = false
+      await toggle.click()
+      await page.waitForFunction(() => document.querySelector('.svc-alert-toggle button')?.getAttribute('aria-checked') === 'false')
+      role = 'viewer'
+      await page.reload()
+      await qdrant.waitFor()
+      assert.equal(await toggle.isDisabled(), true, 'viewer cannot change monitoring')
+      // The saved monitoring switch remains reachable if the Qdrant inventory disappears.
+      role = 'admin'
+      servers[2].qdrant_monitor_enabled = true
+      const inventoryBackup = servers[2].backup_audit
+      servers[2].backup_audit = []
+      await page.reload()
+      await page.locator('.hs-modal .svc-alert-toggle').waitFor()
+      await page.locator('.hs-modal').getByRole('switch').click()
+      await page.waitForFunction(() => !document.querySelector('.svc-alert-toggle'))
+      servers[2].backup_audit = inventoryBackup
+      if (await page.locator('.hs-modal').count()) await close()
+      await page.goto(`${base}/?section=services`)
+      await page.locator('.svc-matrix-row').first().waitFor()
+      await page.setViewportSize({ width: 1440, height: 1000 })
+      await page.locator('.svc-matrix-row').filter({ hasText: 'beta' }).getByRole('button', { name: /PostgreSQL/ }).click()
+      await page.locator('.svc-db-card[data-service-kind="PostgreSQL"]').waitFor()
+      assert.equal(new URL(page.url()).searchParams.get('sec'), 'db')
+      assert.equal(await page.locator('.svc-alert-toggle').count(), 0, 'no Qdrant control for PostgreSQL-only server')
+      await close()
+      await gamma.locator('.svc-matrix-node').click()
+      await page.locator('.hs-modal').waitFor()
+      assert.equal(new URL(page.url()).searchParams.has('sec'), false, 'server name still opens overview')
+      assert.equal(new URL(page.url()).searchParams.has('service'), false, 'no stale engine selection')
+      await close()
+      const alpha = page.locator('.svc-matrix-row').first()
+      for (const [kind, section] of [['Envoy', 'web'], ['BullMQ', 'queues']]) {
+        await alpha.getByRole('button', { name: new RegExp(kind) }).click()
+        await page.locator('.hs-modal').waitFor()
+        assert.equal(new URL(page.url()).searchParams.get('sec'), section, `${kind} opens its section`)
+        await close()
+      }
       const search = page.locator('input[name="services-search"]')
       await search.focus()
       await search.fill('Weaviate')
@@ -110,7 +196,7 @@ try {
       await page.locator('.svc-matrix-row').first().waitFor()
       assert.equal(await page.locator('.svc-matrix-header').count(), 1, 'grouping persists after reload')
       assert.deepEqual(errors, [], 'no browser runtime errors')
-      console.log(`${theme}/${lang}: desktop/mobile, one-line rows, overflow, full inventory, instance counts, keyboard modal, deep link, hidden-service/IP search, tile filter, persistent grouping passed`)
+      console.log(`${theme}/${lang}: matrix layout, database navigation/focus/F5, inline switch, save/reload/failure/viewer/missing inventory, search and filters passed`)
       await ctx.close()
     }
   }
