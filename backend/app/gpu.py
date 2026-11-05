@@ -532,6 +532,20 @@ def llm_key(x: dict) -> str:
     return f"{x.get('engine')}|{x.get('kind') or ''}|{x.get('name') or ''}|{x.get('port') or ''}"
 
 
+def llm_recovery_confirmed(rep: dict, previous: list[str] | None = None) -> bool:
+    """Отбой подтверждают ответы всех объявленных ранее сервисов.
+
+    Пропажа сервиса, недоступная агенту сеть или закрытые метрики не означают,
+    что LLM снова работает. У старых алертов перечня еще нет: проверяем весь отчет.
+    """
+    items = llm_list(rep)
+    healthy = {llm_key(x) for x in items if x.get("ok") is True and not x.get("no_metrics")}
+    if previous:
+        return set(previous) <= healthy
+    return (bool(items) and len(items) == len(rep.get("llm") or [])
+            and all(x.get("ok") is True and not x.get("no_metrics") for x in items))
+
+
 def llm_label(x: dict) -> str:
     return f"{ENGINE.get(str(x.get('engine')), str(x.get('engine')))} {x.get('name') or ''}".strip()
 
@@ -821,15 +835,20 @@ def _lat_text(v: float, b: float) -> str:
     return f"{v * 1000:.0f} мс вместо {b * 1000:.0f}"
 
 
+def _llm_name(p) -> str:
+    text, key = str(p[1] or ""), str(p[2] or "")
+    _llm, _kind, svc = (key.split(":", 2) + ["", ""])[:3]
+    name = svc.split("|")[2] if svc.count("|") >= 2 else ""
+    return name or text.partition(": ")[0]
+
+
 def _llm_one(p) -> tuple[str, str]:
     """(что случилось, конкретика) по одной беде llm_problems()."""
     text, key = str(p[1] or ""), str(p[2] or "")
-    _llm, kind, svc = (key.split(":", 2) + ["", ""])[:3]
-    name = svc.split("|")[2] if svc.count("|") >= 2 else ""
-    name = name or text.partition(": ")[0]
+    kind = (key.split(":", 2) + [""])[1]
+    name = _llm_name(p)
     if kind == "down":
-        m = re.search(r"/metrics \(([^)]+)\)", text)
-        return "LLM не отвечает", f"{name}: {m.group(1)}" if m else name
+        return "LLM не отвечает", f"{name} недоступна"
     if kind == "queue":
         m = re.search(r"в очереди (\d+)", text)
         return "LLM не успевает, растет очередь", f"{name}: ждут {m.group(1)}" if m else name
@@ -852,8 +871,8 @@ def tg_short_llm(items) -> tuple[str, list[str]] | None:
         return None
     what, fact = _llm_one(ps[0])
     facts = [fact] if fact else []
-    first = fact.partition(": ")[0]
-    rest = [f.partition(": ")[0] for f in (_llm_one(p)[1] for p in ps[1:]) if f]
+    first = _llm_name(ps[0])
+    rest = [_llm_name(p) for p in ps[1:]]
     rest = [r for r in rest if r != first]
     if rest:
         facts.append(tg_fmt.fact("Еще", tg_fmt.names(rest)))

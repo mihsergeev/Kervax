@@ -261,7 +261,9 @@ def test_llm():
     down = (2, "TEI embed: не отвечает на /metrics (порт закрыт), процесс работает 2 ч", "llm:down:tei|container|embed|80")
     tpot = (1, "vLLM Qwen3.8-27B: задержка на токен p95 310 мс, обычно 120 мс, держится 15 мин при 90 запросах "
                "за 5 минут", f"llm:tpot:{k}")
-    assert gpu.tg_short_llm([down, slow, tpot]) == ("LLM не отвечает", ["embed: порт закрыт", "Еще: Qwen3.8-27B"])
+    assert gpu.tg_short_llm([down, slow, tpot]) == ("LLM не отвечает", ["embed недоступна", "Еще: Qwen3.8-27B"])
+    same = (2, "TEI embed: не отвечает на /metrics (таймаут)", "llm:down:tei|container|embed|80")
+    assert gpu.tg_short_llm([down, same]) == ("LLM не отвечает", ["embed недоступна"])
     assert gpu.tg_short_llm([tpot])[1] == ["Qwen3.8-27B: на токен 310 мс вместо 120"]
     assert gpu.tg_short_llm([]) is None
 

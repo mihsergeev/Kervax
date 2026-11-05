@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.101] - 2026-11-05
+
+- LLM recovery alerts now follow 15 minutes of continuously confirmed health, without the extra hour of delay.
+- Missing, stale or incomplete telemetry does not clear an active LLM alert. Failed recovery delivery is retried; successful delivery is not repeated.
+- LLM outage messages say "LLM is not responding" and "model is unavailable". Recovery messages say "LLM is responding again"; technical diagnostics remain in the panel and history.
+
+Agent 2.65, server helpers and database migration 0143 are unchanged.
+
 ## [1.8.100] - 2026-11-05
 
 - Services now uses a compact matrix: one desktop row per server, three service categories and a +N button for overflow. Search, groups, filters and service details remain available.

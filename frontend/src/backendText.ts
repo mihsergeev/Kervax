@@ -8,6 +8,11 @@ type Rule = [RegExp, string]
 
 // Длинные фразы раньше коротких: "открыто в интернет" входит в "служебное открыто в интернет"
 const PHRASES: Rule[] = [
+  // короткая тревога и отбой LLM (app/gpu.py, app/srv_short.py)
+  [/LLM-сервисы снова отвечают/g, 'LLM services respond again'],
+  [/LLM снова отвечает/g, 'LLM responds again'],
+  [/LLM не отвечает/g, 'LLM is not responding'],
+  [/ недоступна/g, ' is unavailable'],
   // починили, а беда еще видна (app/fixed.py NOT_FIXED)
   [/^Еще не починено: /g, 'Not fixed yet: '],
   // как агент проверил сайт изнутри (app/checks.via_text)

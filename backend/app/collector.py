@@ -2187,7 +2187,7 @@ def _recovery_detail(key: str, st: dict, ctx: dict) -> str:
     if key == "gpu_heat":
         return "GPU остыли, замедления из-за температуры нет"
     if key == "llm":
-        return "LLM-сервисы снова в норме: отвечают, очереди нет, задержки обычные"
+        return "LLM-сервисы снова отвечают"
     if key == "queue_stuck":
         return "очереди снова разбираются"
     if key == "queue_failed":
@@ -7124,8 +7124,13 @@ def _server_conditions(s: Server, now: datetime,
     # обычного - когда держится дольше выдержки
     if online and gpu_mod.llm_list(rep):
         lp = gpu_mod.llm_problems(rep, state.get("llm_base"), state.get("llm_lat"), now)
-        sustain_lvl("llm", max((p[0] for p in lp), default=0), {"detail": "; ".join(p[1] for p in lp[:3]), "items": lp},
-                    cool_s=_CALM_S)
+        # Отбой - после общей выдержки _SETTLE_S. Дополнительный час _CALM_S
+        # задерживал его еще на час; неизвестная телеметрия норму не подтверждает.
+        sustain_lvl("llm", max((p[0] for p in lp), default=0), {
+            "detail": "; ".join(p[1] for p in lp[:3]), "items": lp,
+            "who": sorted({p[2].split(":", 2)[2] for p in lp}), "cool": None,
+            "_complete": gpu_mod.llm_recovery_confirmed(rep, state.get("llm_who")),
+        })
     # Сертификат nginx истекает или истек (helper webserver-setup 0.24)
     if online and web_certs.block(rep, now) is not None:
         wce = web_certs.problems(rep, now)
