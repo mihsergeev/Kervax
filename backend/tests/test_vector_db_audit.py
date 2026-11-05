@@ -34,6 +34,7 @@ def test_vector_tool_images_not_databases(image):
 def test_vector_audit_deduplicates_process_docker_and_kubernetes():
     rep = {
         "db_engines": ["Qdrant", "Milvus", "Weaviate"],
+        "setup_versions": {"backup-setup": "0.51"},
         "docker": {"containers": [
             {"name": "vectors", "image": "qdrant/qdrant:v1.15", "state": "running"},
             {"name": "backup", "image": "zilliztech/milvus-backup:latest", "state": "running"},
@@ -47,7 +48,7 @@ def test_vector_audit_deduplicates_process_docker_and_kubernetes():
              "image": "ghcr.io/chroma-core/chroma:latest", "phase": "Running", "ready": True},
         ]},
     }
-    server = Server(name="node-1", token_hash="x", last_report=rep)
+    server = Server(name="node-1", token_hash="x", agent_version="2.66", last_report=rep)
     rows = [row for row in _backup_coverage(server) if row.kind.startswith("db")]
     assert {(row.subject, row.instance) for row in rows} == {
         ("Qdrant", "vectors"),
@@ -55,13 +56,16 @@ def test_vector_audit_deduplicates_process_docker_and_kubernetes():
         ("Weaviate", "k8s.search.sts.weaviate"),
         ("Chroma", "k8s.search.sts.chroma"),
     }
-    assert all(row.kind == "db" and row.dump_engine == "" and not row.can_dump for row in rows)
+    qdrant = next(row for row in rows if row.subject == "Qdrant")
+    assert qdrant.kind == "db" and qdrant.dump_engine == "qdrant" and qdrant.can_dump
+    others = [row for row in rows if row.subject != "Qdrant"]
+    assert all(row.kind == "db" and row.dump_engine == "" and not row.can_dump for row in others)
     assert all(row.note for row in rows)
-    assert "snapshot API" in next(row for row in rows if row.subject == "Qdrant").note
+    assert "snapshot API" in qdrant.note
     assert "milvus-backup" in next(row for row in rows if row.subject == "Milvus").note
     assert "Backup API" in next(row for row in rows if row.subject == "Weaviate").note
     assert "persistent volume" in next(row for row in rows if row.subject == "Chroma").note
-    assert next(row for row in rows if row.subject == "Qdrant").container == "vectors"
+    assert qdrant.container == "vectors"
     assert next(row for row in rows if row.subject == "Milvus").pods == ["search/milvus-0"]
 
 
