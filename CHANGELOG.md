@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 - Services recognizes Qdrant, Milvus, Weaviate and Chroma in Docker and Kubernetes, plus Qdrant, Milvus and Weaviate running directly on a host. Client, exporter and operator images are excluded.
 - Vector databases appear under Databases and stores with their deployment location. They count as database engines without prompts to install an unsupported inventory helper.
+- The backend image installs the security update for APT.
 
 ## [1.8.98] - 2026-11-05
 
