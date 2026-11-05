@@ -2313,7 +2313,7 @@ class BackupCommandIn(BaseModel):
     # Список ДОЛЖЕН совпадать с _DUMP_ENGINE в api/servers.py и с разбором в
     # agent/backup-setup.sh: забытый движок молча отваливался бы 422-й на кнопке
     # «включить дампы» (так уже вышло с grafana).
-    engine: str = Field(default="", pattern="^$|^(pg|mysql|mongo|ch|redis|rabbitmq|k8s|grafana|neo4j)$")
+    engine: str = Field(default="", pattern="^$|^(pg|mysql|mongo|ch|redis|rabbitmq|k8s|grafana|neo4j|qdrant)$")
     # имя контейнера или цель в kubernetes: k8s.<namespace>.<sts|deploy|ds>.<имя>
     container: str = Field(default="", max_length=160, pattern=r"^$|^[A-Za-z0-9._-]+$")
     # настройки дампа: каталог, сколько последних хранить, минимум свободного места (%).

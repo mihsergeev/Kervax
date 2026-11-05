@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.104] - 2026-11-06
+
+- Enable scheduled Qdrant snapshots for standalone Docker instances in Backups > Coverage, with a choice of dump directory and retention.
+- The backup job saves a compressed snapshot of all collections and aliases before the file backup. Coverage shows failures and keeps the last good archive. For recovery, decompress the archive and start a standalone Qdrant with its storage snapshot option.
+- Qdrant snapshots require Linux agent 2.66 and backup helper 0.51.
+
 ## [1.8.103] - 2026-11-05
 
 - Database chips open the Databases and storage section and focus the selected engine. Direct links preserve the selection after reload; other service chips open their own sections.

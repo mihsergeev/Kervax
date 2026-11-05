@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.65"
+const version = "2.66"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -8899,7 +8899,7 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 		// grafana и neo4j тут отсутствовали, и кнопка «включить дампы» для них
 		// отбивалась агентом, хотя и панель, и helper их умеют
 		switch cmd.Engine {
-		case "pg", "mysql", "mongo", "ch", "redis", "rabbitmq", "k8s", "grafana", "neo4j":
+		case "pg", "mysql", "mongo", "ch", "redis", "rabbitmq", "k8s", "grafana", "neo4j", "qdrant":
 		default:
 			postBackupResult(panelURL, token, cmd.ID, false, "неизвестный движок дампа")
 			return

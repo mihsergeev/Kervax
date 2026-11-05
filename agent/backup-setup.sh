@@ -152,7 +152,8 @@ AGENT_USER=kervax
 # preserve database names, and refresh only the exact older generated PG runner.
 # 0.50: MongoDB full-instance archives with secure authentication and topology checks;
 # explicit read-only inspect for fresh alert rechecks.
-KERVAX_SETUP_VERSION=0.50  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.51: scheduled, standalone Qdrant snapshots via the container-local API.
+KERVAX_SETUP_VERSION=0.51  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -991,6 +992,180 @@ MONGO_JS
   return "$rc"
 }
 
+# Use the container's network namespace to reach its local API, even if no
+# port is published. The key goes through a pipe from Docker, never in argv.
+qdrant_run() {
+  local mode="$1" container="$2" target id pid net image py
+  [[ "$container" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || { echo "Qdrant snapshots require a Docker container" >&2; return 1; }
+  target="$(timeout 10 docker -H unix:///var/run/docker.sock inspect --type container \
+    --format '{{.Id}} {{.State.Pid}} {{.HostConfig.NetworkMode}} {{.Config.Image}}' \
+    "$container" 2>/dev/null)" || { echo "Qdrant Docker container is unavailable" >&2; return 1; }
+  read -r id pid net image <<< "$target"
+  if ! [[ "$id" =~ ^[0-9a-f]{64}$ && "$pid" =~ ^[1-9][0-9]*$ &&
+          "$image" =~ ^(docker[.]io/)?qdrant/qdrant([:@][A-Za-z0-9._:@-]+)?$ &&
+          "$net" != host && "$net" != container:* ]]; then
+    echo "Qdrant snapshots require a running qdrant/qdrant container with its own network namespace" >&2
+    return 1
+  fi
+  py="$(cat <<'QDRANT_PY'
+import gzip
+import hashlib
+import http.client
+import json
+import os
+import posixpath
+import re
+import subprocess
+import sys
+from contextlib import contextmanager
+
+mode, container, pid, output, minfree = sys.argv[1:]
+docker = ["docker", "-H", "unix:///var/run/docker.sock"]
+
+
+class SnapshotError(Exception):
+    pass
+
+
+@contextmanager
+def request(method, path, timeout=8):
+    # Direct loopback inside the chosen network namespace. No proxies or redirects.
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    try:
+        conn.request(method, path, headers=headers)
+        with conn.getresponse() as response:
+            if response.status in (401, 403):
+                raise SnapshotError("Qdrant API requires a read-write key in QDRANT__SERVICE__API_KEY")
+            if response.status != 200:
+                raise SnapshotError(f"Qdrant snapshot API returned HTTP {response.status}")
+            yield response
+    finally:
+        conn.close()
+
+
+def result(method, path, timeout=8):
+    with request(method, path, timeout) as response:
+        data = json.loads(response.read(1024 * 1024 + 1))
+    if not isinstance(data, dict) or data.get("status") != "ok" or "result" not in data:
+        raise SnapshotError("unexpected Qdrant snapshot API response")
+    return data["result"]
+
+
+def container_read(*args):
+    return subprocess.check_output(
+        [*docker, "exec", container, *args], stderr=subprocess.DEVNULL, timeout=90, universal_newlines=True
+    )
+
+
+def check_source_space():
+    # Full snapshots may need both a temporary collection archive and the
+    # final archive. Check the source filesystems before requesting either.
+    storage = env.get("QDRANT__STORAGE__STORAGE_PATH", "./storage")
+    snapshots = env.get("QDRANT__STORAGE__SNAPSHOTS_PATH", "./snapshots")
+    temporary = env.get("QDRANT__STORAGE__TEMP_PATH") or storage
+    paths = [posixpath.normpath(posixpath.join("/qdrant", path)) for path in (storage, snapshots, temporary)]
+    used = int(container_read("du", "-s", "--apparent-size", "-B1", "--", paths[0]).split()[0])
+    # The snapshots/temp directory may not exist until the first run.
+    for path in dict.fromkeys(paths):
+        df = container_read(
+            "sh", "-c", 'while [ ! -d "$1" ]; do set -- "$(dirname -- "$1")"; done; df -kP -- "$1"',
+            "sh", path,
+        )
+        total, free = map(int, df.splitlines()[-1].split()[1:4:2])
+        if free * 1024 - 2 * used < max(total * 1024 * int(minfree) // 100, 64 * 1024**2):
+            raise SnapshotError("not enough space on the Qdrant storage or snapshot filesystem")
+
+
+def write_archive(path, size, checksum):
+    digest = hashlib.sha256()
+    received = 0
+    with request("GET", path, timeout=90) as response, open(output, "xb") as raw:
+        fs = os.fstatvfs(raw.fileno())
+        reserve = fs.f_blocks * fs.f_frsize * int(minfree) // 100
+        if size > fs.f_bavail * fs.f_frsize - reserve:
+            raise SnapshotError("not enough space in the dump directory for the Qdrant snapshot")
+        with gzip.GzipFile(fileobj=raw, mode="wb", compresslevel=1, mtime=0) as archive:
+            for chunk in iter(lambda: response.read(4 * 1024**2), b""):
+                if not received and chunk[257:262] != b"ustar":
+                    raise SnapshotError("Qdrant snapshot is not a tar archive")
+                received += len(chunk)
+                fs = os.fstatvfs(raw.fileno())
+                if received > size or len(chunk) + 65536 > fs.f_bavail * fs.f_frsize - reserve:
+                    raise SnapshotError("Qdrant snapshot exceeds the reported size or available space")
+                digest.update(chunk)
+                archive.write(chunk)
+    if received != size or (checksum and digest.hexdigest() != checksum.lower()):
+        raise SnapshotError("Qdrant snapshot size or checksum mismatch")
+
+
+def snapshot():
+    check_source_space()
+    existing = result("GET", "/snapshots")
+    if not isinstance(existing, list):
+        raise SnapshotError("unexpected Qdrant snapshot list")
+    names = {item.get("name") for item in existing if isinstance(item, dict)}
+    created = result("POST", "/snapshots?wait=true", timeout=3600)
+    name = created.get("name") if isinstance(created, dict) else None
+    if not isinstance(name, str) or not re.fullmatch(r"full-snapshot-[A-Za-z0-9_-]+[.]snapshot", name) or name in names:
+        raise SnapshotError("Qdrant did not return a new full snapshot name")
+    path = "/snapshots/" + name
+    try:
+        size, checksum = created.get("size"), created.get("checksum")
+        if type(size) is not int or size <= 0 or (checksum and (
+            not isinstance(checksum, str) or not re.fullmatch(r"[A-Fa-f0-9]{64}", checksum)
+        )):
+            raise SnapshotError("invalid Qdrant snapshot size or checksum")
+        write_archive(path, size, checksum)
+    finally:
+        if result("DELETE", path + "?wait=true") is not True:
+            raise SnapshotError("Qdrant could not remove the temporary snapshot")
+
+
+try:
+    metadata = json.load(sys.stdin)
+    if not isinstance(metadata, list) or str(metadata[0]) != pid:
+        raise SnapshotError("Qdrant container restarted during setup")
+    env = dict(entry.split("=", 1) for entry in metadata[1] if "=" in entry)
+    port = int(env.get("QDRANT__SERVICE__HTTP_PORT", "6333"))
+    if not 1 <= port <= 65535:
+        raise SnapshotError("invalid Qdrant HTTP port")
+    key = env.get("QDRANT__SERVICE__API_KEY")
+    headers = {"api-key": key} if key else {}
+    cluster = result("GET", "/cluster")
+    if not isinstance(cluster, dict) or cluster.get("status") != "disabled":
+        raise SnapshotError("Qdrant is in cluster mode; full storage snapshots require a standalone instance")
+    working_dir, args, mounts = metadata[2:]
+    config_dir = "/qdrant/config"
+    # Files can override the default paths. Refuse such layouts instead of
+    # checking available space on the wrong volume.
+    if working_dir != "/qdrant" or any(
+        arg == "--config-path" or arg.startswith("--config-path=") for arg in args
+    ) or any(
+        config_dir == path or config_dir.startswith(path.rstrip("/") + "/")
+        or path.startswith(config_dir + "/")
+        for path in (posixpath.normpath(mount["Destination"]) for mount in mounts or [])
+    ):
+        raise SnapshotError("Qdrant snapshots require standard configuration files; set storage paths through Docker environment variables")
+    if mode == "dump":
+        snapshot()
+except SnapshotError as exc:
+    print(exc, file=sys.stderr)
+    sys.exit(1)
+except (OSError, ValueError, TypeError, IndexError, http.client.HTTPException, subprocess.SubprocessError):
+    print("Qdrant snapshot failed: check the local HTTP API, container storage and disk space", file=sys.stderr)
+    sys.exit(1)
+QDRANT_PY
+)"
+  # Inspect only the same immutable container ID. The PID is checked again in
+  # the child to catch a restart between inspection and entering its namespace.
+  timeout 10 docker -H unix:///var/run/docker.sock inspect --type container \
+    --format '[{{.State.Pid}},{{json .Config.Env}},{{json .Config.WorkingDir}},{{json .Args}},{{json .Mounts}}]' \
+    "$id" 2>/dev/null |
+    timeout -k 15s "$([ "$mode" = probe ] && echo 20s || echo 2h)" \
+      nsenter --net="/proc/$pid/ns/net" -- python3 -c "$py" "$mode" "$id" "$pid" "${3:-}" "${4:-10}"
+}
+
 # Every failed check says why: its error goes to the caller (cmd_dump_setup hands it to the
 # panel). Up to 0.37 most branches sent stderr to /dev/null with the output, and the panel showed
 # an empty reason.
@@ -1019,6 +1194,7 @@ dump_probe() {
           || docker exec "$container" pg_dumpall -U "$pgu" --schema-only >/dev/null
       else sudo -u postgres pg_dumpall --schema-only >/dev/null; fi ;;
     mongo) mongo_run probe "$container" >/dev/null ;;
+    qdrant) qdrant_run probe "$container" ;;
     mysql)
       # mariadb:11 has no mysqldump name, the generated script already prefers mariadb-dump
       if [ -n "$container" ]; then
@@ -1239,8 +1415,8 @@ dumps_rsyncable_maybe() {
 cmd_dump_setup() {
   local engine="$1" container="${2:-}"
   case "$engine" in
-    pg|mysql|mongo|ch|redis|rabbitmq|k8s|grafana|neo4j) ;;
-    *) echo "unknown engine: $engine (supported: pg, mysql, mongo, ch, redis, rabbitmq, k8s, grafana, neo4j)" >&2; return 2 ;;
+    pg|mysql|mongo|ch|redis|rabbitmq|k8s|grafana|neo4j|qdrant) ;;
+    *) echo "unknown engine: $engine (supported: pg, mysql, mongo, ch, redis, rabbitmq, k8s, grafana, neo4j, qdrant)" >&2; return 2 ;;
   esac
   case "$container" in ''|*[!A-Za-z0-9._-]*) container="" ;; esac
   # a database in a pod: the "container" is the workload, entered with kubectl exec (see kube_enter)
@@ -1331,13 +1507,13 @@ cmd_dump_setup() {
     printf '#!/usr/bin/env bash\n# generated by kervax - dump of %s before the file backup\nset -uo pipefail\n' "$engine"
     dump_gz_header
     printf 'OUT=%q\nKEEP=%s\nCONT=%q\nKT=%q\nMINFREE=%s\nSKIPF=%q\n' "$out" "$keep" "$dcont" "$kt" "$minfree" "$skipf"
-    if [ "$engine" = mongo ]; then
+    if [[ "$engine" = mongo || "$engine" = qdrant ]]; then
       printf 'ERRF=%q\n' "$DUMPS_D/$slot.error"
       # One temporary directory per slot: serialize manual/timer/file-backup starts.
       printf '%s\n' 'umask 077' 'exec 9>"${ERRF%.error}.lock"' 'flock 9 || exit 1'
-      cat <<'MONGO_ERROR_TRAP'
+      cat <<'DUMP_ERROR_TRAP'
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then date +%s > "$ERRF"; fi' EXIT
-MONGO_ERROR_TRAP
+DUMP_ERROR_TRAP
     fi
     dump_path_guard
     printf 'TS=$(date +%%Y%%m%%d-%%H%%M%%S)\n'
@@ -1432,6 +1608,9 @@ MONGO_ERROR_TRAP
            printf 'else python3 -c %s "$DB" "$F" >/dev/null 2>&1; fi\n' \
                   "'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()'"
            printf '$GZF "$F" 2>/dev/null; F="$F.gz"\n' ;;
+      qdrant) printf 'F="$OUT/qdrant-$TS.snapshot.gz"\n'
+              declare -f qdrant_run
+              printf 'qdrant_run dump "$CONT" "$F" "$MINFREE"\n' ;;
       neo4j) printf 'F="$OUT/neo4j-$TS.tar.gz"\n'
            # Neo4j Community cannot do an online dump: neo4j-admin refuses to work on a live
            # database ("The database is in use"), and a hot backup exists only in Enterprise. So
@@ -1496,7 +1675,7 @@ fi
     printf 'chmod 0600 "$F" || { rm -rf "$OUT"; echo "dump permissions failed" >&2; exit 1; }\n'
     # publication: the finished file is moved in one go and the temporary directory is removed
     printf 'mv -f "$F" "$FINAL/" || { rm -rf "$OUT"; echo "dump publication failed" >&2; exit 1; }; F="$FINAL/$(basename "$F")"; rm -rf "$OUT"; OUT="$FINAL"\n'
-    [ "$engine" != mongo ] || printf 'rm -f "$ERRF"\n'
+    [[ "$engine" != mongo && "$engine" != qdrant ]] || printf 'rm -f "$ERRF"\n'
     # rotation: only the last KEEP are kept, otherwise the history eats the local disk
     printf 'ls -1t "$OUT"/*.gz 2>/dev/null | tail -n +$((KEEP+1)) | xargs -r rm -f\n'
     printf 'echo "kervax-dump: %s → $F"\n' "$engine"
@@ -1557,7 +1736,7 @@ fi
 cmd_dump_remove() {
   local engine="$1" container="${2:-}"
   case "$engine" in
-    pg|mysql|mongo|ch|redis|rabbitmq|k8s|grafana|neo4j) ;;
+    pg|mysql|mongo|ch|redis|rabbitmq|k8s|grafana|neo4j|qdrant) ;;
     *) echo "unknown engine: $engine" >&2; return 2 ;;
   esac
   case "$container" in ''|*[!A-Za-z0-9._-]*) container="" ;; esac
@@ -3499,6 +3678,10 @@ cmd_verify() {
     for f in "$DUMPS_D"/*.sh; do
       [ -f "$f" ] || continue
       e=$(basename "$f" .sh); dir="$DUMP_DIR_BASE/$e"
+      case "$e" in
+        qdrant@*) dir=$(sed -n 's/^dir=//p' "$DUMPS_D/$e.meta" | head -1)
+                  [ -n "$dir" ] || continue ;;
+      esac
       newest=$(find "$dir" -maxdepth 1 -type f -name '*.gz' ! -newermt "@$sts" -printf '%T@ %p\n' 2>/dev/null \
                | sort -rn | head -1 | cut -d' ' -f2- || true)
       [ -n "$newest" ] || continue

@@ -983,7 +983,7 @@ _DUMP_ENGINE = {"PostgreSQL": "pg", "MySQL/MariaDB": "mysql", "MongoDB": "mongo"
                 # Neo4j: дамп снимается ТОЛЬКО с остановленной базы (онлайн-backup —
                 # привилегия Enterprise), поэтому хелпер гасит её на время дампа.
                 # Предупреждаем об этом в тексте находки — см. _DUMP_DOWNTIME.
-                "Neo4j": "neo4j"}
+                "Neo4j": "neo4j", "Qdrant": "qdrant"}
 # Движки, у которых дамп требует кратковременной остановки: пользователь должен узнать
 # об этом ДО того, как включит ежедневный дамп, а не из графика доступности.
 _DUMP_DOWNTIME = {"neo4j": "потребуется кратковременная остановка базы: "
@@ -1059,6 +1059,17 @@ def _mongo_dump_block(agent_version: str, rep: dict) -> str:
     have = str((rep.get("setup_versions") or {}).get("backup-setup") or "")
     if _ver_key(have) < (0, 50):
         return "для дампов MongoDB обновите backup-helper до 0.50 или новее"
+    return ""
+
+
+def _qdrant_dump_block(agent_version: str, rep: dict, container: str) -> str:
+    if not container or container.startswith("k8s."):
+        return "снапшоты Qdrant поддерживаются для одиночных экземпляров в Docker"
+    if _ver_key(agent_version) < (2, 66):
+        return "для снапшотов Qdrant обновите агент до 2.66 или новее"
+    have = str((rep.get("setup_versions") or {}).get("backup-setup") or "")
+    if _ver_key(have) < (0, 51):
+        return "для снапшотов Qdrant обновите backup-helper до 0.51 или новее"
     return ""
 
 
@@ -1406,6 +1417,8 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                          "не снимает") if bare and not inst else ""
                 if code == "mongo":
                     block = block or _mongo_dump_block(server.agent_version, rep)
+                if code == "qdrant":
+                    block = block or _qdrant_dump_block(server.agent_version, rep, inst)
                 can_dump = bool(code) and not block
             out.append(BackupAudit(
                 kind="db", subject=eng, gap=False, instance=inst,
@@ -2702,6 +2715,18 @@ async def backup_command(
                     block = "дампы MongoDB из Kubernetes пока не поддерживаются; настройте отдельный бэкап кластера"
                 if block:
                     raise HTTPException(status.HTTP_409_CONFLICT, block)
+            if body.engine == "qdrant":
+                rep = srv.last_report or {}
+                block = _qdrant_dump_block(srv.agent_version, rep, body.container)
+                if block:
+                    raise HTTPException(status.HTTP_409_CONFLICT, block)
+                containers = (rep.get("docker") or {}).get("containers") or []
+                if not any(
+                    c.get("name") == body.container and c.get("state") == "running"
+                    and _db_engine_of(c.get("image") or "", body.container) == "Qdrant"
+                    for c in containers
+                ):
+                    raise HTTPException(status.HTTP_409_CONFLICT, "контейнер Qdrant не найден среди запущенных")
             # свой каталог дампов - root-действие на ноде (helper создает его 0700, выключение
             # дампа удаляет): как "Освободить место", только админ. /backup и пусто - всем
             if not dump_dir_default(body.dump_dir) and user.role != "admin":

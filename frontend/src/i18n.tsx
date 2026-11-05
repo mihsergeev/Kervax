@@ -74,6 +74,8 @@ const EN: Record<string, string> = {
     'Agent request IP filtering is enabled. If the main IP and additional addresses are empty, access is checked by token only.',
   'IP-фильтр запросов агента не включен. Сохраненные адреса пока не ограничивают доступ к API агента, запросы проверяются по токену.':
     'Agent request IP filtering is not enabled. Saved addresses do not restrict access to the agent API yet; requests are checked by token.',
+  'Qdrant: снапшот всех коллекций и алиасов. Поддерживается одиночный экземпляр в Docker.':
+    'Qdrant: a snapshot of all collections and aliases. Supported for standalone Docker instances.',
   'MongoDB: replica set снимается с oplog, восстановление с --oplogReplay. Для standalone приостановите запись на время дампа. Шардированные кластеры не поддерживаются.':
     'MongoDB: replica sets include the oplog; restore with --oplogReplay. Pause writes during a standalone dump. Sharded clusters are not supported.',
   'запросил свежую проверку исправления': 'requested fresh recovery verification',
