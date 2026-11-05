@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.99] - 2026-11-05
+
+- Services recognizes Qdrant, Milvus, Weaviate and Chroma in Docker and Kubernetes, plus Qdrant, Milvus and Weaviate running directly on a host. Client, exporter and operator images are excluded.
+- Vector databases appear under Databases and stores with their deployment location. They count as database engines without prompts to install an unsupported inventory helper.
+
 ## [1.8.98] - 2026-11-05
 
 - The backup server card has a dedicated Second copy tab with repository selection, destination setup and copy status.

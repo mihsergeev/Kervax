@@ -3805,6 +3805,7 @@ const EN: Record<string, string> = {
   'Сертификаты': 'Certificates',
   'Данные': 'Data',
   'Базы и хранилища': 'Databases and stores',
+  'Векторная БД': 'Vector database',
   '{n} запросов/мин': '{n} requests/min',
   'ближайший: {l} через {n} дн': 'nearest: {l} in {n} d',
   'всего {n}': '{n} in total',

@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.63"
+const version = "2.64"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -707,6 +707,9 @@ func dbImageLike(image string) bool {
 	if strings.Contains(l, "exporter") || strings.Contains(l, "postgrest") {
 		return false
 	}
+	if vectorDBImage(l) != "" {
+		return true
+	}
 	for _, k := range []string{
 		"postgres", "postgis", "timescale", "mysql", "mariadb", "percona", "mongo",
 		"clickhouse", "elasticsearch", "opensearch", "redis", "valkey", "influxdb",
@@ -719,6 +722,34 @@ func dbImageLike(image string) bool {
 		}
 	}
 	return false
+}
+
+// Match the server image, not a repository substring: qdrant-client,
+// milvus-backup and Weaviate modules are not database processes.
+func vectorDBImage(image string) string {
+	ref := strings.ToLower(image)
+	for _, marker := range []string{"exporter", "operator", "client", "backup", "migrat", "-tool"} {
+		if strings.Contains(ref, marker) {
+			return ""
+		}
+	}
+	path := ref
+	if i := strings.IndexByte(ref, '@'); i >= 0 {
+		path = path[:i]
+	}
+	if i := strings.LastIndexByte(path, ':'); i > strings.LastIndexByte(path, '/') {
+		path = path[:i]
+	}
+	name := path[strings.LastIndexByte(path, '/')+1:]
+	switch name {
+	case "qdrant", "milvus", "weaviate":
+		return name
+	case "chroma":
+		if path == "chromadb/chroma" || path == "chroma-core/chroma" || strings.HasSuffix(path, "/chromadb/chroma") || strings.HasSuffix(path, "/chroma-core/chroma") {
+			return name
+		}
+	}
+	return ""
 }
 
 // снимок Docker на ноде (read-only)
@@ -5478,6 +5509,7 @@ func dockerPresent() bool {
 // (pg_dump/mysqldump/mongodump/BACKUP TABLE) или снапшот средствами самой СУБД.
 // Ключ — имя процесса (comm, максимум 15 символов в ядре!), значение — движок для панели.
 var dbProcSignatures = map[string]string{
+	"qdrant": "Qdrant", "milvus": "Milvus", "weaviate": "Weaviate",
 	"postgres": "PostgreSQL", "postmaster": "PostgreSQL",
 	"mysqld": "MySQL/MariaDB", "mariadbd": "MySQL/MariaDB",
 	"mongod":          "MongoDB",

@@ -932,6 +932,23 @@ _DB_IMAGES = {
 # Операторы (altinity/clickhouse-operator, postgres-operator…) базами управляют, но данных
 # не держат: на k8s-c под clickhouse-operator числился второй ClickHouse.
 _NOT_DB_MARKERS = ("exporter", "postgrest", "operator")
+_VECTOR_DB_IMAGES = {"qdrant": "Qdrant", "milvus": "Milvus", "weaviate": "Weaviate"}
+_VECTOR_TOOL_MARKERS = ("client", "backup", "migrat", "-tool")
+
+
+def _vector_db_image(image: str) -> str | None:
+    """Only server image names; clients, backup tools and modules are not databases."""
+    ref = (image or "").lower()
+    if any(marker in ref for marker in (*_NOT_DB_MARKERS, *_VECTOR_TOOL_MARKERS)):
+        return None
+    path = ref.split("@", 1)[0]
+    if ":" in path.rsplit("/", 1)[-1]:
+        path = path.rsplit(":", 1)[0]
+    name = path.rsplit("/", 1)[-1]
+    if name == "chroma" and (path in ("chromadb/chroma", "chroma-core/chroma")
+                             or path.endswith(("/chromadb/chroma", "/chroma-core/chroma"))):
+        return "Chroma"
+    return _VECTOR_DB_IMAGES.get(name)
 
 
 def _db_engine_of(image: str, name: str = "") -> str | None:
@@ -941,6 +958,10 @@ def _db_engine_of(image: str, name: str = "") -> str | None:
     nm = (name or "").lower()
     if any(m in img or m in nm for m in _NOT_DB_MARKERS):
         return None
+    if eng := _vector_db_image(img):
+        if any(m in nm for m in _VECTOR_TOOL_MARKERS):
+            return None
+        return eng
     for key, eng in _DB_IMAGES.items():
         if key in img:
             return eng
@@ -989,6 +1010,10 @@ _DB_HOWTO = {
     "MS SQL Server": "BACKUP DATABASE", "Prometheus": "snapshot API (admin)",
     "MinIO": "mc mirror", "HashiCorp Vault": "vault operator raft snapshot",
     "Consul": "consul snapshot save", "Grafana": "grafana.db / API дашбордов",
+    "Qdrant": "snapshot API (каждая коллекция и узел, aliases отдельно)",
+    "Milvus": "milvus-backup (данные и метаданные)",
+    "Weaviate": "Backup API",
+    "Chroma": "остановить сервер и скопировать каталог данных (persistent volume)",
 }
 
 
@@ -1378,7 +1403,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                          "не снимает") if bare and not inst else ""
                 if code == "mongo":
                     block = block or _mongo_dump_block(server.agent_version, rep)
-                can_dump = not block
+                can_dump = bool(code) and not block
             out.append(BackupAudit(
                 kind="db", subject=eng, gap=False, instance=inst,
                 detail=f"{where_txt} — файловый снапшот живой базы может не восстановиться"

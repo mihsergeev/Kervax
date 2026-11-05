@@ -212,6 +212,9 @@ const DB_ENGINE_LABEL: Record<string, string> = {
   redis: 'Redis',
 }
 
+// These engines are detected without the relational database inventory helper.
+const VECTOR_DATABASES = new Set(['Qdrant', 'Milvus', 'Weaviate', 'Chroma'])
+
 // ВСЕ инстансы движка, а не один: на одной ноде бывает 37 postgres-контейнеров, а карточка в
 // модалке одна на движок — показать инвентарь одного из них значило бы соврать.
 function matchDbStats(kind: string, stats: DBStat[]): DBStat[] {
@@ -817,6 +820,7 @@ function noDbHint(
   t: (s: string, v?: Record<string, string | number>) => string,
 ): string | null {
   const kind = it.kind
+  if (VECTOR_DATABASES.has(kind)) return t('Векторная БД')
   // инвентарь снимает только dbstat-setup и только для этих движков
   if (!Object.values(DB_ENGINE_LABEL).includes(kind)) return null
   const ver = server.last_report?.setup_versions?.['dbstat-setup']
@@ -1861,7 +1865,7 @@ function ServerServicesModal({ srv, onClose, onChanged, initialSec, sites }: {
   const missing = missingSites(siteList, sites)
   const rate = webRate(s.last_report)
   // СУБД сверху, под ними прочее, что держит данные (Grafana, Prometheus, etcd): их тоже находит аудит
-  const isDb = (it: SvcItem) => Object.values(DB_ENGINE_LABEL).includes(it.kind)
+  const isDb = (it: SvcItem) => Object.values(DB_ENGINE_LABEL).includes(it.kind) || VECTOR_DATABASES.has(it.kind)
   const dbItems = srv.items.filter((it) => !it.web && !it.svc && !it.llm && !it.workers && !it.cron && !it.gitlab).sort((a, b) => Number(isDb(b)) - Number(isDb(a)))
   const llm = s.llm ?? []
   const llmBad = llm.filter((x) => !x.ok && !x.no_metrics).length
