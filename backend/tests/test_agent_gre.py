@@ -189,7 +189,7 @@ async def test_helper_gets_the_host_address_only_when_the_host_is_ready(client: 
     await client.put(f"/api/servers/{sid}/gre", json={"enabled": False}, headers=auth_headers)
     assert (await client.post("/api/agent/gre-wanted", content=tok)).text == "no"
     assert (await client.post("/api/agent/gre", json={}, headers=hdr)).json() == {"enabled": False}
-    # чужой токен - 401: helper по нему снимает туннель, условие установки ложно
+    # чужой токен - 401: конфиг не отдается, helper сохраняет туннель, условие установки ложно
     assert (await client.post("/api/agent/gre", json={}, headers={"Authorization": "Bearer nope"})).status_code == 401
     assert (await client.post("/api/agent/gre-wanted", content="nope")).status_code == 401
 

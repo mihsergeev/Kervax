@@ -12,6 +12,7 @@ from starlette.requests import Request
 
 from app import agent_auth, config
 from app.models import Check, DockerCommand, Server
+from tests.test_gre_helper import sync as gre_sync
 
 PRIMARY = "198.51.100.20"
 OTHER = "198.51.100.21"
@@ -280,6 +281,59 @@ async def test_report_uses_validated_source_not_leftmost_untrusted_xff(client, a
     assert r.status_code == 200, r.text
     async with client._transport.app.state.session_factory() as session:
         assert (await session.get(Server, sid)).external_ip == PRIMARY
+
+
+async def test_gre_survives_proxy_readiness_denial_without_granting_access(
+    client, auth_headers, monkeypatch, gre_sync,
+):
+    mod, calls, env, tmp = gre_sync
+    sid, token = await _new_server(client, auth_headers)
+    _enable_guard(monkeypatch)
+    assert (await _call(client, PRIMARY, token)).status_code == 200
+    enabled = await client.put(f"/api/servers/{sid}/gre", headers=auth_headers, json={"enabled": True})
+    assert enabled.status_code == 200, enabled.text
+    data = Path(config.get_settings().data_dir)
+    (data / "gre_tunnels.applied").write_text(
+        f"# kervax-gre fw=ufw ts={int(time.time())}\nkvxg{sid} {PRIMARY} 203.0.113.5 ok\n",
+        encoding="utf-8",
+    )
+    _snapshot(data)
+    env["src"] = PRIMARY
+    (tmp / "kervax-agent.conf").write_text(f"url=https://panel.example\ntoken={token}\n", encoding="utf-8")
+
+    async def tick():
+        response = await _call(client, FRONTEND, token, endpoint="gre", payload={},
+                               headers={"X-Forwarded-For": f"10.254.0.2, {CADDY}"})
+        env["reply"] = response.status_code, response.content
+        return response, mod.main(["x"])
+
+    response, result = await tick()
+    assert response.status_code == 200 and response.json()["remote"] == "203.0.113.5" and result == 0
+    installed = [Path(path) for path in (mod.AGENT_CONF, mod.CONF, mod.STATE, mod.VERSION_FILE)]
+    before = {path: path.read_bytes() for path in installed}
+    calls.clear()
+    # The host publishes this fail-closed snapshot while the backend is still starting.
+    _snapshot(data, v=0, frontend_peer_ips=[], forwarded_proxy_ips=[], error="topology_unavailable")
+    response, result = await tick()
+    assert response.status_code == 403 and result == 1
+    assert response.json() == {"detail": "Источник запроса агента не разрешен"}
+    assert {path: path.read_bytes() for path in installed} == before
+    assert not calls
+    _snapshot(data)  # Healthy topology is rediscovered, retaining exact source restrictions.
+    response, result = await tick()
+    assert response.status_code == 200 and response.json()["enabled"] is True and result == 0
+    assert not any("restart" in call or "disable" in call for call in calls)
+    for source, bad_token, expected in ((OTHER, token, 403), (PRIMARY, "invalid-token", 401)):
+        response = await _call(client, source, bad_token, endpoint="gre", payload={})
+        assert response.status_code == expected
+        assert set(response.json()) == {"detail"}  # no config/peer data on either failure
+    disabled = await client.put(f"/api/servers/{sid}/gre", headers=auth_headers, json={"enabled": False})
+    assert disabled.status_code == 200
+    response = await _call(client, PRIMARY, token, endpoint="gre", payload={})
+    assert response.status_code == 200 and response.json() == {"enabled": False}
+    env["reply"] = response.status_code, response.content
+    assert mod.main(["x"]) == 0
+    assert not (tmp / "gre.json").exists()
 
 
 async def test_agent_cannot_claim_proxy_or_extra_source_permissions_in_report(client, auth_headers, monkeypatch):

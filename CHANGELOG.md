@@ -9,7 +9,9 @@ All notable changes to this project are documented here. The format is based on
 - Database chips open the Databases and storage section and focus the selected engine. Direct links preserve the selection after reload; other service chips open their own sections.
 - Qdrant alerts use a compact switch in the Qdrant card header. Save failures are shown beside it, viewers cannot change it, and an enabled setting can still be disabled if Qdrant disappears from the inventory.
 
-Agent 2.65, Windows collector 0.3.0, server helpers and database migration 0145 are unchanged.
+- GRE helper 0.3 preserves existing tunnels through temporary authorization failures during panel updates and retries automatically. Only an authenticated explicit disable removes the tunnel; source restrictions remain enforced.
+
+Agent 2.65, Windows collector 0.3.0, other server helpers and database migration 0145 are unchanged.
 
 ## [1.8.102] - 2026-11-05
 

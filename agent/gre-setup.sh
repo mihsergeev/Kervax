@@ -16,10 +16,11 @@
 #   * kervax-gre.service - the tunnel itself (ip tunnel mode gre, mtu 1476), so it comes back after
 #     a reboot before the panel is even asked.
 # GRE does not pass NAT: a node without a public address on its interface says so to the panel and
-# brings nothing up. Switched off in the panel (or the server deleted there) - the sync removes
-# connect=, the tunnel, its firewall rules and the helper itself, version marker included.
+# brings nothing up. Explicitly switched off in an authorized panel response - the sync removes
+# connect=, the tunnel, its firewall rules and the helper itself, version marker included. Failed
+# requests (including 401/403 during a panel restart) keep the tunnel and retry on the next tick.
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 # Only where GRE is switched on in the panel: asked with this node's agent token, which goes as the
 # request body straight from the agent config (no quotes, braces or backslashes here: the condition
 # travels through the playbook and the panel's helper index as is). Assigned before set -e: the
@@ -53,8 +54,9 @@ cat > "$SYNC.new" <<'SYNC_EOF'
 
 The panel answers {"enabled", "remote", "local_addr", "panel_addr", "prefix", "mtu"}: remote is the
 panel host's address it expects GRE from (empty while the host has not set up its side), the two
-addresses are this node's /30 inside the tunnel. Switched off or the server gone from the panel
-(401) - everything is removed. Panel unreachable - everything stays as it is.
+addresses are this node's /30 inside the tunnel. Only an authorized JSON object with enabled=false
+removes everything. Failed authentication, an invalid answer or an unreachable panel leaves the
+existing tunnel in place; the next timer tick retries with the same agent credentials.
 """
 import http.client
 import ipaddress
@@ -336,10 +338,9 @@ def sync():
         print("kervax-gre: panel unreachable: %s" % type(got).__name__, file=sys.stderr)
         return 1
     code, data = got
-    if code in (401, 403):   # the server is gone from the panel: nothing to tunnel for
-        teardown()
-        return 0
     if code != 200:
+        # A 401/403 can be a temporary readiness/source-validation failure during a deployment.
+        # Keep local state, never use the error body as config, and retry on the next timer tick.
         print("kervax-gre: panel answered %d" % code, file=sys.stderr)
         return 1
     try:
@@ -347,7 +348,10 @@ def sync():
     except ValueError:
         print("kervax-gre: panel answer is not JSON", file=sys.stderr)
         return 1
-    if not ans.get("enabled"):
+    if not isinstance(ans, dict) or type(ans.get("enabled")) is not bool:
+        print("kervax-gre: panel answer has no boolean enabled flag", file=sys.stderr)
+        return 1
+    if ans["enabled"] is False:
         teardown()
         return 0
     want = valid_answer(ans)

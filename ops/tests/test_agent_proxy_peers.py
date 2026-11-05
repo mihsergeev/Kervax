@@ -181,6 +181,26 @@ def test_atomic_publish_replaces_stale_addresses_and_clears_on_failure(topology,
         assert path.stat().st_mode & 0o777 == 0o644
 
 
+def test_backend_readiness_window_clears_and_then_restores_exact_peers(topology, tmp_path):
+    env, items, _, _ = topology
+    env["KERVAX_PROXY_PEERS_DATA_DIR"] = str(tmp_path)
+    path = tmp_path / "agent_proxy_peers.json"
+    sync.refresh(env)
+    ready = json.loads(path.read_text())
+    items[BACK]["health"] = "starting"
+    with pytest.raises(ValueError, match="health is invalid"):
+        sync.refresh(env)
+    unavailable = json.loads(path.read_text())
+    assert unavailable["v"] == 0 and unavailable["error"] == "topology_unavailable"
+    assert unavailable["frontend_peer_ips"] == unavailable["forwarded_proxy_ips"] == []
+    items[BACK]["health"] = "healthy"
+    sync.refresh(env)
+    recovered = json.loads(path.read_text())
+    assert recovered["v"] == 1
+    for key in ("frontend_peer_ips", "forwarded_proxy_ips"):
+        assert recovered[key] == ready[key]
+
+
 def test_failed_atomic_write_preserves_previous_complete_file_and_cleans_temp(tmp_path, monkeypatch):
     path = tmp_path / "agent_proxy_peers.json"
     sync.publish(path, {"v": 1})

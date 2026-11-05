@@ -59,6 +59,8 @@ def sync(tmp_path, monkeypatch):
         r = env["reply"]
         if isinstance(r, Exception):
             raise r
+        if isinstance(r, tuple):
+            return r
         if isinstance(r, int):
             return r, b"{}"
         return 200, json.dumps(r).encode()
@@ -140,27 +142,79 @@ def test_sync_refuses_a_strange_answer(sync):
     assert not (tmp / "gre.json").exists()
 
 
-def test_sync_removes_everything_when_switched_off_or_deleted(sync):
+def test_sync_removes_everything_only_when_explicitly_switched_off(sync):
     mod, calls, env, tmp = sync
     mod.main(["x"])
+    helper = tmp / "kervax-gre-sync.py"
+    helper.write_text("installed helper", encoding="utf-8")
     calls.clear()
     env["reply"] = {"enabled": False}
     assert mod.main(["x"]) == 0
     assert "connect=" not in _conf(tmp) and "token=fake-token-example" in _conf(tmp)
     assert "ufw delete allow proto gre from 203.0.113.5 to any" in calls
     assert "systemctl disable --now kervax-gre.service" in calls and "ip link del kervax-gre" in calls
-    assert not (tmp / "gre.json").exists() and not (tmp / "gre-setup.ver").exists()
+    assert "systemctl disable --now kervax-gre-sync.timer" in calls
+    assert not (tmp / "gre.json").exists() and not (tmp / "gre-setup.ver").exists() and not helper.exists()
 
 
-def test_sync_keeps_the_tunnel_when_the_panel_is_unreachable_and_removes_it_for_a_deleted_server(sync):
+def test_sync_keeps_the_tunnel_when_the_panel_is_unreachable(sync):
     mod, calls, env, tmp = sync
     mod.main(["x"])
     env["reply"] = OSError("timed out")
     assert mod.main(["x"]) == 1 and (tmp / "gre.json").exists() and "connect=10.254.0.1" in _conf(tmp)
     env["reply"] = 502
     assert mod.main(["x"]) == 1 and (tmp / "gre.json").exists()
-    env["reply"] = 401
-    assert mod.main(["x"]) == 0 and not (tmp / "gre.json").exists()
+
+
+@pytest.mark.parametrize("code", [401, 403])
+def test_sync_preserves_installed_tunnel_on_auth_denial_and_recovers_next_tick(sync, code):
+    mod, calls, env, tmp = sync
+    assert mod.main(["x"]) == 0
+    helper = tmp / "kervax-gre-sync.py"
+    helper.write_text("installed helper", encoding="utf-8")
+    before = {path: path.read_bytes() for path in tmp.rglob("*") if path.is_file()}
+    calls.clear()
+    env["sent"].clear()
+    # An error body must never be interpreted as a request to disable the tunnel.
+    env["reply"] = (code, b'{"enabled":false}')
+    for _ in range(2):
+        assert mod.main(["x"]) == 1
+        assert {path: path.read_bytes() for path in tmp.rglob("*") if path.is_file()} == before
+        assert not calls  # no firewall/interface/unit changes, including the sync timer
+    assert [request[3] for request in env["sent"]] == ["10.254.0.1", "10.254.0.1"]
+    assert all(request[1] == "fake-token-example" for request in env["sent"])
+    env["reply"] = dict(ANSWER)
+    assert mod.main(["x"]) == 0
+    assert _conf(tmp).endswith("connect=10.254.0.1\n") and helper.exists()
+    assert not any("restart" in call or "disable" in call or "ufw" in call for call in calls)
+
+
+@pytest.mark.parametrize("answer", [
+    {}, {"enabled": None}, {"enabled": 0}, {"enabled": 1}, {"enabled": "false"},
+    {"enabled": "true"}, {"enabled": ""}, {"enabled": []}, {"enabled": {}},
+    None, False, 0, "false", [], [{"enabled": False}],
+])
+def test_sync_preserves_existing_tunnel_on_missing_or_non_boolean_enabled(sync, answer):
+    mod, calls, env, tmp = sync
+    assert mod.main(["x"]) == 0
+    before = {path: path.read_bytes() for path in tmp.rglob("*") if path.is_file()}
+    calls.clear()
+    env["reply"] = (200, json.dumps(answer).encode())
+    assert mod.main(["x"]) == 1
+    assert {path: path.read_bytes() for path in tmp.rglob("*") if path.is_file()} == before
+    assert not calls
+
+
+@pytest.mark.parametrize("body", [b"", b"{", b'{"enabled":false', b"<html>unavailable</html>", b"\xff"])
+def test_sync_preserves_existing_tunnel_on_malformed_response(sync, body):
+    mod, calls, env, tmp = sync
+    assert mod.main(["x"]) == 0
+    before = {path: path.read_bytes() for path in tmp.rglob("*") if path.is_file()}
+    calls.clear()
+    env["reply"] = (200, body)
+    assert mod.main(["x"]) == 1
+    assert {path: path.read_bytes() for path in tmp.rglob("*") if path.is_file()} == before
+    assert not calls
 
 
 def test_sync_does_not_point_an_agent_behind_a_proxy_at_the_tunnel(sync):
