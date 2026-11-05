@@ -8595,14 +8595,10 @@ label.repo-copy-row { cursor: pointer; }
 @media (max-width: 900px) {
   .repo-copy-layout { grid-template-columns: minmax(0, 1fr); }
 }
-.mirror-row { display: grid; grid-template-columns: 10px minmax(8rem, max-content) minmax(0, 1fr) auto; gap: 10px; align-items: center; cursor: pointer; }
-.mirror-make { display: flex; flex-direction: column; gap: 6px; padding: 10px 4px 2px; }
 .mirror-main { display: flex; flex-direction: column; gap: 12px; padding: 14px 18px 18px; }
 .mirror-howto-b { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
 .mirror-howto-b p { margin: 0; }
 @media (max-width: 760px) {
-  .mirror-row { grid-template-columns: 10px minmax(0, 1fr); }
-  .mirror-row > :nth-child(n + 3) { grid-column: 2; }
   .mirror-main { padding: 12px; }
 }
 /* GRE до панели (Gre.tsx): пометка у адреса. Путь агента в панель, как плашка "через ретранслятор":
@@ -8633,6 +8629,27 @@ label.repo-copy-row { cursor: pointer; }
   .home-attention-row { flex-wrap: wrap; }
   .home-recheck-wrap { margin-left: auto; }
 }
+
+/* Keep the site's text readable even when the card is narrow in a two-column layout. */
+.home-site-alert { position: relative; flex-wrap: wrap; row-gap: 0.25rem; padding-inline-end: 1.2rem; }
+.home-site-alert .home-attention-txt { flex: 1 1 min(16rem, calc(100% - 3rem)); }
+.home-site-alert > .home-open { position: absolute; inset-inline-end: 0.3rem; top: 0.4rem; }
+.home-site-alert-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.25rem;
+  min-width: 0;
+  margin-left: auto;
+}
+.home-site-alert-actions > :where(.home-recheck-wrap, .quick-mute, .exp-snooze-pick, .exp-snooze-state) {
+  margin-left: 0;
+}
+.home-site-alert-actions:has(> .quick-mute) { flex-wrap: nowrap; }
+.home-site-alert-actions :where(.home-recheck-wrap, .exp-snooze-state) { flex-wrap: wrap; }
+.home-site-alert-actions .home-recheck-wrap { flex-shrink: 1; min-width: 0; }
+.home-site-alert-actions .home-recheck { white-space: normal; }
 
 /* Windows service selection uses stable service names, including long custom names. */
 .windows-service-row {

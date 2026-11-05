@@ -1073,7 +1073,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     const e = expEntry(w.check, w.kind)
     return (
       <div key={key} role="button" tabIndex={0}
-        className={`home-attention-row${off ? ' home-attention-subrow home-attention-muted' : ''}`}
+        className={`home-attention-row home-site-alert${off ? ' home-attention-subrow home-attention-muted' : ''}`}
         onClick={() => onOpen('sites', w.id, false, 'exp')}
         onKeyDown={(ev) => ev.key === 'Enter' && ev.target === ev.currentTarget && onOpen('sites', w.id, false, 'exp')}>
         <span className={`lk-dot ${off ? '' : w.days <= 3 ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
@@ -1086,19 +1086,21 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
             {w.more ? ` · ${t('мониторов: {n}', { n: w.more + 1 })}` : ''}
           </span>
         </span>
-        {!off && recheckAction(w.members.map((id) => ({ object_type: 'check', object_id: id, kind: w.kind })))}
-        {off ? (
-          <ExpirySnoozeState check={w.check} kind={w.kind} canEdit={!isViewer} onDone={load} />
-        ) : !isViewer && warnPick === key ? (
-          <ExpirySnoozePick check={w.check} kind={w.kind} short onDone={load} onClose={() => setWarnPick(null)} />
-        ) : !isViewer && (
-          <span className="quick-mute" title={w.kind === 'domain'
-            ? t('Напомнить позже или не следить за доменом')
-            : t('Напомнить позже или не следить за сертификатом')}
-            onClick={(ev) => { ev.stopPropagation(); setWarnPick(key) }}>
-            🔕
-          </span>
-        )}
+        <span className="home-site-alert-actions">
+          {!off && recheckAction(w.members.map((id) => ({ object_type: 'check', object_id: id, kind: w.kind })))}
+          {off ? (
+            <ExpirySnoozeState check={w.check} kind={w.kind} canEdit={!isViewer} onDone={load} />
+          ) : !isViewer && warnPick === key ? (
+            <ExpirySnoozePick check={w.check} kind={w.kind} short onDone={load} onClose={() => setWarnPick(null)} />
+          ) : !isViewer && (
+            <span className="quick-mute" title={w.kind === 'domain'
+              ? t('Напомнить позже или не следить за доменом')
+              : t('Напомнить позже или не следить за сертификатом')}
+              onClick={(ev) => { ev.stopPropagation(); setWarnPick(key) }}>
+              🔕
+            </span>
+          )}
+        </span>
         <span className="home-open">→</span>
       </div>
     )
@@ -1149,7 +1151,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           {cap(t('Сайты'), siteRows || undefined, siteDown ? 'bad' : 'warn')}
           <div className="home-attention-list">
             {downChecks.slice(0, HOME_LIST_LIMIT).map((c) => (
-              <div role="button" tabIndex={0} key={c.id} className="home-attention-row" onClick={() => onOpen('sites', c.id)}
+              <div role="button" tabIndex={0} key={c.id} className="home-attention-row home-site-alert" onClick={() => onOpen('sites', c.id)}
                 onKeyDown={(e) => activateHomeRow(e, () => onOpen('sites', c.id))}>
                 <span className={`lk-dot ${c.last_status === 'down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
                 <span className="home-attention-ico">🌐</span>
@@ -1170,7 +1172,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                     {c.last_status !== 'up' && c.last_message ? ` · ${c.last_message}` : ''}
                   </span>
                 </span>
-                {recheckAction([{ object_type: 'check', object_id: c.id, kind: 'status' }])}
+                <span className="home-site-alert-actions">
+                  {recheckAction([{ object_type: 'check', object_id: c.id, kind: 'status' }])}
+                </span>
                 <span className="home-open">→</span>
               </div>
             ))}

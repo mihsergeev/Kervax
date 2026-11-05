@@ -39,8 +39,8 @@ import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditName
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
-import { MirrorModal, MirrorsCard, RepoMirrorBlock, RepoMirrorSelection } from './BsrvMirror'
-import { isMirror } from './bsrvMirrorState'
+import { MirrorModal, MirrorPanel, MirrorRowStatus, RepoMirrorBlock, RepoMirrorSelection } from './BsrvMirror'
+import { canMakeMirror, isMirror } from './bsrvMirrorState'
 import { backupDiskTone } from './bsrvStorage'
 import { CoverageAudit } from './CoverageAudit'
 import { helperText } from './helperText'
@@ -2415,6 +2415,7 @@ const BSRV_SECTIONS: SecDef[] = [
   { id: 'overview', label: 'Сводка', group: '' },
   { id: 'repos', label: 'Репозитории', group: 'Репозитории' },
   { id: 'copies', label: 'Вторая копия', group: 'Репозитории' },
+  { id: 'mirror', label: 'Копии с других серверов', group: 'Репозитории' },
   { id: 'archive', label: 'Архив', group: 'Репозитории' },
   { id: 'cleanup', label: 'Чистка', group: 'Репозитории' },
   { id: 'server', label: 'Сервер', group: 'Нода' },
@@ -2529,6 +2530,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
     overview: true,
     repos: true,
     copies: isAdmin || Object.keys(s.backup_mirror ?? {}).length > 0,
+    mirror: isMirror(s) || (isAdmin && canMakeMirror(s)),
     archive: archivedRepos.length > 0,
     cleanup: all.length > 0,
     server: true,
@@ -2605,6 +2607,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   const infoSec: Record<string, SecInfo> = {}
   for (const { id } of BSRV_SECTIONS) infoSec[id] = secInfoOf(items[id] ?? [], ok[id] ?? '', t)
   infoSec.copies.idle = true
+  if (!infoSec.mirror.level) infoSec.mirror.idle = true
   // не проблема, но и не "все в порядке": старый rest-server, трафик без HTTPS
   const soft = (id: string, line: string) => {
     if (!infoSec[id].level) infoSec[id] = { ...infoSec[id], level: 1, line }
@@ -2777,6 +2780,10 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
 
             <RepoMirrorSelection active={cur.id === 'copies'} server={s} repos={every}
               servers={servers} canAct={isAdmin} onChanged={onChanged} />
+
+            {cur.id === 'mirror' && (
+              <MirrorPanel server={s} servers={servers} canAct={isAdmin} onChanged={onChanged} />
+            )}
 
             {cur.id === 'repos' && (
               <div className="srv-sec">
@@ -3032,14 +3039,15 @@ function BulkCleanup({ server, all, muted }: {
   )
 }
 
-function BackupServerRow({ server: s, info, onOpen }: { server: Server; info: BackupServerInfo; onOpen: () => void }) {
+function BackupServerRow({ server: s, info, onOpen }: { server: Server; info?: BackupServerInfo; onOpen: () => void }) {
   const { t } = useI18n()
   const ctx = repoCtx(s)
-  const repos = (info.repos ?? []).filter((r) => !ctx.archived.has(r.name))
-  const archivedN = (info.repos ?? []).length - repos.length
+  const repos = (info?.repos ?? []).filter((r) => !ctx.archived.has(r.name))
+  const archivedN = (info?.repos ?? []).length - repos.length
   const bad = repos.filter((r) => repoBad(r, ctx)).length
-  const pct = diskPct(info)
-  const diskTone = backupDiskTone(info.disk_total ?? 0, diskFree(info))
+  const pct = info ? diskPct(info) : null
+  const diskTone = info ? backupDiskTone(info.disk_total ?? 0, diskFree(info)) : null
+  const mirror = isMirror(s)
   // и покрытие тоже: бэкап-сервер в списке клиентов не рендерится, так что его
   // заглушённые пункты покрытия иначе оказались бы только в сводке
   const repoMutes = collectMutes(s, t, ['repo', 'audit'])
@@ -3052,32 +3060,38 @@ function BackupServerRow({ server: s, info, onOpen }: { server: Server; info: Ba
           <CountryFlag code={s.country} />
           {s.name}
           {s.group_name && <span className="type-chip group-chip">{s.group_name}</span>}
-          <span className="type-chip">rest-server {info.version || '—'}</span>
+          {info && <span className="type-chip">rest-server {info.version || '—'}</span>}
+          {mirror && <span className="type-chip">{t('резервный')}</span>}
           {repoMutes.length > 0 && <MuteChip items={repoMutes} t={t} />}
-          {!info.running && <span className="type-chip off">{t('остановлен')}</span>}
-          {!!info.version && verLt(info.version, RESTSRV_TARGET) && (
+          {info && !info.running && <span className="type-chip off">{t('остановлен')}</span>}
+          {!!info?.version && verLt(info.version, RESTSRV_TARGET) && (
             <span className="type-chip upd" title={t('доступно обновление до {v}', { v: RESTSRV_TARGET })}>
               ⬆ {RESTSRV_TARGET}
             </span>
           )}
         </div>
-        <div className="mono muted small">
-          {t('репозиториев: {n}', { n: repos.length })}
-          {bad > 0 ? ` · ${t('проблемных: {b}', { b: bad })}` : ''}
-          {archivedN > 0 ? ` · ${t('в архиве: {n}', { n: archivedN })}` : ''}
-          {pct != null && (
-            <>
-              {' · '}
-              <span className={diskTone === 'bad' ? 't-down' : diskTone === 'warn' ? 't-degraded' : ''}>{t('диск занят на {p}%', { p: pct })}</span>
-            </>
-          )}
+        {info && (
+          <div className="mono muted small">
+            {t('репозиториев: {n}', { n: repos.length })}
+            {bad > 0 ? ` · ${t('проблемных: {b}', { b: bad })}` : ''}
+            {archivedN > 0 ? ` · ${t('в архиве: {n}', { n: archivedN })}` : ''}
+            {pct != null && (
+              <>
+                {' · '}
+                <span className={diskTone === 'bad' ? 't-down' : diskTone === 'warn' ? 't-degraded' : ''}>{t('диск занят на {p}%', { p: pct })}</span>
+              </>
+            )}
+          </div>
+        )}
+        {mirror && <MirrorRowStatus server={s} />}
+      </div>
+      {info && (
+        <div className="hs-host-count mono">
+          <span className={bad > 0 ? 't-down' : 't-up'}>
+            {bad > 0 ? `${bad} ⚠` : `${repos.length}`}
+          </span>
         </div>
-      </div>
-      <div className="hs-host-count mono">
-        <span className={bad > 0 ? 't-down' : 't-up'}>
-          {bad > 0 ? `${bad} ⚠` : `${repos.length}`}
-        </span>
-      </div>
+      )}
     </button>
   )
 }
@@ -3856,15 +3870,15 @@ export function BackupsPage({
     return () => window.clearInterval(id)
   }, [load])
 
-  const srvHosts = (servers ?? [])
+  const backupServers = (servers ?? [])
+    .filter((s) => s.last_report?.backup_server?.present || isMirror(s))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  // Только rest-server принимает клиентские бэкапы, но оба типа видны в общем списке.
+  const srvHosts = backupServers
     .map((s) => ({ s, d: s.last_report?.backup_server }))
     .filter((x): x is { s: Server; d: BackupServerInfo } => !!x.d?.present)
-    .sort((a, b) => a.s.name.localeCompare(b.s.name))
-  // резервный сервер бэкапов открывается своим окном: по ссылке алерта (?backupsrv=id&sec=mirror)
-  // или по строке в карточке "Резервные серверы"
-  const openMirror = (servers ?? []).find((s) => s.id === openSrvId && isMirror(s)
-    && (linkSrvSec.sec === 'mirror' || !s.last_report?.backup_server?.present))
-  const openSrv = openMirror ? undefined : srvHosts.find(({ s }) => s.id === openSrvId)
+  const openSrv = srvHosts.find(({ s }) => s.id === openSrvId)
+  const openMirror = !openSrv && backupServers.find((s) => s.id === openSrvId && isMirror(s))
   const covSrv = (servers ?? []).find((x) => x.id === covId) ?? null
   const deploySrv = (servers ?? []).find((x) => x.id === (moveSrvId ?? deploySrvId))
 
@@ -3950,7 +3964,7 @@ export function BackupsPage({
     .map((h) => ({ ...h, hint: tile === 'verify' ? verifyHit(h.s, t) : tile === 'problems' ? probHint(h.s.id) : null }))
     .filter((h) => tile !== 'verify' || h.hint)
     .sort((a, b) => a.s.name.localeCompare(b.s.name))
-  const srvHostsView = showSec('servers') ? srvHosts.filter(({ s }) => match(s)) : []
+  const srvHostsView = showSec('servers') ? backupServers.filter(match) : []
   const ownOnlyView = showSec('nobackup') ? ownOnly.filter(match) : []
   const setupBadView = showSec('nobackup') ? setupBad.filter(match) : []
   const noBackupReqView = showSec('nobackup') ? noBackupReq.filter(match) : []
@@ -4019,7 +4033,7 @@ export function BackupsPage({
           )}
         </div>
       </div>
-      {servers && allHosts.length + srvHosts.length + noBackupAll.length + ownOnly.length + setupBad.length > 0 && (
+      {servers && allHosts.length + backupServers.length + noBackupAll.length + ownOnly.length + setupBad.length > 0 && (
         <div className="home-tiles sec-tiles">
           <HomeTile
             label={t('Бэкапы')}
@@ -4049,15 +4063,15 @@ export function BackupsPage({
               onOpen={tileProps('nobackup').onClick}
             />
           )}
-          {srvHosts.length > 0 && (
+          {backupServers.length > 0 && (
             <HomeTile
               label={t('Бэкап-серверы')}
-              value={String(srvHosts.length)}
+              value={String(backupServers.length)}
               ok={pctMax >= 0 && fullest ? (srvStat.length > 1
                 ? t('диск больше всех занят у {name}: {p}%', { name: fullest.name, p: pctMax })
                 : t('диск занят на {p}%', { p: pctMax })) : undefined}
               okTone={fullest && fullest.tone !== 'ok' ? 'warn' : 'muted'}
-              foot={t('репозиториев: {n}', { n: repoN })}
+              foot={srvHosts.length ? t('репозиториев: {n}', { n: repoN }) : undefined}
               {...tileProps('servers')}
               onOpen={tileProps('servers').onClick}
             />
@@ -4091,7 +4105,7 @@ export function BackupsPage({
           )}
         </div>
       )}
-      {allHosts.length > 1 && (
+      {allHosts.length + backupServers.length > 1 && (
         <div className="checks-search-row">
           {/* Chrome видел на странице поля пароля (сейф), считал её формой входа и
               подставлял сюда сохранённый логин: поиск молча превращался в фильтр
@@ -4118,16 +4132,12 @@ export function BackupsPage({
       )}
       {tile && <TileFilterChip label={filterLabel[tile]} onClear={() => setTile(null)} />}
       {err && <p className="form-error">{err}</p>}
-      {servers && allHosts.length === 0 && srvHosts.length === 0 && noBackupAll.length === 0 && ownOnly.length === 0 && (
+      {servers && allHosts.length === 0 && backupServers.length === 0 && noBackupAll.length === 0 && ownOnly.length === 0 && (
         <div className="card muted">
           {t('Ноды с restic-бэкапом не найдены. Агент определяет бэкап сам (метрики + systemd); если бэкап есть, но раздел пуст — обновите агент.')}
         </div>
       )}
       <div className="net-cards hs-groups">
-        {servers && (
-          <MirrorsCard servers={servers} canAct={isAdmin} onChanged={load}
-            onOpen={(id) => { setOpenSrvId(id); setLinkSrvSec({ id, sec: 'mirror' }) }} />
-        )}
         {srvHostsView.length > 0 && (
           <div className="chart-card net-card net-card-wide">
             <div className="net-head">
@@ -4137,8 +4147,13 @@ export function BackupsPage({
               </div>
             </div>
             <div className="loc-results">
-              {srvHostsView.map(({ s, d }) => (
-                <BackupServerRow key={s.id} server={s} info={d} onOpen={() => setOpenSrvId(s.id)} />
+              {srvHostsView.map((s) => (
+                <BackupServerRow key={s.id} server={s}
+                  info={s.last_report?.backup_server?.present ? s.last_report.backup_server : undefined}
+                  onOpen={() => {
+                    setLinkSrvSec({ id: s.id, sec: null })
+                    setOpenSrvId(s.id)
+                  }} />
               ))}
             </div>
           </div>
@@ -4213,7 +4228,7 @@ export function BackupsPage({
           srvHostsView.length + noBackupReqView.length + noBackupOptView.length + ownOnlyView.length > 0 && (
           <div className="chart-cap hs-sect">{t('Клиенты (что бэкапится)')}</div>
         )}
-        {servers && (tile ? nothing : allHosts.length > 0 && hosts.length === 0) && (
+        {servers && (tile ? nothing : q && nothing) && (
           <div className="chart-card net-card net-card-wide muted">
             <div>
               {q
@@ -4341,7 +4356,7 @@ export function BackupsPage({
       )}
       {openSrv && (
         <BackupServerModal
-          key={openSrv.s.id}
+          key={`${openSrv.s.id}:${linkSrvSec.id === openSrv.s.id ? linkSrvSec.sec ?? '' : ''}`}
           server={openSrv.s}
           info={openSrv.d}
           servers={servers ?? []}

@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.105] - 2026-11-06
+
+- Manage primary backups and incoming second copies from one backup server card. An existing backup server can enable the reserve role in its Incoming copies section. Select repositories to copy in the source server's Second copy tab.
+- The backup window warning recognizes completed runs when the systemd start time and the restic metric differ. Active overruns and late finishes still appear.
+- Site alerts on the dashboard keep the domain and status readable when space is tight. Recheck, mute and navigation controls wrap within the card.
+
 ## [1.8.104] - 2026-11-06
 
 - Enable scheduled Qdrant snapshots for standalone Docker instances in Backups > Coverage, with a choice of dump directory and retention.

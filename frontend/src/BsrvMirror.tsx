@@ -3,13 +3,14 @@
 // только для чтения на основном; панель только называет, что копировать. Удалить копию, сменить
 // адрес известного основного, разморозить копию - команды root на самом резервном, здесь они только
 // показаны.
-import { Fragment, useState, type ReactNode } from 'react'
+import { Fragment, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   backupMirrorPull, backupMirrorRole, backupMirrorSync, backupRepoMirror, backupRepoMirrors,
   type MirrorCopy, type MirrorReport, type RepoStat, type Server,
 } from './api'
 import { CountryFlag } from './CountryFlag'
+import { useUrlParam } from './deeplink'
 import { FixCmd } from './FixSteps'
 import { NetTile } from './NetLinks'
 import { OsIcon } from './osIcon'
@@ -20,16 +21,9 @@ import { fmtBytes } from './units'
 import type { RepoTone } from './bsrvRepos'
 import { backupDiskTone } from './bsrvStorage'
 import {
-  HELPER, MIRROR_HELPER_MIN, ago, copyKey, copyShort, copyTone, entryDrift, errText, frozenText, isMirror,
+  HELPER, MIRROR_HELPER_MIN, ago, canMakeMirror, copyKey, copyShort, copyTone, entryDrift, errText, frozenText, isMirror,
   mirrorNotReady, mirrorReport, running, syncNotes, verLt, verifyText, verifyTone, when,
 } from './bsrvMirrorState'
-
-function mirrorCandidates(servers: Server[]): Server[] {
-  // Пустые бэкап-серверы подходят, но действующие хранилища и Windows сюда не входят.
-  return servers.filter((s) => !isMirror(s) && !s.last_report?.backup_server?.repos?.length
-    && s.last_report?.platform !== 'windows' && !s.agent_version?.startsWith('windows-'))
-    .sort((a, b) => a.name.localeCompare(b.name))
-}
 
 export function RepoMirrorSelection({ active, server: s, repos, servers, canAct, onChanged }: {
   active: boolean; server: Server; repos: RepoStat[]; servers: Server[]; canAct: boolean
@@ -45,7 +39,7 @@ export function RepoMirrorSelection({ active, server: s, repos, servers, canAct,
 
   const others = servers.filter((m) => m.id !== s.id)
   const mirrors = others.filter(isMirror).sort((a, b) => a.name.localeCompare(b.name))
-  const candidates = canAct ? mirrorCandidates(others) : []
+  const candidates = canAct ? others.filter(canMakeMirror).sort((a, b) => a.name.localeCompare(b.name)) : []
   const available = repos.filter((r) => r.valid && (canAct || s.backup_mirror?.[r.name]))
     .sort((a, b) => a.name.localeCompare(b.name))
   const visible = available.filter((r) => r.name.toLowerCase().includes(query.trim().toLowerCase()))
@@ -297,7 +291,36 @@ const TONE_DOT: Record<RepoTone, string> = { bad: ' lk-dot-bad', warn: ' lk-dot-
 
 /** Окно резервного сервера: копии слева по группам, выбранная справа, внизу настройки и команды. */
 export function MirrorModal({ server: s, servers, canAct, onChanged, onClose }: {
-  server: Server; servers: Server[]; canAct: boolean; onChanged: () => void; onClose: () => void
+  server: Server; servers: Server[]; canAct: boolean; onChanged: () => Promise<void>; onClose: () => void
+}) {
+  const { t } = useI18n()
+  useUrlParam('sec', 'mirror')
+  return createPortal(
+    <div className="modal-backdrop">
+      <div className="card detail detail-server hs-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="detail-head">
+          <div className="detail-title">
+            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
+            <OsIcon os={s.os} size={18} />
+            <CountryFlag code={s.country} />
+            <h3>{s.name}</h3>
+            <span className="type-chip">{t('резервный')}</span>
+          </div>
+          <div className="detail-head-actions">
+            <button className="ghost icon-btn" onClick={onClose} title={t('Закрыть')}>✕</button>
+          </div>
+        </div>
+        <div className="srv-main mirror-main">
+          <MirrorPanel server={s} servers={servers} canAct={canAct} onChanged={onChanged} onRoleRemoved={onClose} />
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+export function MirrorPanel({ server: s, servers, canAct, onChanged, onRoleRemoved }: {
+  server: Server; servers: Server[]; canAct: boolean; onChanged: () => Promise<void>; onRoleRemoved?: () => void
 }) {
   const { t } = useI18n()
   const [sel, setSel] = useState('')
@@ -314,115 +337,122 @@ export function MirrorModal({ server: s, servers, canAct, onChanged, onClose }: 
   const srcServer = (src: string) => servers.find((p) => Object.values(p.backup_mirror ?? {}).some((e) => e.mirror === s.id && e.src === src))
   const total = copies.reduce((a, c) => a + (c.bytes || 0), 0)
   const pct = rep?.disk_total ? Math.round(100 - (rep.disk_free / rep.disk_total) * 100) : null
-  const pull = async () => {
+  const run = async (action: () => Promise<unknown>) => {
     setBusy(true)
     try {
-      await backupMirrorPull(s.id)
-      onChanged()
+      await action()
+      await onChanged()
     } catch (e) {
       toastError(e)
     } finally {
       setBusy(false)
     }
   }
-  const notReady = mirrorNotReady(s, t)
-
-  return createPortal(
-    <div className="modal-backdrop">
-      <div className="card detail detail-server hs-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="detail-head">
-          <div className="detail-title">
-            <span className={`sdot ${s.online ? 'sdot-up' : 'sdot-down'}`} />
-            <OsIcon os={s.os} size={18} />
-            <CountryFlag code={s.country} />
-            <h3>{s.name}</h3>
-            <span className="type-chip">{t('резервный')}</span>
-          </div>
-          <div className="detail-head-actions">
-            <button className="ghost icon-btn" onClick={onClose} title={t('Закрыть')}>✕</button>
-          </div>
-        </div>
-        {rep && (
-          <div className="srv-meta srv-meta-line">
-            <span className="srv-meta-item"><span className="srv-meta-k">{t('копии')}</span> <span className="mono">{rep.data_dir}</span></span>
-            {verLt(rep.helper, MIRROR_HELPER_MIN) && <span className="srv-meta-item"><span className="srv-meta-k">{t('удаленное на основном держится')}</span> {t('{n} дн.', { n: rep.keep_days })}</span>}
-            <span className="srv-meta-item"><span className="srv-meta-k">{t('ежедневная сверка')}</span> {rep.pull_at}</span>
-            <span className="srv-meta-item"><span className="srv-meta-k">mirror-setup</span> {rep.helper}</span>
-            <span className="srv-meta-item"><span className="srv-meta-k">{t('обновлено')}</span> {fmtRel(s.last_seen)}</span>
-          </div>
-        )}
-        <div className="srv-main mirror-main">
-          {notReady ? (
-            <div className="repo-fix repo-fix-warn">
-              <div>{t('Сервер отмечен резервным, но копировать на него пока нельзя: {why}.', { why: notReady })}</div>
-              <div>{t('Helper mirror-setup ставится плейбуком kervax_helpers.yml: сервер уже в "Требует действий".')}</div>
-              <FixCmd cmd={`ansible-playbook playbooks/kervax_helpers.yml -l ${s.name}`} />
-            </div>
-          ) : (
-            <>
-              <div className="net-tiles srv-tiles">
-                <NetTile label={t('Копии')} value={String(copies.filter((c) => c.enabled).length)}
-                  sub={copies.some((c) => !c.enabled) ? t('на паузе: {n}', { n: copies.filter((c) => !c.enabled).length }) : undefined}
-                  tone={groups.some((g) => g.tone === 'bad') ? 'bad' : copies.length ? 'ok' : undefined} />
-                <NetTile label={t('Размер копий')} value={fmtBytes(total, '0')} />
-                {pct != null && rep && (
-                  <NetTile label={t('Место на диске')} value={`${pct}%`}
-                    sub={t('свободно {f} из {tt}', { f: fmtBytes(rep.disk_free), tt: fmtBytes(rep.disk_total) })}
-                    tone={backupDiskTone(rep.disk_total, rep.disk_free)} />
-                )}
-                {rep && (
-                  <NetTile label={t('Следующая перекачка')} value={rep.running ? t('идет') : rep.next_run ? when(rep.next_run) : '—'}
-                    sub={rep.running && rep.current ? rep.current : undefined} />
-                )}
-              </div>
-              {copies.length === 0 ? (
-                <div className="srv-empty">
-                  {t('Копий пока нет. Откройте вкладку «Вторая копия» на основном бэкап-сервере и выберите репозитории.')}
-                </div>
-              ) : (
-                <div className="bsrv-md">
-                  <div className="bsrv-md-list">
-                    {groups.map((g) => (
-                      <Fragment key={g.tone}>
-                        <div className={`bsrv-md-cap bsrv-md-cap-${g.tone}`}>{g.cap} <span>{g.list.length}</span></div>
-                        {g.list.map((c) => (
-                          <button key={copyKey(c)} className={`bsrv-md-it${cur && copyKey(c) === copyKey(cur) ? ' on' : ''}`} onClick={() => setSel(copyKey(c))}>
-                            <span className={`lk-dot${TONE_DOT[g.tone]}`} />
-                            <span className="bsrv-md-nm mono">{copyKey(c)}</span>
-                            <span className={`bsrv-md-r${g.tone === 'bad' ? ' t-down' : g.tone === 'warn' ? ' t-degraded' : ''}`}>
-                              {rep && copyShort(c, rep, t)}
-                            </span>
-                          </button>
-                        ))}
-                      </Fragment>
-                    ))}
-                  </div>
-                  <div className="bsrv-md-body">
-                    <select className="modal-sort bsrv-md-sel" value={cur ? copyKey(cur) : ''} onChange={(e) => setSel(e.target.value)}>
-                      {groups.map((g) => (
-                        <optgroup key={g.tone} label={g.cap}>
-                          {g.list.map((c) => <option key={copyKey(c)} value={copyKey(c)}>{copyKey(c)}</option>)}
-                        </optgroup>
-                      ))}
-                    </select>
-                    {cur && rep && <CopyDetail c={cur} rep={rep} primary={srcServer(cur.src)} canAct={canAct} />}
-                  </div>
-                </div>
-              )}
-              {canAct && copies.some((c) => c.enabled) && (
-                <div className="repo-acts">
-                  <button className="ghost row-act" disabled={busy || rep?.running} onClick={pull}>
-                    {busy ? '…' : rep?.running ? t('Перекачка уже идет') : t('Забрать сейчас')}
-                  </button>
-                </div>
-              )}
-              {rep && <MirrorHowTo rep={rep} />}
-            </>
-          )}
+  if (!isMirror(s)) {
+    return canAct && canMakeMirror(s) && (
+      <div className="srv-sec">
+        <div className="muted small">{t('Этот сервер может хранить вторые копии выбранных репозиториев с других бэкап-серверов. Он сам забирает их по SSH.')}</div>
+        <div className="repo-acts">
+          <button className="ghost row-act" disabled={busy} onClick={() => run(() => backupMirrorRole(s.id, true))}>
+            {busy ? '…' : t('Сделать резервным')}
+          </button>
         </div>
       </div>
-    </div>,
-    document.body,
+    )
+  }
+
+  const notReady = mirrorNotReady(s, t)
+  const hasAssignments = servers.some((p) => Object.values(p.backup_mirror ?? {}).some((e) => e.mirror === s.id))
+
+  return (
+    <div className="srv-sec">
+      {rep && (
+        <div className="srv-meta srv-meta-line">
+          <span className="srv-meta-item"><span className="srv-meta-k">{t('копии')}</span> <span className="mono">{rep.data_dir}</span></span>
+          {verLt(rep.helper, MIRROR_HELPER_MIN) && <span className="srv-meta-item"><span className="srv-meta-k">{t('удаленное на основном держится')}</span> {t('{n} дн.', { n: rep.keep_days })}</span>}
+          <span className="srv-meta-item"><span className="srv-meta-k">{t('ежедневная сверка')}</span> {rep.pull_at}</span>
+          <span className="srv-meta-item"><span className="srv-meta-k">mirror-setup</span> {rep.helper}</span>
+          <span className="srv-meta-item"><span className="srv-meta-k">{t('обновлено')}</span> {fmtRel(s.last_seen)}</span>
+        </div>
+      )}
+      {notReady ? (
+        <div className="repo-fix repo-fix-warn" role="status">
+          <div>{t('Сервер отмечен резервным, но копировать на него пока нельзя: {why}.', { why: notReady })}</div>
+          <div>{t('Helper mirror-setup ставится плейбуком kervax_helpers.yml: сервер уже в "Требует действий".')}</div>
+          <FixCmd cmd={`ansible-playbook playbooks/kervax_helpers.yml -l ${s.name}`} />
+        </div>
+      ) : (
+        <>
+          <div className="net-tiles srv-tiles">
+            <NetTile label={t('Копии')} value={String(copies.filter((c) => c.enabled).length)}
+              sub={copies.some((c) => !c.enabled) ? t('на паузе: {n}', { n: copies.filter((c) => !c.enabled).length }) : undefined}
+              tone={groups.some((g) => g.tone === 'bad') ? 'bad' : copies.length ? 'ok' : undefined} />
+            <NetTile label={t('Размер копий')} value={fmtBytes(total, '0')} />
+            {pct != null && rep && (
+              <NetTile label={t('Место на диске')} value={`${pct}%`}
+                sub={t('свободно {f} из {tt}', { f: fmtBytes(rep.disk_free), tt: fmtBytes(rep.disk_total) })}
+                tone={backupDiskTone(rep.disk_total, rep.disk_free)} />
+            )}
+            {rep && (
+              <NetTile label={t('Следующая перекачка')} value={rep.running ? t('идет') : rep.next_run ? when(rep.next_run) : '—'}
+                sub={rep.running && rep.current ? rep.current : undefined} />
+            )}
+          </div>
+          {copies.length === 0 ? (
+            <div className="srv-empty">
+              {t('Копий пока нет. Откройте вкладку «Вторая копия» на основном бэкап-сервере и выберите репозитории.')}
+            </div>
+          ) : (
+            <div className="bsrv-md">
+              <div className="bsrv-md-list">
+                {groups.map((g) => (
+                  <Fragment key={g.tone}>
+                    <div className={`bsrv-md-cap bsrv-md-cap-${g.tone}`}>{g.cap} <span>{g.list.length}</span></div>
+                    {g.list.map((c) => (
+                      <button key={copyKey(c)} className={`bsrv-md-it${cur && copyKey(c) === copyKey(cur) ? ' on' : ''}`} onClick={() => setSel(copyKey(c))}>
+                        <span className={`lk-dot${TONE_DOT[g.tone]}`} />
+                        <span className="bsrv-md-nm mono">{copyKey(c)}</span>
+                        <span className={`bsrv-md-r${g.tone === 'bad' ? ' t-down' : g.tone === 'warn' ? ' t-degraded' : ''}`}>
+                          {rep && copyShort(c, rep, t)}
+                        </span>
+                      </button>
+                    ))}
+                  </Fragment>
+                ))}
+              </div>
+              <div className="bsrv-md-body">
+                <select className="modal-sort bsrv-md-sel" value={cur ? copyKey(cur) : ''} onChange={(e) => setSel(e.target.value)}>
+                  {groups.map((g) => (
+                    <optgroup key={g.tone} label={g.cap}>
+                      {g.list.map((c) => <option key={copyKey(c)} value={copyKey(c)}>{copyKey(c)}</option>)}
+                    </optgroup>
+                  ))}
+                </select>
+                {cur && rep && <CopyDetail c={cur} rep={rep} primary={srcServer(cur.src)} canAct={canAct} />}
+              </div>
+            </div>
+          )}
+          {canAct && copies.some((c) => c.enabled) && (
+            <div className="repo-acts">
+              <button className="ghost row-act" disabled={busy || rep?.running} onClick={() => run(() => backupMirrorPull(s.id))}>
+                {busy ? '…' : rep?.running ? t('Перекачка уже идет') : t('Забрать сейчас')}
+              </button>
+            </div>
+          )}
+          {rep && <MirrorHowTo rep={rep} />}
+        </>
+      )}
+      {canAct && s.backup_mirror_role && !copies.length && !hasAssignments && (
+        <div className="repo-acts">
+          <button className="ghost row-act" disabled={busy} onClick={() => run(async () => {
+            await backupMirrorRole(s.id, false)
+            onRoleRemoved?.()
+          })}>
+            {t('Снять роль')}
+          </button>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -558,86 +588,20 @@ function MirrorHowTo({ rep }: { rep: MirrorReport }) {
   )
 }
 
-/** Карточка "Резервные серверы" на странице бэкапов: строка на резервный, кнопка сделать резервным. */
-export function MirrorsCard({ servers, canAct, onOpen, onChanged }: {
-  servers: Server[]; canAct: boolean; onOpen: (id: number) => void; onChanged: () => void
-}) {
+export function MirrorRowStatus({ server: s }: { server: Server }) {
   const { t } = useI18n()
-  const [pick, setPick] = useState('')
-  const [busy, setBusy] = useState(false)
-  const mirrors = servers.filter(isMirror).sort((a, b) => a.name.localeCompare(b.name))
-  const cands = mirrorCandidates(servers)
-  if (!mirrors.length && !canAct) return null
-  const make = async () => {
-    if (!pick) return
-    setBusy(true)
-    try {
-      await backupMirrorRole(Number(pick), true)
-      setPick('')
-      onChanged()
-    } catch (e) {
-      toastError(e)
-    } finally {
-      setBusy(false)
-    }
-  }
-  const unmake = async (id: number) => {
-    try {
-      await backupMirrorRole(id, false)
-      onChanged()
-    } catch (e) {
-      toastError(e)
-    }
-  }
-  const rows: ReactNode[] = mirrors.map((m) => {
-    const rep = mirrorReport(m)
-    const cs = rep?.copies ?? []
-    const bad = rep ? cs.filter((c) => copyTone(c, rep) === 'bad').length : 0
-    const warn = rep ? cs.filter((c) => copyTone(c, rep) === 'warn').length : 0
-    const nr = mirrorNotReady(m, t)
-    return (
-      <div key={m.id} className="loc-res docker-row repo-row mirror-row" onClick={() => onOpen(m.id)} role="button">
-        <span className={`lk-dot${bad ? ' lk-dot-bad' : warn || nr ? ' lk-dot-warn' : cs.length ? ' lk-dot-ok' : ''}`} />
-        <span className="mono">{m.name}</span>
-        <span className={`muted small${bad ? ' t-down' : warn || nr ? ' t-degraded' : ''}`}>
-          {nr || (cs.length
-            ? t('копий: {n}, {sz}', { n: cs.filter((c) => c.enabled).length, sz: fmtBytes(cs.reduce((a, c) => a + c.bytes, 0), '0') })
-              + (bad ? `, ${t('требуют внимания: {n}', { n: bad })}` : '')
-            : t('копий пока нет'))}
-        </span>
-        {canAct && !cs.length && !Object.values(servers).some((p) => Object.values(p.backup_mirror ?? {}).some((e) => e.mirror === m.id)) && (
-          <button className="ghost row-act" onClick={(e) => { e.stopPropagation(); unmake(m.id) }}>{t('Снять роль')}</button>
-        )}
-      </div>
-    )
-  })
+  const rep = mirrorReport(s)
+  const copies = rep?.copies ?? []
+  const bad = rep ? copies.filter((c) => copyTone(c, rep) === 'bad').length : 0
+  const warn = rep && copies.some((c) => copyTone(c, rep) === 'warn')
+  const notReady = mirrorNotReady(s, t)
+  const summary = copies.length
+    ? t('копий: {n}, {sz}', { n: copies.filter((c) => c.enabled).length, sz: fmtBytes(copies.reduce((a, c) => a + c.bytes, 0), '0') })
+    : t('копий пока нет')
   return (
-    <div className="chart-card net-card net-card-wide">
-      <div className="net-head">
-        <div className="chart-cap net-cap">
-          {t('Резервные серверы')}
-          <span className="net-n">{mirrors.length}</span>
-        </div>
-      </div>
-      <div className="loc-results">
-        {rows}
-        {canAct && (
-          <div className="mirror-make">
-            <span className="muted small">
-              {t('Резервный держит вторую копию выбранных репозиториев с разных серверов бэкапов. Взломав основной сервер бэкапов или клиента, удалить ее нельзя.')}
-            </span>
-            <div className="repo-acts">
-              <select className="modal-sort" value={pick} onChange={(e) => setPick(e.target.value)}>
-                <option value="">{t('сервер…')}</option>
-                {cands.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-              <button className="ghost row-act" disabled={busy || !pick} onClick={make}>
-                {busy ? '…' : t('Сделать резервным')}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
+    <span className={`mono muted small${bad ? ' t-down' : warn || notReady ? ' t-degraded' : ''}`}>
+      {notReady || summary}
+      {bad > 0 && ` · ${t('требуют внимания: {n}', { n: bad })}`}
+    </span>
   )
 }

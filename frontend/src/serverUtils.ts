@@ -329,7 +329,11 @@ export function backupWindowNote(s: Server, now: number = Date.now()): string | 
   if (!b || !backupAlive(b)) return null
   const deadline = s.backup_deadline_hour ?? 8
   const started = b.started_ts ?? 0
-  const ended = b.last_backup_ts ?? 0
+  const last = b.last_backup_ts ?? 0
+  const duration = b.full_duration_sec ?? 0
+  // systemd даёт полную длительность после завершения запуска. Если метрика старее старта,
+  // оцениваем конец этого запуска по systemd, чтобы не взять время предыдущего прогона.
+  const ended = started > last && duration > 0 ? started + duration : last
   if (!started && !ended) return null
   const hourOf = (ts: number) => new Date(ts * 1000).getHours()
   const hhmm = (ts: number) =>
@@ -337,7 +341,6 @@ export function backupWindowNote(s: Server, now: number = Date.now()): string | 
   // Окно - ночь до дедлайна. Начатый днем или вечером (расписание на 18:00, запуск руками) в
   // окно и не собирался: "позже окна" про него вводило в заблуждение
   if (started && hourOf(started) >= deadline && hourOf(started) < 22) return null
-  // бэкап ещё идёт (последний старт новее последнего завершения), и уже позже дедлайна.
   // Дедлайн - ближайшие {deadline}:00 после старта: начатый в 23:30 бэкап укладывается до 8:00
   // завтра. Раньше сверяли только час "сейчас", и в 23:31 любой ночной прогон "не уложился"
   const running = started > ended

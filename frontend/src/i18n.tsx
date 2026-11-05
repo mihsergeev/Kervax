@@ -244,6 +244,9 @@ const EN: Record<string, string> = {
   'Резервные серверы': 'Mirror servers',
   'Резервный держит вторую копию выбранных репозиториев с разных серверов бэкапов. Взломав основной сервер бэкапов или клиента, удалить ее нельзя.': 'A mirror keeps a second copy of chosen repositories from different backup servers. Breaking into the main backup server or a client does not let anyone remove it.',
   'сервер…': 'server…',
+  'Копии с других серверов': 'Copies from other servers',
+  'Этот сервер может хранить вторые копии выбранных репозиториев с других бэкап-серверов. Он сам забирает их по SSH.':
+    'This server can keep copies of selected repositories from other backup servers. It pulls them over SSH.',
   'Сделать резервным': 'Make it a mirror',
   'включил копию репозитория на резервном': 'turned on a copy of a repository on a mirror',
   'снял копирование репозитория на резервный': 'turned off copying a repository to a mirror',

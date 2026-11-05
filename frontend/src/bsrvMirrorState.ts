@@ -51,6 +51,11 @@ export function isMirror(s: Server): boolean {
   return !!s.backup_mirror_role || !!s.last_report?.extras?.['backup-mirror']
 }
 
+/** Роль можно добавить и действующему бэкап-серверу. */
+export function canMakeMirror(s: Server): boolean {
+  return !isMirror(s) && s.last_report?.platform !== 'windows' && !s.agent_version?.startsWith('windows-')
+}
+
 export function copyKey(c: MirrorCopy): string {
   return `${c.src}/${c.repo}`
 }
