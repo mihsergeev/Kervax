@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format is based on
 - Enable scheduled Qdrant snapshots for standalone Docker instances in Backups > Coverage, with a choice of dump directory and retention.
 - The backup job saves a compressed snapshot of all collections and aliases before the file backup. Coverage shows failures and keeps the last good archive. For recovery, decompress the archive and start a standalone Qdrant with its storage snapshot option.
 - Qdrant snapshots require Linux agent 2.66 and backup helper 0.51.
+- Updated the bundled DB-IP country database to the November 2026 edition. Country flags still work offline, with a link to the data source in the panel footer.
 
 ## [1.8.103] - 2026-11-05
 
