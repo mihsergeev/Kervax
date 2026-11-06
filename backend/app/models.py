@@ -786,6 +786,7 @@ class Server(Base):
     # Позволяет заглушить, напр., OOM на день, не теряя offline/CPU/диск. Истёкшие
     # записи игнорируются (и вычищаются при следующей записи снуза).
     alert_snoozes: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    backup_growth_ack_ts: Mapped[float | None] = mapped_column(Float, nullable=True)
     # заглушённые репозитории бэкап-сервера (по имени): разовые/неактуальные — не
     # считаем проблемой, не алертим на устаревание, показываем приглушённо.
     backup_repo_mutes: Mapped[list | None] = mapped_column(JSON, nullable=True)

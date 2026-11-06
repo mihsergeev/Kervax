@@ -8009,6 +8009,11 @@ async def evaluate_servers(
                 # сломано"; что останется к закрытию, станет известной проблемой
                 continue
             prev = int(st.get(key, 0))
+            growth_run = (ctx.get("items") or {}).get("ts") if key == "backup_growth" and level else None
+            if growth_run is not None and prev and s.backup_growth_ack_ts is not None:
+                # The next report can arrive before a tick closes the acknowledged alert.
+                if growth_run > s.backup_growth_ack_ts >= (st.get("backup_growth_at") or 0):
+                    prev = 0
             if key in fix_now:
                 # отметили "починили" (app/fixed.py): закрываем сейчас, без выдержки отбоя. Отбой в чат -
                 # если о беде говорили (придержанное распорядком и тихий повтор прошли без сообщения).
@@ -8326,6 +8331,8 @@ async def evaluate_servers(
                                               _aware(s.last_seen) if key == "offline" and s.last_seen else now)
                 fires.append(fmsg)
                 fire_apply.append((s.id, key, level))
+                if growth_run is not None:
+                    fire_apply.append((s.id, "backup_growth_at", growth_run))
                 if not tracks_members:
                     fire_apply.append((s.id, lvk, max(told_lvl, level) if prev else level))
                 if pressure_causes:
@@ -8356,6 +8363,8 @@ async def evaluate_servers(
                 if key in _SILENT_RECOVERY:
                     apply(s.id, key, 0)
                     apply(s.id, lvk, None)
+                    if key == "backup_growth":
+                        apply(s.id, "backup_growth_at", None)
                     continue
                 kids_tail = ""
                 if key == "offline":

@@ -54,12 +54,12 @@ def usual(rs: list[dict]) -> float:
 
 def jump(server, now: datetime) -> dict | None:
     """Последний прогон добавил в разы больше обычного: {level, text, st, usual, ts}. None - норма,
-    мало истории или прогон давний."""
+    мало истории, прогон давний или отмечен как ожидаемый."""
     rs = runs(server)
     if len(rs) < _MIN_HISTORY + 1:
         return None
     last = rs[-1]
-    if now.timestamp() - float(last["ts"]) > _FRESH:
+    if last["ts"] == getattr(server, "backup_growth_ack_ts", None) or now.timestamp() - float(last["ts"]) > _FRESH:
         return None
     st, base = float(last.get("st") or 0), usual(rs)
     if st < _JUMP_RATIO * base or st - base < _JUMP_MIN:

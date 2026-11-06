@@ -118,6 +118,7 @@ export const ACT: Record<string, string> = {
   backup_set_paths: 'изменил пути бэкапа',
   backup_set_schedule: 'изменил расписание бэкапа',
   backup_run_now: 'запустил бэкап',
+  backup_growth_ack: 'отметил прирост бэкапа как ожидаемый',
   backup_dump_setup: 'настроил дампы баз',
   backup_dump_remove: 'убрал дампы баз',
   backup_restic_update: 'обновил restic',

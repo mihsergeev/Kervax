@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.110] - 2026-11-06
+
+- Mark a backup size spike as expected in Backups > Runs. The panel clears the warning for that run and keeps it in the chart. Future spikes can still trigger alerts.
+
 ## [1.8.109] - 2026-11-06
 
 - PostgreSQL backup coverage shows database names and estimated sizes when inventory is available. It waits for incomplete Docker inventory and rejects a stale host dump request when PostgreSQL runs in a container.

@@ -1823,6 +1823,7 @@ class ServerOut(BaseModel):
     docker_since: dict[str, str] = Field(default_factory=dict)
     # последний прогон бэкапа добавил в разы больше обычного: {level, text, st, usual, ts}
     backup_growth: dict | None = None
+    backup_growth_ack_ts: float | None = None
     # настроен ли бэкап (app/backup_state.py): {state: ok|partial|none, reason, since, traces} -
     # одно правило для главной, раздела "Бэкапы" и формы настройки
     backup_state: dict | None = None
@@ -1859,6 +1860,10 @@ class ServerOut(BaseModel):
     bsrv_cadence: dict[str, int] = Field(default_factory=dict)
     # репозитории, у которых не работает чистка: имя -> причина (не открывает, падает, не идет)
     bsrv_prune: dict[str, str] = Field(default_factory=dict)
+
+
+class BackupGrowthAckIn(BaseModel):
+    ts: float = Field(gt=0, allow_inf_nan=False)
 
 
 class BackupRepoMuteIn(BaseModel):

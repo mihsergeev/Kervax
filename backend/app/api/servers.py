@@ -127,6 +127,7 @@ from app.schemas import (
     AutobanCmdIn,
     BackupCommandOut,
     BackupAuditMuteIn,
+    BackupGrowthAckIn,
     CustomBackupIgnoreIn,
     BackupRepoArchiveIn,
     BackupRepoMuteIn,
@@ -474,8 +475,10 @@ def _docker_alerts(server: Server) -> dict[str, str]:
     return out
 
 
-async def _get_or_404(server_id: int, session: SessionDep, user: User | None = None) -> Server:
-    server = await session.get(Server, server_id)
+async def _get_or_404(
+    server_id: int, session: SessionDep, user: User | None = None, *, lock: bool = False
+) -> Server:
+    server = await session.get(Server, server_id, with_for_update=lock)
     if server is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Сервер не найден")
     # Нода вне групп учётки — отвечаем «не найден», а не «запрещено»: так по ответу
@@ -2857,6 +2860,25 @@ def _cadences(rep: dict) -> dict[str, int]:
         c = backup_cadence(o.get("recent")) if isinstance(o, dict) else 0
         if c:
             out[name] = c
+    return out
+
+
+@router.post("/{server_id}/backup/growth-ack", response_model=ServerOut)
+async def backup_growth_ack(
+    server_id: int, body: BackupGrowthAckIn, user: CurrentUser, session: SessionDep
+) -> ServerOut:
+    s = await _get_or_404(server_id, session, user, lock=True)
+    now = datetime.now(timezone.utc)
+    if s.backup_growth_ack_ts == body.ts:
+        return _out(s, now)
+    growth = backup_growth.jump(s, now)
+    if not growth or growth["ts"] != body.ts:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Backup run changed. Refresh and try again.")
+    s.backup_growth_ack_ts = body.ts
+    await session.commit()
+    await session.refresh(s)
+    out = _out(s, now)
+    await audit.record(session, user.username, "backup_growth_ack", s.name, f"run_ts={body.ts}")
     return out
 
 

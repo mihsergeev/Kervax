@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useId, useRef, useState, type ReactNo
 import { createPortal } from 'react-dom'
 import {
   ApiError,
+  acknowledgeBackupGrowth,
   backupCommand,
   backupCommandStatus,
   backupCredentials,
@@ -954,6 +955,9 @@ function BackupModal({
   const { t } = useI18n()
   const [rbusy, setRbusy] = useState(false)
   const [rmsg, setRmsg] = useState<string | null>(null)
+  const [growthAck, setGrowthAck] = useState<number | null>(null)
+  const [growthBusy, setGrowthBusy] = useState(false)
+  const [growthError, setGrowthError] = useState('')
   // оптимистично прячем кнопку сразу после успеха: версия в отчёте обновится лишь со
   // следующим тиком агента (~15с), а «кнопка не пропала» читается как «не сработало»
   const [rdone, setRdone] = useState(false)
@@ -995,6 +999,27 @@ function BackupModal({
   // сколько restic добавляет за прогон: это и раздувает бэкап-сервер
   const runs = backupRuns(s)
   const last = runs.length ? runs[runs.length - 1] : null
+  const acknowledged = last != null && (last.ts === growthAck || last.ts === s.backup_growth_ack_ts)
+  const growth = acknowledged ? null : s.backup_growth
+  const acknowledgeGrowth = async () => {
+    if (!growth || growthBusy) return
+    setGrowthBusy(true)
+    setGrowthError('')
+    try {
+      const updated = await acknowledgeBackupGrowth(s.id, growth.ts)
+      setGrowthAck(updated.backup_growth_ack_ts ?? null)
+      onChanged()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        setGrowthError(t('Прогон изменился. Проверьте свежие данные.'))
+        onChanged()
+      } else {
+        setGrowthError(t('Не удалось отметить прирост'))
+      }
+    } finally {
+      setGrowthBusy(false)
+    }
+  }
   const usual = runs.length > 1 ? usualGrowth(runs.slice(0, -1)) : 0
   const dumpBytes = (b.dumps ?? []).reduce((a, d) => a + (d.size_bytes || 0), 0)
   const dumpFiles = (b.dumps ?? []).reduce((a, d) => a + (d.files || 0), 0)
@@ -1040,9 +1065,8 @@ function BackupModal({
       })
     else if (b.metric_present && b.last_backup_ts && Date.now() / 1000 - b.last_backup_ts > STALE_SECONDS)
       add('runs', { level: 1, text: t('бэкап не свежий: последний {ago}', { ago: fmtAgo(b.last_backup_ts) }), since: s.alert_since?.backup_stale })
-    const g = s.backup_growth
-    if (g && !mutes.has('backup_growth'))
-      add('runs', { level: 1, text: g.text, since: new Date(g.ts * 1000).toISOString() })
+    if (growth && !mutes.has('backup_growth'))
+      add('runs', { level: 1, text: growth.text, since: new Date(growth.ts * 1000).toISOString() })
     if (ownBad.length)
       add('own', {
         level: ownBad.some((j) => j.status === 'failed') ? 2 : 1,
@@ -1269,7 +1293,16 @@ function BackupModal({
                       <div className="muted small">
                         {t('сколько каждый прогон добавил в репозиторий, последние {n}, свежий справа', { n: Math.min(runs.length, 40) })}
                       </div>
-                      {s.backup_growth && <div className="small t-degraded">⚠ {s.backup_growth.text}</div>}
+                      {growth && (
+                        <div className="growth-warning">
+                          <span className="small t-degraded">⚠ {growth.text}</span>
+                          {canManage && <button className="ghost" disabled={growthBusy} onClick={acknowledgeGrowth}>
+                            {t('Ожидаемый прирост')}
+                          </button>}
+                        </div>
+                      )}
+                      {acknowledged && <div className="muted small" role="status">{t('Прирост отмечен как ожидаемый')}</div>}
+                      {growthError && <div className="small t-down" role="alert">{growthError}</div>}
                     </div>
                   </div>
                 )}

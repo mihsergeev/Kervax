@@ -1450,6 +1450,7 @@ button.ghost.sw-tog-btn { align-self: flex-start; margin: 0; padding: 0.15rem 0.
 }
 /* прирост бэкапа по прогонам: столбики, свежий справа; подробности - в подсказке столбика */
 .growth-wrap { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 10px; max-width: 100%; overflow-x: auto; }
+.growth-warning { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .growth-bars { display: block; }
 .growth-bars rect { fill: var(--accent); opacity: 0.7; }
 .growth-bars rect:last-child, .growth-bars rect:hover { opacity: 1; }

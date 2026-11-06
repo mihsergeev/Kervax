@@ -2680,6 +2680,7 @@ export type Server = {
   docker_since?: Record<string, string> // с какого момента лежит каждый упавший контейнер
   // последний прогон бэкапа добавил в разы больше обычного (считает бэкенд)
   backup_growth?: { level: number; text: string; st: number; usual: number; ts: number } | null
+  backup_growth_ack_ts?: number | null
   // настроен ли бэкап - одно правило бэкенда для главной, "Бэкапов" и формы настройки
   // (app/backup_state.py): ok - бэкап есть (reason - почему упал прогон), partial - настройка из
   // панели упала на полпути, none - бэкапа нет; traces - что осталось от старого бэкапа
@@ -3899,6 +3900,13 @@ export function setCustomBackupIgnored(id: number, job: string, ignored: boolean
   return api<Server>(`/api/servers/${id}/backup/custom-ignore`, {
     method: 'POST',
     body: JSON.stringify({ id: job, ignored }),
+  })
+}
+
+export function acknowledgeBackupGrowth(id: number, ts: number): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/backup/growth-ack`, {
+    method: 'POST',
+    body: JSON.stringify({ ts }),
   })
 }
 
