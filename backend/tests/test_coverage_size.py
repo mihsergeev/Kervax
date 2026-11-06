@@ -78,6 +78,14 @@ def test_redis_takes_rdb_dir_not_key_count():
     assert _row(_backup_coverage(s), "Redis", "redis").size_bytes == 512 << 20
 
 
+def test_qdrant_size_available_before_first_snapshot():
+    s = _srv([("vector-db", "qdrant/qdrant:1"), ("other-vector-db", "qdrant/qdrant:1")],
+             sizes=[{"key": "qdrant", "container": "vector-db", "bytes": 29 * GB, "ts": NOW}])
+    rows = _backup_coverage(s)
+    assert _row(rows, "Qdrant", "vector-db").size_bytes == 29 * GB
+    assert _row(rows, "Qdrant", "other-vector-db").size_bytes == 0
+
+
 def test_rabbitmq_is_small_whatever_the_queues():
     s = _srv([("rabbitmq", "rabbitmq:3-management")],
              sizes=[{"key": "rabbitmq", "container": "rabbitmq", "bytes": 40 * GB, "ts": NOW}])

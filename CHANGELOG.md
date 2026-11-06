@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.106] - 2026-11-06
+
+- Enable Qdrant backups from the Enable backup button in Backups > Coverage.
+- Coverage shows an estimate from the Qdrant storage directory before the first snapshot. Update the database inventory helper to 0.18 to collect it. The compressed snapshot size appears after the first backup.
+
 ## [1.8.105] - 2026-11-06
 
 - Manage primary backups and incoming second copies from one backup server card. An existing backup server can enable the reserve role in its Incoming copies section. Select repositories to copy in the source server's Second copy tab.

@@ -76,9 +76,10 @@
 # used. Only pods of this node are visible here: a pod on another node is the job of that node's helper.
 # When a database in a pod does not answer, the reason goes to the panel ("fails" in db-health.json): no
 # nsenter, no client in the image, the login was refused, no answer in time.
+# 0.18: estimate Qdrant snapshot space from its storage directory, before any snapshot exists.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.17  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.18  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -1142,10 +1143,21 @@ SIZE_START=$SECONDS
 measure() { # key container dirs (one per line)
   local f b dirs
   f="$SIZE_DIR/du.$(skey "$1" "$2")"
-  mapfile -t dirs < <(printf '%s\n' "$3" | data_dirs)
-  [ "${#dirs[@]}" -gt 0 ] || return 0
+  if [ "$1" != qdrant ]; then
+    mapfile -t dirs < <(printf '%s\n' "$3" | data_dirs)
+    [ "${#dirs[@]}" -gt 0 ] || return 0
+  fi
   if stale "$f" && [ $((SECONDS - SIZE_START)) -lt "$SIZE_BUDGET" ]; then
-    b=$(dir_bytes "${dirs[@]}") || b=-
+    if [ "$1" = qdrant ]; then
+      # Same apparent storage size as the Qdrant snapshot space check. Bound the scan
+      # inside the container too: timing out the Docker client alone may leave du running.
+      b=$(timeout "$((SIZE_TO + 5))" docker exec -w /qdrant "$2" sh -c '
+        exec timeout "$1" nice -n 19 du -s --apparent-size -B1 -- "${QDRANT__STORAGE__STORAGE_PATH:-./storage}"
+      ' sh "$SIZE_TO" 2>/dev/null) || b=-
+      b=${b%%$'\t'*}
+    else
+      b=$(dir_bytes "${dirs[@]}") || b=-
+    fi
     put "$f" "${b:--}"
   fi
   b=$(head -1 "$f" 2>/dev/null)
@@ -1156,8 +1168,14 @@ measure() { # key container dirs (one per line)
 # Exporters, operators and postgrest carry an engine in the name but hold no data. RabbitMQ is left
 # out: what to back up there are the definitions, a few kilobytes whatever lies in the queues
 size_key() {
-  local i
+  local i image
   i=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  image=${i%%@*}
+  image=${image##*/}
+  if [ "${image%%:*}" = qdrant ]; then
+    printf '%s' qdrant
+    return 0
+  fi
   case "$i" in *exporter*|*postgrest*|*operator*) return 0 ;; esac
   for k in postgres postgis timescale pgvector mysql mariadb percona mongo clickhouse elasticsearch opensearch \
            redis valkey influxdb victoriametrics etcd cockroach cassandra zookeeper kafka neo4j couchdb \
@@ -1275,7 +1293,11 @@ if have docker; then
     [ -n "$name" ] && [ -n "$key" ] || continue
     case "$key" in postgres|postgis|timescale|pgvector) fam=postgres ;; mysql|mariadb|percona) fam=mysql ;; *) fam=$key ;; esac
     case "$INV" in *"|$fam:$name|"*) continue ;; esac
-    measure "$key" "$name" "$(docker inspect -f '{{range .Mounts}}{{if .RW}}{{.Source}}{{"\n"}}{{end}}{{end}}' "$name" 2>/dev/null)"
+    if [ "$key" = qdrant ]; then
+      measure "$key" "$name"
+    else
+      measure "$key" "$name" "$(docker inspect -f '{{range .Mounts}}{{if .RW}}{{.Source}}{{"\n"}}{{end}}{{end}}' "$name" 2>/dev/null)"
+    fi
   done < "$SIZE_DIR/ps.$$"
   rm -f "$SIZE_DIR/ps.$$"
 fi

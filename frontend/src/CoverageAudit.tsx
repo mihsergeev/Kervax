@@ -297,15 +297,19 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
     )
   }
   // Объем: рядом с именем - сколько примерно бэкапить, в строке - из чего он (база целиком, если дамп
-  // без индексов заметно меньше, и крупнейшая база). Не посчитано - молчим
+  // без индексов заметно меньше, и крупнейшая база).
   const sizeChip = (x: BackupAudit) =>
     x.size_small
       ? <span className="cov-size" title={t('бэкапятся только настройки (definitions): килобайты при любом объеме очередей')}>{t('мало')}</span>
       : x.size_bytes
-        ? <span className="cov-size" title={x.size_db
-            ? t('примерный объем дампа: данные без индексов, индексы в дамп не идут')
-            : t('примерно столько придется бэкапить, замер раз в сутки')}>~{fmtBytes(x.size_bytes)}</span>
-        : null
+        ? <span className="cov-size" title={x.dump_engine === 'qdrant'
+            ? t('Объем данных Qdrant на диске. Размер сжатого снапшота будет известен после первого бэкапа.')
+            : x.size_db
+              ? t('примерный объем дампа: данные без индексов, индексы в дамп не идут')
+              : t('примерно столько придется бэкапить, замер раз в сутки')}>~{fmtBytes(x.size_bytes)}</span>
+        : x.dump_engine === 'qdrant'
+          ? <span className="cov-size">{t('Объем пока не измерен')}</span>
+          : null
   const sizeTail = (x: BackupAudit) => {
     const parts = [
       x.size_db ? t('дамп без индексов, база {v}', { v: fmtBytes(x.size_db) }) : '',
@@ -333,7 +337,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
           {canEnable && (
             <button className="svc-act svc-act-primary" disabled={busyAny}
               onClick={() => setCfgFor(cfgFor === cfgKey ? null : cfgKey)}>
-              {t('включить дамп')}
+              {t(x.dump_engine === 'qdrant' ? 'Включить бэкап' : 'включить дамп')}
             </button>
           )}
           {d && canManage && (
