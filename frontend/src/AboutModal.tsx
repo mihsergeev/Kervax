@@ -93,6 +93,9 @@ function AboutSec({ version }: { version: string }) {
         <a href={`${KERVAX_URL}/blob/main/LICENSE`} target="_blank" rel="noopener noreferrer">
           {t('Лицензия')}
         </a>
+        <a href="https://db-ip.com" target="_blank" rel="noreferrer">
+          {t('Геолокация IP от DB-IP')}
+        </a>
       </div>
     </>
   )

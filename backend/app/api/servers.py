@@ -1167,12 +1167,36 @@ class _CoverageSizes:
             a.size_bytes = total - idx if 0 < idx < total else total
             if a.size_bytes < total * 0.85:
                 a.size_db = total
-            if len(dbs) > 1:
+            if len(dbs) == 1:
+                a.size_db_name = dbs[0][0]
+            else:
                 name, top = max(dbs, key=lambda x: x[1])
                 if top >= total * 0.3:  # крупнейшая из сотни мелких ничего не объясняет
                     a.size_top, a.size_top_bytes = name, top
             return
         a.size_bytes = self.du.get(a.instance, 0) if a.instance else self.native.get(a.subject, 0)
+
+
+_PG_TARGET_PENDING = "Место запуска PostgreSQL пока не подтверждено. Дождитесь отчета Docker или инвентаризации баз."
+_PG_TARGET_CHANGED = "PostgreSQL работает в контейнере. Обновите карточку и выберите контейнер."
+
+
+def _pg_host_dump_block(rep: dict) -> str:
+    """A process on the host can belong to a container. Check before using the host user."""
+    pg_stats = [item for item in rep.get("db_stats") or []
+                if isinstance(item, dict) and item.get("engine") == "pg"]
+    if any(not item.get("container") and item.get("dbs") for item in pg_stats):
+        return ""
+    docker = rep.get("docker") or {}
+    if any(c.get("state") == "running"
+           and _db_engine_of(c.get("image") or "", c.get("name") or "") == "PostgreSQL"
+           for c in docker.get("containers") or []):
+        return _PG_TARGET_CHANGED
+    if any(item.get("container") for item in pg_stats):
+        return _PG_TARGET_PENDING
+    if docker.get("present") and (not docker.get("access") or docker.get("containers_complete") is False):
+        return _PG_TARGET_PENDING
+    return ""
 
 
 def _backup_coverage(server: Server) -> list[BackupAudit]:
@@ -1419,13 +1443,19 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                     block = block or _mongo_dump_block(server.agent_version, rep)
                 if code == "qdrant":
                     block = block or _qdrant_dump_block(server.agent_version, rep, inst)
+                if code == "pg" and not inst:
+                    block = block or _pg_host_dump_block(rep)
+                    if block == _PG_TARGET_PENDING:
+                        where_txt = "место запуска не подтверждено"
                 can_dump = bool(code) and not block
             out.append(BackupAudit(
                 kind="db", subject=eng, gap=False, instance=inst,
                 detail=f"{where_txt} — файловый снапшот живой базы может не восстановиться"
                        + (f", бэкапьте отдельно: {howto}" if howto else "")
                        + (f" — {block}" if block else ""),
-                note=", ".join(x for x in (f"бэкапить отдельно: {howto}" if howto else "", block) if x),
+                note=block if code == "pg" and block else ", ".join(
+                    x for x in (f"бэкапить отдельно: {howto}" if howto else "", block) if x
+                ),
                 dump_engine=code, can_dump=can_dump,
                 downtime=_DUMP_DOWNTIME.get(code, "") if can_dump and not kube else "",
                 container=inst, pods=inst_pods[:4],
@@ -2709,6 +2739,9 @@ async def backup_command(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "не указан движок дампа")
         payload = {"engine": body.engine, "container": body.container}
         if body.action == "dump_setup":
+            if body.engine == "pg" and not body.container:
+                if block := _pg_host_dump_block(srv.last_report or {}):
+                    raise HTTPException(status.HTTP_409_CONFLICT, block)
             if body.engine == "mongo":
                 block = _mongo_dump_block(srv.agent_version, srv.last_report or {})
                 if body.container.startswith("k8s."):

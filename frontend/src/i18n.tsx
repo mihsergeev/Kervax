@@ -79,6 +79,11 @@ const EN: Record<string, string> = {
   'Объем данных Qdrant на диске. Размер сжатого снапшота будет известен после первого бэкапа.':
     'Qdrant data size on disk. The compressed snapshot size is available after the first backup.',
   'Объем пока не измерен': 'Size not measured yet',
+  'база {name}': 'database {name}',
+  'Геолокация IP от DB-IP': 'IP geolocation by DB-IP',
+  'Уведомления приглушены': 'Notifications muted',
+  'Место запуска PostgreSQL пока не подтверждено. Дождитесь отчета Docker или инвентаризации баз.': 'PostgreSQL location is unconfirmed. Wait for a Docker report or database inventory.',
+  'PostgreSQL работает в контейнере. Обновите карточку и выберите контейнер.': 'PostgreSQL runs in a container. Refresh the server card and select it.',
   'Включить бэкап': 'Enable backup',
   'MongoDB: replica set снимается с oplog, восстановление с --oplogReplay. Для standalone приостановите запись на время дампа. Шардированные кластеры не поддерживаются.':
     'MongoDB: replica sets include the oplog; restore with --oplogReplay. Pause writes during a standalone dump. Sharded clusters are not supported.',

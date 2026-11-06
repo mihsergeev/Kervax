@@ -207,7 +207,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
         onChanged()
       }
     } catch (e) {
-      phase('error', { ok: false, text: (e instanceof Error && e.message) || t('ошибка') })
+      phase('error', { ok: false, text: e instanceof Error && e.message ? t(e.message) : t('ошибка') })
     } finally {
       setDumpBusy(null)
     }
@@ -279,7 +279,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
   // Строка под именем базы: у дампа - когда снимался или когда снимется первый, каталог и сколько
   // хранить; у остального - короткая note с бэкенда. Полный текст находки - в подсказке.
   const rowLine = (x: BackupAudit, d: DumpStat | undefined) => {
-    if (!d) return <>{x.note || x.detail}{sizeTail(x)}</>
+    if (!d) return <>{t(x.note || x.detail)}{sizeTail(x)}</>
     const head = x.kind === 'db'
       ? x.note || x.detail // дамп включен, но не снимается
       : d.files > 0
@@ -307,11 +307,12 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
             : x.size_db
               ? t('примерный объем дампа: данные без индексов, индексы в дамп не идут')
               : t('примерно столько придется бэкапить, замер раз в сутки')}>~{fmtBytes(x.size_bytes)}</span>
-        : x.dump_engine === 'qdrant'
+        : x.dump_engine === 'qdrant' || x.subject === 'PostgreSQL'
           ? <span className="cov-size">{t('Объем пока не измерен')}</span>
           : null
   const sizeTail = (x: BackupAudit) => {
     const parts = [
+      x.size_db_name && t('база {name}', { name: x.size_db_name }),
       x.size_db ? t('дамп без индексов, база {v}', { v: fmtBytes(x.size_db) }) : '',
       x.size_top && x.size_top_bytes ? t('крупнейшая {name} {v}', { name: x.size_top, v: fmtBytes(x.size_top_bytes) }) : '',
     ].filter(Boolean)

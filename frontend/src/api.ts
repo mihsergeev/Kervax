@@ -3082,6 +3082,7 @@ export type BackupAudit = {
   muted?: boolean // приглушена вручную: не считается проблемой и не идёт на главную
   size_bytes?: number // примерно сколько бэкапить (дамп без индексов или каталог данных); 0 = не посчитано
   size_db?: number // база целиком, когда дамп заметно меньше
+  size_db_name?: string // имя единственной базы экземпляра
   size_top?: string // крупнейшая база экземпляра
   size_top_bytes?: number
   size_small?: boolean // бэкапится малое при любом объеме (RabbitMQ: definitions)

@@ -1429,6 +1429,7 @@ class BackupAudit(BaseModel):
     # индексов (в дамп они не идут), у остальных - каталог данных. 0 - не посчитано, строка молчит.
     size_bytes: int = 0
     size_db: int = 0  # база целиком, когда дамп заметно меньше нее
+    size_db_name: str = ""  # имя, если в инвентаре одна база
     size_top: str = ""  # крупнейшая база экземпляра, если баз несколько
     size_top_bytes: int = 0
     size_small: bool = False  # бэкапится малое при любом объеме данных (RabbitMQ: definitions)

@@ -53,7 +53,6 @@ import { useI18n, currentLang, tr } from './i18n'
 import { toastError } from './toast'
 import { MuteChip, collectMutes, muteRows, mutesTileSub } from './mutes'
 import { MutesPanel } from './MutesPanel'
-import { VaultPanel } from './VaultPanel'
 import { DeadBlocks, LegacyPlaque, OffRows, RowFix, bsrvFixText, offLines, rotationAction, rotationLines } from './BsrvCleanup'
 import { FixCmd, FixSteps } from './FixSteps'
 import { CountryFlag } from './CountryFlag'
@@ -4321,9 +4320,6 @@ export function BackupsPage({
           </div>
         )}
       </div>
-      {/* Сейф доступов — в подвале, рядом со справочными блоками: это не ежедневная
-          работа, а страховка на день восстановления. Виден только админам. */}
-      {isAdmin && <VaultPanel servers={servers ?? []} />}
       {mutesOpen && (
         <MutesPanel
           rows={mutes}

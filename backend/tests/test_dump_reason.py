@@ -90,6 +90,30 @@ async def test_agent_result_with_empty_reason_is_filled(client, auth_headers):
     assert "/etc/mysql/debian.cnf" in st["result"]
 
 
+async def test_stale_postgres_card_cannot_queue_host_dump_for_docker(client, auth_headers):
+    r = await client.post("/api/servers", json={"name": "db-a"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    agent_headers = {"Authorization": f"Bearer {token}"}
+    report = {
+        "agent_version": "2.66", "mem_used": 1, "mem_total": 2,
+        "db_engines": ["PostgreSQL"],
+        "docker": {
+            "present": True, "access": True, "containers_complete": True,
+            "containers": [{"name": "pg-main", "image": "postgres:18", "state": "running"}],
+        },
+    }
+    assert (await client.post("/api/agent/report", json=report, headers=agent_headers)).status_code == 200
+    url = f"/api/servers/{sid}/backup/command"
+    command = {"action": "dump_setup", "engine": "pg"}
+    stale = await client.post(url, json=command, headers=auth_headers)
+    assert stale.status_code == 409
+    assert "обновите карточку" in stale.json()["detail"].lower()
+    correct = await client.post(url, json={**command, "container": "pg-main"}, headers=auth_headers)
+    assert correct.status_code == 200
+    delivered = await client.post("/api/agent/report", json=report, headers=agent_headers)
+    assert [(c["engine"], c["container"]) for c in delivered.json()["backup_commands"]] == [("pg", "pg-main")]
+
+
 def test_frontend_knows_every_phrase():
     """фразы helper'а и панели, которые переводит helperText.ts: разойдутся - вместо понятного текста
     в интерфейсе покажется английский"""

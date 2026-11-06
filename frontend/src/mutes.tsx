@@ -495,21 +495,6 @@ export function muteBrief(items: MuteItem[], t: TFn): string {
   return parts.join(', ')
 }
 
-// самый поздний срок среди временных (null, если все бессрочные)
-function latestUntil(items: MuteItem[]): string | null {
-  const t = items
-    .filter((i) => i.until)
-    .sort((a, b) => new Date(b.until!).getTime() - new Date(a.until!).getTime())[0]
-  return t?.until ?? null
-}
-
-// «бессрочно» / «ещё 3 ч» — бессрочное приоритетнее: срок снуза истечёт сам
-function muteWhen(items: MuteItem[], t: TFn): string {
-  if (items.some((i) => !i.until)) return t('бессрочно')
-  const u = latestUntil(items)
-  return u ? t('ещё {d}', { d: muteLeft(u, t) }) : ''
-}
-
 // Чип словом, без эмодзи, как остальные чипы. what - что именно заглушено ("заглушено: 5xx сайт"),
 // а не на сколько: в шапке сервера голое "заглушено бессрочно" читалось как "сервер не мониторим"
 export function MuteChip({ items, t, what }: { items: MuteItem[]; t: TFn; what?: boolean }) {
@@ -523,8 +508,7 @@ export function MuteChip({ items, t, what }: { items: MuteItem[]; t: TFn; what?:
         t('заглушено: {list}', { list: muteBrief(items, t) })
       ) : (
         <>
-          {t('заглушено')}
-          <span className="mute-chip-when"> {muteWhen(items, t)}</span>
+          {t('Уведомления приглушены')}
           {items.length > 1 && ` · ${items.length}`}
         </>
       )}

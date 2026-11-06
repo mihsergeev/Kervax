@@ -48,7 +48,20 @@ def test_postgres_without_index_measure_shows_whole_base():
              db_stats=[{"engine": "pg", "container": "pg-main", "dbs": [{"name": "app", "size": 2 * GB}]}])
     a = _row(_backup_coverage(s), "PostgreSQL", "pg-main")
     assert a.size_bytes == 2 * GB
-    assert a.size_db == 0 and a.size_top == ""  # одна база: "крупнейшая" ничего не добавит
+    assert a.size_db == 0 and a.size_top == "" and a.size_db_name == "app"
+
+
+def test_postgres_process_waits_for_incomplete_docker_inventory():
+    s = _srv([], procs=["PostgreSQL"])
+    s.last_report["docker"].update(present=True, access=True, containers_complete=False)
+    row = _row(_backup_coverage(s), "PostgreSQL")
+    assert row.can_dump is False
+    assert "место запуска не подтверждено" in row.detail
+
+    s.last_report["db_stats"] = [{"engine": "pg", "dbs": [{"name": "app", "size": GB}]}]
+    row = _row(_backup_coverage(s), "PostgreSQL")
+    assert row.can_dump is True
+    assert row.size_db_name == "app"
 
 
 def test_small_largest_db_not_named():
