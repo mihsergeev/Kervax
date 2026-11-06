@@ -2,6 +2,7 @@
 похоже, отбой после тишины, проблема у сервера и раздел в окне Пользователи."""
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import httpx
 from sqlalchemy import select, update
@@ -33,7 +34,9 @@ def test_paths_fold_ids_and_tokens():
     assert rw.norm_path("/api/agent/commands") == "/api/agent/commands"
 
 
-async def test_middleware_counts_rejections_by_address(client: httpx.AsyncClient):
+async def test_middleware_counts_rejections_by_address(client: httpx.AsyncClient, monkeypatch):
+    # This test inspects a single bucket regardless of when CI starts the requests.
+    monkeypatch.setattr(rw, "time", SimpleNamespace(time=lambda: 1_800_000_000))
     rw.reset()
     for _ in range(60):
         r = await client.get("/api/agent/commands", headers={**_from("203.0.113.80"), "Authorization": "Bearer nope"})
