@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.108] - 2026-11-06
+
+- Automatic logo styling now preserves transparent backgrounds on tightly cropped logos in both themes. Images with an opaque background still use a backing plate.
+
 ## [1.8.107] - 2026-11-06
 
 - The backup client header shows a compact button that opens the backup server card. The address and port are shown on the backup server card.

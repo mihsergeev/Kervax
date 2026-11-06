@@ -56,8 +56,9 @@ export async function analyzeLogo(dataUrl: string): Promise<{
     }
   }
   return {
-    // края в основном непрозрачные → у картинки есть свой фон
-    transparentEdges: edge > 0 && edgeOpaque / edge < 0.35,
+    // Плотно обрезанный знак может касаться краёв, оставляя фон прозрачным.
+    // Свой фон занимает почти весь холст, даже если у него скруглены углы.
+    transparentEdges: edgeOpaque / edge < 0.35 || lumaCount / (S * S) < 0.9,
     // тёмный логотип: на тёмной теме утонет без обработки
     dark: lumaCount > 0 && lumaSum / lumaCount < 110,
   }
