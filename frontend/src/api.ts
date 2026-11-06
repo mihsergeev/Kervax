@@ -3332,8 +3332,24 @@ export function muteServerKeys(id: number, add: string[], remove: string[] = [])
   muteChain.set(id, run)
   return run
 }
-export function deleteServer(id: number): Promise<void> {
-  return api<void>(`/api/servers/${id}`, { method: 'DELETE' })
+interface BackupArchiveRef {
+  backup_server_id: number
+  repo: string
+}
+export interface BackupArchiveCandidate extends BackupArchiveRef {
+  backup_server_name: string
+}
+export type ServerDeletePreview = Record<number, BackupArchiveCandidate[]>
+export function previewServerDelete(ids: number[]): Promise<ServerDeletePreview> {
+  return api('/api/servers/delete-preview', { method: 'POST', body: JSON.stringify(ids) })
+}
+export function deleteServer(id: number, archive: BackupArchiveRef[] = []): Promise<void> {
+  return api<void>(`/api/servers/${id}`, {
+    method: 'DELETE',
+    body: archive.length ? JSON.stringify({
+      archive_repos: archive.map(({ backup_server_id, repo }) => ({ backup_server_id, repo })),
+    }) : undefined,
+  })
 }
 // Веб-корень ноды: php - улики взлома (y - почему); site - признаки идут и в карточку сайта;
 // остальное - серые строки о том, что менялось за неделю

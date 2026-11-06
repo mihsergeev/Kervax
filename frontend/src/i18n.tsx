@@ -542,6 +542,12 @@ const EN: Record<string, string> = {
   'остановлен': 'stopped',
   'под трассировкой': 'traced',
   'мёртв': 'dead',
+  'Ищем связанные репозитории…': 'Finding linked repositories…',
+  'Перенести связанные репозитории в архив': 'Archive linked repositories',
+  'Снапшоты останутся на бэкап-сервере. Алерты об отсутствии агента и просрочке для архива отключены.':
+    'Snapshots stay on the backup server. Missing-agent and overdue alerts are suppressed for archived repositories.',
+  'Удалить и архивировать': 'Delete and archive',
+  'Список репозиториев изменился. Откройте окно удаления заново.': 'Repository list changed. Reopen the delete dialog.',
   'Удалить выбранные серверы ({n} шт.) вместе с историей метрик?':
     'Delete the selected servers ({n}) along with their metric history?',
   'Перетащите группу': 'Drag the group',

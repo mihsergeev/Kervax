@@ -14,7 +14,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Body, Header, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 
@@ -75,7 +75,7 @@ from app.collector import _ver_tuple
 from app.collector import (
     _OFFLINE_ALERT_EXTRA, _backup_problem_repos, alert_since, awaiting_after_pause, backup_cadence, backup_rotation_items, backup_unmonitored,
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
-    backup_run_start, dump_local_stale, needed_pod_names, panel_server_names, pod_uid_names,
+    archived_repo, backup_run_start, dump_local_stale, needed_pod_names, panel_server_names, pod_uid_names, server_backup_names,
     disk_health_block, send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
     web_error_window, web_label_key, web_log_label, web_rate_total, panel_started_at, backup_busy,
 )
@@ -85,7 +85,7 @@ from app.setup_scripts import (
     setup_scripts as _setup_scripts,
 )
 from app.config import get_settings
-from app.deps import LOGS_CLOSED, AdminUser, CurrentUser, SessionDep, group_allowed, scope_query, viewer_command_ok
+from app.deps import LOGS_CLOSED, AdminUser, CurrentUser, SessionDep, group_allowed, scope_query, user_sections, viewer_command_ok
 from app.models import (
     AgentPathProbe,
     AgentProbe,
@@ -127,9 +127,11 @@ from app.schemas import (
     AutobanCmdIn,
     BackupCommandOut,
     BackupAuditMuteIn,
+    BackupArchiveCandidate,
     BackupGrowthAckIn,
     CustomBackupIgnoreIn,
     BackupRepoArchiveIn,
+    ServerDeleteIn,
     BackupRepoMuteIn,
     BackupCredsOut,
     BackupAudit,
@@ -2019,11 +2021,87 @@ async def update_server(
     return _out(server, datetime.now(timezone.utc))
 
 
+def _backup_archive_candidates(
+    server: Server, fleet: list[Server], user: User
+) -> list[BackupArchiveCandidate]:
+    if "backups" not in user_sections(user):
+        return []
+    others = [s for s in fleet if s.id != server.id and s.enabled]
+    shared_names = panel_server_names(others)
+    names = server_backup_names(server)
+    target = backup_target.view(server.last_report or {}) or {}
+    other_targets = [
+        t for s in others if (t := backup_target.view(s.last_report or {})) and t["kind"] == "rest"
+    ]
+    backup_servers = [
+        s for s in fleet if ((s.last_report or {}).get("backup_server") or {}).get("present")
+    ]
+    target_ids = [
+        s.id for s in backup_servers
+        if target.get("kind") == "rest" and target["host"].lower() in backup_target.addrs(s)
+    ]
+    out = []
+    for bs in backup_servers:
+        if bs.id == server.id or not group_allowed(user, bs.group_name):
+            continue
+        claimed = {t["repo"] for t in other_targets if t["host"].lower() in backup_target.addrs(bs)}
+        repos = bs.last_report["backup_server"].get("repos") or []
+        for r in repos:
+            name = r.get("name") or ""
+            if (not re.fullmatch(r"[A-Za-z0-9._-]{1,253}", name)
+                    or name.lower() in shared_names or name in claimed
+                    or archived_repo(bs.backup_repo_archive, name)):
+                continue
+            if name.lower() in names or (target_ids == [bs.id] and name == target["repo"]):
+                out.append(BackupArchiveCandidate(backup_server_id=bs.id, backup_server_name=bs.name, repo=name))
+    return sorted(out, key=lambda r: (r.backup_server_name, r.repo))
+
+
+@router.post("/delete-preview", response_model=dict[int, list[BackupArchiveCandidate]])
+async def preview_server_delete(
+    user: CurrentUser, session: SessionDep, ids: list[int] = Body(min_length=1)
+) -> dict[int, list[BackupArchiveCandidate]]:
+    fleet = list(await session.scalars(select(Server)))
+    selected = set(ids)
+    return {
+        s.id: [
+            r for r in _backup_archive_candidates(s, fleet, user) if r.backup_server_id not in selected
+        ]
+        for s in fleet if s.id in selected and group_allowed(user, s.group_name)
+    }
+
+
 @router.delete("/{server_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_server(
-    server_id: int, user: CurrentUser, session: SessionDep
+    server_id: int, user: CurrentUser, session: SessionDep, body: ServerDeleteIn | None = None
 ) -> None:
     server = await _get_or_404(server_id, session, user)
+    requested = {(r.backup_server_id, r.repo) for r in body.archive_repos} if body else set()
+    if requested:
+        ids = {server_id, *(backup_id for backup_id, _ in requested)}
+        locked = {
+            s.id: s for s in await session.scalars(
+                select(Server).where(Server.id.in_(ids)).order_by(Server.id)
+                .with_for_update().execution_options(populate_existing=True)
+            )
+        }
+        server = locked.get(server_id)
+        if server is None or not group_allowed(user, server.group_name):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Сервер не найден")
+        fleet = list(await session.scalars(select(Server)))
+        allowed = {(r.backup_server_id, r.repo) for r in _backup_archive_candidates(server, fleet, user)}
+        if not requested <= allowed:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT, "Список репозиториев изменился. Откройте окно удаления заново."
+            )
+        now = datetime.now(timezone.utc).isoformat()
+        # Архив и удаление видны сборщику одновременно. Команды restic не ставятся.
+        for backup_id, repo in sorted(requested):
+            bs = locked[backup_id]
+            bs.backup_repo_archive = {
+                **(bs.backup_repo_archive or {}),
+                repo: {"note": "", "ts": now, "by": user.username},
+            }
     name, had_gre = server.name, server.gre_enabled
     await session.execute(
         sa_delete(ServerMetric).where(ServerMetric.server_id == server_id)
@@ -2045,7 +2123,8 @@ async def delete_server(
     await _write_agent_allowlist(session)
     if had_gre:  # хост панели снимает его туннель
         await gre_mod.write_tunnels(session)
-    await audit.record(session, user.username, "server_delete", name)
+    detail = ", ".join(f"srv={backup_id}/{repo}" for backup_id, repo in sorted(requested))
+    await audit.record(session, user.username, "server_delete", name, detail)
 
 
 @router.post("/{server_id}/rotate", response_model=ServerEnrollOut)
@@ -2890,7 +2969,7 @@ async def backup_repo_archive(
     снапшотов). Архив хранится как есть: не устаревает, не проблема, проверка целостности идет.
     На сервере ничего не меняется: чистка по политике у такого репозитория и так ничего не
     удаляет, а группу удаляют только руками (forget-group)."""
-    s = await _get_or_404(server_id, session, user)
+    s = await _get_or_404(server_id, session, user, lock=True)
     key = f"{body.repo}|{body.host}" if body.host else body.repo
     arch = dict(s.backup_repo_archive or {})
     if body.archived:

@@ -2961,6 +2961,16 @@ def failed_checks(bs: dict, extra: dict, muted: set, now: datetime, archive: dic
     return sorted(out)
 
 
+def server_backup_names(server) -> set[str]:
+    """Имена, которыми агент или панель могут назвать репозиторий клиента."""
+    names = {
+        name.strip().lower()
+        for name in (server.name, server.hostname, (server.last_report or {}).get("hostname"))
+        if name and name.strip()
+    }
+    return names | {name.split(".", 1)[0] for name in names}
+
+
 def panel_server_names(servers) -> set[str]:
     """Имена включенных нод панели для сверки с репозиториями бэкап-серверов: имя сервера,
     hostname и его короткая часть до точки. Репозиторий назван по клиенту (так его заводят и
@@ -2969,12 +2979,7 @@ def panel_server_names(servers) -> set[str]:
     for s in servers:
         if not getattr(s, "enabled", True):
             continue
-        # и имя машины из отчета агента: им ansible-роль называет репозиторий клиента
-        for n in (s.name, s.hostname, (s.last_report or {}).get("hostname")):
-            n = (n or "").strip().lower()
-            if n:
-                out.add(n)
-                out.add(n.split(".")[0])
+        out.update(server_backup_names(s))
     return out
 
 

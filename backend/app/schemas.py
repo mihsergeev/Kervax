@@ -1896,10 +1896,26 @@ class BackupMirrorRoleIn(BaseModel):
     on: bool
 
 
+BackupArchiveRepoName = Annotated[str, Field(min_length=1, max_length=253, pattern=r"^[A-Za-z0-9._-]+$")]
+
+
+class BackupArchiveRef(BaseModel):
+    backup_server_id: int = Field(gt=0)
+    repo: BackupArchiveRepoName
+
+
+class BackupArchiveCandidate(BackupArchiveRef):
+    backup_server_name: str
+
+
+class ServerDeleteIn(BaseModel):
+    archive_repos: list[BackupArchiveRef] = Field(default_factory=list, max_length=1000)
+
+
 class BackupRepoArchiveIn(BaseModel):
     """Убрать в архив или вернуть репозиторий бэкап-сервера, а с host - одну его старую группу."""
 
-    repo: str = Field(min_length=1, max_length=253, pattern=r"^[A-Za-z0-9._-]+$")
+    repo: BackupArchiveRepoName
     host: str = Field(default="", max_length=253, pattern=r"^[A-Za-z0-9._-]*$")
     note: str = Field(default="", max_length=200)
     archived: bool

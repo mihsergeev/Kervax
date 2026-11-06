@@ -375,6 +375,21 @@ input.field-bad {
   margin-top: 0.3rem;
 }
 
+.server-delete-dialog:not([open]) { display: none; }
+.server-delete-dialog {
+  width: 540px;
+  max-height: calc(100dvh - 2rem);
+  color: inherit;
+}
+.server-delete-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+.server-delete-repos {
+  margin: 0;
+  padding-left: 1.4em;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  min-height: 0;
+}
+
 .clients-head {
   display: flex;
   align-items: center;

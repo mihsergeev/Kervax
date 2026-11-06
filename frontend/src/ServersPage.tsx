@@ -15,6 +15,7 @@ import {
   backupCommandStatus,
   createServer,
   deleteServer,
+  type ServerDeletePreview,
   dockerCommand,
   dockerCommandStatus,
   getAgentRelease,
@@ -82,6 +83,7 @@ import linuxTux from './assets/linux-tux.svg'
 import { CountryFlag } from './CountryFlag'
 import { currentLang, useI18n } from './i18n'
 import { useEscape } from './useEscape'
+import { ServerDeleteDialog } from './ServerDeleteDialog'
 import { toastError } from './toast'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type SecDef, type SecInfo, type SecItem } from './cardLayout'
@@ -5344,6 +5346,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
   // режим массового выбора (чекбоксы + удаление выбранных)
   const [selectMode, setSelectMode] = useState(false)
   const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [deleteIds, setDeleteIds] = useState<number[] | null>(null)
   // drag-and-drop: перенос сервера в другую группу
   const dragRef = useRef<number | null>(null)
   const busyRef = useRef(false) // пауза автообновления, пока тащим / сохраняем перенос
@@ -5488,23 +5491,13 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
     setSelectMode(false)
     setSelected(new Set())
   }
-  const deleteSelected = async () => {
-    const ids = [...selected]
-    if (ids.length === 0) return
-    if (
-      !window.confirm(
-        t('Удалить выбранные серверы ({n} шт.) вместе с историей метрик?', {
-          n: ids.length,
-        }),
-      )
-    )
-      return
+  const deleteSelected = async (ids: number[], archive: ServerDeletePreview) => {
     // отдельного bulk-эндпоинта у серверов нет — удаляем по одному. Уже удаленный (404) не ошибка,
     // а после отказа список перечитываем: удаленные до него не должны висеть выбранными
     const left = new Set(ids)
     try {
       for (const id of ids) {
-        await deleteServer(id).catch((e) => {
+        await deleteServer(id, archive[id]).catch((e) => {
           if (!(e instanceof ApiError && e.status === 404)) throw e
         })
         left.delete(id)
@@ -5516,6 +5509,8 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
       setSelected(left)
       load()
       setErr(e instanceof Error ? e.message : t('Ошибка'))
+    } finally {
+      setDeleteIds(null)
     }
   }
 
@@ -5673,7 +5668,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
               <button
                 className="ghost danger-btn"
                 disabled={selected.size === 0}
-                onClick={deleteSelected}
+                onClick={() => setDeleteIds([...selected])}
               >
                 {t('Удалить ({n})', { n: selected.size })}
               </button>
@@ -5803,6 +5798,15 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
         />
       )}
       {enroll && <InstallModal enroll={enroll.result} platform={enroll.platform} onClose={() => setEnroll(null)} />}
+      {deleteIds && (
+        <ServerDeleteDialog
+          ids={deleteIds}
+          message={t('Удалить выбранные серверы ({n} шт.) вместе с историей метрик?', { n: deleteIds.length })}
+          onClose={() => setDeleteIds(null)}
+          onDelete={(archive) => deleteSelected(deleteIds, archive)}
+          onUnauthorized={onUnauthorized}
+        />
+      )}
       {detail && (
         <ServerDetail
           key={detail.id}
@@ -6884,6 +6888,7 @@ function ServerDetail({
   const [hours, setHours] = useState(6)
   const [zoomKey, setZoomKey] = useState<MetricKey | null>(null)
   const [editing, setEditing] = useState(false)
+  const [deleteIds, setDeleteIds] = useState<number[] | null>(null)
   const [form, setForm] = useState<ServerEditForm | null>(null)
   const [editSec, setEditSec] = useState('srv') // раздел, с которого открыть окно настроек
   // Esc закрывает карточку, но не во время правки: там он стер бы набранное
@@ -7015,25 +7020,6 @@ function ServerDetail({
       window.clearInterval(id)
     }
   }, [s.id, active, hasReport])
-
-  async function del() {
-    if (
-      !window.confirm(
-        t('Удалить сервер «{name}»? Агент на ноде продолжит слать — удалите его отдельно.', {
-          name: s.name,
-        }),
-      )
-    )
-      return
-    try {
-      await deleteServer(s.id)
-      onChanged()
-      onClose()
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 401) return onUnauthorized()
-      setSaveErr(e instanceof Error ? e.message : t('Ошибка'))
-    }
-  }
 
   // бэйдж "ретранслятор" в шапке: окно настроек сразу на разделе ретранслятора
   function editRelay() {
@@ -8066,7 +8052,20 @@ function ServerDetail({
         }
         onSubmit={submitEdit}
         onCancel={() => setEditing(false)}
-        onDelete={del}
+        onDelete={() => setDeleteIds([s.id])}
+      />
+    )}
+    {deleteIds && (
+      <ServerDeleteDialog
+        ids={deleteIds}
+        message={t('Удалить сервер «{name}»? Агент на ноде продолжит слать — удалите его отдельно.', { name: s.name })}
+        onClose={() => setDeleteIds(null)}
+        onDelete={async (archive) => {
+          await deleteServer(s.id, archive[s.id])
+          onChanged()
+          onClose()
+        }}
+        onUnauthorized={onUnauthorized}
       />
     )}
     </>

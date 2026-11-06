@@ -661,6 +661,78 @@ async def test_archive_endpoint_and_late_reasons_in_the_server_list(client, auth
     assert r.json()["backup_repo_archive"] == {}
 
 
+async def test_delete_server_can_archive_selected_repositories(client, auth_headers, monkeypatch):
+    from datetime import datetime, timezone
+
+    from fastapi import HTTPException
+
+    from app import timeline
+
+    now = int(datetime.now(timezone.utc).timestamp())
+
+    async def enroll(name, report=None):
+        response = await client.post("/api/servers", json={"name": name}, headers=auth_headers)
+        assert response.status_code == 201, response.text
+        data = response.json()
+        if report:
+            response = await client.post("/api/agent/report", json={
+                "hostname": name, "clock_unix": now, "cpu_percent": 5, **report,
+            }, headers={"Authorization": f"Bearer {data['token']}"})
+            assert response.status_code == 200, response.text
+        return data["server"]["id"]
+
+    repo = {"name": "app-client", "valid": True, "snapshots": 13, "last_activity": now - 60}
+    unrelated = {**repo, "name": "other-client"}
+    custom = {**repo, "name": "custom-repo"}
+    backup_id = await enroll("backup-01", {"backup_server": {
+        "present": True, "running": True, "repos": [repo, unrelated, custom],
+    }})
+    node_id = await enroll("app-client", {"backup": {
+        "repo_dest": "rest:https://backup-01:8000/custom-repo",
+    }})
+    archive = {"backup_server_id": backup_id, "repo": repo["name"]}
+    path = f"/api/servers/{node_id}"
+    preview_path = "/api/servers/delete-preview"
+    response = await client.post(preview_path, json=[node_id], headers=auth_headers)
+    assert response.json() == {str(node_id): [
+        {**archive, "backup_server_name": "backup-01"},
+        {**archive, "repo": "custom-repo", "backup_server_name": "backup-01"},
+    ]}
+    response = await client.post(preview_path, json=[node_id, backup_id], headers=auth_headers)
+    assert response.json() == {str(node_id): [], str(backup_id): []}
+
+    async def read_backup():
+        response = await client.get("/api/servers", headers=auth_headers)
+        return next(row for row in response.json() if row["id"] == backup_id)
+
+    old = await read_backup()
+    assert old["bsrv_unmonitored"] == ["custom-repo", "other-client"]
+    response = await client.request("DELETE", path, json={
+        "archive_repos": [archive, {**archive, "repo": "other-client"}],
+    }, headers=auth_headers)
+    assert response.status_code == 409
+    assert (await client.get(path, headers=auth_headers)).status_code == 200
+    assert (await read_backup())["backup_repo_archive"] == old["backup_repo_archive"]
+
+    async def fail_cleanup(*args):
+        raise HTTPException(503)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(timeline, "forget", fail_cleanup)
+        response = await client.request("DELETE", path, json={"archive_repos": [archive]}, headers=auth_headers)
+        assert response.status_code == 503
+    assert (await client.get(path, headers=auth_headers)).status_code == 200
+    assert (await read_backup())["backup_repo_archive"] == old["backup_repo_archive"]
+
+    response = await client.request("DELETE", path, json={"archive_repos": [archive]}, headers=auth_headers)
+    assert response.status_code == 204, response.text
+    assert (await client.get(path, headers=auth_headers)).status_code == 404
+    srv = await read_backup()
+    assert set(srv["backup_repo_archive"]) == {"app-client"}
+    assert srv["last_report"]["backup_server"]["repos"] == old["last_report"]["backup_server"]["repos"]
+    assert srv["bsrv_unmonitored"] == ["custom-repo", "other-client"]
+
+
 async def test_new_late_repo_alerts_at_once_next_to_an_old_problem(tmp_path, monkeypatch):
     """Опоздавший бэкап клиента без агента приходит сразу, а не с суточным напоминанием про
     репозиторий, который уже был проблемным."""
