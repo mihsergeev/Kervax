@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.107] - 2026-11-06
+
+- The backup client header shows a compact button that opens the backup server card. The address and port are shown on the backup server card.
+
 ## [1.8.106] - 2026-11-06
 
 - Enable Qdrant backups from the Enable backup button in Backups > Coverage.

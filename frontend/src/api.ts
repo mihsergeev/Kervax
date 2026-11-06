@@ -2389,6 +2389,7 @@ export type BackupServerInfo = {
   helper_version?: number // версия backupserver-helper (панель флагует старые)
   tls_front?: boolean // поднят self-signed TLS-фронт (caddy) → клиенты могут ходить по HTTPS
   tls_port?: number // порт TLS-фронта (обычно 64101); HTTP rest-server остаётся на 64100
+  port?: number // порт HTTP rest-server из отчета агента
   // место на томе С РЕПОЗИТОРИЯМИ (df по каталогу данных, снимает root-helper):
   // репозитории часто на отдельном диске, и общая метрика диска ноды про заполнение
   // хранилища бэкапов ничего не говорит

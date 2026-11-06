@@ -4160,6 +4160,38 @@ button.srv-nav-item.active {
   background: none;
   font-size: 0.8rem;
 }
+.backup-dest-meta {
+  min-width: 0;
+}
+.backup-dest-meta > .srv-meta-k {
+  white-space: nowrap;
+}
+.backup-dest-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  min-width: 0;
+  padding: 0.15em 0.5em;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-card));
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+.backup-dest-link:hover {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 20%, var(--bg-card));
+}
+.backup-dest-link > span:first-of-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.backup-dest-link .sec-icon {
+  width: 1em;
+  height: 1em;
+}
 /* значки в шапке: что заглушено и заметка. На узком экране уходят на вторую строку, а не
    сжимают имя сервера до одной буквы */
 .detail-server .detail-title { flex-wrap: wrap; row-gap: 0.3rem; }

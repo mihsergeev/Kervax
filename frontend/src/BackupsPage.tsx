@@ -39,6 +39,7 @@ import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditName
 import { fmtRel } from './ServersPage'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { OsIcon } from './osIcon'
+import { IconServers } from './icons'
 import { MirrorModal, MirrorPanel, MirrorRowStatus, RepoMirrorBlock, RepoMirrorSelection } from './BsrvMirror'
 import { canMakeMirror, isMirror } from './bsrvMirrorState'
 import { backupDiskTone } from './bsrvStorage'
@@ -131,11 +132,8 @@ function diskFree(info: BackupServerInfo): number {
   return info.disk_free ?? Math.max((info.disk_total || 0) - (info.disk_used || 0), 0)
 }
 
-// Куда бэкапится: имя сервера бэкапов, за ним адрес, порт и канал (serverUtils.backupDest). Имя -
-// ссылка на окно сервера бэкапов (или карточку, если rest-server на нем панель не видит). http через
-// интернет подсвечен: это пункт "Требует действий", пока не решили оставить
-function DestLabel({ dest, onOpen }: { dest: BackupDest; onOpen?: (s: Server) => void }) {
-  const { t } = useI18n()
+// В списке и для назначений без карточки сохраняем адрес и предупреждение о незашифрованном HTTP.
+function DestLabel({ dest }: { dest: BackupDest }) {
   const tg = dest.target
   const where = backupDestWhere(tg)
   const proto = tg && tg.kind !== 'local' ? (
@@ -144,12 +142,31 @@ function DestLabel({ dest, onOpen }: { dest: BackupDest; onOpen?: (s: Server) =>
   const addr = where || proto ? <>{where}{where && proto ? ', ' : ''}{proto}</> : null
   // сервер бэкапов в панели не нашелся: имя - это и есть хост, повторять его не нужно
   if (!dest.srv) return addr ?? <>{dest.name}</>
-  const bsrv = !!dest.srv.last_report?.backup_server?.present
-  const name = onOpen ? (
-    <a href={bsrv ? `?backupsrv=${dest.srv.id}` : `?server=${dest.srv.id}`} title={t('открыть сервер бэкапов')}
-      onClick={(e) => { e.preventDefault(); onOpen(dest.srv!) }}>{dest.name}</a>
-  ) : dest.name
-  return <>{name}{addr && <> ({addr})</>}</>
+  return <>{dest.name}{addr && <> ({addr})</>}</>
+}
+
+function DestLink({ dest, onOpen }: { dest: BackupDest; onOpen?: (s: Server) => void }) {
+  const { t } = useI18n()
+  const { srv, target } = dest
+  if (!srv || !onOpen) return <><span className="srv-meta-k">{t('куда')}</span> <DestLabel dest={dest} /></>
+  const bsrv = srv.last_report?.backup_server?.present
+  const proto = target?.proto.toUpperCase()
+  return (
+    <>
+      <span className="srv-meta-k">{t('Бэкап-сервер')}</span>
+      <a className="backup-dest-link" href={bsrv ? `?backupsrv=${srv.id}` : `?server=${srv.id}`}
+        title={t('открыть сервер бэкапов')} onClick={(e) => {
+          if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return
+          e.preventDefault()
+          onOpen(srv)
+        }}>
+        <IconServers />
+        <span>{dest.name}</span>
+        <span aria-hidden="true">›</span>
+      </a>
+      {proto && <span className={target?.insecure && !target.muted ? 't-degraded' : proto === 'HTTPS' ? 't-up' : 'srv-meta-k'}>{proto}</span>}
+    </>
+  )
 }
 
 // Статистику репозитория (физический размер на бэкап-сервере, число снапшотов) панель
@@ -1123,8 +1140,8 @@ function BackupModal({
         </div>
         <div className="srv-meta srv-meta-line">
           {dest && (
-            <span className="srv-meta-item">
-              <span className="srv-meta-k">{t('куда')}</span> <DestLabel dest={dest} onOpen={onOpenDest} />
+            <span className="srv-meta-item backup-dest-meta">
+              <DestLink dest={dest} onOpen={onOpenDest} />
             </span>
           )}
           <span className="srv-meta-item">
@@ -2508,6 +2525,8 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
   const free = diskFree(info)
   const srvOld = !!info.version && verLt(info.version, RESTSRV_TARGET)
   const tlsPort = info.tls_port || 64101
+  const backupPort = info.tls_front ? tlsPort : info.port
+  const backupIp = s.display_external_ip || s.external_ip || s.local_ip || s.agent_ip
   const now = Date.now() / 1000
   // недельная проверка целостности за две недели: сколько прошло из тех, что вообще проверялись.
   // check_ok -1 - проверки еще не было: helper заранее ставит дату первой, и такой репозиторий
@@ -2676,7 +2695,12 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
           </span>
           <span className="srv-meta-item">
             <span className={info.tls_front ? 't-up' : undefined}>{info.tls_front ? 'HTTPS' : 'HTTP'}</span>
-            {info.tls_front && ` :${tlsPort}`}
+            {(backupIp || !!backupPort) && (
+              <span className="mono">
+                {backupIp && backupPort && backupIp.includes(':') ? `[${backupIp}]` : backupIp}
+                {backupPort ? `:${backupPort}` : ''}
+              </span>
+            )}
           </span>
           {ext?.restic && (
             <span className="srv-meta-item">
@@ -2936,9 +2960,12 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
                       {srvOld && <span className="t-degraded"> · {t('есть {v}', { v: RESTSRV_TARGET })}</span>}
                     </span>
                   ))}
-                  {row(t('Протокол'), info.tls_front
-                    ? `HTTPS · ${t('порт {p}', { p: tlsPort })}`
-                    : `HTTP · ${t('без TLS')}`)}
+                  {row(t('Протокол'), <>
+                    {info.tls_front && `HTTPS · ${t('порт {p}', { p: tlsPort })}`}
+                    {(!info.tls_front || !!info.port) && (
+                      <>{info.tls_front && <br />}HTTP · {info.port ? t('порт {p}', { p: info.port }) : t('без TLS')}</>
+                    )}
+                  </>)}
                   {ext?.restic && row('restic', `${ext.restic} · ${t('для чистки и проверки')}`)}
                   {info.data_dir && row(t('данные'), info.data_dir)}
                   {pct != null && row(t('Место на диске'), `${pct}% · ${t('свободно {f} из {tt}', { f: fmtBytes(free), tt: fmtBytes(info.disk_total) })}`)}
