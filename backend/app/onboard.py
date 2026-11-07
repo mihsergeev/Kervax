@@ -18,7 +18,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-ONBOARD_MAX = timedelta(days=3)
+ONBOARD_MAX = timedelta(days=1)
 KNOWN_TEXT = "было при подключении"
 # виды, которые уходят алертом и во время подключения
 _SEND = frozenset({"offline", "disk", "inode"})

@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.117] - 2026-11-08
+
+- Removed new server onboarding reminders from the home page. Onboarding closes automatically 24 hours after the first agent report, or 24 hours after server creation if no report has arrived. You can also close it from the server card.
+
 ## [1.8.116] - 2026-11-08
 
 - The home page shows the “Fixed” button only when at least one alert in the row can be rechecked.

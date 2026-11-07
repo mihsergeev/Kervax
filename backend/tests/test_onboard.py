@@ -54,13 +54,18 @@ async def _set(factory, sid, **kw):
 
 def test_active_and_destinations():
     now = datetime(2026, 10, 17, 12, 0, tzinfo=timezone.utc)
-    s = Server(name="web-a", created_at=now - timedelta(days=10), first_report_at=now - timedelta(days=1))
+    s = Server(name="web-a", created_at=now - timedelta(days=10),
+               first_report_at=now - timedelta(days=1) + timedelta(seconds=1))
     assert not onboard.active(s, now)  # заведен не через панель: метки нет
     s.alert_state = {"onboard": 1}
     assert onboard.active(s, now)  # отсчет с первого отчета агента, а не с заведения
-    assert not onboard.active(s, now + timedelta(days=2, minutes=1))
+    assert onboard.until(s) == now + timedelta(seconds=1)
+    assert not onboard.active(s, now + timedelta(seconds=1))
     s.onboard_done_at = now
     assert not onboard.active(s, now)
+    s.onboard_done_at = None
+    s.first_report_at = None
+    assert not onboard.active(s, now)  # без отчета отсчет с заведения
     cfg = {"telegram_token": "t", "telegram_chat": "1",
            "routes": {"main": "rest", "chats": [{"name": "Инфра", "chat": "2", "server_groups": ["infra"]}]}}
     assert onboard.destinations(cfg, "infra") == {"tg": True, "main": False, "chats": ["Инфра"]}
@@ -129,10 +134,15 @@ async def test_onboarding_closes_itself(tmp_path, monkeypatch):
     now = datetime.now(timezone.utc)
     async with factory() as s:
         s.add(_srv("web-a", now, onboard_done_at=None, alert_state={"onboard": 1},
-                   created_at=now - timedelta(days=4), first_report_at=now - onboard.ONBOARD_MAX - timedelta(minutes=1)))
+                   last_seen=now - timedelta(seconds=1),
+                   created_at=now - timedelta(days=4), first_report_at=now - timedelta(days=1)))
         await s.commit()
     sent = _sender(monkeypatch)
-    await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+    settings = Settings(alert_webhook="http://hook")
+    await collector.evaluate_servers(factory, settings, now - timedelta(seconds=1))
+    async with factory() as s:
+        assert (await s.get(Server, 1)).onboard_done_at is None
+    await collector.evaluate_servers(factory, settings, now)
     assert sent == []
     async with factory() as s:
         a = await s.get(Server, 1)

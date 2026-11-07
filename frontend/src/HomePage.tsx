@@ -345,12 +345,6 @@ function actionItems(servers: Server[], relProblem: string, t: T): ActItem[] {
         ...hm(s, 'bs-restic'), detail: `restic ${s.bsrv_restic_old}`,
         text: t('{name}: на сервере бэкапов старый restic {v} - обновите', { name: s.name, v: s.bsrv_restic_old }) })
     }
-    // Идет подключение (backend app/onboard.py): алертом уходят только офлайн и критичный диск,
-    // остальное ждет, пока человек посмотрит, что нашлось, и закроет подключение в карточке
-    if (s.onboard) {
-      items.push({ key: `onb-${s.id}`, icon: '🆕', section: 'servers', id: s.id, name: s.name, cc: s.country, ...hm(s, 'onb'),
-        text: t('{name}: идет подключение - посмотрите, что нашлось, и закройте его в карточке', { name: s.name }) })
-    }
     // Соединение до панели режут по объему (замеры агента 2.56, backend app/gre.need): отчеты
     // проходят, а обновления агента и большие ответы - нет. Ведем в карточку: там кнопка включить GRE
     if (s.gre_need && !s.gre_enabled) {
