@@ -81,7 +81,8 @@ def test_front_groups_match_backend():
     grps |= set(re.findall(r"hm\(s, lvl >= 2 \? '([\w-]+)' : '([\w-]+)'\)", src)[0])
     assert "hm(s, `ssh-${a.kind}`)" in src
     grps.add("ssh-ssh_password")
-    assert grps == set(home_mute.SIGS)
+    # Подключение скрыто с главной, старые заглушки снимаются при закрытии.
+    assert grps == set(home_mute.SIGS) - {"onb"}
     # у каждой группы подпись для журнала
     assert set(home_mute.LABELS) == set(home_mute.SIGS)
 
