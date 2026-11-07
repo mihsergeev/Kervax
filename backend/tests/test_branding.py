@@ -1,4 +1,4 @@
-"""Свой логотип: что принимается, что отвергается и кому это доступно."""
+"""Настройки оформления: допустимые значения, сохранение и права доступа."""
 
 import base64
 
@@ -11,6 +11,7 @@ PNG_1PX = base64.b64decode(
 SVG_OK = b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10"/></svg>'
 SVG_SCRIPT = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
 SVG_ONLOAD = b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><rect/></svg>'
+COMPANY_NAME_PATH = "/api/branding/company-name"
 
 
 def b64(data: bytes) -> str:
@@ -27,6 +28,7 @@ async def test_branding_default_is_empty(client: httpx.AsyncClient):
     r = await client.get("/api/branding")
     assert r.status_code == 200
     assert r.json()["logo"] is False
+    assert r.json()["company_name"] == ""
     assert (await client.get("/api/branding/logo")).status_code == 404
 
 
@@ -35,6 +37,7 @@ async def test_branding_png_roundtrip(client: httpx.AsyncClient, auth_headers):
     assert r.status_code == 200, r.text
     assert r.json()["logo"] is True and r.json()["title"] == "Ромашка"
     assert r.json()["plate_auto"] is True
+    assert r.json()["company_name"] == ""
 
     meta = (await client.get("/api/branding")).json()
     assert meta["logo"] is True and meta["version"] >= 1
@@ -50,6 +53,42 @@ async def test_branding_png_roundtrip(client: httpx.AsyncClient, auth_headers):
     r = await client.delete("/api/branding", headers=auth_headers)
     assert r.status_code == 200 and r.json()["logo"] is False
     assert (await client.get("/api/branding/logo")).status_code == 404
+
+
+async def test_company_name_without_logo(client: httpx.AsyncClient, auth_headers):
+    name = "Пример & <Партнер>"
+    r = await client.put(COMPANY_NAME_PATH, json={"company_name": f"  {name}  "}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["company_name"] == name
+    assert r.json()["logo"] is False and r.json()["version"] == 0
+    assert (await client.get("/api/branding")).json()["company_name"] == name
+
+    for invalid in (None, "a" * 65, "Первая\nВторая", "Первая\u2028Вторая", "Имя\x00"):
+        r = await client.put(COMPANY_NAME_PATH, json={"company_name": invalid}, headers=auth_headers)
+        assert r.status_code == 422, r.text
+    assert (await client.get("/api/branding")).json()["company_name"] == name
+
+    r = await client.put(COMPANY_NAME_PATH, json={"company_name": "  "}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["company_name"] == ""
+    assert (await client.get("/api/branding")).json()["company_name"] == ""
+
+
+async def test_company_name_is_independent_of_logo(client: httpx.AsyncClient, auth_headers):
+    r = await _put(client, auth_headers, PNG_1PX, title="Подпись", plate="always")
+    assert r.status_code == 200, r.text
+    before = r.json()
+    name = "Пример"
+    r = await client.put(COMPANY_NAME_PATH, json={"company_name": name}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json() == {**before, "company_name": name}
+    assert (await client.get("/api/branding/logo")).content == PNG_1PX
+
+    r = await _put(client, auth_headers, SVG_OK, title="Новая подпись")
+    assert r.status_code == 200 and r.json()["company_name"] == name
+    r = await client.delete("/api/branding", headers=auth_headers)
+    assert r.status_code == 200 and r.json()["company_name"] == name
+    assert (await client.get("/api/branding")).json()["company_name"] == name
 
 
 async def test_branding_accepts_clean_svg(client: httpx.AsyncClient, auth_headers):
@@ -97,6 +136,9 @@ async def test_branding_write_requires_admin(client: httpx.AsyncClient, auth_hea
     assert (await client.get("/api/branding", headers=editor)).status_code == 200
     assert (await _put(client, editor, PNG_1PX)).status_code == 403
     assert (await client.delete("/api/branding", headers=editor)).status_code == 403
+    company = {"company_name": "Пример"}
+    assert (await client.put(COMPANY_NAME_PATH, json=company, headers=editor)).status_code == 403
+    assert (await client.put(COMPANY_NAME_PATH, json=company)).status_code == 401
 
 
 async def test_branding_plate_per_theme_and_dark_variant(client: httpx.AsyncClient, auth_headers):

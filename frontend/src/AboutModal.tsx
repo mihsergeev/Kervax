@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import {
   ApiError,
   brandingLogoUrl,
@@ -6,6 +6,7 @@ import {
   getBranding,
   getHealth,
   putBranding,
+  putCompanyName,
   type Branding,
 } from './api'
 import { useLogoViews } from './BrandLogo'
@@ -19,13 +20,10 @@ import { useEscape } from './useEscape'
 export const KERVAX_URL = 'https://github.com/mihsergeev/Kervax'
 const MAX_KB = 512
 
-// «О панели» из меню: что это, куда идти за исходниками — и здесь же админ меняет
-// логотип. Отдельным пунктом меню настройка логотипа выглядела как что-то важное
-// и частое, хотя её трогают один раз за всё время жизни установки. Раскладка как у
-// карточки сервера: раздел "Логотип" виден только админу.
+// «О панели» из меню: сведения о панели и настройки оформления для админа.
 export function AboutModal({ onClose, onBrandingChanged }: {
   onClose: () => void
-  onBrandingChanged: () => void
+  onBrandingChanged: (branding: Branding) => void
 }) {
   const { t } = useI18n()
   useEscape(onClose)
@@ -38,7 +36,10 @@ export function AboutModal({ onClose, onBrandingChanged }: {
   }, [])
   const SECS: SecDef[] = [
     { id: 'about', label: 'О панели', group: '' },
-    ...(isAdmin ? [{ id: 'logo', label: 'Логотип', group: 'Оформление' }] : []),
+    ...(isAdmin ? [
+      { id: 'logo', label: 'Логотип', group: 'Оформление' },
+      { id: 'company', label: 'Заголовок вкладки', group: 'Оформление' },
+    ] : []),
   ]
   const cur = SECS.find((s) => s.id === sec) ?? SECS[0]
   return (
@@ -57,6 +58,7 @@ export function AboutModal({ onClose, onBrandingChanged }: {
             <div className="srv-sec">
               {cur.id === 'about' && <AboutSec version={version} />}
               {cur.id === 'logo' && <BrandingSection onChanged={onBrandingChanged} />}
+              {cur.id === 'company' && <CompanyNameSection onChanged={onBrandingChanged} />}
             </div>
           </div>
         </div>
@@ -105,7 +107,7 @@ function AboutSec({ version }: { version: string }) {
 // логотип, который хорош на белом и исчезает на тёмном, а заметить это вечером,
 // когда панель откроет коллега с другой темой. Превью считается тем же logoView,
 // что и шапка: что видно здесь, то и будет в панели.
-function BrandingSection({ onChanged }: { onChanged: () => void }) {
+function BrandingSection({ onChanged }: { onChanged: (branding: Branding) => void }) {
   const { t } = useI18n()
   const [st, setSt] = useState<Branding | null>(null)
   // новый основной файл (data-URL) и его текст, если это SVG
@@ -209,7 +211,7 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
       setDarkSvg(null)
       setDarkRemove(false)
       setNote(t('Логотип сохранён'))
-      onChanged()
+      onChanged(b)
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e))
     } finally {
@@ -229,7 +231,7 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
       setDarkSvg(null)
       setDarkRemove(false)
       setNote(t('Вернули стандартный логотип'))
-      onChanged()
+      onChanged(b)
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : String(e))
     } finally {
@@ -365,5 +367,65 @@ function BrandingSection({ onChanged }: { onChanged: () => void }) {
         )}
       </div>
     </div>
+  )
+}
+
+function CompanyNameSection({ onChanged }: { onChanged: (branding: Branding) => void }) {
+  const { t } = useI18n()
+  const [name, setName] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    getBranding()
+      .then((b) => setName(b.company_name ?? ''))
+      .catch((e) => setErr(e instanceof ApiError ? e.message : String(e)))
+  }, [])
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault()
+    if (name === null || busy) return
+    setBusy(true)
+    setErr('')
+    setSaved(false)
+    try {
+      const b = await putCompanyName(name.trim())
+      setName(b.company_name)
+      onChanged(b)
+      setSaved(true)
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <form onSubmit={save}>
+      <p className="muted small al-lead">
+        {t('Вкладка будет называться «Название компании · Kervax», в том числе до входа в панель. Пустое поле оставляет «Kervax».')}
+      </p>
+      <label className="brand-row">
+        {t('Название компании')}
+        <input
+          value={name ?? ''}
+          maxLength={64}
+          disabled={name === null || busy}
+          onChange={(e) => {
+            setName(e.target.value)
+            setErr('')
+            setSaved(false)
+          }}
+        />
+      </label>
+      {err && <p className="form-error" role="alert">{err}</p>}
+      {saved && <p className="tg-ok" role="status">{t('Название компании сохранено')}</p>}
+      <div className="tg-actions">
+        <button type="submit" className="primary" disabled={name === null || busy}>
+          {busy ? t('сохраняем…') : t('Сохранить')}
+        </button>
+      </div>
+    </form>
   )
 }

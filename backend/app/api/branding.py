@@ -1,13 +1,12 @@
-"""Свой логотип вместо стандартного (white-label).
+"""Логотип и заголовок вкладки панели.
 
-Всё брендирование лежит в data_dir/branding — и картинка, и meta.json рядом с
+Всё брендирование лежит в data_dir/branding, включая картинку и meta.json рядом с
 ней. В БД не хранится ничего: бинарь раздувал бы каждый экспорт конфигурации,
 а мета отдельно от файла давала бы полу-состояние — восстановили бэкап панели
 на новой машине, мета говорит «логотип есть», а файла нет. Лежат вместе —
 переносятся вместе (скопировать каталог), теряются тоже вместе.
 
-Отдаём картинку ПУБЛИЧНО: логотип нужен на экране входа, то есть до всякой
-авторизации. Логотип — не секрет, а вот загрузка и удаление — админские.
+Чтение публичное: оформление нужно на экране входа. Изменения доступны админам.
 """
 
 import base64
@@ -24,11 +23,13 @@ from fastapi import APIRouter, HTTPException, Response, status
 from app import audit
 from app.config import get_settings
 from app.deps import AdminUser, SessionDep
-from app.schemas import BrandingIn, BrandingOut
+from app.schemas import BrandingCompanyIn, BrandingIn, BrandingOut
 
 router = APIRouter(prefix="/branding", tags=["branding"])
 
 _META = "meta.json"
+# Отдельный файл, чтобы параллельные правки названия и логотипа не перезаписывали друг друга.
+_COMPANY = "company.json"
 _MAX_BYTES = 512 * 1024  # 512 КБ: логотипу хватает, а память и бэкап не пухнут
 
 # Тип определяем по СОДЕРЖИМОМУ, а не по Content-Type и не по расширению —
@@ -94,9 +95,11 @@ def _store(data: bytes, dark: bool, ext: str) -> None:
 
 def _out(m: dict) -> BrandingOut:
     light = m.get("plate_light")
+    company_name = _read_meta(_COMPANY).get("company_name")
     return BrandingOut(
         logo=bool(m.get("ext")),
         title=m.get("title", ""),
+        company_name=company_name if isinstance(company_name, str) else "",
         plate=m.get("plate", "auto"),
         plate_auto=bool(m.get("plate_auto")),
         plate_light=light if isinstance(light, bool) else None,
@@ -127,23 +130,23 @@ def _sniff(data: bytes) -> tuple[str, str]:
     )
 
 
-def _read_meta() -> dict:
-    """Мета из файла. Нет файла или он битый — считаем, что логотипа нет."""
+def _read_meta(filename: str = _META) -> dict:
+    """Нет файла или он повреждён — используем стандартное оформление."""
     try:
-        with open(os.path.join(_dir(), _META), encoding="utf-8") as f:
+        with open(os.path.join(_dir(), filename), encoding="utf-8") as f:
             m = json.load(f)
         return m if isinstance(m, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
-def _write_meta(meta: dict) -> None:
+def _write_meta(meta: dict, filename: str = _META) -> None:
     os.makedirs(_dir(), exist_ok=True)
-    path = os.path.join(_dir(), _META)
+    path = os.path.join(_dir(), filename)
     # пишем через временный файл: оборванная запись не должна оставить обрубок,
     # из-за которого панель решит, что логотипа нет. Файл свой у каждой записи: у воркеров
     # uvicorn общее имя meta.json.tmp давало гонку, как у agent_allow_ips
-    fd, tmp = tempfile.mkstemp(dir=_dir(), prefix=_META + ".")
+    fd, tmp = tempfile.mkstemp(dir=_dir(), prefix=filename + ".")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False)
@@ -158,6 +161,13 @@ def _write_meta(meta: dict) -> None:
 @router.get("", response_model=BrandingOut)
 async def get_branding() -> BrandingOut:
     """Публично: экран входа рисуется до авторизации."""
+    return _out(_read_meta())
+
+
+@router.put("/company-name", response_model=BrandingOut)
+async def put_company_name(body: BrandingCompanyIn, user: AdminUser, session: SessionDep) -> BrandingOut:
+    _write_meta({"company_name": body.company_name.strip()}, _COMPANY)
+    await audit.record(session, user.username, "branding_company_set")
     return _out(_read_meta())
 
 

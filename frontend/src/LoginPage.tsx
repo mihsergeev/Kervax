@@ -1,15 +1,15 @@
 import { useState, type FormEvent } from 'react'
-import { api, ApiError, setToken } from './api'
-import { BrandLogo, useBranding } from './BrandLogo'
+import { api, ApiError, setToken, type Branding } from './api'
+import { BrandLogo } from './BrandLogo'
 import { useI18n } from './i18n'
 
 type Props = {
   onLogin: () => void
+  branding: Branding | null | undefined
 }
 
-export function LoginPage({ onLogin }: Props) {
+export function LoginPage({ onLogin, branding }: Props) {
   const { t } = useI18n()
-  const [branding] = useBranding()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [otp, setOtp] = useState('')

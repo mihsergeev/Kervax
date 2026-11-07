@@ -5313,6 +5313,11 @@ const EN: Record<string, string> = {
   'всегда': 'always',
   'никогда': 'never',
   'Подпись рядом с логотипом': 'Caption next to the logo',
+  'Заголовок вкладки': 'Browser tab title',
+  'Название компании': 'Company name',
+  'Вкладка будет называться «Название компании · Kervax», в том числе до входа в панель. Пустое поле оставляет «Kervax».':
+    'The tab title will be “Company name · Kervax”, including on the sign-in page. Leave it blank to show “Kervax”.',
+  'Название компании сохранено': 'Company name saved',
   'например, название компании': 'e.g. your company name',
   'Сохранить логотип': 'Save logo',
   'сохраняем…': 'saving…',
@@ -6394,6 +6399,8 @@ const EN: Record<string, string> = {
     'changed the logo',
   'вернул стандартный логотип':
     'restored the default logo',
+  'изменил название компании':
+    'changed the company name',
   'настроил бэкап сервера':
     'set up server backup',
   'изменил пути бэкапа':

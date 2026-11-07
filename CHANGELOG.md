@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format is based on
 ## [1.8.112] - 2026-11-07
 
 - Enable Qdrant backups from Backups > Coverage for single-pod Kubernetes StatefulSets and Deployments. The helper uses a local port-forward to save a full snapshot with collections and aliases before restic runs. Kubernetes snapshots require backup-setup 0.52.
+- Set a company name in About > Appearance > Browser tab title. The tab shows the company name first, including on the sign-in page. Leave it blank to show Kervax.
 
 ## [1.8.111] - 2026-11-07
 

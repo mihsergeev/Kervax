@@ -467,7 +467,8 @@ class BrandingOut(BaseModel):
     """Состояние брендирования. Отдаётся публично — рисуется на экране входа."""
 
     logo: bool          # загружен ли свой логотип
-    title: str          # подпись рядом с логотипом (название компании)
+    title: str          # подпись рядом с логотипом
+    company_name: str = ""  # название в заголовке вкладки
     plate: str          # auto | always | never — подложка под логотип
     # Что решил автоанализ картинки при загрузке. Считает браузер: только он видит
     # пиксели, а тащить на бэкенд декодер картинок ради этого не стоит.
@@ -481,6 +482,10 @@ class BrandingOut(BaseModel):
     dark_logo: bool = False
     dark_plate: bool = False  # у варианта для тёмной темы свой фон — нужна плашка
     version: int        # растёт при замене; используется как ?v= для кэша
+
+
+class BrandingCompanyIn(BaseModel):
+    company_name: str = Field(max_length=64, pattern=r"^[^\x00-\x1f\x7f-\x9f\u2028\u2029]*$")
 
 
 class BrandingIn(BaseModel):

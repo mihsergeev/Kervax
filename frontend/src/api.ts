@@ -120,6 +120,7 @@ const FIELD_LABEL: Record<string, string> = {
   target: 'Адрес',
   port: 'Порт',
   group_name: 'Группа',
+  company_name: 'Название компании',
   interval_seconds: 'Интервал, сек',
   degraded_ms: 'Порог «медленно», мс',
   retries: 'Повторы при сбое',
@@ -781,10 +782,11 @@ export function domainProbes(): Promise<{ items: DomainProbe[] }> {
   return api('/api/checks/discovered/probes')
 }
 
-// --- брендирование (свой логотип) ---
+// --- оформление панели ---
 export type Branding = {
   logo: boolean
   title: string
+  company_name: string
   plate: 'auto' | 'always' | 'never'
   plate_auto: boolean // автоанализ: на ТЁМНОЙ теме нужна плашка
   plate_light: boolean | null // на светлой; null — залит до разделения по темам
@@ -794,6 +796,9 @@ export type Branding = {
 }
 export function getBranding(): Promise<Branding> {
   return api('/api/branding')
+}
+export function putCompanyName(company_name: string): Promise<Branding> {
+  return api('/api/branding/company-name', { method: 'PUT', body: JSON.stringify({ company_name }) })
 }
 // ?v= меняется при замене логотипа: файл кэшируется на неделю, и без версии
 // браузер показывал бы старый ещё долго после замены

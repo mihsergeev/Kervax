@@ -215,7 +215,11 @@ export default function App() {
       setSection('home')
     }
   }, [sections, section])
-  const [branding, reloadBranding] = useBranding()
+  const [branding, applyBranding] = useBranding()
+  const companyName = branding?.company_name
+  useEffect(() => {
+    document.title = companyName ? `${companyName} · Kervax` : 'Kervax'
+  }, [companyName])
   const [menuOpen, setMenuOpen] = useState(false)
   const [modal, setModal] = useState<Modal>(null)
   // Ctrl+K (на любой раскладке - по коду клавиши) или "/" вне поля ввода - поиск по парку
@@ -718,12 +722,12 @@ export default function App() {
         )}
         </ErrorBoundary>
       ) : (
-        <LoginPage onLogin={loadMe} />
+        <LoginPage onLogin={loadMe} branding={branding} />
       )}
 
       {modal === 'account' && <AccountModal onClose={() => setModal(null)} onUnauthorized={logout} />}
       {modal === 'about' && (
-        <AboutModal onClose={() => setModal(null)} onBrandingChanged={reloadBranding} />
+        <AboutModal onClose={() => setModal(null)} onBrandingChanged={applyBranding} />
       )}
       {modal === 'history' && (
         <AlertHistoryModal

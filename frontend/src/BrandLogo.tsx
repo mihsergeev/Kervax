@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { BrandHorizontal, BrandLockup } from './Logo'
 import { brandingLogoUrl, getBranding, type Branding } from './api'
 import { logoView, type LogoMode, type LogoSource, type LogoView } from './logoAdapt'
@@ -164,26 +164,31 @@ function cachedBranding(): Branding | undefined {
 }
 
 // Загружает состояние брендирования один раз на монтирование: сначала из кеша, потом с сервера.
-export function useBranding(): [Branding | null | undefined, () => void] {
+export function useBranding(): [Branding | null | undefined, (next: Branding) => void] {
   const [b, setB] = useState<Branding | null | undefined>(cachedBranding)
   const [tick, setTick] = useState(0)
+  const apply = useCallback((next: Branding) => {
+    setB(next)
+    try {
+      localStorage.setItem(BRAND_KEY, JSON.stringify(next))
+    } catch {
+      /* без кеша — оформление появится после ответа сервера */
+    }
+  }, [])
   useEffect(() => {
     let alive = true
     getBranding()
       .then((r) => {
-        if (!alive) return
-        setB(r)
-        try {
-          localStorage.setItem(BRAND_KEY, JSON.stringify(r))
-        } catch {
-          /* без кеша - просто без мгновенного логотипа */
-        }
+        if (alive) apply(r)
       })
       // не ответил - оставляем то, что было в кеше; кеша нет - штатный логотип
       .catch(() => alive && setB((cur) => (cur === undefined ? null : cur)))
     return () => {
       alive = false
     }
-  }, [tick])
-  return [b, () => setTick((n) => n + 1)]
+  }, [apply, tick])
+  return [b, (next) => {
+    apply(next)
+    setTick((n) => n + 1)
+  }]
 }

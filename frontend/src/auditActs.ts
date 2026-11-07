@@ -111,6 +111,7 @@ export const ACT: Record<string, string> = {
   retention_config: 'изменил сроки хранения',
   branding_set: 'сменил логотип',
   branding_clear: 'вернул стандартный логотип',
+  branding_company_set: 'изменил название компании',
   backup_config: 'изменил автобэкап',
   backup_run: 'создал бэкап панели',
   backup_restore: 'восстановил панель из бэкапа',

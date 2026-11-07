@@ -61,7 +61,7 @@ def test_vector_audit_deduplicates_process_docker_and_kubernetes():
     others = [row for row in rows if row.subject != "Qdrant"]
     assert all(row.kind == "db" and row.dump_engine == "" and not row.can_dump for row in others)
     assert all(row.note for row in rows)
-    assert "snapshot API" in qdrant.note
+    assert "полный снапшот Qdrant с коллекциями и алиасами" in qdrant.note
     assert "milvus-backup" in next(row for row in rows if row.subject == "Milvus").note
     assert "Backup API" in next(row for row in rows if row.subject == "Weaviate").note
     assert "persistent volume" in next(row for row in rows if row.subject == "Chroma").note
