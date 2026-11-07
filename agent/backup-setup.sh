@@ -153,7 +153,8 @@ AGENT_USER=kervax
 # 0.50: MongoDB full-instance archives with secure authentication and topology checks;
 # explicit read-only inspect for fresh alert rechecks.
 # 0.51: scheduled, standalone Qdrant snapshots via the container-local API.
-KERVAX_SETUP_VERSION=0.51  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.52: standalone Qdrant snapshots from a single Kubernetes pod.
+KERVAX_SETUP_VERSION=0.52  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -691,14 +692,15 @@ KEX() { $KEX_CMD "$@"; }
 # for the panel next to the node's other extras, at most every 5 minutes.
 KUBE_EXTRA=/var/lib/kervax/report.d/kube-dumps.json
 kube_access_maybe() {
-  local kc can=false
+  local kc can=false forward=false
   if [ -f "$KUBE_EXTRA" ] && [ $(( $(date +%s) - $(stat -c %Y "$KUBE_EXTRA" 2>/dev/null || echo 0) )) -lt 300 ]; then
     return 0
   fi
   kc="$(kube_ctl)" || { rm -f "$KUBE_EXTRA"; return 0; }
   [ "$(timeout 15 $kc auth can-i create pods --subresource=exec -A 2>/dev/null)" = yes ] && can=true
+  [ "$(timeout 15 $kc auth can-i create pods --subresource=portforward -A 2>/dev/null)" = yes ] && forward=true
   install -d -m 0755 "$(dirname "$KUBE_EXTRA")"
-  printf '{"v":1,"ts":%s,"ctl":"%s","exec":%s}\n' "$(date +%s)" "$(json_escape "${kc%% *}")" "$can" > "$KUBE_EXTRA.tmp" \
+  printf '{"v":1,"ts":%s,"ctl":"%s","exec":%s,"portforward":%s}\n' "$(date +%s)" "$(json_escape "${kc%% *}")" "$can" "$forward" > "$KUBE_EXTRA.tmp" \
     && mv -f "$KUBE_EXTRA.tmp" "$KUBE_EXTRA" && chmod 0644 "$KUBE_EXTRA"
 }
 
@@ -992,22 +994,11 @@ MONGO_JS
   return "$rc"
 }
 
-# Use the container's network namespace to reach its local API, even if no
-# port is published. The key goes through a pipe from Docker, never in argv.
+# Reach only the selected instance's API: Docker network namespace or a
+# loopback port-forward to a specific pod. Keys are read privately, never in argv.
 qdrant_run() {
-  local mode="$1" container="$2" target id pid net image py
-  [[ "$container" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
-    || { echo "Qdrant snapshots require a Docker container" >&2; return 1; }
-  target="$(timeout 10 docker -H unix:///var/run/docker.sock inspect --type container \
-    --format '{{.Id}} {{.State.Pid}} {{.HostConfig.NetworkMode}} {{.Config.Image}}' \
-    "$container" 2>/dev/null)" || { echo "Qdrant Docker container is unavailable" >&2; return 1; }
-  read -r id pid net image <<< "$target"
-  if ! [[ "$id" =~ ^[0-9a-f]{64}$ && "$pid" =~ ^[1-9][0-9]*$ &&
-          "$image" =~ ^(docker[.]io/)?qdrant/qdrant([:@][A-Za-z0-9._:@-]+)?$ &&
-          "$net" != host && "$net" != container:* ]]; then
-    echo "Qdrant snapshots require a running qdrant/qdrant container with its own network namespace" >&2
-    return 1
-  fi
+  local mode="$1" container="$2" target id pid net image py kc limit
+  limit="$([ "$mode" = probe ] && echo 40s || echo 2h)"
   py="$(cat <<'QDRANT_PY'
 import gzip
 import hashlib
@@ -1016,12 +1007,13 @@ import json
 import os
 import posixpath
 import re
+import select
 import subprocess
 import sys
-from contextlib import contextmanager
+import time
+from contextlib import contextmanager, nullcontext
 
-mode, container, pid, output, minfree = sys.argv[1:]
-docker = ["docker", "-H", "unix:///var/run/docker.sock"]
+mode, container, pid, output, minfree, *kubectl = sys.argv[1:]
 
 
 class SnapshotError(Exception):
@@ -1030,7 +1022,7 @@ class SnapshotError(Exception):
 
 @contextmanager
 def request(method, path, timeout=8):
-    # Direct loopback inside the chosen network namespace. No proxies or redirects.
+    # Direct loopback only. No proxies or redirects.
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
         conn.request(method, path, headers=headers)
@@ -1054,8 +1046,109 @@ def result(method, path, timeout=8):
 
 def container_read(*args):
     return subprocess.check_output(
-        [*docker, "exec", container, *args], stderr=subprocess.DEVNULL, timeout=90, universal_newlines=True
+        [*exec_cmd, *args], stderr=subprocess.DEVNULL, timeout=90, encoding="utf-8"
     )
+
+
+def kube_json(*args):
+    return json.loads(subprocess.check_output(
+        [*kubectl, "get", *args, "-o", "json"], stderr=subprocess.DEVNULL, timeout=8
+    ))
+
+
+def controller_uid(obj, kind):
+    return next((ref["uid"] for ref in obj["metadata"].get("ownerReferences", [])
+                 if ref.get("controller") and ref.get("kind") == kind), None)
+
+
+def kube_instance(target):
+    _, ns, kind, name = target.split(".", 3)
+    kubectl.extend(["-n", ns])
+    resource = {"sts": "statefulset", "deploy": "deployment"}.get(kind)
+    if not resource:
+        raise SnapshotError("Qdrant snapshots require a StatefulSet or Deployment")
+    wl = kube_json(resource, name)
+    if wl["spec"].get("replicas", 1) != 1:
+        raise SnapshotError("Qdrant snapshots require exactly one Kubernetes replica")
+    workload_uid = wl["metadata"]["uid"]
+    owner_uids = {workload_uid}
+    pod_owner = "StatefulSet"
+    if kind == "deploy":
+        pod_owner = "ReplicaSet"
+        owner_uids = {rs["metadata"]["uid"] for rs in kube_json("replicasets")["items"]
+                      if controller_uid(rs, "Deployment") == workload_uid}
+    pods = [pod for pod in kube_json("pods")["items"]
+            if controller_uid(pod, pod_owner) in owner_uids
+            and pod["status"].get("phase") not in ("Succeeded", "Failed")]
+    if len(pods) != 1:
+        raise SnapshotError("Qdrant snapshots require exactly one pod, with no rollout in progress")
+    pod = pods[0]
+    if (pod["metadata"].get("deletionTimestamp") or pod["status"].get("phase") != "Running"
+        or not any(c["type"] == "Ready" and c["status"] == "True"
+                   for c in pod["status"].get("conditions", []))):
+        raise SnapshotError("the Qdrant pod is not ready")
+    spec = pod["spec"]
+    containers = [c for c in spec["containers"] if re.fullmatch(
+        r"(?:docker[.]io/)?qdrant/qdrant(?:[:@][A-Za-z0-9._:@-]+)?", c["image"]
+    )]
+    if len(containers) != 1 or spec.get("hostNetwork"):
+        raise SnapshotError("Qdrant snapshots require one official Qdrant container in a pod without hostNetwork")
+    c = containers[0]
+    if (c.get("command") or c.get("args") or c.get("workingDir", "/qdrant") != "/qdrant"
+        or any(covers_config(m["mountPath"]) for m in c.get("volumeMounts", []))):
+        raise SnapshotError("Qdrant pod snapshots require standard configuration; set storage paths through environment variables")
+    return pod["metadata"]["name"], c["name"], pod_identity(pod, c["name"])
+
+
+def pod_identity(pod, container_name):
+    instance = next((status.get("containerID") for status in pod["status"].get("containerStatuses", [])
+                     if status["name"] == container_name and status.get("ready")), None)
+    if not instance or pod["metadata"].get("deletionTimestamp"):
+        raise SnapshotError("the Qdrant container is not ready")
+    return pod["metadata"]["uid"], instance
+
+
+def covers_config(path):
+    path = posixpath.normpath(path)
+    config_dir = "/qdrant/config"
+    return (config_dir == path or config_dir.startswith(path.rstrip("/") + "/")
+            or path.startswith(config_dir + "/"))
+
+
+def kube_env():
+    # Read only the variables required by the helper. The API key stays in memory.
+    keys = ("QDRANT__SERVICE__API_KEY", "QDRANT__SERVICE__HTTP_PORT",
+            "QDRANT__STORAGE__STORAGE_PATH", "QDRANT__STORAGE__SNAPSHOTS_PATH",
+            "QDRANT__STORAGE__TEMP_PATH")
+    values = container_read("sh", "-c", "printf '%s\\000' " + " ".join(f'"${{{k}-}}"' for k in keys))
+    return {key: value for key, value in zip(keys, values.split("\0")) if value}
+
+
+@contextmanager
+def kube_forward(pod, remote_port):
+    with subprocess.Popen(
+        [*kubectl, "port-forward", "--address", "127.0.0.1", f"pod/{pod}", f":{remote_port}"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0,
+    ) as process:
+        try:
+            end = time.monotonic() + 8
+            while (remaining := end - time.monotonic()) > 0:
+                if not select.select([process.stdout], [], [], remaining)[0]:
+                    break
+                line = process.stdout.readline()
+                if not line:
+                    break
+                match = re.fullmatch(rb"Forwarding from 127[.]0[.]0[.]1:(\d+) -> \d+\r?\n", line)
+                if match:
+                    yield int(match[1])
+                    return
+            raise SnapshotError("cannot open a local port-forward to the Qdrant pod")
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 def check_source_space():
@@ -1101,6 +1194,8 @@ def write_archive(path, size, checksum):
 
 def snapshot():
     check_source_space()
+    if kubectl and pod_identity(kube_json("pod", pod), container_name) != identity:
+        raise SnapshotError("the Qdrant pod restarted during the snapshot checks")
     existing = result("GET", "/snapshots")
     if not isinstance(existing, list):
         raise SnapshotError("unexpected Qdrant snapshot list")
@@ -1123,46 +1218,69 @@ def snapshot():
 
 
 try:
-    metadata = json.load(sys.stdin)
-    if not isinstance(metadata, list) or str(metadata[0]) != pid:
-        raise SnapshotError("Qdrant container restarted during setup")
-    env = dict(entry.split("=", 1) for entry in metadata[1] if "=" in entry)
-    port = int(env.get("QDRANT__SERVICE__HTTP_PORT", "6333"))
-    if not 1 <= port <= 65535:
+    if kubectl:
+        pod, container_name, identity = kube_instance(container)
+        exec_cmd = [*kubectl, "exec", pod, "-c", container_name, "--"]
+        env = kube_env()
+    else:
+        metadata = json.load(sys.stdin)
+        if not isinstance(metadata, list) or str(metadata[0]) != pid:
+            raise SnapshotError("Qdrant container restarted during setup")
+        env = dict(entry.split("=", 1) for entry in metadata[1] if "=" in entry)
+        exec_cmd = ["docker", "-H", "unix:///var/run/docker.sock", "exec", container]
+        # Files can override default paths. Never check the wrong volume.
+        working_dir, args, mounts = metadata[2:]
+        if working_dir != "/qdrant" or any(
+            arg == "--config-path" or arg.startswith("--config-path=") for arg in args
+        ) or any(covers_config(mount["Destination"]) for mount in mounts or []):
+            raise SnapshotError("Qdrant snapshots require standard configuration files; set storage paths through Docker environment variables")
+    remote_port = int(env.get("QDRANT__SERVICE__HTTP_PORT", "6333"))
+    if not 1 <= remote_port <= 65535:
         raise SnapshotError("invalid Qdrant HTTP port")
     key = env.get("QDRANT__SERVICE__API_KEY")
     headers = {"api-key": key} if key else {}
-    cluster = result("GET", "/cluster")
-    if not isinstance(cluster, dict) or cluster.get("status") != "disabled":
-        raise SnapshotError("Qdrant is in cluster mode; full storage snapshots require a standalone instance")
-    working_dir, args, mounts = metadata[2:]
-    config_dir = "/qdrant/config"
-    # Files can override the default paths. Refuse such layouts instead of
-    # checking available space on the wrong volume.
-    if working_dir != "/qdrant" or any(
-        arg == "--config-path" or arg.startswith("--config-path=") for arg in args
-    ) or any(
-        config_dir == path or config_dir.startswith(path.rstrip("/") + "/")
-        or path.startswith(config_dir + "/")
-        for path in (posixpath.normpath(mount["Destination"]) for mount in mounts or [])
-    ):
-        raise SnapshotError("Qdrant snapshots require standard configuration files; set storage paths through Docker environment variables")
-    if mode == "dump":
-        snapshot()
+    with (kube_forward(pod, remote_port) if kubectl else nullcontext(remote_port)) as port:
+        if kubectl and pod_identity(kube_json("pod", pod), container_name) != identity:
+            raise SnapshotError("the Qdrant pod restarted while opening its local API")
+        cluster = result("GET", "/cluster")
+        if not isinstance(cluster, dict) or cluster.get("status") != "disabled":
+            raise SnapshotError("Qdrant is in cluster mode; full storage snapshots require a standalone instance")
+        if mode == "dump":
+            snapshot()
+        elif not isinstance(result("GET", "/snapshots"), list):
+            raise SnapshotError("unexpected Qdrant snapshot list")
 except SnapshotError as exc:
     print(exc, file=sys.stderr)
     sys.exit(1)
-except (OSError, ValueError, TypeError, IndexError, http.client.HTTPException, subprocess.SubprocessError):
+except (OSError, ValueError, TypeError, IndexError, KeyError, http.client.HTTPException, subprocess.SubprocessError):
     print("Qdrant snapshot failed: check the local HTTP API, container storage and disk space", file=sys.stderr)
     sys.exit(1)
 QDRANT_PY
 )"
+  if [[ "$container" == k8s.* ]]; then
+    kube_target_ok "$container" || { echo "invalid Kubernetes workload" >&2; return 1; }
+    kc="$(kube_ctl)" || { echo "no access to the Kubernetes cluster from this node" >&2; return 1; }
+    timeout -k 15s "$limit" python3 -c "$py" "$mode" "$container" "" "${3:-}" "${4:-10}" $kc
+    return
+  fi
+  [[ "$container" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || { echo "Qdrant snapshots require a Docker container" >&2; return 1; }
+  target="$(timeout 10 docker -H unix:///var/run/docker.sock inspect --type container \
+    --format '{{.Id}} {{.State.Pid}} {{.HostConfig.NetworkMode}} {{.Config.Image}}' \
+    "$container" 2>/dev/null)" || { echo "Qdrant Docker container is unavailable" >&2; return 1; }
+  read -r id pid net image <<< "$target"
+  if ! [[ "$id" =~ ^[0-9a-f]{64}$ && "$pid" =~ ^[1-9][0-9]*$ &&
+          "$image" =~ ^(docker[.]io/)?qdrant/qdrant([:@][A-Za-z0-9._:@-]+)?$ &&
+          "$net" != host && "$net" != container:* ]]; then
+    echo "Qdrant snapshots require a running qdrant/qdrant container with its own network namespace" >&2
+    return 1
+  fi
   # Inspect only the same immutable container ID. The PID is checked again in
   # the child to catch a restart between inspection and entering its namespace.
   timeout 10 docker -H unix:///var/run/docker.sock inspect --type container \
     --format '[{{.State.Pid}},{{json .Config.Env}},{{json .Config.WorkingDir}},{{json .Args}},{{json .Mounts}}]' \
     "$id" 2>/dev/null |
-    timeout -k 15s "$([ "$mode" = probe ] && echo 20s || echo 2h)" \
+    timeout -k 15s "$limit" \
       nsenter --net="/proc/$pid/ns/net" -- python3 -c "$py" "$mode" "$id" "$pid" "${3:-}" "${4:-10}"
 }
 
@@ -1171,6 +1289,10 @@ QDRANT_PY
 # an empty reason.
 dump_probe() {
   local engine="$1" container="${2:-}" r
+  if [ "$engine" = qdrant ]; then
+    qdrant_run probe "$container"
+    return
+  fi
   if kube_target_ok "$container"; then
     kube_enter "$container" "$engine" || return 1
     case "$engine" in
@@ -1194,7 +1316,6 @@ dump_probe() {
           || docker exec "$container" pg_dumpall -U "$pgu" --schema-only >/dev/null
       else sudo -u postgres pg_dumpall --schema-only >/dev/null; fi ;;
     mongo) mongo_run probe "$container" >/dev/null ;;
-    qdrant) qdrant_run probe "$container" ;;
     mysql)
       # mariadb:11 has no mysqldump name, the generated script already prefers mariadb-dump
       if [ -n "$container" ]; then
@@ -1425,7 +1546,7 @@ cmd_dump_setup() {
     k8s.*)
       kube_target_ok "$container" || { echo "invalid Kubernetes workload: $container" >&2; return 2; }
       case "$engine" in
-        pg|mysql|ch|redis|rabbitmq) ;;
+        pg|mysql|ch|redis|rabbitmq|qdrant) ;;
         *) echo "dumps from pods are not supported for $engine" >&2; return 2 ;;
       esac
       kube_ctl >/dev/null || { echo "no access to the Kubernetes cluster from this node" >&2; return 2; }
@@ -1535,7 +1656,7 @@ DUMP_ERROR_TRAP
     printf '    exit 0\n  fi\nfi\n'
     printf 'rm -f "$SKIPF"\n'   # there was enough space - clear the previous skip marker
     # a pod is found anew on every run (its name changes with every restart and rollout)
-    if [ -n "$kt" ]; then
+    if [ -n "$kt" ] && [ "$engine" != qdrant ]; then
       declare -f kube_ctl kube_pod kube_container kube_enter KEX
       printf 'kube_enter "$KT" %q || { echo "kervax-dump: %s - the pod was not found" >&2; exit 1; }\n' "$engine" "$slot"
     fi
@@ -1609,8 +1730,8 @@ DUMP_ERROR_TRAP
                   "'import sqlite3,sys; s=sqlite3.connect(sys.argv[1]); d=sqlite3.connect(sys.argv[2]); s.backup(d); d.close(); s.close()'"
            printf '$GZF "$F" 2>/dev/null; F="$F.gz"\n' ;;
       qdrant) printf 'F="$OUT/qdrant-$TS.snapshot.gz"\n'
-              declare -f qdrant_run
-              printf 'qdrant_run dump "$CONT" "$F" "$MINFREE"\n' ;;
+              declare -f qdrant_run kube_target_ok kube_ctl
+              printf 'qdrant_run dump "${KT:-$CONT}" "$F" "$MINFREE"\n' ;;
       neo4j) printf 'F="$OUT/neo4j-$TS.tar.gz"\n'
            # Neo4j Community cannot do an online dump: neo4j-admin refuses to work on a live
            # database ("The database is in use"), and a hot backup exists only in Enterprise. So

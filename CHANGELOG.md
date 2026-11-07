@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.112] - 2026-11-07
+
+- Enable Qdrant backups from Backups > Coverage for single-pod Kubernetes StatefulSets and Deployments. The helper uses a local port-forward to save a full snapshot with collections and aliases before restic runs. Kubernetes snapshots require backup-setup 0.52.
+
 ## [1.8.111] - 2026-11-07
 
 - Archive linked backup repositories when deleting one or more servers. Snapshots stay on the backup server, and archived repositories stop raising missing-agent and overdue backup alerts.

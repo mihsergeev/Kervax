@@ -1030,11 +1030,11 @@ _DB_HOWTO = {
 # потому что поды пересоздаются под новыми именами (у Deployment хеш меняется при каждом
 # выкате). Раньше панель печатала CronJob с именами, выведенными из имени пода, — его
 # приходилось править руками, и после передеплоя он переставал попадать в базу.
-_KUBE_DUMP_ENGINES = {"pg", "mysql", "ch", "redis", "rabbitmq"}
+_KUBE_DUMP_ENGINES = {"pg", "mysql", "ch", "redis", "rabbitmq", "qdrant"}
 _KUBE_DUMP_HELPER = "0.27"
 # ClickHouse helper 0.27 дампил, входя пользователем default, и на k8s-c упёрся в
 # пароль, которого нет в окружении пода. С 0.28 схему читает из файлов metadata — без входа.
-_KUBE_DUMP_HELPER_FOR = {"ch": "0.28"}
+_KUBE_DUMP_HELPER_FOR = {"ch": "0.28", "qdrant": "0.52"}
 _KUBE_KIND = {"sts": "StatefulSet", "deploy": "Deployment", "ds": "DaemonSet"}
 
 
@@ -1068,10 +1068,22 @@ def _mongo_dump_block(agent_version: str, rep: dict) -> str:
 
 
 def _qdrant_dump_block(agent_version: str, rep: dict, container: str) -> str:
-    if not container or container.startswith("k8s."):
-        return "снапшоты Qdrant поддерживаются для одиночных экземпляров в Docker"
+    if not container:
+        return "снапшоты Qdrant поддерживаются для одиночных экземпляров в Docker и Kubernetes"
     if _ver_key(agent_version) < (2, 66):
         return "для снапшотов Qdrant обновите агент до 2.66 или новее"
+    if container.startswith("k8s."):
+        parts = container.split(".", 3)
+        if len(parts) != 4 or parts[2] not in ("sts", "deploy"):
+            return "для снапшотов Qdrant нужен StatefulSet или Deployment с одним подом"
+        if block := _kube_dump_block(rep, "qdrant"):
+            return block
+        pods = [p for p in ((rep.get("kube") or {}).get("pods") or [])
+                if _kube_workload(p) == container and p.get("phase") in ("Running", "Pending")]
+        if (len(pods) != 1 or pods[0].get("phase") != "Running" or pods[0].get("ready") is not True
+                or _db_engine_of(pods[0].get("image") or "", pods[0].get("name") or "") != "Qdrant"):
+            return "для снапшотов Qdrant нужен один готовый под"
+        return ""
     have = str((rep.get("setup_versions") or {}).get("backup-setup") or "")
     if _ver_key(have) < (0, 51):
         return "для снапшотов Qdrant обновите backup-helper до 0.51 или новее"
@@ -1087,9 +1099,12 @@ def _kube_dump_block(rep: dict, code: str) -> str:
     if not have or _ver_key(have) < _ver_key(need):
         return (f"дамп из пода снимает helper backup-setup {need} и новее — "
                 "обновите его на ноде")
-    if not ((rep.get("extras") or {}).get("kube-dumps") or {}).get("exec"):
+    access = (rep.get("extras") or {}).get("kube-dumps") or {}
+    if not access.get("exec"):
         return ("у helper на этой ноде нет доступа к кластеру: дамп из пода включается на "
                 "управляющей ноде (k0s, k3s, microk8s или kubeadm с admin.conf)")
+    if code == "qdrant" and not access.get("portforward"):
+        return "helper пока не подтвердил доступ pods/portforward для снапшотов Qdrant"
     return ""
 
 
@@ -1438,7 +1453,10 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
             # Кнопку дампа даём только там, где helper реально может его снять: docker exec,
             # локально или kubectl exec с админским доступом самой ноды. Агенту pods/exec
             # по-прежнему не выдаём — exec делает root-helper по белому списку движков.
-            if kube:
+            if kube and code == "qdrant":
+                block = _qdrant_dump_block(server.agent_version, rep, inst)
+                can_dump = not block
+            elif kube:
                 block = _kube_dump_block(rep, code) if code else ""
                 can_dump = bool(code) and not block
             else:
@@ -1453,14 +1471,16 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
                     if block == _PG_TARGET_PENDING:
                         where_txt = "место запуска не подтверждено"
                 can_dump = bool(code) and not block
+            hint = ("полный снапшот Qdrant с коллекциями и алиасами"
+                    if code == "qdrant" and can_dump else "")
             out.append(BackupAudit(
                 kind="db", subject=eng, gap=False, instance=inst,
                 detail=f"{where_txt} — файловый снапшот живой базы может не восстановиться"
                        + (f", бэкапьте отдельно: {howto}" if howto else "")
                        + (f" — {block}" if block else ""),
-                note=block if code == "pg" and block else ", ".join(
+                note=hint or (block if code == "pg" and block else ", ".join(
                     x for x in (f"бэкапить отдельно: {howto}" if howto else "", block) if x
-                ),
+                )),
                 dump_engine=code, can_dump=can_dump,
                 downtime=_DUMP_DOWNTIME.get(code, "") if can_dump and not kube else "",
                 container=inst, pods=inst_pods[:4],
@@ -2836,7 +2856,7 @@ async def backup_command(
                 if block:
                     raise HTTPException(status.HTTP_409_CONFLICT, block)
                 containers = (rep.get("docker") or {}).get("containers") or []
-                if not any(
+                if not body.container.startswith("k8s.") and not any(
                     c.get("name") == body.container and c.get("state") == "running"
                     and _db_engine_of(c.get("image") or "", body.container) == "Qdrant"
                     for c in containers
