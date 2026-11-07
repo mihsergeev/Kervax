@@ -4027,6 +4027,14 @@ def _bsrv_role(rep: dict, s: Server | None) -> bool:
     return bool((rep.get("backup_server") or {}).get("present")) or bool(getattr(s, "backup_mirror_role", False))
 
 
+def _alert_cpu(cpu: float, iowait: float | None, backup_host: bool) -> float:
+    # Агент считает cpu_percent как 100 - idle, включая iowait. На бэкап-серверах
+    # ожидание диска проверяется отдельно по состоянию бэкапа и ошибкам диска.
+    if backup_host and isinstance(iowait, (int, float)) and 0 < iowait <= cpu:
+        return cpu - iowait
+    return cpu
+
+
 def backup_busy(rep: dict) -> str:
     """Какой бэкап сейчас идет на самом сервере ("" - никакой): свое задание (custom-backups) запущено
     или стартовало за последний час, или в базе идет дамп"""
@@ -4296,12 +4304,15 @@ _METRIC_ROW = {"cpu": ("CPU", "%", "cpu_alert_percent"), "mem": ("RAM", "%", "me
                "disktemp": ("диск", "°C", "disk_temp_alert_c")}
 
 
-def _metric_row(s: Server, state: dict, now: datetime, kind: str, value: float) -> str:
+def _metric_row(s: Server, state: dict, now: datetime, kind: str, value: float, *,
+                cpu_without_iowait: bool = False) -> str:
     """Строка CPU, RAM, температур и conntrack для "Что сломано": что держит алерт - среднее за
     последние полчаса ("<вид>_avg", ведет цикл алертов), а сейчас - если заметно отличается. Под
     порогом CPU и RAM еще и когда алерт снимется: строка "CPU 52%" рядом со "сломано" выглядела
     ложной, хотя нода часами сидела выше порога и просела на минуту."""
     label, unit, attr = _METRIC_ROW[kind]
+    if cpu_without_iowait:
+        label = "CPU без ожидания I/O"
     cur = round(value)
     text = f"{label} {cur}{unit}"
     avg = state.get(f"{kind}_avg")
@@ -4472,7 +4483,8 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
 
     cpu = rep.get("cpu_percent")
     if getattr(s, "cpu_alert_percent", 0) and cpu is not None:
-        metric("cpu", 2, _metric_row(s, state, now, "cpu", cpu))
+        value = _alert_cpu(cpu, rep.get("cpu_iowait"), backup_host)
+        metric("cpu", 2, _metric_row(s, state, now, "cpu", value, cpu_without_iowait=backup_host))
     if getattr(s, "mem_alert_percent", 0) and rep.get("mem_total"):
         metric("mem", 2, _metric_row(s, state, now, "mem", (rep.get("mem_used") or 0) / rep["mem_total"] * 100))
     temp = rep.get("cpu_temp")
@@ -5872,21 +5884,22 @@ async def metric_history(session: AsyncSession, servers: list[Server],
     """{server_id: [(unix, {"cpu"|"mem"|"temp"|"conntrack"|"disktemp": значение})]} за последние
     полчаса - только у серверов, где превышение уже идет ("<вид>_since"): остальным среднее не
     нужно. Один запрос на тик по истории метрик, как fill_history."""
-    ids = [s.id for s in servers
-           if any((s.alert_state or {}).get(f"{k}_since") for k in _METRIC_AVG_KINDS)]
+    active = [s for s in servers
+              if any((s.alert_state or {}).get(f"{k}_since") for k in _METRIC_AVG_KINDS)]
     out: dict[int, list[tuple[float, dict[str, float]]]] = {}
-    if not ids:
+    if not active:
         return out
+    backup_ids = {s.id for s in active if _bsrv_role(s.last_report or {}, s) or bsrv_mirror.is_mirror(s)}
     rows = await session.execute(
-        select(ServerMetric.server_id, ServerMetric.ts, ServerMetric.cpu_percent, ServerMetric.mem_percent,
+        select(ServerMetric.server_id, ServerMetric.ts, ServerMetric.cpu_percent, ServerMetric.cpu_iowait, ServerMetric.mem_percent,
                ServerMetric.cpu_temp, ServerMetric.conntrack_count, ServerMetric.conntrack_max,
                ServerMetric.disk_devs)
-        .where(ServerMetric.server_id.in_(ids), ServerMetric.ts >= now - timedelta(seconds=_METRIC_AVG_S))
+        .where(ServerMetric.server_id.in_([s.id for s in active]), ServerMetric.ts >= now - timedelta(seconds=_METRIC_AVG_S))
         .order_by(ServerMetric.ts))
-    for sid, ts, cpu, mem, temp, ct, ctmax, devs in rows.all():
+    for sid, ts, cpu, iowait, mem, temp, ct, ctmax, devs in rows.all():
         v: dict[str, float] = {}
         if cpu is not None:
-            v["cpu"] = float(cpu)
+            v["cpu"] = _alert_cpu(cpu, iowait, sid in backup_ids)
         if mem is not None:
             v["mem"] = float(mem)
         if temp is not None:
@@ -6604,12 +6617,15 @@ def _server_conditions(s: Server, now: datetime,
     rep = s.last_report or {}
     if rep.get("platform") == "windows" and (windows_services.names(s) or state.get("windows_service_sig")):
         out["windows_service"] = windows_services.conditions(s, now)
+    backup_host = _bsrv_role(rep, s) or bsrv_mirror.is_mirror(s)
     cpu = rep.get("cpu_percent")
     if s.cpu_alert_percent and cpu is not None:
+        cpu = _alert_cpu(cpu, rep.get("cpu_iowait"), backup_host)
         # cause заполняется в момент отправки (нужна история метрик), но в ctx он
         # обязан быть всегда: без него шаблон с {cause} не отрендерится
         sustain("cpu", cpu >= s.cpu_alert_percent,
-                {"value": round(cpu), "threshold": s.cpu_alert_percent, "cause": ""},
+                {"value": round(cpu), "threshold": s.cpu_alert_percent, "cause": "",
+                 "cpu_without_iowait": backup_host},
                 below=cpu < s.cpu_alert_percent - _HYST)
     if s.mem_alert_percent and rep.get("mem_total"):
         memp = rep.get("mem_used", 0) / rep["mem_total"] * 100
@@ -6617,7 +6633,6 @@ def _server_conditions(s: Server, now: datetime,
                 {"value": round(memp), "threshold": s.mem_alert_percent, "cause": ""},
                 below=memp < s.mem_alert_percent - _HYST)
     worst, worst_mount, backup_storage = _disk_fill_sample(s, now)
-    backup_host = _bsrv_role(rep, s) or bsrv_mirror.is_mirror(s)
     if rep.get("disks") or worst_mount or (state.get("disk") and backup_host):
         crit, prob, warn = s.disk_crit_percent, s.disk_alert_percent, s.disk_warn_percent
         low = _fill_low(s)

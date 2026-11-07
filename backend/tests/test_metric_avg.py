@@ -3,6 +3,7 @@
 минуту провала главная показывала "CPU 52%" рядом со "сломано", и строка выглядела ложной."""
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select
 
 from app import collector
@@ -96,3 +97,56 @@ async def test_alert_tells_the_average_over_the_hold(tmp_path, monkeypatch):
     # среднее - и в состоянии для главной, и как объявленное значение для "было N" в отбое
     assert st["cpu_avg"] == {"v": 93, "min": 16} and st["cpu_val"] == 93
     await engine.dispose()
+
+
+@pytest.mark.parametrize("role", ["primary", "mirror", "regular"])
+def test_backup_io_wait_does_not_start_a_cpu_alert(role):
+    now = datetime.now(timezone.utc)
+    rep = {"cpu_percent": 94, "cpu_iowait": 83}
+    if role == "primary":
+        rep["backup_server"] = {"present": True}
+    elif role == "mirror":
+        rep["extras"] = {"backup-mirror": {}}
+    s = _srv(now, rep, alert_sustain_seconds=0)
+
+    level, ctx = collector._server_conditions(s, now)["cpu"]
+    assert (level, ctx["value"], ctx["since"] is not None) == (
+        (1, 94, True) if role == "regular" else (0, 11, False)
+    )
+    assert s.last_report["cpu_percent"] == 94
+
+
+async def test_backup_cpu_alert_uses_busy_time_for_history_and_recovery(tmp_path, monkeypatch):
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'backup-cpu.db').as_posix()}")
+    now = datetime.now(timezone.utc)
+    started = (now - timedelta(minutes=16)).isoformat()
+    report = {"backup_server": {"present": True}, "cpu_percent": 98, "cpu_iowait": 3}
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    async with factory() as session:
+        session.add(_srv(now, report, {"cpu_since": started}, mem_alert_percent=0))
+        await session.flush()
+        for minute, cpu, wait in ((15, 96, 4), (10, 99, 4), (5, 97, 5), (1, 93, None)):
+            session.add(ServerMetric(server_id=1, ts=now - timedelta(minutes=minute), cpu_percent=cpu, cpu_iowait=wait))
+        await session.commit()
+
+    sent = []
+
+    async def fake_send(cfg, text, parse_mode=None):
+        sent.append(text)
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", fake_send)
+    try:
+        await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), now)
+        assert len(sent) == 1 and "CPU загружен на 93% в среднем за 16 мин без ожидания I/O" in sent[0]
+        async with factory() as session:
+            s = await session.get(Server, 1)
+            assert s.alert_state["cpu_avg"] == {"v": 93, "min": 16}
+            assert _rows(s, now, "cpu") == ["CPU без ожидания I/O 95%"]
+            s.last_report = {**report, "cpu_percent": 94, "cpu_iowait": 83}
+            level, ctx = collector._server_conditions(s, now)["cpu"]
+            assert level == 1 and ctx["value"] == 11 and ctx["cool"] == now.isoformat()
+            assert "ниже 80%" in _rows(s, now, "cpu")[0]
+    finally:
+        await engine.dispose()

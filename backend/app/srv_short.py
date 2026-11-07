@@ -406,7 +406,8 @@ def _short(key: str, ctx: dict, s, level: int):
         return "Перезагрузился", []
     if key == "cpu":
         top = top_proc(rep, "cpu")
-        return f"CPU загружен на {v}%{_avg_tail(ctx)}", [tg_fmt.fact("Грузит", top)] if top else []
+        basis = " без ожидания I/O" if ctx.get("cpu_without_iowait") else ""
+        return f"CPU загружен на {v}%{_avg_tail(ctx)}{basis}", [tg_fmt.fact("Грузит", top)] if top else []
     if key == "mem":
         top = top_proc(rep, "mem")
         return f"Память занята на {v}%{_avg_tail(ctx)}", [tg_fmt.fact("Ест", top)] if top else []

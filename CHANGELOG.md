@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.113] - 2026-11-07
+
+- CPU alerts on primary and secondary backup servers exclude I/O wait. CPU charts still show the full reading, and sustained CPU saturation, backup stalls, and disk errors still trigger their respective alerts.
+
 ## [1.8.112] - 2026-11-07
 
 - Enable Qdrant backups from Backups > Coverage for single-pod Kubernetes StatefulSets and Deployments. The helper uses a local port-forward to save a full snapshot with collections and aliases before restic runs. Kubernetes snapshots require backup-setup 0.52.
