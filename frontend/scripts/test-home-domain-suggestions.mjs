@@ -58,7 +58,7 @@ try {
 
   const { page, discovered, calls, errors } = await fixture('editor', ['sites'])
   const suggestions = page.locator('.home-domain-suggestions')
-  const count = n => suggestions.getByText('Новые домены ' + n, { exact: true }).waitFor()
+  const count = n => suggestions.locator('.home-domain-label .net-n').filter({ hasText: new RegExp(`^${n}$`) }).waitFor()
   const row = domain => suggestions.locator('li').filter({ hasText: domain })
   const modal = page.locator('.adopt-modal')
   const probes = () => calls.filter(call => call.pathname === discoveryPath + '/probe')
@@ -70,10 +70,20 @@ try {
   await page.clock.fastForward(120_000)
   await count(4)
   assert.equal(probes().length, 0, 'Polling must not probe sites')
-  await suggestions.locator('summary').click()
+  const view = suggestions.getByRole('button', { name: 'Посмотреть', exact: true })
+  const collapse = suggestions.getByRole('button', { name: 'Свернуть список' })
+  const options = suggestions.getByRole('button', { name: 'Настройки подсказок' })
+  const hideBlock = suggestions.getByRole('button', { name: 'Не показывать на главной' })
+  assert.equal(await view.getAttribute('aria-expanded'), 'false')
+  await options.click()
+  await hideBlock.waitFor()
+  assert.equal(await row('alpha.example.test').isVisible(), false, 'Options must not expand the list')
+  await options.click()
+  await view.press('Enter')
+  assert.equal(await collapse.getAttribute('aria-expanded'), 'true')
   assert.equal(await suggestions.locator('li').count(), 3)
   assert(await suggestions.evaluate(element => element.scrollWidth <= element.clientWidth + 1), 'Mobile overflow')
-  await suggestions.getByRole('button', { name: 'Показать все (4)' }).click()
+  await suggestions.getByRole('button', { name: 'Все домены (4)' }).click()
   await modal.getByText('delta.example.test', { exact: true }).waitFor()
   await modal.getByRole('button', { name: 'Закрыть', exact: true }).click()
 
@@ -88,7 +98,10 @@ try {
   await count(2)
   assert.deepEqual(calls.find(call => call.pathname === '/api/checks/adopt').body.domains, ['alpha.example.test'])
 
-  await suggestions.getByRole('button', { name: 'Не показывать на главной' }).click()
+  await collapse.click()
+  assert.equal(await row('gamma.example.test').isVisible(), false)
+  await options.click()
+  await hideBlock.click()
   await suggestions.waitFor({ state: 'hidden' })
   const discoverCalls = calls.filter(call => call.pathname === discoveryPath).length
   await page.reload()
@@ -104,6 +117,7 @@ try {
   await modal.getByRole('button', { name: 'Закрыть', exact: true }).click()
   await page.locator('.brand-link').click()
   await count(3)
+  assert.equal(await row('gamma.example.test').isVisible(), false, 'Re-enabled suggestions must start collapsed')
   assert.deepEqual(errors, [])
 
   for (const [role, sections] of [['viewer', ['sites']], ['editor', ['servers']]]) {

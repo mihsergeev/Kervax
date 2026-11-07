@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.115] - 2026-11-07
+
+- New domains appear in a compact, collapsed row on the home page. Open it to preview up to three domains or review the full list.
+- Hide the whole row from its options menu, even with the list closed. Turn it back on from Sites.
+
 ## [1.8.114] - 2026-11-07
 
 - Home shows a collapsed count of domains that agents found outside monitoring. Expand it to preview up to three domains, add one through the monitoring wizard, or view the full list.

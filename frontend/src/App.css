@@ -5700,20 +5700,51 @@ button.svc-site-on:hover {
   border-radius: 10px;
   background: var(--bg-card);
 }
-.home-domain-suggestions summary { cursor: pointer; }
-.home-domain-suggestions summary .net-n { margin-inline-start: 0.25rem; }
-.home-domain-suggestions ul { list-style: none; padding: 0; margin: 0.5rem 0; }
+.home-domain-strip, .home-domain-label, .home-domain-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.55rem;
+}
+.home-domain-strip { justify-content: space-between; }
+.home-domain-label { font-size: 0.9rem; }
+.home-domain-icon, .home-domain-suggestions .home-domain-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+}
+.home-domain-icon {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 7px;
+}
+.home-domain-suggestions .home-domain-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 2rem;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.home-domain-suggestions .home-domain-toggle:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.home-domain-options, .home-domain-footer { text-align: end; }
+.home-domain-options { margin-top: 0.45rem; }
+.home-domain-suggestions ul { list-style: none; padding: 0; margin: 0.55rem 0 0; }
 .home-domain-suggestions li {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 0.35rem 0.75rem;
-  padding: 0.4rem 0;
+  padding: 0.35rem 0;
   border-top: 1px solid var(--border);
 }
 .home-domain-suggestions li .mono { min-width: 0; overflow-wrap: anywhere; }
-.home-domain-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.75rem; }
 /* проблема самой точки проверки, а не сайтов */
 .loc-warn {
   display: flex;
