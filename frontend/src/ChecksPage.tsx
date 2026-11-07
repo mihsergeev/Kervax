@@ -18,7 +18,8 @@ import { CheckDetail } from './CheckDetail'
 import { EXPIRY_WARN_DAYS, expiryText, expiryTone } from './checkUtils'
 import { ExpirySnoozePick, expEntry, expHidden, expSnoozeText, expSnoozeTip, type ExpKind } from './ExpirySnooze'
 import { useUrlCard } from './deeplink'
-import { AdoptSitesModal, adoptable } from './AdoptSitesModal'
+import { AdoptSitesModal } from './AdoptSitesModal'
+import { domainSuggestionsEnabled, newDiscoveredDomains, setDomainSuggestionsEnabled } from './domainDiscovery'
 import { AddMonitor } from './AddMonitor'
 import { StatusBar } from './charts/StatusBar'
 import { ImportModal } from './ImportModal'
@@ -76,7 +77,8 @@ const warnBadge = expiryTone
 
 export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onConsumed }: Props) {
   const { t } = useI18n()
-  const { isViewer } = useAuth()
+  const { isViewer, username } = useAuth()
+  const [homeSuggestions, setHomeSuggestions] = useState(() => domainSuggestionsEnabled(username))
   const [ov, setOv] = useState<ChecksOverview | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [moveErr, setMoveErr] = useState<string | null>(null)
@@ -154,7 +156,7 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
   }, [onUnauthorized, t])
 
   // Найденные домены тянем один раз: это срез отчётов агентов, он меняется не чаще,
-  // чем правят конфиг веб-сервера. 403 = учётке закрыты серверы — плашки просто не будет.
+  // чем правят конфиг веб-сервера.
   useEffect(() => {
     if (isViewer) return
     discoveredDomains()
@@ -183,9 +185,10 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
 
   // что реально можно предложить добавить: без масок/regexp, без уже покрытых и без
   // помеченных «мониторить не нужно» — иначе плашка висела бы вечно
-  const skipSet = new Set((found?.ignored ?? []).map((x) => x.toLowerCase()))
-  const newFound = (found?.domains ?? []).filter(
-    (d) => adoptable(d.domain) && found?.hosts[d.domain.toLowerCase()] == null && !skipSet.has(d.domain.toLowerCase()),
+  const newFound = newDiscoveredDomains(found)
+  const ignored = new Set(found?.ignored)
+  const ignoredFound = found?.domains.some(({ domain }) =>
+    !Object.hasOwn(found.hosts, domain) && ignored.has(domain),
   )
 
   const openAdd = () => {
@@ -663,19 +666,30 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
           </div>
         ))}
 
-      {!isViewer && newFound.length > 0 && (
+      {!isViewer && (newFound.length > 0 || ignoredFound) && (
         <div className="discover-bar">
           <span className="discover-ico">🧭</span>
           <span>
-            {t('На серверах найдено доменов вне мониторинга: {n}', { n: newFound.length })}
+            {newFound.length
+              ? t('На серверах найдено доменов вне мониторинга: {n}', { n: newFound.length })
+              : t('Домены, найденные на серверах')}
           </span>
           <button className="primary" onClick={() => setWizard(true)}>
-            {t('Посмотреть и добавить')}
+            {newFound.length ? t('Посмотреть и добавить') : t('Посмотреть')}
           </button>
         </div>
       )}
 
-      {wizard && found && (
+      {!isViewer && !homeSuggestions && (
+        <button className="ghost small" onClick={() => {
+          setDomainSuggestionsEnabled(username, true)
+          setHomeSuggestions(true)
+        }}>
+          {t('Показывать новые домены на главной')}
+        </button>
+      )}
+
+      {!isViewer && wizard && found && (
         <AdoptSitesModal
           title={t('Домены, найденные на серверах')}
           items={found.domains}

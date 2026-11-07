@@ -5693,6 +5693,27 @@ button.svc-site-on:hover {
 .discover-ico {
   font-size: 1.1rem;
 }
+.home-domain-suggestions {
+  margin-top: 0.8rem;
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+.home-domain-suggestions summary { cursor: pointer; }
+.home-domain-suggestions summary .net-n { margin-inline-start: 0.25rem; }
+.home-domain-suggestions ul { list-style: none; padding: 0; margin: 0.5rem 0; }
+.home-domain-suggestions li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
+  padding: 0.4rem 0;
+  border-top: 1px solid var(--border);
+}
+.home-domain-suggestions li .mono { min-width: 0; overflow-wrap: anywhere; }
+.home-domain-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.3rem 0.75rem; }
 /* проблема самой точки проверки, а не сайтов */
 .loc-warn {
   display: flex;

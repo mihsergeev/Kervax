@@ -12,21 +12,15 @@ import {
   type ProbeStatus,
 } from './api'
 import { useI18n } from './i18n'
+import { adoptable } from './domainDiscovery'
 
 // Мастер «Поставить на мониторинг»: список доменов, найденных агентами на веб-серверах
 // (nginx/Apache/Caddy, Ingress, Gateway API), с отметкой галочками и созданием мониторов.
 //
-// Два входа, один компонент: из «Сервисов» приходит список одного веб-сервиса, из
-// «Сайтов» — весь парк. Разница только во входных данных, поведение одинаковое.
+// Из «Сервисов» приходит список одного веб-сервиса, из «Сайтов» — весь парк.
+// С главной можно открыть как весь список, так и отдельный домен.
 
 export type AdoptItem = { domain: string; servers?: string[] }
-
-// Годится ли имя в монитор. Та же логика, что на бэкенде (_adopt_problem в
-// backend/app/api/checks.py): маску и regexp проверять нечем — HTTP-монитору нужен
-// конкретный адрес.
-export function adoptable(d: string): boolean {
-  return !!d && !d.includes('*') && !d.startsWith('~') && d.includes('.')
-}
 
 // за раз столько же, сколько принимает POST /api/checks/adopt
 const ADOPT_MAX = 500
@@ -302,6 +296,7 @@ export function AdoptSitesModal({
   hosts,
   groups,
   ignored,
+  preselected = '',
   onClose,
   onDone,
   onIgnored,
@@ -312,6 +307,7 @@ export function AdoptSitesModal({
   hosts: Record<string, number>
   groups: string[]
   ignored?: string[] // домены, помеченные «не нужен» — прячем из предложений
+  preselected?: string
   onClose: () => void
   onDone: (hosts: Record<string, number>, created: number) => void
   onIgnored?: (domains: string[], ignore: boolean) => void
@@ -321,7 +317,7 @@ export function AdoptSitesModal({
   const [q, setQ] = useState('')
   const [group, setGroup] = useState('')
   const [onlyNew, setOnlyNew] = useState(true)
-  const [sel, setSel] = useState<Set<string>>(new Set())
+  const [sel, setSel] = useState(() => new Set(preselected ? [preselected] : []))
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   // итог последнего добавления: пока он есть, мастер показывает его вместо списка

@@ -38,6 +38,7 @@ import { CountryFlag } from './CountryFlag'
 import { ActGroup, QuickMute } from './ActGroup'
 import { grpMuteTip } from './homeGroups'
 import { HomeTile, tileIssues, usePlural, type TileIssue } from './HomeTiles'
+import { HomeDomainSuggestions } from './HomeDomainSuggestions'
 import { backupProblems, byTone, dockerProblems, siteIssueRows, type ProbItem } from './sectionIssues'
 import { AgentUpdRow, HelperUpdRow, UpdateAllButton, agentBehind, rolloutHosts as fleetHosts, useFleetRollout, useViaPanels } from './FleetUpdate'
 
@@ -544,7 +545,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // Главная — витрина всех разделов, поэтому она обязана уважать нарезку доступа:
   // иначе учётка без «Бэкапов» видит на ней и карточку бэкапов, и пункты, ведущие
   // в закрытый раздел (клик по ним всё равно упрётся в 403).
-  const { sections, isViewer, isAdmin } = useAuth()
+  const { sections, isViewer, isAdmin, username } = useAuth()
   const canSee = useCallback(
     (sec: Section) => sections.length === 0 || sections.includes(sec),
     [sections],
@@ -1425,6 +1426,14 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         </div>
       )}
       </div>
+      {!isViewer && canSee('sites') && (
+        <HomeDomainSuggestions
+          key={username}
+          username={username}
+          onAdded={load}
+          onOpenCheck={(id) => onOpen('sites', id)}
+        />
+      )}
     </div>
   )
 }

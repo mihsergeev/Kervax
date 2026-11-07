@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.114] - 2026-11-07
+
+- Home shows a collapsed count of domains that agents found outside monitoring. Expand it to preview up to three domains, add one through the monitoring wizard, or view the full list.
+- Hide a domain from suggestions for everyone on the panel, or turn off homepage suggestions in your browser. Restore hidden domains and re-enable homepage suggestions from Sites.
+
 ## [1.8.113] - 2026-11-07
 
 - CPU alerts on primary and secondary backup servers exclude I/O wait. CPU charts still show the full reading, and sustained CPU saturation, backup stalls, and disk errors still trigger their respective alerts.

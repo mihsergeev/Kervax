@@ -55,6 +55,7 @@ try {
       '/api/alert-rechecks': jobs,
       '/api/maintenance': maintenance,
       '/api/servers': [],
+      '/api/checks/discovered': { domains: [], hosts: {}, groups: [], ignored: [] },
       '/api/checks/local-probe-suggestions': { items: [] },
       '/api/alerts/coverage': { items: [] },
     }[pathname] ?? {}
