@@ -20,7 +20,7 @@ const checks = Array.from({ length: 9 }, (_, i) => check(i + 1, `web${i + 1}.${d
   check_domain: true, domain_days: 9 + i, domain_warn_days: [30], probe_local: i > 0,
 }))
 checks.push(check(10, statusName, { target: 'https://status.example.test', last_status: 'down', last_message: 'HTTP 503' }))
-checks.push(check(11, sslName, { target: 'https://ssl.example.test', check_ssl: true, ssl_days: 14, ssl_warn_days: [14] }))
+checks.push(check(11, sslName, { target: 'https://ssl.example.test', check_ssl: true, probe_local: true, ssl_days: 14, ssl_warn_days: [14] }))
 const maintenance = [{ id: 1, title: 'Demo maintenance', active: true, cur_end: '2030-01-01T12:00:00Z', server_ids: [], check_ids: [1] }]
 
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PW_CHROME })
@@ -72,6 +72,8 @@ try {
   const recheck = (item) => item.getByRole('button', { name: 'Исправил: перепроверить', exact: true })
 
   await grouped.getByText('доступно 1 из 9').waitFor()
+  await ssl.waitFor()
+  assert.equal(await recheck(ssl).count(), 0, 'Unavailable recheck button must be absent')
   const neighbor = await page.locator('.maint-home-row').boundingBox()
   assert(neighbor.x > (await card.boundingBox()).x, 'Narrow desktop must render two columns')
   for (const width of [850, 1440, 390, 320]) {

@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.116] - 2026-11-08
+
+- The home page shows the “Fixed” button only when at least one alert in the row can be rechecked.
+
 ## [1.8.115] - 2026-11-07
 
 - New domains appear in a compact, collapsed row on the home page. Open it to preview up to three domains or review the full list.

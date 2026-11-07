@@ -96,7 +96,6 @@ const EN: Record<string, string> = {
   'Проверяю': 'Checking',
   'Проблема осталась': 'Problem remains',
   'Не удалось проверить': 'Could not verify',
-  'Перепроверка недоступна': 'Verification unavailable',
   'Проверяю свежие данные…': 'Checking fresh observations…',
   'Проверка завершена': 'Verification complete',
   'подтверждено исправление: {n}': 'recovery verified: {n}',

@@ -100,20 +100,20 @@ export function RecheckButton({ refs, jobs, run, blocked = {} }: {
   refs: RecheckRef[]; jobs: Record<string, RecheckJob>; run: (refs: RecheckRef[]) => Promise<void>; blocked?: Record<string, string>
 }) {
   const { t } = useI18n()
+  const eligible = refs.filter((r) => !blocked[recheckKey(r)])
+  if (!eligible.length) return null
   const rows = refs.map((r) => jobs[recheckKey(r)]).filter(Boolean)
   const busy = rows.some((r) => r.status === 'checking')
   const still = rows.some((r) => r.status === 'remains')
   const failed = rows.some((r) => r.status === 'unavailable')
-  const eligible = refs.filter((r) => !blocked[recheckKey(r)])
-  const unavailable = eligible.length ? '' : Object.values(blocked)[0] || ''
-  const label = busy ? 'Проверяю' : still ? 'Проблема осталась' : failed ? 'Не удалось проверить' : unavailable ? 'Перепроверка недоступна' : 'Исправил'
-  const title = unavailable || (failed ? rows.find((r) => r.status === 'unavailable')?.message : 'Исправил: запросить свежую проверку. Алерт исчезнет только после подтверждения.')
+  const label = busy ? 'Проверяю' : still ? 'Проблема осталась' : failed ? 'Не удалось проверить' : 'Исправил'
+  const title = failed ? rows.find((r) => r.status === 'unavailable')?.message : 'Исправил: запросить свежую проверку. Алерт исчезнет только после подтверждения.'
   return <span className="home-recheck-wrap" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-    <button type="button" className={`home-recheck ${still || failed ? 'has-result' : ''}`} disabled={busy || !!unavailable}
+    <button type="button" className={`home-recheck ${still || failed ? 'has-result' : ''}`} disabled={busy}
       title={t(title || '')} aria-label={t('Исправил: перепроверить')} onClick={() => run(eligible)}>
       <span aria-hidden="true">{busy ? '◌' : '☑'}</span> {t(label)}
     </button>
-    {eligible.length > 0 && eligible.length < refs.length && <span className="muted small" title={Object.values(blocked).map((x) => t(x)).join('\n')}>
+    {eligible.length < refs.length && <span className="muted small" title={Object.values(blocked).map((x) => t(x)).join('\n')}>
       {t('доступно {n} из {total}', { n: eligible.length, total: refs.length })}
     </span>}
   </span>
