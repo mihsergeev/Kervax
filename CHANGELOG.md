@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.118] - 2026-11-08
+
+- Docker host-access guidance detects an existing docker-api service in the same Compose project. It explains how to remove direct socket access from the proxy safely and keeps the security warning visible.
+
 ## [1.8.117] - 2026-11-08
 
 - Removed new server onboarding reminders from the home page. Onboarding closes automatically 24 hours after the first agent report, or 24 hours after server creation if no report has arrived. You can also close it from the server card.

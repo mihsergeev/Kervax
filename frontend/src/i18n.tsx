@@ -2898,6 +2898,8 @@ const EN: Record<string, string> = {
     'Add environment and networks to the service, and the docker-api service and network next to it, as in the example',
   'Дописать в {file} руками: docker-api (прокси сокета только на чтение) и DOCKER_HOST сервису, GID из stat -c %g /var/run/docker.sock':
     'Add to {file} by hand: docker-api (a read-only socket proxy) and DOCKER_HOST for the service, GID from stat -c %g /var/run/docker.sock',
+  'В проекте уже есть сервис docker-api. Проверьте, кто использует его, прежде чем менять compose. У самого прокси прямой доступ к сокету остается риском. Чтобы убрать его, сначала переведите клиентов на конфигурацию без Docker API, затем уберите монтирование сокета.':
+    'The project already has a docker-api service. Check which services use it before editing Compose. Direct access to the socket remains a risk for the proxy itself. To remove that access, switch its clients to configuration that works without the Docker API, then remove the socket mount.',
   'Если контейнер из compose, то же в файле (restart: unless-stopped), иначе следующий up вернет как было':
     'If the container is from compose, the same in the file (restart: unless-stopped), or the next up brings the old policy back',
   'Запомнить коды ответов доменов':

@@ -118,6 +118,31 @@ def test_run_dir_socket_caps_and_host_root():
     assert "sudo docker compose -p tools -f stack.yml -f stack.prod.yml up -d docker-api tool" in _cmd(b, "up")
 
 
+def test_existing_docker_api_keeps_the_warning_without_a_self_proxy_recipe():
+    socket = "/var/run/docker.sock"
+    rep = _rep(_c("edge-docker-api-1", "haproxy:3.2", binds=[socket], ro=[socket],
+                  compose=_cm("docker-api", d="/srv/edge", files="/srv/edge/compose.yml.next")))
+
+    [item] = docker_risk.advice(_srv(rep))
+    assert item["flags"] == ["sock"]
+    assert item["name"] == "edge-docker-api-1"
+    [block] = _blocks(rep)
+    assert block["steps"] == [{"id": "sock_existing"}]
+
+
+def test_existing_docker_api_blocks_duplicate_service_only_in_its_project():
+    socket = "/var/run/docker.sock"
+    rep = _rep(
+        _c("edge-docker-api-1", "haproxy:3.2", state="exited", binds=[socket],
+           compose=_cm("docker-api", d="/srv/edge", files="/srv/edge/compose.yml.next")),
+        _c("edge-web-1", "example/web:1", binds=[socket], compose=_cm("web", d="/srv/edge")),
+        _c("shop-web-1", "example/web:1", binds=[socket], compose=_cm("web", d="/srv/shop")),
+    )
+    edge, shop = _blocks(rep)
+    assert edge["steps"] == [{"id": "sock_existing"}]
+    assert "sock_add" in _ids(shop)
+
+
 def test_old_agent_and_docker_run():
     rep = _rep(_c("app-1", "shop/app:1", priv=True), _c("app-2", "shop/app:1", priv=True),
                _c("job", "shop/job:1", caps=["SYS_MODULE"], compose={}))

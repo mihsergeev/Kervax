@@ -409,6 +409,7 @@ function riskFixText(st: RiskStep, a: Record<string, string>, t: (k: string, p?:
     case 'priv_set': return t('В {file} у {svc} заменить privileged: true на {need}', { ...a, need })
     case 'sock_rm': return t('В {file} у {svc} убрать docker-сокет из volumes', a)
     case 'sock_add': return t('Дописать в {file} руками: docker-api (прокси сокета только на чтение) и DOCKER_HOST сервису, GID из stat -c %g /var/run/docker.sock', a)
+    case 'sock_existing': return t('В проекте уже есть сервис docker-api. Проверьте, кто использует его, прежде чем менять compose. У самого прокси прямой доступ к сокету остается риском. Чтобы убрать его, сначала переведите клиентов на конфигурацию без Docker API, затем уберите монтирование сокета.')
     case 'caps_edit': return t('В {file} у {svc} убрать из cap_add {caps}', a)
     case 'host_edit': return t('В {file} у {svc} {paths} на запись: смонтировать только нужный подкаталог или дописать :ro', a)
     case 'up': return t('Пересоздать сервисы и сверить, последние строки скажут, ушел ли ключ')
@@ -553,11 +554,11 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
             <div key={b.key} className="sock-fix">
               <div className="small">{t('Как исправить: {names}', { names: b.names.join(', ') })}</div>
               <FixSteps steps={b.steps} text={(st) => riskFixText(st, b.args, t)} />
-              {(b.args.flags ?? '').split(',').some((f) => f === 'priv' || f === 'sock') && (
+              {(b.args.flags?.split(',').includes('priv') || b.steps.some((st) => st.id === 'sock_add')) && (
                 <details className="fix-more">
                   <summary>{t('подробнее')}</summary>
                   {b.args.flags?.split(',').includes('priv') && <div>{t('Operation not permitted в логе - не хватает одного права: добавьте его в cap_add (или устройство в devices), а не privileged обратно.')}</div>}
-                  {b.args.flags?.split(',').includes('sock') && <div>{t('docker-api пишет blocked - приложению нужен еще путь API: допишите его в -allowGET.')}</div>}
+                  {b.steps.some((st) => st.id === 'sock_add') && <div>{t('docker-api пишет blocked - приложению нужен еще путь API: допишите его в -allowGET.')}</div>}
                 </details>
               )}
             </div>

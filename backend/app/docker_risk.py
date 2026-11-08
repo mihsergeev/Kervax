@@ -196,9 +196,12 @@ def view(srv: Server, fix: bool = False) -> list[dict]:
     out = []
     cs: dict[str, dict] = {}
     for c in dk.get("containers") or []:
-        if not isinstance(c, dict) or c.get("state") != "running":
+        if not isinstance(c, dict):
             continue
         name = str(c.get("name") or "")
+        cs[name] = c
+        if c.get("state") != "running":
+            continue
         ok = allowed(name, str(c.get("image") or ""))
         if docker_origin.verified_socket(rep, c):
             ok = ok | {SOCK}
@@ -220,7 +223,6 @@ def view(srv: Server, fix: bool = False) -> list[dict]:
                 out[-1]["dind"] = dd
             if note:
                 out[-1]["note"] = True
-            cs[name] = c
     if fix:
         live = [x for x in out if not x["muted"] and not x.get("note")]
         for blk in fixes(live, cs):
@@ -427,7 +429,7 @@ def _compose_steps(fl: list[str], c0: dict, image: str, names: list[str], svcs: 
     return steps
 
 
-def _block(items: list[dict], cs: dict[str, dict], w: dict | None) -> dict:
+def _block(items: list[dict], cs: dict[str, dict], w: dict | None, occupied_proxy: bool) -> dict:
     """Шаги для контейнеров одного проекта с одними ключами: {"key", "names", "args", "steps"}.
     Тексты во фронте по id шага, args - подстановки (names, flags, file, dir, svc, caps, paths, cap_add,
     devices, dind_env, idle_days, idle_cpu). w - откуда запущены (compose_cmd.where): {} - docker run, None - старый агент."""
@@ -460,6 +462,9 @@ def _block(items: list[dict], cs: dict[str, dict], w: dict | None) -> dict:
     else:
         svcs = [str(cs[n]["compose"]["service"]) for n in names]
         args.update({"file": ", ".join(w["files"]), "dir": w["dir"], "svc": ", ".join(svcs)})
+        if SOCK in fl and occupied_proxy:
+            steps.append({"id": "sock_existing"})
+            return {"key": names[0], "names": names, "args": args, "steps": steps}
         steps += _compose_steps(fl, c0, image, names, svcs, compose_cmd.Cmd(w))
     if ci and st != "none":
         steps.append({"id": "alt_ci", "alt": True})
@@ -473,6 +478,12 @@ def fixes(items: list[dict], cs: dict[str, dict]) -> list[dict]:
     (три CI-агента одного проекта - одни шаги на всех). У старого агента - тоже одним, по ключам."""
     groups: dict[tuple, list[dict]] = {}
     where: dict[tuple, dict | None] = {}
+    # Имя docker-api зарезервировано шаблоном. Учитываем и остановленный сервис, и другой
+    # compose-файл того же проекта. Это проверка коллизии, а не исключение из алерта.
+    proxy_projects = {
+        w["project"] or compose_cmd.project_name(w["dir"])
+        for c in cs.values() if (w := compose_cmd.where(c)) and w["service"] == "docker-api"
+    }
     for x in items:
         c = cs[x["name"]]
         w = compose_cmd.where(c)
@@ -484,4 +495,9 @@ def fixes(items: list[dict], cs: dict[str, dict]) -> list[dict]:
                    _sock_bind(c) if SOCK in x["flags"] else "", tuple(_host_binds(c)) if HOST in x["flags"] else ())
         groups.setdefault(k, []).append(x)
         where[k] = w
-    return [_block(v, cs, where[k]) for k, v in groups.items()]
+    blocks = []
+    for key, group in groups.items():
+        w = where[key]
+        project = (w["project"] or compose_cmd.project_name(w["dir"])) if w else None
+        blocks.append(_block(group, cs, w, project in proxy_projects))
+    return blocks
