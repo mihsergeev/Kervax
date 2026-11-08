@@ -22,7 +22,7 @@ from sqlalchemy import select
 from app import bsrv_mirror as bm
 from app import collector
 from app.api import bsrv_mirror as api
-from app.models import BackupCommand
+from app.models import BackupCommand, Server
 from app.setup_scripts import setup_needed
 
 AGENT = Path(__file__).resolve().parents[2] / "agent"
@@ -309,6 +309,39 @@ def test_destination_restore_unknown_failed_stale_and_ok_are_distinct():
     assert problem(enabled=False, verify_status="unknown") is None
 
 
+async def test_server_list_shows_mirror_warning_with_announced_state(client, auth_headers):
+    mirror, token = await _server(client, auth_headers, "mirror-a")
+    ts = int(time.time())
+    copy = {"src": "primary", "repo": "repo", "enabled": True, "last_ok": ts,
+            "verify_status": "unknown"}
+    await _report(client, token, _mirror_report(copies=[copy]), "198.51.100.20")
+    factory = client._transport.app.state.session_factory
+
+    async def save_state(value):
+        async with factory() as session:
+            server = await session.get(Server, mirror)
+            server.alert_state = {"backup_mirror": value}
+            await session.commit()
+
+    async def problems():
+        r = await client.get("/api/servers", headers=auth_headers)
+        assert r.status_code == 200, r.text
+        row = next(row for row in r.json() if row["id"] == mirror)
+        return [p for p in row["problems"] if p["kind"] == "backup_mirror"]
+
+    announced = {"keys": ["primary/repo"], "ts": ts}
+    for state, level in ((announced, 2), ({"keys": ["primary/other"], "ts": ts}, 1), ({}, 1), (0, 1), (1, 2)):
+        await save_state(state)
+        row, = await problems()
+        assert (row["level"], row["section"], row["sec"], row["srv"]) == (level, "backups", "mirror", True)
+
+    # A saved announcement cannot keep a recovered copy in the list.
+    await save_state(announced)
+    copy.update(verify_status="ok", verify_ts=ts, verify_files=1, verify_snapshot="a" * 64)
+    await _report(client, token, _mirror_report(copies=[copy]), "198.51.100.20")
+    assert not await problems()
+
+
 def test_alert_registered_and_links_to_the_mirror_section():
     from app import settings_store, srv_short
     assert "backup_mirror" in settings_store.SERVER_ALERT_KINDS
@@ -347,7 +380,7 @@ def test_helpers_and_agent_agree_on_actions():
 
 def test_mirror_helper_rules():
     ms = _src("mirror-setup.sh")
-    assert "\nKERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR" in ms
+    assert "\nKERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR" in ms
     # ставится только туда, где панель сделала сервер резервным
     assert "/api/agent/mirror-wanted" in ms
     # скрипты в /lib65, не в /usr
@@ -362,6 +395,50 @@ def test_mirror_helper_rules():
     assert "drop" not in spool and "unfreeze" not in spool and "accept" not in spool
     # helper атомарно подменяется
     assert 'mv -f "$HELPER.new" "$HELPER"' in ms
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the mirror receiver uses GNU tar")
+@pytest.mark.parametrize("invalid", [None, "missing", "duplicate", "symlink", "hardlink", "directory", "truncated"])
+def test_mirror_unpacks_only_requested_regular_files(tmp_path, invalid):
+    helper = _src("mirror-setup.sh").split("unpack_batch() {\n", 1)[1].split("\n}\n", 1)[0]
+    requested = "data/ab/" + "ab" * 32
+    (tmp_path / "batch").write_text(requested + "\n")
+    (tmp_path / "files").mkdir()
+    archive_bytes = io.BytesIO()
+    with tarfile.open(fileobj=archive_bytes, mode="w", format=tarfile.PAX_FORMAT) as archive:
+        # Even a valid but unrequested record must stay outside the staged repository.
+        extra = tarfile.TarInfo("config")
+        archive.addfile(extra)
+        item = tarfile.TarInfo(requested)
+        item.pax_headers["mtime"] = "1234567890.125"
+        content = b"a" * 1024
+        if invalid in {"symlink", "hardlink", "directory"}:
+            item.type = {"symlink": tarfile.SYMTYPE, "hardlink": tarfile.LNKTYPE, "directory": tarfile.DIRTYPE}[invalid]
+            item.linkname = "../batch"
+            content = b""
+        item.size = len(content)
+        if invalid != "missing":
+            archive.addfile(item, io.BytesIO(content))
+        if invalid == "duplicate":
+            archive.addfile(item, io.BytesIO(content))
+
+    archive = archive_bytes.getvalue()
+    if invalid == "truncated":
+        archive = archive[:2048 + 512]
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", f'unpack_batch() {{\n{helper}\n}}\nunpack_batch "$1"', "bash", str(tmp_path)],
+        input=archive, capture_output=True, timeout=5,
+    )
+    staged = tmp_path / "files" / requested
+    assert not (tmp_path / "files" / "config").exists()
+    if invalid:
+        assert result.returncode != 0
+        assert not staged.exists()
+        return
+    assert result.returncode == 0, result.stderr
+    assert staged.read_bytes() == content
+    assert staged.stat().st_mtime_ns == 1_234_567_890_125_000_000
+    assert not (tmp_path / "batch-files").exists()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the mirror reader uses Linux file descriptors")

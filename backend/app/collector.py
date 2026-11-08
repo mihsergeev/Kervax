@@ -4657,10 +4657,10 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
                 + (f" и еще {len(bad) - 3}" if len(bad) > 3 else ""), _BSRV_SEC["backup_check"], "backup_check",
                 section="backups", srv=True)
     # Резервный сервер бэкапов: копия отстала, заморожена или в ней испортились файлы
-    mp = bsrv_mirror.problems(s, now)
-    if mp:
-        lvl = max(x[0] for x in mp.values())
-        txt = [t for _l, t in sorted(mp.values(), key=lambda x: -x[0])]
+    mirror_problems = bsrv_mirror.problems(s, now)
+    if mirror_problems:
+        lvl = max(x[0] for x in mirror_problems.values())
+        txt = [t for _l, t in sorted(mirror_problems.values(), key=lambda x: -x[0])]
         add("backup_mirror", lvl, "; ".join(txt[:2]) + (f" и еще {len(txt) - 2}" if len(txt) > 2 else ""),
             _BSRV_SEC["backup_mirror"], "backup_mirror", section="backups", srv=True)
     # Сервер задыхается: как и у алерта, только то, что держится дольше выдержки
@@ -4782,10 +4782,16 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
     # web_config, перебор SSH, Job и пропавший порт на главной были желтыми, а в Telegram красными.
     # Еще не объявленное (идет выдержка, справка за сутки) остается желтым: красное на главной без
     # алерта - шум
-    st_lv = s.alert_state or {}
     for p in out:
-        if int(st_lv.get(p["kind"], 0) or 0):
-            p["level"] = srv_short.level(p["kind"], p["level"])
+        kind = p["kind"]
+        announced = state.get(kind)
+        if kind == "backup_mirror" and isinstance(announced, dict):
+            # У второй копии хранится список объявленных репозиториев. Запись о другой
+            # копии могла остаться до следующего тика и не относится к текущей проблеме.
+            keys = announced.get("keys")
+            announced = isinstance(keys, list) and any(isinstance(k, str) and k in mirror_problems for k in keys)
+        if _int(announced):
+            p["level"] = srv_short.level(kind, p["level"])
     out.sort(key=lambda p: -p["level"])
     return out
 

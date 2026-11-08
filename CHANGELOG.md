@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.120] - 2026-11-09
+
+- Fix a server list error when a backup mirror reports structured alert state.
+- Backup mirror helper 0.4 copies Restic files on hosts with hardened systemd settings and verifies each transferred file.
+
 ## [1.8.119] - 2026-11-08
 
 - The dashboard shows a single issue queue with critical issues first.

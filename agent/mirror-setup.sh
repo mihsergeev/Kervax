@@ -44,7 +44,7 @@ fi
 #      sha256, removals reach the copy only after KEEP_DAYS, a large loss at once freezes the copy
 # 0.2: keep repository files regardless of deletions at the source; accept only complete pulls
 # 0.3: weekly sandboxed restore from the destination, with an optional local recovery password
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Only where the panel made this server a mirror (Backups -> Mirror servers). Being a mirror is a
 # decision of a person, not a property of the node: the playbook and the installer ask the panel.
 KERVAX_SETUP_WHEN="sed -n s/^token=//p /etc/kervax-agent.conf | curl -fsS -m 15 --data-binary @- $(sed -n s/^url=//p /etc/kervax-agent.conf 2>/dev/null)/api/agent/mirror-wanted | grep -qx yes"
@@ -433,9 +433,29 @@ cmd_fetch() {
 # staging directory only; root takes from it nothing but regular files whose hash matches
 fetch_batch() {
   if ! "${SSH[@]}" "get $repo" < "$stg/batch" 2>> "$stg/err" \
-       | tar -x -f - -C "$stg/files" --no-same-owner --no-same-permissions --no-overwrite-dir 2>> "$stg/err"; then
+       | unpack_batch "$stg" 2>> "$stg/err"; then
     echo get > "$stg/fail"; return 1
   fi
+}
+
+unpack_batch() {
+  local stg="$1" flat="$1/batch-files" rel
+  mkdir -m 0700 -- "$flat" || return 1
+  # GNU tar 1.35 uses openat2 to traverse nested names, which RestrictSUIDSGID denies.
+  # Match only requested members and extract them flat. Validated restic paths never contain @.
+  tar -x -f - -C "$flat" --no-same-owner --no-same-permissions --keep-old-files \
+    --no-recursion --no-wildcards --anchored --transform='flags=r;s|/|@|g' \
+    --files-from="$stg/batch" || return 1
+  find "$flat" -mindepth 1 -maxdepth 1 -type f -links 1 -printf '%f\n' | sort > "$stg/batch-got" || return 1
+  if ! sed 's|/|@|g' "$stg/batch" | sort | cmp -s - "$stg/batch-got"; then
+    echo 'backup mirror: missing or invalid transfer members' >&2
+    return 1
+  fi
+  while IFS= read -r rel; do
+    if [ "$rel" != config ]; then mkdir -p -- "$stg/files/${rel%/*}" || return 1; fi
+    mv -T -- "$flat/${rel//\//@}" "$stg/files/$rel" || return 1
+  done < "$stg/batch"
+  rmdir -- "$flat"
 }
 
 # -- root side ----------------------------------------------------------------------------------
