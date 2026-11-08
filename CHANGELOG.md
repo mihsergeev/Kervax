@@ -9,6 +9,7 @@ All notable changes to this project are documented here. The format is based on
 - The dashboard shows a single issue queue with critical issues first.
 - Compact section cards filter the queue. Five rows are shown initially, with the rest available on demand.
 - Known issues and updates are collapsed by default.
+- The backend image includes the Debian security update for zlib.
 
 ## [1.8.118] - 2026-11-08
 

@@ -37,7 +37,7 @@ FROM python:3.14-slim
 # первому процессу контейнера.
 RUN set -eu; \
     apt-get update; \
-    apt-get install -y --no-install-recommends apt libapt-pkg7.0 gosu; \
+    apt-get install -y --no-install-recommends apt libapt-pkg7.0 gosu zlib1g; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd -r -g 10001 kervax; \
     useradd -r -u 10001 -g kervax -d /srv -s /usr/sbin/nologin kervax; \
