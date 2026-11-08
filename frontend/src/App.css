@@ -823,6 +823,65 @@ button.htile-more .htile-row-txt { -webkit-line-clamp: 1; }
   button.htile-head { padding: 0.6rem 0.75rem 0.65rem; }
   .htile-num { font-size: 1.5rem; }
 }
+/* Compact status filters and the shared issue queue on the dashboard. */
+.home-queue-filters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr));
+  gap: 0.5rem;
+}
+button.home-queue-filter {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text);
+  text-align: start;
+  font: inherit;
+  box-shadow: none;
+}
+button.home-queue-filter:hover,
+button.home-queue-filter[aria-pressed="true"] { border-color: var(--accent); }
+button.home-queue-filter[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 10%, var(--bg-card)); }
+.home-queue-filter-head { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; }
+.home-queue-filter-head svg { width: 1rem; height: 1rem; flex: none; }
+.home-queue-filter-head strong { min-width: 0; overflow-wrap: anywhere; }
+.home-queue-filter-head .net-n { margin-inline-start: auto; }
+.home-queue-filter-summary { font-size: 0.78rem; overflow-wrap: anywhere; }
+.home-queue.chart-card { --tone: var(--accent); margin: 0.75rem 0; min-width: 0; }
+.home-queue-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-block-end: 0.5rem;
+}
+.home-queue-head h2 { display: flex; align-items: center; gap: 0.5rem; margin: 0; font-size: 1rem; }
+.home-queue-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-end; }
+.home-attention-list.home-queue-rows { gap: 0; }
+.home-queue-rows > * { border-block-start: 1px solid var(--border); }
+.home-queue-rows > .home-attention-row { border-radius: 0; }
+.home-queue-empty { margin: 0; }
+.home-queue-more { margin-block-start: 0.5rem; }
+.home-queue-secondary { display: grid; gap: 0.45rem; margin-block: 0 0.75rem; }
+.home-disclosure {
+  --tone: var(--accent);
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+.home-disclosure summary {
+  padding: 0.6rem 0.8rem;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.home-disclosure summary .net-n { margin-inline-start: 0.45rem; }
+.home-disclosure-body { padding: 0.5rem 0.8rem 0.65rem; border-block-start: 1px solid var(--border); }
 .net-cards.home-blocks { margin-top: 0; }
 .net-cap { display: flex; align-items: center; gap: 0.45rem; }
 .net-n {
@@ -853,8 +912,7 @@ button.htile-more .htile-row-txt { -webkit-line-clamp: 1; }
   background: color-mix(in srgb, var(--tone) 7%, var(--bg-card));
   border-color: color-mix(in srgb, var(--tone) 45%, var(--border));
 }
-.net-card.home-block.home-attention-fleet { --tone: #3b82f6; }
-.net-card.home-block.home-attention-known, .net-card.home-block.home-attention-soft {
+.net-card.home-block.home-attention-soft {
   --tone: var(--text);
   background: color-mix(in srgb, var(--text) 3%, var(--bg-card));
   border-color: var(--border);
@@ -915,10 +973,6 @@ label.home-sel-all { display: inline-flex; flex-direction: row; align-items: cen
 @media (hover: none) {
   .home-attention-subrow .quick-mute { opacity: 0.5; }
 }
-/* группы в "Требует действий": серверное сверху, бэкапное ниже */
-.home-attention-grp { display: flex; flex-direction: column; gap: 0.3rem; }
-.home-attention-grp + .home-attention-grp { margin-top: 0.4rem; }
-.home-attention-grp-head { padding: 0.1rem 0.1rem 0; text-transform: uppercase; letter-spacing: 0.04em; font-size: 0.72rem; }
 @media (max-width: 600px) {
   .home-attention-sub { padding-left: 0.6rem; }
   /* кнопки пункта (закрепить, заглушить, открыть) уезжают под текст: справа они сжимали его
@@ -8301,8 +8355,6 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
 }
 
 /* ---------- "Обновления" на главной и баннер "Серверов" (FleetUpdate.tsx) ---------- */
-.upd-head { display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; flex-wrap: wrap; }
-.upd-head .net-head { flex: 1; }
 /* строку не кликают целиком: действия - кнопки справа, переход - стрелка.
    Кнопки одной группой (upd-acts): в узкой колонке (три блока в ряд) группа целиком уходит
    под текст, а не сжимает его до слова в строке */
@@ -8318,7 +8370,6 @@ button.ghost.lc-del { color: var(--down); border-color: color-mix(in srgb, var(-
 .upd-row.upd-fail { background: color-mix(in srgb, var(--degraded) 6%, transparent); }
 /* кнопка с подтверждением на месте: "Точно?" желтая, полоска внизу - сколько ждет второго клика */
 .upd-go { position: relative; overflow: hidden; }
-.upd-head .upd-go { padding: 0.3rem 0.9rem; font-size: 0.85rem; }
 button.upd-go.upd-sure, button.upd-go.upd-sure:hover {
   background: var(--degraded);
   border-color: var(--degraded);
@@ -8358,7 +8409,6 @@ button.upd-go.upd-sure, button.upd-go.upd-sure:hover {
 .agent-update-banner.upd-banner { display: block; padding: 0.35rem 0.6rem; }
 @media (max-width: 600px) {
   .home-attention-row.upd-row .home-attention-txt { flex: 1 1 calc(100% - 3rem); }
-  .upd-head .upd-go { width: 100%; }
   .upd-bar { width: 90px; }
 }
 

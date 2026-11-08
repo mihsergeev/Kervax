@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
 import {
   ApiError,
   checksOverview,
@@ -37,16 +37,28 @@ import { IconBackups, IconDocker, IconKube, IconServers, IconSites } from './ico
 import { CountryFlag } from './CountryFlag'
 import { ActGroup, QuickMute } from './ActGroup'
 import { grpMuteTip } from './homeGroups'
-import { HomeTile, tileIssues, usePlural, type TileIssue } from './HomeTiles'
 import { HomeDomainSuggestions } from './HomeDomainSuggestions'
-import { backupProblems, byTone, dockerProblems, siteIssueRows, type ProbItem } from './sectionIssues'
+import { backupProblems, dockerProblems, type ProbItem } from './sectionIssues'
 import { AgentUpdRow, HelperUpdRow, UpdateAllButton, agentBehind, rolloutHosts as fleetHosts, useFleetRollout, useViaPanels } from './FleetUpdate'
 
-// сколько проблемных строк показывать в карточках главной
-const HOME_LIST_LIMIT = 25
 const ATTENTION_LIMIT = 15
-// "Что сломано": столько строк сразу, остальное - по кнопке
-const BROKEN_LIMIT = 12
+const QUEUE_LIMIT = 5
+
+type QueueRow = {
+  key: string
+  area: TallyTile
+  critical: boolean
+  render: () => ReactNode
+}
+
+function HomeDisclosure({ title, count, children }: { title: string; count: number; children: ReactNode }) {
+  return (
+    <details className="home-disclosure">
+      <summary><span>{title}</span><span className="net-n">{count}</span></summary>
+      <div className="home-disclosure-body">{children}</div>
+    </details>
+  )
+}
 // иконка проблемы по ее виду - чтобы список читался, не вчитываясь
 const ISSUE_ICON: Record<string, string> = {
   offline: '🔥', cpu: '🧮', mem: '🧠', disk: '🗄', temp: '🌡', throttle: '🥵', conntrack: '🔗',
@@ -553,10 +565,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const [relProblem, setRelProblem] = useState('')
   const [probeHints, setProbeHints] = useState<LocalProbeSuggestion[]>([])
   const [mutes, setMutes] = useState<MuteWarning[]>([])
-  const [brokenAll, setBrokenAll] = useState(false)
-  // "Требует действий": раскрытые группы и показ всех строк сверх ATTENTION_LIMIT
+  const [queueAll, setQueueAll] = useState(false)
+  const [queueArea, setQueueArea] = useState<TallyTile | null>(null)
   const [openGrps, setOpenGrps] = useState<Set<string>>(() => new Set())
-  const [actAll, setActAll] = useState(false)
   // идет заглушка одиночной строки (у групп свое, ActGroup.tsx)
   const [actBusy, setActBusy] = useState(false)
   const toggleGrp = (g: string) =>
@@ -635,9 +646,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // 🔕 с выбором срока: на час, день, неделю (снуз) или постоянно. Ключи без снуза (рост памяти,
   // перезапуски, пропавший порт - их бэкенд читает только из alert_mutes) глушатся сразу постоянно
   const [mutePick, setMutePick] = useState<string | null>(null)
-  // сроки сайтов: у какой строки открыт выбор "напомнить за", раскрыта ли строка отложенных
+  // сроки сайтов: у какой строки открыт выбор "напомнить за"
   const [warnPick, setWarnPick] = useState<string | null>(null)
-  const [warnOffOpen, setWarnOffOpen] = useState(false)
   // блок "заглушено на время": раскрыт ли и какой ключ сейчас снимается ('*' - все, где тихо); то же
   // у блока "заглушка кончилась"
   const [wideOpen, setWideOpen] = useState(false)
@@ -657,7 +667,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   }, [load])
 
   const warns = ov ? expiryWarnings(ov.checks) : []
-  // отложенные и "не следим": строкой внизу блока "Сайты", оттуда вернуть
+  // Отложенные сроки и сроки, за которыми не следим, можно вернуть из отдельного блока.
   const warnsOff = ov ? expiryWarnings(ov.checks, true) : []
   // Заголовок — про СЕЙЧАС: сколько мониторов лежит или деградирует. Открытые
   // инциденты сюда не подмешиваем: иначе при нуле проблем выходило красное
@@ -691,13 +701,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const allActions = actionItems(srvList, relProblem, t).filter((x) => canSee(x.section))
   // отказ самообновления, пока идет раскатка, виден в строке агента по ноде - без повтора
   const fleet = allActions.filter((x) => x.fleet && !(fleetRun.agent && x.key.startsWith('adv-')))
-  const actions = allActions.filter((x) => !x.fleet)
-  // по разделам: на серверах - сверху, бэкапное - ниже; внутри одинаковое свернуто в группы
-  const actGroups = [
-    { key: 'srv', label: t('На серверах'), rows: groupActs(actions.filter((x) => x.section !== 'backups')) },
-    { key: 'bak', label: t('По бэкапам'), rows: groupActs(actions.filter((x) => x.section === 'backups')) },
-  ]
-  const actRowsN = actGroups.reduce((n, g) => n + g.rows.length, 0)
+  const actionRows = groupActs(allActions.filter((x) => !x.fleet))
   const dockerHosts = srvList.filter((s) => s.last_report?.docker?.present && s.last_report.docker.access)
   const dockerRunning = dockerHosts.reduce((n, s) => n + (s.last_report?.docker?.containers?.filter((c) => c.state === 'running').length ?? 0), 0)
   const dockerProbs = dockerProblems(srvList, t)
@@ -707,11 +711,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const backupServers = srvList.filter((s) => s.last_report?.backup_server?.present)
   const backupProbs = backupProblems(srvList, t)
 
-  // "Что сломано": все проблемы одним списком, по строке на каждую - серверы (включая
-  // поломки дисков, прогноз, inode, упавшие юниты), Docker, Kubernetes и бэкапы. Клик ведет
-  // туда, где это чинится: в раздел карточки сервера или в карточку Docker/Кубера/бэкапа.
-  // Проблемы сверху, предупреждения ниже; внутри - по имени сервера, чтобы беды одной ноды
-  // стояли рядом. Списки в карточках разделов ниже убраны: там остались счетчики.
+  // Строки ведут в раздел, где можно разобраться с проблемой.
   type Broken = {
     key: string; id: number; name: string; cc?: string; tone: 't-down' | 't-degraded'; text: string
     kind: string; section: Section; srv?: boolean; sec?: string; mute?: string; since?: string | null
@@ -766,7 +766,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   ].sort((a, b) => (a.tone === b.tone ? a.name.localeCompare(b.name) : a.tone === 't-down' ? -1 : 1))
   // предупреждения с одинаковой шапкой с двух и больше серверов - одна строка; красное - как есть
   type BrokenRow = { one: Broken } | { grp: string; head: string; items: Broken[] }
-  const brokenKey = (b: Broken) => (b.tone === 't-down' ? '' : `${b.kind}|${splitHead(b.text)[0]}`)
+  const brokenKey = (b: Broken) => (b.tone === 't-down' ? '' : `${tallyTile(b.section)}|${b.kind}|${splitHead(b.text)[0]}`)
   const brokenBy = new Map<string, Broken[]>()
   for (const b of broken) {
     const k = brokenKey(b)
@@ -934,88 +934,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         recheckHeader={recheckAction(r.items.flatMap(actRef))} recheckItem={(it) => recheckAction(actRef(it))}
         onOpen={(it) => onOpen(it.section, it.id, it.srv, it.sec)} />
     )
-  // Сводка сверху: плитка на раздел, клик ведет в него (HomeTiles.tsx). Беды - те же строки, что
-  // "Что сломано" (serverUtils.tallyTile): серверы и службы - "Серверы", дальше Docker, Кубер, бэкапы;
-  // у сайтов - sectionIssues.siteIssueRows. Шапки разделов считают так же, числа сходятся
-  const subOf = (...parts: (string | false | 0 | undefined)[]) => parts.filter(Boolean).join(' · ')
-  const pl = usePlural()
-  const issuesOf = (tl: TallyTile): TileIssue[] =>
-    broken
-      .filter((b) => tallyTile(b.section) === tl)
-      .map((b) => ({
-        key: b.key, name: b.name, text: b.text, down: b.tone === 't-down',
-        onOpen: () => onOpen(b.section, b.id, b.srv, b.sec),
-      }))
-  const tile = (sec: Section, icon: ReactNode, label: string, p: Omit<Parameters<typeof HomeTile>[0], 'icon' | 'label' | 'onOpen'>) => (
-    <HomeTile key={sec} icon={icon} label={label} onOpen={() => onNavigate(sec)} {...p} />
-  )
-  const loading = (sec: Section, icon: ReactNode, label: string, empty: boolean, none: string) =>
-    tile(sec, icon, label, { value: '—', ok: empty ? none : t('загрузка…'), okTone: 'muted', issues: [] })
-  const siteDown = downChecks.filter((c) => c.last_status === 'down').length
-  const tiles: ReactNode[] = []
-  if (canSee('sites'))
-    tiles.push(
-      ov == null || ov.total === 0
-        ? loading('sites', <IconSites />, t('Сайты'), ov != null, t('Мониторов пока нет.'))
-        : tile('sites', <IconSites />, t('Сайты'), {
-            value: String(ov.up), unit: t('из {n}', { n: ov.total }),
-            // частично (не отвечает из части локаций) входит в "работают", как плитка "Работает" в
-            // разделе Сайты, и так же отдельно подписан: иначе 10 из 12 читалось как "все десять в порядке"
-            ok: ov.partial > 0 ? t('частично: {n}', { n: ov.partial }) : knownDown || mutedDomainDown ? '' : t('все в норме'),
-            okTone: ov.partial > 0 ? 'warn' : 'ok',
-            foot: subOf(
-              knownDown && t('известных: {n}', { n: knownDown }),
-              mutedDomainText,
-              ov.open_incidents > 0 && t('открытых инцидентов: {n}', { n: ov.open_incidents }),
-            ),
-            total: subOf(
-              t('работают {n} из {total}', { n: ov.up, total: ov.total }),
-              ov.partial > 0 && t('частично: {n}', { n: ov.partial }),
-              knownDown && t('известных: {n}', { n: knownDown }),
-              mutedDomainText,
-            ),
-            issues: tileIssues(byTone(siteIssueRows(ov.checks, t)), onOpen),
-          }),
-    )
-  if (canSee('servers'))
-    tiles.push(
-      servers == null || srvTotal === 0
-        ? loading('servers', <IconServers />, t('Серверы'), servers != null, t('Серверов пока нет.'))
-        : tile('servers', <IconServers />, t('Серверы'), {
-            value: String(srvOnline), unit: t('из {n}', { n: srvTotal }),
-            // оффлайн-нода уже среди строк (srvIssues отдает ей "оффлайн"), отдельно не плюсуем
-            ok: srvOnline === srvTotal ? t('все в норме') : t('офлайн: {n}', { n: srvTotal - srvOnline }),
-            okTone: srvOnline === srvTotal ? 'ok' : 'warn',
-            total: t('онлайн {n} из {total}', { n: srvOnline, total: srvTotal }),
-            issues: issuesOf('servers'),
-          }),
-    )
-  // Docker, Кубер и бэкапы - только если в разделе есть что показать
-  if (canSee('docker') && dockerHosts.length)
-    tiles.push(tile('docker', <IconDocker />, 'Docker', {
-      value: String(dockerRunning), unit: pl(dockerRunning, t('контейнер'), t('контейнера'), t('контейнеров')),
-      ok: t('все в норме'), foot: t('хостов: {n}', { n: dockerHosts.length }),
-      total: subOf(t('запущено: {n}', { n: dockerRunning }), t('хостов: {n}', { n: dockerHosts.length })),
-      issues: issuesOf('docker'),
-    }))
-  if (canSee('kuber') && kubeHosts.length)
-    tiles.push(tile('kuber', <IconKube />, 'Kubernetes', {
-      value: String(kubePods), unit: pl(kubePods, t('под'), t('пода'), t('подов')),
-      ok: t('все в норме'), foot: t('кластеров: {n}', { n: kubeHosts.length }),
-      total: subOf(t('подов: {n}', { n: kubePods }), t('кластеров: {n}', { n: kubeHosts.length })),
-      issues: issuesOf('kuber'),
-    }))
-  if (canSee('backups') && backupClients.length + backupServers.length)
-    tiles.push(tile('backups', <IconBackups />, t('Бэкапы'), {
-      value: String(backupClients.length), unit: t('под бэкапом'),
-      ok: t('все свежие'),
-      foot: backupServers.length > 0 ? t('серверов бэкапа: {n}', { n: backupServers.length }) : '',
-      total: subOf(
-        t('под бэкапом: {n}', { n: backupClients.length }),
-        backupServers.length > 0 && t('серверов бэкапа: {n}', { n: backupServers.length }),
-      ),
-      issues: issuesOf('backups'),
-    }))
   // заглушено на время целиком (wideMutes): строка на сервер, ведет в его карточку
   const wideRows = canSee('servers')
     ? srvList.map((s) => ({ s, items: wideMutes(s, t) })).filter((x) => x.items.length > 0)
@@ -1060,7 +978,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const late = canSee('backups')
     ? srvList.map((s) => ({ s, note: backupWindowNote(s) })).filter((x) => x.note)
     : []
-  const siteRows = canSee('sites') ? downChecks.length + warns.length : 0
   // строка срока сертификата/домена: 🔕 - напомнить за 7/1 дней или не следить (ExpirySnooze.tsx);
   // off - отложенная, в раскрытой строке внизу блока, с "вернуть"
   const warnRow = (w: Warn, off = false) => {
@@ -1100,6 +1017,93 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       </div>
     )
   }
+  const siteStatusRow = (c: Check) => (
+    <div role="button" tabIndex={0} key={c.id} className="home-attention-row home-site-alert" onClick={() => onOpen('sites', c.id)}
+      onKeyDown={(e) => activateHomeRow(e, () => onOpen('sites', c.id))}>
+      <span className={`lk-dot ${c.last_status === 'down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
+      <span className="home-attention-ico">🌐</span>
+      <span className="home-attention-txt">
+        <b>{c.name}</b>
+        {(c.parents ?? []).filter((p) => p.silent).map((p) => (
+          <span key={p.id} className="type-chip parent-chip" title={t('сервер не на связи, алерты монитора ждут его')}>
+            ⛓ {p.name}
+          </span>
+        ))}
+        <span className="muted">
+          {' - '}
+          {c.last_status === 'down'
+            ? t('Недоступно')
+            : c.last_status === 'degraded'
+              ? t('Деградация')
+              : t('Отвечает через раз')}
+          {c.last_status !== 'up' && c.last_message ? ` · ${c.last_message}` : ''}
+        </span>
+      </span>
+      <span className="home-site-alert-actions">
+        {recheckAction([{ object_type: 'check', object_id: c.id, kind: 'status' }])}
+      </span>
+      <span className="home-open">→</span>
+    </div>
+  )
+
+  const queueRows: QueueRow[] = [
+    ...brokenRows.map((row): QueueRow => {
+      const item = 'one' in row ? row.one : row.items[0]
+      return {
+        key: 'one' in row ? 'broken-' + item.key : 'broken-group-' + row.grp,
+        area: tallyTile(item.section),
+        critical: item.tone === 't-down',
+        render: () => brokenGrpRow(row),
+      }
+    }),
+    ...(canSee('sites') ? [
+      ...downChecks.map((c): QueueRow => ({
+        key: 'check-' + c.id, area: 'sites', critical: c.last_status === 'down', render: () => siteStatusRow(c),
+      })),
+      ...warns.map((w): QueueRow => ({
+        key: w.kind + '-' + w.id, area: 'sites', critical: w.days <= 3, render: () => warnRow(w),
+      })),
+    ] : []),
+    ...actionRows.map((row): QueueRow => ({
+      key: 'one' in row ? 'action-' + row.one.key : 'action-group-' + row.grp,
+      area: tallyTile('one' in row ? row.one.section : row.items[0].section),
+      critical: false,
+      render: () => grpRow(row),
+    })),
+  ].sort((a, b) => Number(b.critical) - Number(a.critical))
+  const visibleRows = queueArea ? queueRows.filter((row) => row.area === queueArea) : queueRows
+  const selectArea = (area: TallyTile | null) => {
+    setQueueArea(area)
+    setQueueAll(false)
+  }
+  const loadingText = t('загрузка…')
+  const siteSummary = ov
+    ? t('работают {n} из {total}', { n: ov.up, total: ov.total })
+    : loadingText
+  const siteDetails = [
+    siteSummary,
+    ov && ov.partial > 0 && t('частично: {n}', { n: ov.partial }),
+    knownDown && t('известных: {n}', { n: knownDown }),
+    mutedDomainText,
+    ov && ov.open_incidents > 0 && t('открытых инцидентов: {n}', { n: ov.open_incidents }),
+  ].filter(Boolean).join(' · ')
+  const tiles: { area: TallyTile; label: string; icon: ReactNode; summary: string; title?: string }[] = [
+    { area: 'sites', label: t('Сайты'), icon: <IconSites />, summary: siteSummary, title: siteDetails },
+    { area: 'servers', label: t('Серверы'), icon: <IconServers />,
+      summary: servers ? t('онлайн {n} из {total}', { n: srvOnline, total: srvTotal }) : loadingText },
+    { area: 'docker', label: 'Docker', icon: <IconDocker />,
+      summary: servers ? t('запущено: {n}', { n: dockerRunning }) : loadingText },
+    { area: 'kuber', label: 'Kubernetes', icon: <IconKube />,
+      summary: servers ? t('подов: {n}', { n: kubePods }) : loadingText },
+    { area: 'backups', label: t('Бэкапы'), icon: <IconBackups />,
+      summary: servers ? t('под бэкапом: {n}', { n: backupClients.length }) : loadingText,
+      title: servers ? t('серверов бэкапа: {n}', { n: backupServers.length }) : undefined },
+  ]
+  const areas = tiles.filter(({ area }) => canSee(area))
+  const queueLoading = areas.some(({ area }) =>
+    (!queueArea || queueArea === area) && (area === 'sites' ? !ov : !servers),
+  )
+
   // шапка карточки блока: подпись и счетчик, тон счетчика - по самому тяжелому в блоке
   const cap = (title: string, n?: number, tone?: 'bad' | 'warn' | 'info') => (
     <div className="net-head">
@@ -1124,115 +1128,114 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           }}
         />
       )}
-      {tiles.length > 0 && <div className="home-tiles">{tiles}</div>}
+      {areas.length > 0 && (
+        <>
+          <div className="home-queue-filters" role="group" aria-label={t('Фильтр по разделам')}>
+            {areas.map(({ area, label, icon, summary, title }) => {
+              const rows = queueRows.filter((row) => row.area === area)
+              const critical = rows.some((row) => row.critical)
+              return (
+                <button key={area} type="button" className="home-queue-filter"
+                  aria-pressed={queueArea === area} aria-controls="home-issue-queue"
+                  onClick={() => selectArea(queueArea === area ? null : area)}>
+                  <span className="home-queue-filter-head">
+                    {icon}<strong>{label}</strong>
+                    {rows.length > 0 && (
+                      <span className={'net-n ' + (critical ? 'net-n-bad' : 'net-n-warn')}
+                        aria-label={t('Активных проблем: {n}', { n: rows.length })}>{rows.length}</span>
+                    )}
+                  </span>
+                  <span className="home-queue-filter-summary muted" title={title}>{summary}</span>
+                </button>
+              )
+            })}
+          </div>
+          <section id="home-issue-queue" className="chart-card home-queue" aria-labelledby="home-issue-queue-title">
+            <div className="home-queue-head">
+              <h2 id="home-issue-queue-title">{t('Активные проблемы')} <span className="net-n">{visibleRows.length}</span></h2>
+              {queueArea ? (
+                <div className="home-queue-actions">
+                  <button type="button" className="ghost small" onClick={() => selectArea(null)}>{t('Все разделы')}</button>
+                  <button type="button" className="ghost small" onClick={() => onNavigate(queueArea)}>{t('Открыть раздел')} →</button>
+                </div>
+              ) : visibleRows.length > 0 && <span className="muted small">{t('Сначала критичные')}</span>}
+            </div>
+            {visibleRows.length > 0 ? (
+              <div id="home-issue-queue-rows" className="home-attention-list home-queue-rows">
+                {(queueAll ? visibleRows : visibleRows.slice(0, QUEUE_LIMIT)).map((row) => (
+                  <Fragment key={row.key}>{row.render()}</Fragment>
+                ))}
+              </div>
+            ) : <p className="muted small home-queue-empty">{queueLoading ? loadingText : t('Нет активных проблем')}</p>}
+            {visibleRows.length > QUEUE_LIMIT && (
+              <button type="button" className="ghost small home-queue-more"
+                aria-expanded={queueAll} aria-controls="home-issue-queue-rows"
+                onClick={() => setQueueAll(!queueAll)}>
+                {queueAll ? t('свернуть') : t('Показать еще {n}', { n: visibleRows.length - QUEUE_LIMIT })}
+              </button>
+            )}
+          </section>
+        </>
+      )}
+      {(knownRows.length > 0 || updN > 0 || (canSee('sites') && warnsOff.length > 0)) && (
+        <div className="home-queue-secondary">
+          {knownRows.length > 0 && (
+            <HomeDisclosure title={t('Известные проблемы')} count={knownRows.length}>
+              <div className="home-attention-list">
+                {knownRows.map((it) => (
+                  <button
+                    key={it.key}
+                    className="home-attention-row"
+                    onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
+                  >
+                    <span className="lk-dot" />
+                    <span className="home-attention-ico">{it.check ? '🌐' : (ISSUE_ICON[it.kind] ?? '⚠️')}</span>
+                    <span className="home-attention-txt">
+                      <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
+                      <span className="muted">
+                        {' '}· {knownText(it.known, t)}
+                        {knownMeta(it.known, t) ? ` (${knownMeta(it.known, t)})` : ''}
+                      </span>
+                    </span>
+                    {!isViewer && (
+                      <span className="quick-mute" title={t('Снять отметку: если проблема осталась, придет алерт')}
+                        onClick={(e) => { e.stopPropagation(); dropKnown(it) }}>
+                        ✕
+                      </span>
+                    )}
+                    <span className="home-open">→</span>
+                  </button>
+                ))}
+              </div>
+            </HomeDisclosure>
+          )}
+          {updN > 0 && (
+            <HomeDisclosure title={t('Обновления')} count={updN}>
+              {canUpd && <div className="home-queue-actions"><UpdateAllButton servers={srvList} avail={avail} fleet={fleetRun} via={viaPanels} /></div>}
+              <div className="home-attention-list">
+                {showSrv && (
+                  <AgentUpdRow servers={srvList} avail={avail} fleet={fleetRun} canUpd={canUpd}
+                    onOpen={() => onOpen('servers')} onOpenNode={(id) => onOpen('servers', id)} />
+                )}
+                {showSrv && (
+                  <HelperUpdRow servers={srvList} fleet={fleetRun} canUpd={canUpd} via={viaPanels}
+                    onOpen={() => onOpen('servers')} />
+                )}
+                {fleet.map(actRow)}
+              </div>
+              {fleetRun.err && <div className="upd-err">{fleetRun.err}</div>}
+            </HomeDisclosure>
+          )}
+          {canSee('sites') && warnsOff.length > 0 && (
+            <HomeDisclosure title={t('Заглушенные сроки сайтов')} count={warnsOff.length}>
+              <div className="home-attention-list">{warnsOff.map((w) => warnRow(w, true))}</div>
+            </HomeDisclosure>
+          )}
+        </div>
+      )}
       <div className="net-cards home-blocks">
       {mutes.length > 0 && isAdmin && <MuteHint items={mutes} onOpen={onOpen} onDone={load} />}
-      {broken.length > 0 && (
-        <div className={`chart-card net-card net-card-wide home-block home-attention-broken${broken.some((x) => x.tone === 't-down') ? ' has-down' : ''}`}>
-          {cap(t('Что сломано'), brokenRows.length, broken.some((x) => x.tone === 't-down') ? 'bad' : 'warn')}
-          <div className="home-attention-list">
-            {(brokenAll ? brokenRows : brokenRows.slice(0, BROKEN_LIMIT)).map(brokenGrpRow)}
-            {brokenRows.length > BROKEN_LIMIT && (
-              <button className="ghost small home-attention-more" onClick={() => setBrokenAll(!brokenAll)}>
-                {brokenAll ? t('свернуть') : t('…и ещё {n}', { n: brokenRows.length - BROKEN_LIMIT })}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-      {/* Сайты: лежащие мониторы и истекающие SSL/домены. Клик - в сам монитор */}
-      {canSee('sites') && (siteRows > 0 || warnsOff.length > 0) && (
-        <div className={`chart-card net-card home-block${siteDown ? ' has-down' : ''}`}>
-          {cap(t('Сайты'), siteRows || undefined, siteDown ? 'bad' : 'warn')}
-          <div className="home-attention-list">
-            {downChecks.slice(0, HOME_LIST_LIMIT).map((c) => (
-              <div role="button" tabIndex={0} key={c.id} className="home-attention-row home-site-alert" onClick={() => onOpen('sites', c.id)}
-                onKeyDown={(e) => activateHomeRow(e, () => onOpen('sites', c.id))}>
-                <span className={`lk-dot ${c.last_status === 'down' ? 'lk-dot-bad' : 'lk-dot-warn'}`} />
-                <span className="home-attention-ico">🌐</span>
-                <span className="home-attention-txt">
-                  <b>{c.name}</b>
-                  {(c.parents ?? []).filter((p) => p.silent).map((p) => (
-                    <span key={p.id} className="type-chip parent-chip" title={t('сервер не на связи, алерты монитора ждут его')}>
-                      ⛓ {p.name}
-                    </span>
-                  ))}
-                  <span className="muted">
-                    {' - '}
-                    {c.last_status === 'down'
-                      ? t('Недоступно')
-                      : c.last_status === 'degraded'
-                        ? t('Деградация')
-                        : t('Отвечает через раз')}
-                    {c.last_status !== 'up' && c.last_message ? ` · ${c.last_message}` : ''}
-                  </span>
-                </span>
-                <span className="home-site-alert-actions">
-                  {recheckAction([{ object_type: 'check', object_id: c.id, kind: 'status' }])}
-                </span>
-                <span className="home-open">→</span>
-              </div>
-            ))}
-            {downChecks.length > HOME_LIST_LIMIT && (
-              <button className="ghost small home-attention-more" onClick={() => onNavigate('sites')}>
-                {t('…ещё {n}', { n: downChecks.length - HOME_LIST_LIMIT })}
-              </button>
-            )}
-            {warns.slice(0, HOME_LIST_LIMIT).map((w) => warnRow(w))}
-            {warns.length > HOME_LIST_LIMIT && (
-              <button className="ghost small home-attention-more" onClick={() => onNavigate('sites')}>
-                {t('…ещё {n}', { n: warns.length - HOME_LIST_LIMIT })}
-              </button>
-            )}
-            {warnsOff.length > 0 && (
-              <div className="home-sel-foot">
-                <button className="linklike muted small" onClick={() => setWarnOffOpen(!warnOffOpen)}>
-                  {[
-                    warnsOff.some((w) => expEntry(w.check, w.kind)?.mode !== 0) &&
-                      t('отложено: {n}', { n: warnsOff.filter((w) => expEntry(w.check, w.kind)?.mode !== 0).length }),
-                    warnsOff.some((w) => expEntry(w.check, w.kind)?.mode === 0) &&
-                      t('не следим: {n}', { n: warnsOff.filter((w) => expEntry(w.check, w.kind)?.mode === 0).length }),
-                  ].filter(Boolean).join(', ')}
-                  , {warnOffOpen ? t('скрыть') : t('показать')}
-                </button>
-              </div>
-            )}
-            {warnOffOpen && warnsOff.map((w) => warnRow(w, true))}
-          </div>
-        </div>
-      )}
       <MaintHome />
-      {knownRows.length > 0 && (
-        <div className="chart-card net-card home-block home-attention-known">
-          {cap(t('Известные проблемы'), knownRows.length)}
-          <div className="home-attention-list">
-            {knownRows.map((it) => (
-              <button
-                key={it.key}
-                className="home-attention-row"
-                onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}
-              >
-                <span className="lk-dot" />
-                <span className="home-attention-ico">{it.check ? '🌐' : (ISSUE_ICON[it.kind] ?? '⚠️')}</span>
-                <span className="home-attention-txt">
-                  <CountryFlag code={it.cc} /> <b>{it.name}</b> - {it.text}
-                  <span className="muted">
-                    {' '}· {knownText(it.known, t)}
-                    {knownMeta(it.known, t) ? ` (${knownMeta(it.known, t)})` : ''}
-                  </span>
-                </span>
-                {!isViewer && (
-                  <span className="quick-mute" title={t('Снять отметку: если проблема осталась, придет алерт')}
-                    onClick={(e) => { e.stopPropagation(); dropKnown(it) }}>
-                    ✕
-                  </span>
-                )}
-                <span className="home-open">→</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
       {/* Заглушка кончилась, а проблема есть: алерты придержаны, решение за человеком */}
       {overRows.length > 0 && (
         <div className="chart-card net-card net-card-wide home-block home-attention-over">
@@ -1292,51 +1295,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         <div className="chart-card net-card home-block home-attention-probe">
           {cap(t('Похоже на белый список'), probeHints.length)}
           <LocalProbeHint items={probeHints} onDone={load} />
-        </div>
-      )}
-      {updN > 0 && (
-        <div className="chart-card net-card home-block home-attention-fleet">
-          <div className="upd-head">
-            {cap(t('Обновления'), updN, 'info')}
-            {canUpd && <UpdateAllButton servers={srvList} avail={avail} fleet={fleetRun} via={viaPanels} />}
-          </div>
-          <div className="home-attention-list">
-            {showSrv && (
-              <AgentUpdRow servers={srvList} avail={avail} fleet={fleetRun} canUpd={canUpd}
-                onOpen={() => onOpen('servers')} onOpenNode={(id) => onOpen('servers', id)} />
-            )}
-            {showSrv && (
-              <HelperUpdRow servers={srvList} fleet={fleetRun} canUpd={canUpd} via={viaPanels}
-                onOpen={() => onOpen('servers')} />
-            )}
-            {fleet.map(actRow)}
-          </div>
-          {fleetRun.err && <div className="upd-err">{fleetRun.err}</div>}
-        </div>
-      )}
-      {actRowsN > 0 && (
-        <div className="chart-card net-card net-card-wide home-block">
-          {cap(t('Требует действий'), actRowsN, 'warn')}
-          <div className="home-attention-list">
-            {/* Делим по тому, КУДА ведёт пункт: чинится на сервере (агент, helper'ы,
-                доступы) — сверху; бэкапное — ниже, оно обычно менее срочное. */}
-            {actGroups.map((grp) =>
-              grp.rows.length === 0 ? null : (
-                <div key={grp.key} className="home-attention-grp">
-                  {/* заголовок только если есть ОБЕ группы — иначе он лишний шум */}
-                  {actGroups.every((g) => g.rows.length > 0) && (
-                    <div className="home-attention-grp-head muted small">{grp.label}</div>
-                  )}
-                  {(actAll ? grp.rows : grp.rows.slice(0, ATTENTION_LIMIT)).map(grpRow)}
-                  {grp.rows.length > ATTENTION_LIMIT && (
-                    <button className="ghost small home-attention-more" onClick={() => setActAll(!actAll)}>
-                      {actAll ? t('свернуть') : t('…и ещё {n}', { n: grp.rows.length - ATTENTION_LIMIT })}
-                    </button>
-                  )}
-                </div>
-              ),
-            )}
-          </div>
         </div>
       )}
       {/* Мягкие уведомления (НЕ алерты, не в Telegram): бэкап вышел за ночное окно.

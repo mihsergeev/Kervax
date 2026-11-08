@@ -11,6 +11,15 @@ export type Lang = 'ru' | 'en'
 // Ключ = русская строка (дефолт). Значение = английский перевод.
 // Отсутствующий ключ → возвращается русский (мягкий фолбэк).
 const EN: Record<string, string> = {
+  'Фильтр по разделам': 'Filter by section',
+  'Активные проблемы': 'Active issues',
+  'Активных проблем: {n}': 'Active issues: {n}',
+  'Сначала критичные': 'Critical first',
+  'Нет активных проблем': 'No active issues',
+  'Все разделы': 'All sections',
+  'Открыть раздел': 'Open section',
+  'Показать еще {n}': 'Show {n} more',
+  'Заглушенные сроки сайтов': 'Muted site expirations',
   'Qdrant: недоступен или ошибка коллекции': 'Qdrant: unavailable or collection error',
   'Нет данных': 'No data',
   'Службы Windows': 'Windows services',

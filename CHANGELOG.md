@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.119] - 2026-11-08
+
+- The dashboard shows a single issue queue with critical issues first.
+- Compact section cards filter the queue. Five rows are shown initially, with the rest available on demand.
+- Known issues and updates are collapsed by default.
+
 ## [1.8.118] - 2026-11-08
 
 - Docker host-access guidance detects an existing docker-api service in the same Compose project. It explains how to remove direct socket access from the proxy safely and keeps the security warning visible.
