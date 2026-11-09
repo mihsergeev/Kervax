@@ -16,6 +16,12 @@ const EN: Record<string, string> = {
   'Активных проблем: {n}': 'Active issues: {n}',
   'Сначала критичные': 'Critical first',
   'Нет активных проблем': 'No active issues',
+  'Данные недоступны': 'Data unavailable',
+  'данные устарели': 'data is stale',
+  'Не удалось обновить данные о сайтах': 'Could not refresh site data',
+  'Не удалось обновить данные о серверах': 'Could not refresh server data',
+  'Данные на {time}': 'Data as of {time}',
+  'Повторить запрос': 'Retry',
   'Все разделы': 'All sections',
   'Открыть раздел': 'Open section',
   'Показать еще {n}': 'Show {n} more',
@@ -125,6 +131,7 @@ const EN: Record<string, string> = {
   'Очередь read-only helper недоступна агенту. Переустановите recheck-setup.': 'The agent cannot write to the read-only collector queue. Reinstall recheck-setup.',
   'Обновите backup-helper до 0.50: нужна read-only команда inspect.': 'Update backup-helper to 0.50 for the read-only inspect action.',
   'Не удалось получить результат проверки. Повторяем запрос; алерт не скрыт.': 'Could not retrieve the result. Retrying; the alert remains visible.',
+  'Проверку заменила более новая. Запустите ее снова.': 'A newer check superseded this one. Run it again.',
   // сервер разработки (ServerEdit.tsx, ServersPage.tsx, cardLayout.tsx, DockerPage.tsx; backend app/dev_mode.py)
   'Назначение': 'Purpose',
   'Прод': 'Production',
@@ -1685,8 +1692,8 @@ const EN: Record<string, string> = {
   'больше не бэкапится': 'no longer backed up',
   'разовый бэкап': 'one-off backup',
   'проект заморожен': 'project frozen',
-  'Группа {host} останется в репозитории как есть и больше не будет считаться встающей ротацией.':
-    'The {host} group stays in the repository as is and no longer counts as a stalled rotation.',
+  'Все группы хоста {host} останутся в репозитории. Панель исключит их из проверки ротации.':
+    'All groups for host {host} stay in the repository. The panel excludes them from rotation checks.',
   'Репозиторий останется как есть: чистка по политике у него ничего не удаляет, раз новых снапшотов нет. Он уйдет в раздел "Архив" и перестанет быть проблемой, а проверка целостности продолжится.':
     'The repository stays as is: the policy cleanup removes nothing from it while no new snapshots come. It moves to the "Archive" section and stops being a problem, and the integrity check goes on.',
   'Зачем в архив (необязательно)': 'Why archive it (optional)',
@@ -1694,6 +1701,8 @@ const EN: Record<string, string> = {
   'в архив': 'archive',
   'группа {host} в архиве': 'group {host} archived',
   'старая группа {host}': 'old group {host}',
+  'без тегов': 'no tags',
+  'Хранить все группы этого хоста в архиве': 'Archive all groups for this host',
   'прежнее имя сервера {host}': 'former server name {host}',
   'пути': 'paths',
   'склеить с {host}': 'merge into {host}',
@@ -1701,15 +1710,8 @@ const EN: Record<string, string> = {
   'Отдать эти снапшоты новому имени: дальше их чистит общая политика': 'Hand these snapshots over to the new name: from then on the usual policy cleans them',
   'Чистка restic идет по группам (хост и теги) и последние снапшоты каждой группы держит всегда: группа, в которую больше не бэкапятся, сама не уйдет.':
     'restic cleans up group by group (host and tags) and always keeps the last snapshots of each group: a group nothing backs up into anymore never goes away by itself.',
-  'На бэкап-сервере. Снапшоты прежнего имени получат имя {to}, и дальше их чистит общая политика: лишние уйдут ночной чисткой, остальные останутся, пока нужны политике. Данные не копируются. Без --apply команда только покажет, что сделает.':
-    'On the backup server. The snapshots of the former name get the name {to} and the usual policy cleans them from then on: the extra ones go with the nightly cleanup, the rest stay while the policy needs them. No data is copied. Without --apply the command only shows what it would do.',
-  'Склейку helper backupserver-setup умеет с версии {v}, здесь {cur}: обновите helper на этом сервере.':
-    'The backupserver-setup helper can merge from version {v}, this server has {cur}: update the helper here.',
-  'Хранить группу как есть и не считать её встающей ротацией': 'Keep the group as is and do not count it as a stalled rotation',
   'как удалить': 'how to remove',
   'вернуть': 'restore',
-  'На бэкап-сервере. Без --apply команда только покажет, что удалится, с --apply удалит снапшоты группы, место вернет ночная чистка. Группу, в которую бэкапились последнюю неделю, команда удалять откажется.':
-    'On the backup server. Without --apply the command only shows what would go, with --apply it removes the snapshots of the group, and the nightly cleanup frees the space. A group that got a backup within the last week is refused.',
   'архив': 'archive',
   'убрал {who}': 'archived by {who}',
   'в архиве с {d}': 'archived since {d}',
@@ -7037,6 +7039,10 @@ const EN: Record<string, string> = {
   'вернул ошибки панели в неразобранные':
     'returned panel errors to review',
   // вкладка "Чистка" сервера бэкапов (BsrvCleanup.tsx)
+  'Дождитесь следующей плановой чистки репозитория и откройте шаги снова. Она обновит список групп с точными тегами.':
+    'Wait for the next scheduled repository cleanup and reopen the steps. It refreshes the group list with exact tags.',
+  'Повторите пробную команду и убедитесь, что под прежним именем больше нет снапшотов.':
+    'Repeat the preview command and check that no snapshots remain under the old name.',
   'Пробный прогон, ничего не меняет: по каждому репозиторию helper покажет, сколько снапшотов удалит первая чистка (группы по хосту и тегам, как в чистке панели). Проверьте, что уходят только лишние старые снапшоты. Если restic не ответил, пароль в блоке не подходит, и такой репозиторий helper не перенесет.':
     'Dry run, changes nothing: for each repository the helper shows how many snapshots the first cleanup removes (grouped by host and tags, as the panel cleanup does). Check that only extra old snapshots go. If restic did not answer, the password in the block is wrong and the helper will not move that repository.',
   'Перенести: у репозитория появится свой prune-скрипт с той же политикой и паролем из блока, чистка раз в сутки через 12 часов после бэкапа клиента, раз в неделю проверка целостности. Блок в старом скрипте закомментируется, копия файла - /etc/systemd-rest.conf.kervax-bak-<время>. На этом шаге ничего не удаляется.':
@@ -7055,16 +7061,16 @@ const EN: Record<string, string> = {
     'Check: the file parses (OK) and at least {n} blocks are commented out.',
   'Вернуть старый скрипт из копии.':
     'Restore the old script from the copy.',
-  'Сначала без --apply: покажет, сколько снапшотов группы и за какие даты удалится. Ничего не меняет. Группу, в которую бэкапились последнюю неделю, команда удалять откажется.':
-    'First without --apply: shows how many snapshots of the group and from which dates would go. Changes nothing. The command refuses to remove a group that got a backup within the last week.',
-  'Удалить снапшоты группы. Это необратимо: восстановиться из них будет нельзя. Место вернет ночная чистка.':
-    'Remove the group\'s snapshots. This cannot be undone: there is no restoring from them afterwards. The nightly cleanup gives the space back.',
-  'Проверить: команда ответит, что снапшотов этой группы нет (no snapshots of host). Пункт уйдет после ночной чистки, она перепишет список групп.':
-    'Check: the command answers that the group has no snapshots (no snapshots of host). The item goes away after the nightly cleanup rewrites the group list.',
-  'Если группу надо хранить: кнопка "в архив" выше. На сервере ничего не меняется, пункт уходит.':
-    'If the group must be kept: the "archive" button above. Nothing changes on the server, the item goes away.',
-  'Сначала без --apply: покажет обе группы. Ничего не меняет.':
-    'First without --apply: shows both groups. Changes nothing.',
+  'Запустите пробную команду на бэкап-сервере. Она покажет точные теги, число снапшотов и диапазон дат. Для самой свежей группы и групп с бэкапами за последние 7 дней удаление заблокировано.':
+    'Run the preview command on the backup server. It shows the exact tags, snapshot count and date range. Removal is blocked for the newest group and for groups with backups in the last 7 days.',
+  'Проверьте план и выполните команду с --apply из вывода. Если список снапшотов изменился, повторите пробный запуск. Удаление необратимо. Место освободит ночная чистка.':
+    'Review the plan and run the command with --apply from the output. If the snapshot list has changed, run the preview again. Removal is irreversible. The nightly cleanup frees the space.',
+  'Повторите пробную команду и убедитесь, что она сообщает об отсутствии снапшотов выбранной группы.':
+    'Repeat the preview command and check that it reports no snapshots for the selected group.',
+  'Чтобы хранить все группы этого хоста, нажмите "в архив". Снапшоты останутся в репозитории.':
+    'To keep all groups for this host, click "archive". The snapshots stay in the repository.',
+  'Запустите пробную команду на бэкап-сервере. Она проверит теги и покажет даты и число снапшотов обеих групп.':
+    'Run the preview command on the backup server. It checks the tags and shows the dates and snapshot counts of both groups.',
   'Отдать снапшоты прежнего имени серверу {to}: данные не копируются, меняются только записи снапшотов. Дальше их чистит общая политика, лишние уйдут ночной чисткой, и это уже необратимо.':
     'Hand the old name\'s snapshots over to {to}: no data is copied, only the snapshot records change. From then on the common policy cleans them, the extra ones go with the nightly cleanup, and that cannot be undone.',
   'Что делала чистка в последних прогонах: сколько снапшотов было и стало, ошибки restic.':

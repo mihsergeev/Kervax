@@ -1,4 +1,5 @@
 import asyncio
+import re
 import types
 
 import httpx
@@ -167,7 +168,7 @@ async def test_run_http_all_ips_aggregates(monkeypatch):
 
     class FakeClient:
         def __init__(self, **kw):
-            pass
+            self.address = kw["transport"].address
 
         async def __aenter__(self):
             return self
@@ -176,15 +177,15 @@ async def test_run_http_all_ips_aggregates(monkeypatch):
             return False
 
         async def request(self, method, url, **kw):
-            seen.append({"url": url, "ext": kw.get("extensions")})
+            seen.append({"url": url, "address": self.address})
             # 10.0.0.2 — мёртвый бэкенд (500), остальные 200
-            return FakeResp(500 if "10.0.0.2" in url else 200)
+            return FakeResp(500 if self.address == "10.0.0.2" else 200)
 
     async def fake_resolve(host, port):
         return ["10.0.0.1", "10.0.0.2"]
 
     monkeypatch.setattr("app.checks.httpx.AsyncClient", FakeClient)
-    monkeypatch.setattr("app.checks._resolve_ips", fake_resolve)
+    monkeypatch.setattr("app.net_guard._resolve", fake_resolve)
     check = types.SimpleNamespace(
         target="https://site.example", timeout_ms=3000, degraded_ms=2000,
         method="GET", keyword_up="", keyword_down="", expected_status="200-399",
@@ -194,12 +195,12 @@ async def test_run_http_all_ips_aggregates(monkeypatch):
     assert outcome.status == "down"
     assert "10.0.0.2" in outcome.message and "1/2" in outcome.message
     # оба адреса опрошены, каждый с SNI = домен
-    assert {s["url"] for s in seen} == {"https://10.0.0.1", "https://10.0.0.2"}
-    assert all(s["ext"] == {"sni_hostname": "site.example"} for s in seen)
+    assert {s["address"] for s in seen} == {"10.0.0.1", "10.0.0.2"}
+    assert {s["url"] for s in seen} == {"https://site.example"}
 
     # все живы → up с числом адресов
     monkeypatch.setattr(
-        "app.checks._resolve_ips",
+        "app.net_guard._resolve",
         lambda host, port: _aiolist(["10.0.0.1", "10.0.0.3"]),
     )
     seen.clear()
@@ -208,7 +209,7 @@ async def test_run_http_all_ips_aggregates(monkeypatch):
 
     # один адрес → None-ветка → обычная одиночная проверка (не падаем), разбивка пустая:
     # карточка пишет "у домена один адрес", а не "еще нет разбивки"
-    monkeypatch.setattr("app.checks._resolve_ips", lambda host, port: _aiolist(["10.0.0.1"]))
+    monkeypatch.setattr("app.net_guard._resolve", lambda host, port: _aiolist(["10.0.0.1"]))
     outcome = await checks_exec._run_http(check)
     assert outcome.status == "up" and outcome.ip_results == []
     check.check_all_ips = False
@@ -1076,3 +1077,39 @@ async def test_probe_source_is_one_choice(client, auth_headers):
     r = await client.patch(f"/api/checks/{cid}", headers=auth_headers,
                            json={"probe_local": True})
     assert r.json()["probe_local"] is True and r.json()["check_locations"] is False
+
+async def test_monitor_transport_pins_address_and_preserves_host_on_redirect(monkeypatch):
+    from app import net_guard
+
+    requests = []
+
+    async def serve(reader, writer):
+        headers = await reader.readuntil(b"\r\n\r\n")
+        requests.append(headers.lower())
+        response = (b"302 Found\r\nLocation: /next" if len(requests) == 1 else b"200 OK")
+        writer.write(b"HTTP/1.1 " + response + b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def resolve(host, timeout):
+        assert host == "pinned.example"
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr(net_guard, "_resolve", resolve)
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    async with server:
+        port = server.sockets[0].getsockname()[1]
+        url = f"http://pinned.example:{port}/"
+        transport = net_guard.MonitorTransport(True, True, 2)
+        async with httpx.AsyncClient(transport=transport, follow_redirects=True) as client:
+            response = await client.get(url)
+        assert response.status_code == 200 and str(response.url) == url + "next"
+        assert len(requests) == 2
+        assert all(f"host: pinned.example:{port}\r\n".encode() in req for req in requests)
+
+        transport = net_guard.MonitorTransport(True, False, 2)
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(httpx.ConnectError, match=re.escape(net_guard.ADMIN_ONLY_TEXT)):
+                await client.get(url)
+        assert len(requests) == 2

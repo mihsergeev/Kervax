@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
+import asyncio
 import ipaddress
 import re
 import secrets
@@ -518,7 +519,7 @@ async def import_checks(
         _push_defaults(check)
         _dns_defaults(check)
         _local_probe_ok(check, user)
-        await _target_ok(check.type, check.target, check.dns_server, user)
+        check.allow_internal_target = await _target_ok(check.type, check.target, check.dns_server, user)
         _one_probe_source(check)
     session.add_all(checks)
     await session.commit()
@@ -738,7 +739,7 @@ async def try_check(body: CheckTryIn, user: CurrentUser, session: SessionDep) ->
     if body.type == "dns":
         _dns_defaults(chk)  # имя без схемы и пути, резолвер - только IP, как у сохраненного
     if body.part in ("panel", "expiry"):
-        await _target_ok(body.type, chk.target, getattr(chk, "dns_server", ""), user)
+        chk.allow_internal_target = await _target_ok(body.type, chk.target, getattr(chk, "dns_server", ""), user)
     if body.type == "dns":
         chk.retries = 0
         own = await session.get(Check, body.check_id) if body.check_id else None
@@ -996,7 +997,7 @@ async def adopt_domains(
     hosts, _ = await _hosts_map(user, session)
     max_order = await session.scalar(select(func.max(Check.sort_order))) or 0
     skipped: list[str] = []
-    fresh: list[Check] = []
+    candidates: list[tuple[Check, AdoptItemOut]] = []
     seen: set[str] = set()
     # «Проверять изнутри» — ноду вычисляем здесь, а не берём из запроса (как и в
     # local_probe_apply): иначе редактор назначил бы проверку с чужой ноды.
@@ -1051,11 +1052,31 @@ async def adopt_domains(
             check.probe_server_id = hit[0]
             check.probe_bound_at = now
             _one_probe_source(check)
-        fresh.append(check)
-        items.append(AdoptItemOut(
+        item = AdoptItemOut(
             domain=domain, local=bool(hit), server=hit[1] if hit else "",
             path=hint["path"] if hint else "", expected_status=hint["expect"] if hint else "",
-        ))
+        )
+        candidates.append((check, item))
+        items.append(item)
+
+    async def target_problem(check: Check) -> str:
+        try:
+            check.allow_internal_target = await _target_ok(check.type, check.target, check.dns_server, user)
+        except HTTPException as exc:
+            return str(exc.detail)
+        return ""
+
+    fresh: list[Check] = []
+    for start in range(0, len(candidates), 32):
+        batch = candidates[start:start + 32]
+        problems = await asyncio.gather(*(target_problem(check) for check, _ in batch))
+        for (check, item), problem in zip(batch, problems):
+            if problem:
+                item.reason, item.problem = "invalid", problem
+                item.local, item.server = False, ""
+                skipped.append(f"{item.domain} — {problem}")
+            else:
+                fresh.append(check)
     if fresh:
         session.add_all(fresh)
         await session.commit()
@@ -1105,7 +1126,7 @@ async def create_check(
     _dns_defaults(check)
     await _parent_check(check, session, user)
     _local_probe_ok(check, user)
-    await _target_ok(check.type, check.target, check.dns_server, user)
+    check.allow_internal_target = await _target_ok(check.type, check.target, check.dns_server, user)
     _one_probe_source(check)
     # новый монитор — в конец списка (иначе прыгнул бы наверх при ручном порядке)
     max_order = await session.scalar(select(func.max(Check.sort_order)))
@@ -1312,10 +1333,14 @@ def _target_host(typ: str, target: str) -> str:
     return parents_mod.target_host(SimpleNamespace(type=typ, target=target))
 
 
-async def _target_ok(typ: str, target: str, dns_server: str, user) -> None:
+async def _target_ok(typ: str, target: str, dns_server: str, user) -> bool:
     """Куда монитор пойдет с хоста панели (app/net_guard.py): метаданные облака - никому,
     внутренняя сеть - только админу."""
-    for host in (_target_host(typ, target), (dns_server or "").strip() if typ == "dns" else ""):
+    host = _target_host(typ, target)
+    if typ in ("http", "cert") and not host:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неверный адрес для проверки")
+    internal = False
+    for host in (host, (dns_server or "").strip() if typ == "dns" else ""):
         if not host:
             continue
         cls = await net_guard.host_class(host)
@@ -1324,6 +1349,8 @@ async def _target_ok(typ: str, target: str, dns_server: str, user) -> None:
                                 + net_guard.FORBIDDEN_TEXT)
         if cls == net_guard.INTERNAL and user.role != "admin":
             raise HTTPException(status.HTTP_403_FORBIDDEN, net_guard.ADMIN_ONLY_TEXT)
+        internal |= cls == net_guard.INTERNAL
+    return internal
 
 
 def _one_probe_source(check: Check) -> None:
@@ -1387,7 +1414,7 @@ async def update_check(
     _push_defaults(check)
     _dns_defaults(check)
     if (check.type, check.target, check.dns_server) != old_where:
-        await _target_ok(check.type, check.target, check.dns_server, user)
+        check.allow_internal_target = await _target_ok(check.type, check.target, check.dns_server, user)
     await _parent_check(check, session, user)
     if check.target != old_dns[0] and check.tamper_state:
         # другой адрес - другая страница: база признаков взлома от старой не годится

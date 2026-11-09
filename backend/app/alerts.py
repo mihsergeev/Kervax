@@ -16,7 +16,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import notification_text, settings_store, tg_buttons, tg_fmt
+from app import listen_watch, notification_text, settings_store, tg_buttons, tg_fmt
 from app.config import Settings
 from app.models import AlertEvent, Check, Server, TgAlert, User
 
@@ -76,6 +76,8 @@ class Msg(str):
                       self.ref, mutes=self.mutes)
         if getattr(self, "parts", None):
             out.parts = self.parts
+        if getattr(self, "listen_episodes", None):
+            out.listen_episodes = self.listen_episodes
         # куда ушло сообщение (app/site_group.py его потом правит): список общий с исходным
         if getattr(self, "sent_to", None) is not None:
             out.sent_to = self.sent_to
@@ -124,7 +126,7 @@ _STORM_SHORT = 3  # серверов ссылками в коротком соо
 _AGO = re.compile(r"\d+\s*(?:с|сек|мин|ч|дн|д)\.?\s+назад")
 _HREF = re.compile(r'<a href="[^"]*">')
 # "это мы" и остальное, где кнопка про один сервер
-_STORM_SKIP = frozenset({"access_change"})
+_STORM_SKIP = frozenset({"access_change", "listen_gone"})
 
 
 def _servers_word(n: int) -> str:
@@ -857,6 +859,25 @@ async def dispatch(
     rows: dict[int, int] = {}
     if session_factory is not None and buttons_on(cfg):
         rows = await tg_buttons.prepare(session_factory, messages)
+    stale = set()
+    listen_ids = {_listen_server(m) for m in messages} - {None}
+    if session_factory is not None and listen_ids:
+        now = datetime.now(timezone.utc)
+        async with session_factory() as session:
+            servers = {s.id: s for s in await session.scalars(select(Server).where(Server.id.in_(listen_ids)))}
+            for i, m in enumerate(messages):
+                sid = _listen_server(m)
+                if sid is None:
+                    continue
+                if not listen_watch.can_notify(servers.get(sid), m.listen_episodes, now):
+                    stale.add(i)
+        if stale:
+            keep = [i for i in range(len(messages)) if i not in stale]
+            messages = [messages[i] for i in keep]
+            rows = {j: rows[i] for j, i in enumerate(keep) if i in rows}
+            origins = [origins[i] for i in keep] if origins else []
+            if not messages:
+                return False
     sent: dict[int, list] = {}
     uncertain: set[int] = set()
     async with _link() as link:
@@ -915,7 +936,7 @@ async def dispatch(
         await record_history(session_factory, delivered)
     if finished is not None:
         finished.update(original for i, indices in enumerate(origins) if i not in again for original in indices)
-    return not again
+    return not again and not stale
 
 
 async def _note_passed(session_factory, cfg: dict, messages: list, on_main: list[bool], got: set[int]) -> None:
@@ -1210,21 +1231,47 @@ async def _note_webhook(session_factory, err: str | None) -> None:
         log.warning("состояние вебхука не записано", exc_info=True)
 
 
+def _listen_server(m: str) -> int | None:
+    if not getattr(m, "listen_episodes", None):
+        return None
+    ref, ids = _ref_ids(m.ref)
+    return ids[0] if ref == "srv" and len(ids) == 1 else None
+
+
 async def record_history(session_factory, messages: list[str]) -> None:
     """Записать доставленные алерты в историю (AlertEvent). Текст без HTML-разметки, как его
     видит человек. Сбой записи не должен ни ронять отправку, ни вызывать повтор: алерт уже
     ушел, и вторая копия в чате хуже пропуска в истории."""
     try:
         async with session_factory() as session:
-            for m in [p for x in messages for p in getattr(x, "parts", None) or [x]]:
-                session.add(AlertEvent(
+            parts = [p for x in messages for p in getattr(x, "parts", None) or [x]]
+            listen_ids = {_listen_server(m) for m in parts} - {None}
+            servers = {}
+            if listen_ids:
+                servers = {s.id: s for s in await session.scalars(
+                    select(Server).where(Server.id.in_(listen_ids)).order_by(Server.id).with_for_update())}
+            now = datetime.now(timezone.utc)
+            for m in parts:
+                event = AlertEvent(
                     kind=str(getattr(m, "kind", "") or "")[:40],
                     target=str(getattr(m, "target", "") or "")[:255],
                     section=str(getattr(m, "section", "") or "")[:20],
                     grp=str(getattr(m, "group", "") or "")[:255],
                     recovery=bool(getattr(m, "recovery", False)),
                     text=html.unescape(_TAG.sub("", getattr(m, "full", "") or str(m)))[:4000],
-                ))
+                )
+                session.add(event)
+                if (sid := _listen_server(m)) is None:
+                    continue
+                srv = servers.get(sid)
+                state = (srv.alert_state or {}) if srv is not None else {}
+                active = listen_watch.matching(state, m.listen_episodes)
+                if active:
+                    srv.alert_state = listen_watch.mark_delivered(state, active, now)
+                elif not state.get("listen_gone"):
+                    ports = ", ".join(key.removeprefix("tcp:") for key in m.listen_episodes)
+                    session.add(AlertEvent(kind=event.kind, target=event.target, section=event.section, grp=event.grp,
+                                           recovery=True, text=listen_watch.closure(event.target, ports)))
             await session.commit()
     except Exception:  # noqa: BLE001
         log.warning("история алертов не записана", exc_info=True)

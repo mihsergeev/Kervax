@@ -106,7 +106,8 @@ fi
 # 0.39: new servers can keep repositories on a selected mounted filesystem
 # 0.40: an empty server deployed by the panel can move to a selected filesystem
 # 0.41: the mirror reader rejects symlinks and uses descriptor-relative reads
-KERVAX_SETUP_VERSION=0.41  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.42: exact tag groups and explicit snapshot IDs for manual cleanup
+KERVAX_SETUP_VERSION=0.42  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -765,7 +766,7 @@ groups = {}
 for s in json.load(sys.stdin) or []:
     host = s.get("hostname") or ""
     tags = sorted(s.get("tags") or [])
-    g = groups.setdefault(host + "\t" + ",".join(tags),
+    g = groups.setdefault((host, tuple(tags)),
                           {"host": host, "tags": tags, "paths": [], "n": 0, "first": 0, "last": 0})
     g["n"] += 1
     for p in s.get("paths") or []:
@@ -780,7 +781,8 @@ if len(groups) < 2:
         os.remove(out)
     sys.exit(0)
 with open(out + ".tmp", "w") as f:
-    json.dump({"ts": int(time.time()), "groups": sorted(groups.values(), key=lambda g: -g["last"])[:20]}, f)
+    json.dump({"ts": int(time.time()), "exact_tags": True,
+               "groups": sorted(groups.values(), key=lambda g: -g["last"])[:20]}, f)
 os.chmod(out + ".tmp", 0o644)
 os.replace(out + ".tmp", out)
 '
@@ -900,7 +902,9 @@ repo_size() { du -sb "$RESTIC_REPOSITORY" 2>/dev/null | awk '{print $1}'; }
     # Written only when the repository has more than one group.
     if command -v python3 >/dev/null 2>&1; then
       mkdir -p "$(dirname "$GROUPS_FILE")"
-      "$BIN" snapshots --json 2>/dev/null | python3 -c "$GROUPS_PY" "$GROUPS_FILE" 2>/dev/null || true
+      if groups_json="$("$BIN" snapshots --json 2>/dev/null)"; then
+        printf "%s" "$groups_json" | python3 -c "$GROUPS_PY" "$GROUPS_FILE" 2>/dev/null || true
+      fi
     fi
   fi
   # Measured AFTER the prune: the size used to be taken before the cleanup, so a 1.5 GB
@@ -2106,15 +2110,31 @@ cmd_dedup_cron() {
   echo "root crontab: $changed prune line(s) commented out, the previous crontab is in $bak"
 }
 
-# cmd_forget_group removes every snapshot of one old group: a host that no longer backs up into
-# the repository (renamed, gone, a one-off backup). The policy keeps the last snapshots of such
-# a group forever, so it goes only by hand. Only an old group: when the host has a snapshot
-# from the last 7 days the group is alive and nothing is removed. Without --apply it only says
-# what would go. The space comes back with the next nightly prune of the repository.
+# An upgraded helper can still read a group cache written by the previous prune script.
+require_exact_groups() {
+  python3 -c '
+import json, sys, time
+try:
+    with open(sys.argv[1]) as cache:
+        data = json.load(cache)
+    if data.get("exact_tags") is True and 0 <= time.time() - data["ts"] <= 3 * 86400:
+        sys.exit(0)
+except (OSError, AttributeError, KeyError, TypeError, ValueError):
+    pass
+sys.exit("snapshot group cache is missing or outdated; wait for the next scheduled cleanup")
+' "$GROUPS_DIR/$1.json"
+}
+
+# Select one host and exact tag set. Applying a dry run requires the same snapshot IDs.
 cmd_forget_group() {
-  local repo="${1:-}" host="${2:-}" apply="${3:-}" env bin
+  local repo="${1:-}" host="${2:-}" group="${4:-}" expected="${6:-}" env bin
   valid_name "$repo" || { echo "bad repository name" >&2; return 2; }
   valid_name "$host" || { echo "bad host name" >&2; return 2; }
+  if [[ "${3:-}" != "--group" || ! "$group" =~ ^[0-9a-f]{64}$ ]] ||
+     { [ "$#" -ne 4 ] && [[ "$#" -ne 6 || "$5" != "--apply" || ! "$expected" =~ ^[0-9a-f]{64}$ ]]; }; then
+    echo "usage: $0 forget-group <repo> <host> --group <selector> [--apply <plan>]" >&2
+    return 2
+  fi
   env="$ENV_DIR/$repo.env"
   [ -f "$env" ] || { echo "no $env: the repository has no prune script of its own, nothing to take the password from" >&2; return 2; }
   command -v python3 >/dev/null 2>&1 || { echo "python3 is needed" >&2; return 2; }
@@ -2122,53 +2142,92 @@ cmd_forget_group() {
   [ -x "$bin" ] || bin="$RESTIC_BIN"
   (
     set -a; . "$env"; set +a
-    snaps="$("$bin" snapshots --host "$host" --json 2>&1)" || { echo "restic snapshots failed: $snaps" >&2; exit 2; }
+    snaps="$("$bin" snapshots --json)" || { echo "restic snapshots failed" >&2; exit 2; }
     info="$(printf '%s' "$snaps" | python3 -c '
-import json, re, sys
+import hashlib, json, re, sys
 from datetime import datetime
+
+repo, host, group = sys.argv[1:]
 def unix(t):
     t = re.sub(r"\.\d+", "", t or "").replace("Z", "+00:00")
     try:
         return int(datetime.fromisoformat(t).timestamp())
     except ValueError:
         return 0
-rows = sorted((unix(s.get("time")), s.get("id") or "") for s in json.load(sys.stdin) or [])
-print(len(rows), rows[0][0] if rows else 0, rows[-1][0] if rows else 0)
+snaps = json.load(sys.stdin) or []
+rows = []
+newest = 0
+selected_tags = "[]"
+for snap in snaps:
+    ts = unix(snap.get("time"))
+    if not ts:
+        sys.exit("invalid snapshot timestamp")
+    newest = max(newest, ts)
+    if snap.get("hostname") != host:
+        continue
+    tags = json.dumps(sorted(snap.get("tags") or []), separators=(",", ":"))
+    if hashlib.sha256(tags.encode()).hexdigest() != group:
+        continue
+    ident = snap.get("id") or ""
+    if not re.fullmatch(r"[0-9a-f]{64}", ident):
+        sys.exit("invalid snapshot metadata")
+    selected_tags = tags
+    rows.append((ts, ident))
+rows.sort()
+plan_data = [repo, host, group, sorted(ident for _, ident in rows)]
+plan = hashlib.sha256(json.dumps(plan_data, separators=(",", ":")).encode()).hexdigest()
+print(len(rows), rows[0][0] if rows else 0, rows[-1][0] if rows else 0, newest, plan)
+print(selected_tags)
 for t, i in rows:
     print(i)
-')" || { echo "could not read the snapshot list" >&2; exit 2; }
-    read -r n first last <<<"$(head -n1 <<<"$info")"
-    if [ "${n:-0}" -eq 0 ]; then echo "no snapshots of host $host in $repo"; exit 0; fi
-    if [ $(( $(date +%s) - last )) -lt $(( 7 * 86400 )) ]; then
-      echo "host $host backed up into $repo $(( ($(date +%s) - last) / 3600 )) h ago: the group is alive, nothing removed" >&2
+' "$repo" "$host" "$group")" || { echo "could not read the snapshot list" >&2; exit 2; }
+    read -r n first last newest plan <<<"${info%%$'\n'*}"
+    if [ "${n:-0}" -eq 0 ]; then
+      echo "no snapshots of the selected group in $repo"
+      [ -z "$expected" ]
+      exit $?
+    fi
+    if [ "$last" -ge "$newest" ] || [ $(( $(date +%s) - last )) -lt $(( 7 * 86400 )) ]; then
+      echo "the group is active or is the newest in $repo, nothing removed" >&2
       exit 2
     fi
-    echo "group $host in $repo: $n snapshots, $(date -d "@$first" +%F) .. $(date -d "@$last" +%F)"
-    if [ "$apply" != "--apply" ]; then
-      echo "dry run, nothing removed. To remove: $0 forget-group $repo $host --apply"
+    require_exact_groups "$repo" || exit 2
+    mapfile -t details <<<"${info#*$'\n'}"
+    echo "group $host with tags ${details[0]} in $repo: $n snapshots, $(date -d "@$first" +%F) .. $(date -d "@$last" +%F)"
+    if [ -z "$expected" ]; then
+      echo "dry run, nothing removed. To remove:"
+      printf 'sudo %q forget-group %q %q --group %q --apply %q\n' "$0" "$repo" "$host" "$group" "$plan"
       exit 0
     fi
-    rl=""; "$bin" forget --help 2>/dev/null | grep -q -- "--retry-lock" && rl="--retry-lock 20m"
-    # shellcheck disable=SC2046
-    "$bin" forget $rl $(tail -n +2 <<<"$info" | grep -E '^[0-9a-f]{64}$') || { echo "restic forget failed" >&2; exit 2; }
+    [ "$expected" = "$plan" ] || { echo "snapshot list changed, run the dry run again" >&2; exit 2; }
+    ids=("${details[@]:1}")
+    [ "${#ids[@]}" -eq "$n" ] || exit 2
+    rl=()
+    if "$bin" forget --help 2>/dev/null | grep -q -- "--retry-lock"; then rl=(--retry-lock 20m); fi
+    "$bin" forget "${rl[@]}" "${ids[@]}" || { echo "restic forget failed" >&2; exit 2; }
     rm -f "$GROUPS_DIR/$repo.json"  # the next prune writes it anew
     echo "removed $n snapshots of $host from $repo; the space comes back with the next nightly prune"
   )
 }
 
-# cmd_merge_group hands the snapshots of an old group over to the name the server backs up under
-# now: the server was renamed. forget groups by host, so the history under the old name is never
-# rotated; after the merge it is one group again and the usual policy decides what stays.
-# restic rewrite --new-host writes new snapshot records over the same data (nothing is copied)
-# and --forget drops the old records. Only an old group into a live one: the old host has no
-# snapshot from the last 7 days, the new one has snapshots. Without --apply it only says what
-# would happen.
+# Merge the old host into a destination group with the same tags. Legacy calls without a
+# selector still work when the source has exactly one tag set.
 cmd_merge_group() {
-  local repo="${1:-}" host="${2:-}" to="${3:-}" apply="${4:-}" env bin
+  local repo="${1:-}" host="${2:-}" to="${3:-}" group="" apply="" env bin
   valid_name "$repo" || { echo "bad repository name" >&2; return 2; }
   valid_name "$host" || { echo "bad old host name" >&2; return 2; }
   valid_name "$to" || { echo "bad new host name" >&2; return 2; }
   [ "$host" != "$to" ] || { echo "the old and the new host are the same" >&2; return 2; }
+  shift 3
+  if [ "${1:-}" = "--group" ]; then
+    group="${2:-}"
+    [[ "$group" =~ ^[0-9a-f]{64}$ ]] || { echo "bad group selector" >&2; return 2; }
+    shift 2
+  fi
+  if [ "$#" -ne 0 ]; then
+    [ "$#" -eq 1 ] && [ "$1" = "--apply" ] || { echo "expected --apply" >&2; return 2; }
+    apply="$1"
+  fi
   env="$ENV_DIR/$repo.env"
   [ -f "$env" ] || { echo "no $env: the repository has no prune script of its own, nothing to take the password from" >&2; return 2; }
   command -v python3 >/dev/null 2>&1 || { echo "python3 is needed" >&2; return 2; }
@@ -2181,39 +2240,59 @@ cmd_merge_group() {
       *--new-host*) ;;
       *) echo "this restic cannot rename snapshots (rewrite --new-host is in 0.17+), run: $0 restic-update" >&2; exit 2 ;;
     esac
-    span() {
-      python3 -c '
-import json, re, sys
+    snaps="$("$bin" snapshots --json)" || { echo "restic snapshots failed" >&2; exit 2; }
+    info="$(printf '%s' "$snaps" | python3 -c '
+import hashlib, json, re, sys
 from datetime import datetime
+
+host, to, group = sys.argv[1:]
 def unix(t):
-    t = re.sub(r"\.\d+", "", t or "").replace("Z", "+00:00")
-    try:
-        return int(datetime.fromisoformat(t).timestamp())
-    except ValueError:
-        return 0
-ts = sorted(unix(s.get("time")) for s in json.load(sys.stdin) or [])
-print(len(ts), ts[0] if ts else 0, ts[-1] if ts else 0)
-'
-    }
-    old="$("$bin" snapshots --host "$host" --json 2>&1)" || { echo "restic snapshots failed: $old" >&2; exit 2; }
-    new="$("$bin" snapshots --host "$to" --json 2>&1)" || { echo "restic snapshots failed: $new" >&2; exit 2; }
-    read -r n first last <<<"$(printf '%s' "$old" | span)" || { echo "could not read the snapshot list" >&2; exit 2; }
-    read -r n2 first2 last2 <<<"$(printf '%s' "$new" | span)" || { echo "could not read the snapshot list" >&2; exit 2; }
-    if [ "${n:-0}" -eq 0 ]; then echo "no snapshots of host $host in $repo"; exit 0; fi
+    return int(datetime.fromisoformat(re.sub(r"\.\d+", "", t).replace("Z", "+00:00")).timestamp())
+def tags(snap):
+    return tuple(sorted(snap.get("tags") or []))
+
+snaps = json.load(sys.stdin) or []
+old = [snap for snap in snaps if snap.get("hostname") == host]
+if not old:
+    print(0)
+    sys.exit(0)
+tag_sets = {tags(snap) for snap in old}
+if len(tag_sets) != 1:
+    sys.exit("the old host has multiple tag groups, nothing changed")
+tag_set, = tag_sets
+if group:
+    selector = hashlib.sha256(json.dumps(tag_set, separators=(",", ":")).encode()).hexdigest()
+    if selector != group:
+        sys.exit("the old host tag group changed, nothing changed")
+new = [snap for snap in snaps if snap.get("hostname") == to and tags(snap) == tag_set]
+if not new:
+    sys.exit("the new host has no snapshots with the same tags: nothing to merge into")
+rows = sorted((unix(snap["time"]), snap["id"]) for snap in old)
+if any(not re.fullmatch(r"[0-9a-f]{64}", ident) for _, ident in rows):
+    sys.exit("invalid snapshot ID")
+new_times = sorted(unix(snap["time"]) for snap in new)
+print(len(rows), rows[0][0], rows[-1][0], len(new_times), new_times[0], new_times[-1])
+for _, ident in rows:
+    print(ident)
+' "$host" "$to" "$group")" || exit 2
+    read -r n first last n2 first2 last2 <<<"${info%%$'\n'*}"
+    if [ "$n" -eq 0 ]; then echo "no snapshots of host $host in $repo"; exit 0; fi
     if [ $(( $(date +%s) - last )) -lt $(( 7 * 86400 )) ]; then
-      echo "host $host backed up into $repo $(( ($(date +%s) - last) / 3600 )) h ago: the group is alive, nothing changed" >&2
+      echo "host $host backed up into $repo recently: the group is alive, nothing changed" >&2
       exit 2
     fi
-    [ "${n2:-0}" -gt 0 ] || { echo "no snapshots of host $to in $repo: nothing to merge into" >&2; exit 2; }
+    require_exact_groups "$repo" || exit 2
     echo "group $host in $repo: $n snapshots, $(date -d "@$first" +%F) .. $(date -d "@$last" +%F)"
     echo "joins $to: $n2 snapshots, $(date -d "@$first2" +%F) .. $(date -d "@$last2" +%F)"
     if [ "$apply" != "--apply" ]; then
-      echo "dry run, nothing changed. To merge: $0 merge-group $repo $host $to --apply"
+      echo "dry run, nothing changed"
       exit 0
     fi
-    rl=""; case "$rw" in *--retry-lock*) rl="--retry-lock 20m" ;; esac
-    # shellcheck disable=SC2086
-    "$bin" rewrite $rl --host "$host" --new-host "$to" --forget || { echo "restic rewrite failed" >&2; exit 2; }
+    mapfile -t ids <<<"${info#*$'\n'}"
+    [ "${#ids[@]}" -eq "$n" ] || exit 2
+    rl=()
+    case "$rw" in *--retry-lock*) rl=(--retry-lock 20m) ;; esac
+    "$bin" rewrite "${rl[@]}" --new-host "$to" --forget "${ids[@]}" || { echo "restic rewrite failed" >&2; exit 2; }
     rm -f "$GROUPS_DIR/$repo.json"  # the next prune writes it anew
     echo "the $n snapshots of $host now belong to $to: the nightly cleanup applies the policy to them and gives the space back"
   )
@@ -2298,7 +2377,7 @@ case "${1:-}" in
   mirror-allow)     shift; with_storage cmd_mirror_allow "$@" ;;
   ensure-mirror-python) ensure_mirror_python ;;  # installer preflight for existing keys
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|storage-dir|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port] [storage-mount]|update-image|restic-update|forget-group <repo> <host> [--apply]|merge-group <repo> <old-host> <new-host> [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|allow-tls <ip>|get-client-creds <name>|mirror-allow <mirror> <ip> <pubkey> [repo...]|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|storage-dir|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port] [storage-mount]|update-image|restic-update|forget-group <repo> <host> --group <selector> [--apply <plan>]|merge-group <repo> <old-host> <new-host> [--group <selector>] [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|allow-tls <ip>|get-client-creds <name>|mirror-allow <mirror> <ip> <pubkey> [repo...]|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 # Existing mirror keys must keep working through upgrades. Without keys, install

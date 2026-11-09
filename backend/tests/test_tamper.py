@@ -188,7 +188,7 @@ async def test_scan_reads_page_js_and_googlebot(monkeypatch):
 
     real = httpx.AsyncClient
     monkeypatch.setattr(tamper.httpx, "AsyncClient",
-                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+                        lambda **kw: real(**{**kw, "transport": httpx.MockTransport(handler)}))
     chk = SimpleNamespace(target="https://www.example.com/", auth_method="", http_headers="", ignore_tls=False)
     got = (await tamper.scan(chk))["obs"]
     assert got["title"] == "Example Shop" and got["size"] == len(PAGE)
@@ -206,7 +206,7 @@ async def test_scan_skips_blocked_bot_and_non_html(monkeypatch):
 
     real = httpx.AsyncClient
     monkeypatch.setattr(tamper.httpx, "AsyncClient",
-                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+                        lambda **kw: real(**{**kw, "transport": httpx.MockTransport(handler)}))
     chk = SimpleNamespace(target="example.com/health", auth_method="", http_headers="", ignore_tls=False)
     assert await tamper.scan(chk) == {"err": "не html"}
 
@@ -447,7 +447,7 @@ async def test_scan_sees_wall_for_people_and_for_bot(monkeypatch):
 
     real = httpx.AsyncClient
     monkeypatch.setattr(tamper.httpx, "AsyncClient",
-                        lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+                        lambda **kw: real(**{**kw, "transport": httpx.MockTransport(handler)}))
     chk = SimpleNamespace(target="https://www.example.com/", auth_method="", http_headers="", ignore_tls=False)
     assert await tamper.scan(chk) == {"wall": "кука __js_p_"}
     mode["people"] = "cf"

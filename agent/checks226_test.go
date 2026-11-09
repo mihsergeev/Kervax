@@ -54,6 +54,45 @@ func TestParseListen(t *testing.T) {
 	}
 }
 
+func TestListenReportDistinguishesEmptyInventoryFromFailure(t *testing.T) {
+	const header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+	listen := collectListen(func(path string) ([]byte, error) {
+		if path == "/proc/net/tcp6" || path == "/proc/net/udp6" {
+			return nil, os.ErrNotExist
+		}
+		return []byte(header), nil
+	})
+	if listen == nil || len(listen) != 0 {
+		t.Fatalf("expected successful empty inventory, got %#v", listen)
+	}
+	failed := collectListen(func(path string) ([]byte, error) {
+		if path == "/proc/net/udp" {
+			return nil, os.ErrPermission
+		}
+		return []byte(header), nil
+	})
+	if failed != nil {
+		t.Fatalf("expected no inventory after a read error, got %#v", failed)
+	}
+	for _, report := range []report{{Listen: &listen}, {}} {
+		data, err := json.Marshal(report)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatal(err)
+		}
+		want := ""
+		if report.Listen != nil {
+			want = "[]"
+		}
+		if got := string(fields["listen"]); got != want {
+			t.Fatalf("listen field: %q, want %q", got, want)
+		}
+	}
+}
+
 func TestPairCountersAndConntrack(t *testing.T) {
 	snmp := "Ip: Forwarding DefaultTTL\nIp: 1 64\nTcp: RtoAlgorithm OutSegs RetransSegs InErrs\nTcp: 1 1000 25 3\n"
 	m := pairCounters(snmp, "Tcp")
@@ -127,7 +166,7 @@ func TestLiveDump(t *testing.T) {
 		t.Skip("KVX_LIVE не задан")
 	}
 	b, _ := json.MarshalIndent(map[string]any{
-		"listen": collectListen(), "ips": publicIPs(), "psi": readPSI(), "fds": readFds(),
+		"listen": collectListen(os.ReadFile), "ips": publicIPs(), "psi": readPSI(), "fds": readFds(),
 		"dstate": dstate(readProcs()), "tcp": readTCP().out, "os_upd": collectOSUpdates(time.Now()),
 	}, "", " ")
 	t.Log(string(b))

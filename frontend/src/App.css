@@ -50,6 +50,7 @@
 
 .topnav {
   display: flex;
+  min-width: 0;
   gap: 0.25rem;
   margin-left: 0.5rem;
   /* На узком экране вкладки не помещались в строку и растягивали страницу вправо:
@@ -92,6 +93,8 @@
 
 .navgroup {
   display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
   gap: 0.15rem;
   padding: 3px;
   border: 1px solid var(--border);
@@ -865,6 +868,15 @@ button.home-queue-filter[aria-pressed="true"] { background: color-mix(in srgb, v
 .home-queue-rows > * { border-block-start: 1px solid var(--border); }
 .home-queue-rows > .home-attention-row { border-radius: 0; }
 .home-queue-empty { margin: 0; }
+.home-queue-error {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.65rem;
+  margin-block-end: 0.5rem;
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
 .home-queue-more { margin-block-start: 0.5rem; }
 .home-queue-secondary { display: grid; gap: 0.45rem; margin-block: 0 0.75rem; }
 .home-disclosure {

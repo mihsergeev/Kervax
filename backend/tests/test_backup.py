@@ -608,14 +608,15 @@ def test_renamed_server_is_named_as_rename():
 
 
 def test_merge_group_renames_an_old_group_by_hand():
-    """helper 0.33: merge-group отдает старую группу новому имени (restic rewrite --new-host
+    """merge-group отдает совместимую старую группу новому имени (restic rewrite --new-host
     --forget), только старую в живую, без --apply ничего не меняет."""
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh").read_text(encoding="utf-8")
     fn = src[src.index("cmd_merge_group() {"):]
     fn = fn[:fn.index("\n}\n")]
-    assert 'rewrite $rl --host "$host" --new-host "$to" --forget' in fn
-    assert fn.index('"$apply" != "--apply"') < fn.index("rewrite $rl")
+    rewrite = 'rewrite "${rl[@]}" --new-host "$to" --forget "${ids[@]}"'
+    assert rewrite in fn and 'len(tag_sets) != 1' in fn
+    assert fn.index('"$apply" != "--apply"') < fn.index(rewrite)
     assert "7 * 86400" in fn and "nothing to merge into" in fn and 'rm -f "$GROUPS_DIR/$repo.json"' in fn
     assert 'merge-group)      shift; with_storage cmd_merge_group "$@" ;;' in src
 

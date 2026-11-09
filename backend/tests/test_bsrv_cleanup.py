@@ -1,13 +1,23 @@
 """Вкладка "Чистка" сервера бэкапов (app/bsrv_cleanup.py): у каждого пункта готовые шаги под этот
 сервер и эти репозитории, две причины про один репозиторий - одна строка."""
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from app import bsrv_cleanup, collector
 
 DAY = 86400
 POL = {"keep_daily": 7, "keep_weekly": 4, "keep_monthly": 6}
 MISSING = ["web-old-1", "web-old-2", "db-old-1"]
+HELPER = Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh"
 
 
 def _server(now: datetime, helper="0.34", where="", archive=None, missing=None, mutes=None):
@@ -28,7 +38,7 @@ def _server(now: datetime, helper="0.34", where="", archive=None, missing=None, 
         "repo-a": {"cleaner": "legacy", "removed_ts": 0, "seen_since": ts - 6 * DAY - 3600},
         "proj-a": {"cleaner": "legacy", "removed_ts": 0, "seen_since": ts - 6 * DAY},
         "repo-b": {"cleaner": "script", "removed_ts": ts - 5 * 3600, "seen_since": ts - 60 * DAY,
-                   "groups": {"ts": ts - 5 * 3600, "groups": [
+                   "groups": {"ts": ts - 5 * 3600, "exact_tags": True, "groups": [
                        {"host": "repo-b", "tags": [], "paths": ["/"], "n": 14, "first": ts - 140 * DAY,
                         "last": ts - 6 * 3600},
                        {"host": "repo-b-old", "tags": [], "paths": ["/"], "n": 14, "first": ts - 870 * DAY,
@@ -131,29 +141,155 @@ def test_scheduled_legacy_repo_is_its_own_cause():
 
 
 def test_old_group_steps_forget_and_merge():
-    """Старая группа: удалить (сначала без --apply) или, если это прежнее имя сервера, склеить.
-    Склейка - с helper'а 0.33, раньше - шаг "обновите helper"."""
     now = datetime.now(timezone.utc)
-    v = bsrv_cleanup.view(_server(now), now)
+    s = _server(now, helper="0.42")
+    v = bsrv_cleanup.view(s, now)
     rot = {x["repo"]: x for x in v["rotation"]}
     assert rot["repo-b"]["cause"] == "old_group" and rot["repo-b"]["hosts"] == ["repo-b-old"]
-    g = v["groups"]["repo-b"]["repo-b-old"]
+    key = '["repo-b-old",[]]'
+    g = v["groups"]["repo-b"][key]
     assert _ids(g["forget"]) == ["group_dry", "group_apply", "group_check", "group_keep"]
-    assert g["forget"][0]["cmd"] == "sudo /lib65/kervax/kervax-backupserver-helper forget-group repo-b repo-b-old"
-    assert g["forget"][1]["cmd"].endswith("--apply") and g["forget"][3]["alt"]
-    # пути и теги те же, а новая группа началась позже конца старой больше чем на неделю - не
-    # переименование
+    selector = hashlib.sha256(b"[]").hexdigest()
+    dry = f"sudo /lib65/kervax/kervax-backupserver-helper forget-group repo-b repo-b-old --group {selector}"
+    assert g["forget"][0]["cmd"] == g["forget"][2]["cmd"] == dry
+    assert "cmd" not in g["forget"][1] and g["forget"][3]["alt"]
     assert "merge" not in g
-    s = _server(now)
-    grp = s.last_report["extras"]["backup-server"]["repos"]["repo-b"]["groups"]["groups"]
+
+    cache = s.last_report["extras"]["backup-server"]["repos"]["repo-b"]["groups"]
+    grp = cache["groups"]
     grp[0]["first"] = grp[1]["last"] + 3600
-    g = bsrv_cleanup.view(s, now)["groups"]["repo-b"]["repo-b-old"]
-    assert _ids(g["merge"]) == ["merge_dry", "merge_apply", "group_check"]
-    assert g["merge"][0]["cmd"].endswith("merge-group repo-b repo-b-old repo-b") and g["merge"][0]["arg"] == "repo-b"
-    s = _server(now, helper="0.32")
-    s.last_report["extras"]["backup-server"]["repos"]["repo-b"]["groups"]["groups"][0]["first"] = grp[1]["last"] + 3600
-    g = bsrv_cleanup.view(s, now)["groups"]["repo-b"]["repo-b-old"]
-    assert g["merge"] == [{"id": "helper_update", "arg": "0.33"}] and g["forget"][0]["id"] == "group_dry"
+    g = bsrv_cleanup.view(s, now)["groups"]["repo-b"][key]
+    assert _ids(g["merge"]) == ["merge_dry", "merge_apply", "merge_check"]
+    merge = f"sudo /lib65/kervax/kervax-backupserver-helper merge-group repo-b repo-b-old repo-b --group {selector}"
+    assert g["merge"][0]["cmd"] == g["merge"][2]["cmd"] == merge
+    assert g["merge"][1]["cmd"] == f"{merge} --apply" and g["merge"][1]["arg"] == "repo-b"
+
+    cache.pop("exact_tags")
+    g = bsrv_cleanup.view(s, now)["groups"]["repo-b"][key]
+    assert g["forget"] == g["merge"] == [{"id": "group_refresh"}]
+    s.last_report["setup_versions"]["backupserver-setup"] = "0.41"
+    g = bsrv_cleanup.view(s, now)["groups"]["repo-b"][key]
+    assert g["forget"] == g["merge"] == [{"id": "helper_update", "arg": "0.42"}]
+
+
+def test_groups_keep_distinct_tag_lists_for_the_same_host(tmp_path):
+    now = datetime.now(timezone.utc)
+    s = _server(now, helper="0.42")
+    cache = s.last_report["extras"]["backup-server"]["repos"]["repo-b"]["groups"]
+    grp = cache["groups"]
+    grp[0]["first"] = grp[1]["last"] + 3600
+    grp[0]["tags"] = grp[1]["tags"] = ["a,b"]
+    grp.append(dict(grp[1], tags=["a", "b"]))
+    result = bsrv_cleanup.view(s, now)
+    rotation = {x["repo"]: x for x in result["rotation"]}
+    assert rotation["repo-b"]["hosts"] == ["repo-b-old"]
+    view = result["groups"]["repo-b"]
+    assert set(view) == {'["repo-b-old",["a,b"]]', '["repo-b-old",["a","b"]]'}
+    for key, fix in view.items():
+        assert "merge" not in fix
+        tag_list = json.dumps(json.loads(key)[1], separators=(",", ":")).encode()
+        assert fix["forget"][0]["cmd"].endswith(f"--group {hashlib.sha256(tag_list).hexdigest()}")
+
+    source = HELPER.read_text(encoding="utf-8")
+    groups_py = source.split("GROUPS_PY='\n", 1)[1].split("\n'\n", 1)[0]
+    snapshots = [
+        {"hostname": "repo-b-old", "tags": tags, "time": now.isoformat()}
+        for tags in (["a,b"], ["a", "b"], ["b", "a"])
+    ]
+    cache_path = tmp_path / "groups.json"
+    subprocess.run([sys.executable, "-c", groups_py, str(cache_path)],
+                   input=json.dumps(snapshots), text=True, check=True)
+    written = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert written["exact_tags"] is True
+    assert {tuple(group["tags"]): group["n"] for group in written["groups"]} == {("a,b",): 1, ("a", "b"): 2}
+
+
+def test_helper_rejects_changed_forget_plan_and_only_passes_the_selected_ids(tmp_path):
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is required")
+    source = HELPER.read_text(encoding="utf-8")
+    name_check = source.split("\nvalid_name() {", 1)[1].split("\n}\n", 1)[0]
+    cleanup = source.split("\nrequire_exact_groups() {", 1)[1].split("\n# The answer goes", 1)[0]
+    harness = r'''
+set -uo pipefail
+ENV_DIR="$1"
+PRUNE_DIR="$1"
+GROUPS_DIR="$1"
+RESTIC_BIN=fake_restic
+python_exe="$2"
+shift 2
+python3() { "$python_exe" "$@" | tr -d '\r'; }
+fake_restic() {
+  case "$1" in
+    snapshots) cat "$GROUPS_DIR/snapshots.json" ;;
+    forget)
+      [ "${2:-}" = --help ] && return 0
+      printf '%s\n' "$@" > "$GROUPS_DIR/operation"
+      ;;
+    rewrite)
+      if [ "${2:-}" = --help ]; then echo --new-host; return 0; fi
+      printf '%s\n' "$@" > "$GROUPS_DIR/operation"
+      ;;
+    *) return 2 ;;
+  esac
+}
+'''
+    harness += "\nvalid_name() {" + name_check + "\n}\n"
+    harness += "\nrequire_exact_groups() {" + cleanup + "\n\"cmd_$1\" \"${@:2}\"\n"
+    script = tmp_path / "helper-test.sh"
+    script.write_bytes(harness.encode("utf-8"))
+    cache = tmp_path / "repo.json"
+    (tmp_path / "repo.env").touch()
+    snapshots = tmp_path / "snapshots.json"
+    operation = tmp_path / "operation"
+    now = int(datetime.now(timezone.utc).timestamp())
+    old = {"hostname": "source", "tags": ["a"], "time": "2020-01-01T00:00:00Z", "id": "1" * 64}
+    other = dict(old, tags=["a", "b"], id="2" * 64)
+    newest = dict(old, hostname="target", time="2020-02-01T00:00:00Z", id="3" * 64)
+
+    def run(action, *args):
+        return subprocess.run([bash, "--noprofile", "--norc", script.as_posix(), tmp_path.as_posix(),
+                               Path(sys.executable).as_posix(), action, "repo", "source", *args],
+                              capture_output=True, text=True, timeout=20)
+
+    selector = hashlib.sha256(b'["a"]').hexdigest()
+    selection = ("--group", selector)
+    snapshots.write_text(json.dumps([old, other, newest]), encoding="utf-8")
+    cache.write_text(json.dumps({"ts": now}), encoding="utf-8")
+    blocked = run("forget_group", *selection)
+    assert blocked.returncode != 0 and "cache is missing or outdated" in blocked.stderr
+    assert not operation.exists()
+    cache.write_text(json.dumps({"ts": now, "exact_tags": True}), encoding="utf-8")
+    dry = run("forget_group", *selection)
+    assert dry.returncode == 0 and 'with tags ["a"] in repo: 1 snapshots' in dry.stdout, dry
+    plan = re.search(r"--apply ([0-9a-f]{64})", dry.stdout)[1]
+    assert not operation.exists()
+
+    cache.write_text(json.dumps({"ts": now - 4 * DAY, "exact_tags": True}), encoding="utf-8")
+    stale = run("forget_group", *selection, "--apply", plan)
+    assert stale.returncode != 0 and "cache is missing or outdated" in stale.stderr
+    assert not operation.exists()
+    cache.write_text(json.dumps({"ts": now, "exact_tags": True}), encoding="utf-8")
+
+    merge = run("merge_group", "target", *selection, "--apply")
+    assert merge.returncode != 0 and "multiple tag groups" in merge.stderr
+    snapshots.write_text(json.dumps([old, other, newest, dict(old, id="4" * 64)]), encoding="utf-8")
+    changed = run("forget_group", *selection, "--apply", plan)
+    assert changed.returncode != 0 and "snapshot list changed" in changed.stderr
+    assert not operation.exists()
+
+    snapshots.write_text(json.dumps([old, other, newest]), encoding="utf-8")
+    applied = run("forget_group", *selection, "--apply", plan)
+    assert applied.returncode == 0, applied
+    assert operation.read_text(encoding="utf-8").splitlines() == ["forget", old["id"]]
+    assert not cache.exists()
+
+    cache.write_text(json.dumps({"ts": now, "exact_tags": True}), encoding="utf-8")
+    snapshots.write_text(json.dumps([old, newest]), encoding="utf-8")
+    merged = run("merge_group", "target", *selection, "--apply")
+    assert merged.returncode == 0, merged
+    assert operation.read_text(encoding="utf-8").splitlines() == ["rewrite", "--new-host", "target", "--forget", old["id"]]
 
 
 def test_old_helper_gets_update_step():
@@ -262,9 +398,8 @@ def test_cleanup_off_rows_and_steps():
 
 def test_helper_turns_cleanup_off_and_keeps_it_off():
     """helper 0.34: prune-off / prune-on, regen-prune и adopt-legacy сохраняют выключенное состояние."""
-    from pathlib import Path
-    src = (Path(__file__).resolve().parents[2] / "agent" / "backupserver-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.41" in src and "\r" not in src
+    src = HELPER.read_text(encoding="utf-8")
+    assert "KERVAX_SETUP_VERSION=0.42" in src and "\r" not in src
     assert 'prune-off)        shift; with_storage cmd_prune_switch off "$@" ;;' in src
     assert 'prune-on)         shift; with_storage cmd_prune_switch on "$@" ;;' in src
     regen = src[src.index("cmd_regen_prune() {"):]
@@ -287,13 +422,6 @@ def test_helper_scenario_in_a_shell():
     crontab, restic и docker. Нужен Linux и root (helper меняет владельца файлов), иначе пропуск;
     на Windows его гоняют в WSL: wsl -u root -- bash tests/sh/bsrv_prune_off.sh <корень репо>."""
     import os
-    import shutil
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    import pytest
-
     if sys.platform != "linux" or os.geteuid() != 0 or not shutil.which("python3"):
         pytest.skip("нужен Linux, root и python3")
     root = Path(__file__).resolve().parents[2]
@@ -308,13 +436,6 @@ def test_bsrv_sec_scenario_in_a_shell():
     очистки не идут по симлинку, ответы спула не уводятся. Нужен Linux и root, иначе пропуск;
     на Windows его гоняют в WSL: wsl -u root -- bash tests/sh/bsrv_sec.sh <корень репо>."""
     import os
-    import shutil
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    import pytest
-
     if sys.platform != "linux" or os.geteuid() != 0 or not shutil.which("python3"):
         pytest.skip("нужен Linux, root и python3")
     root = Path(__file__).resolve().parents[2]

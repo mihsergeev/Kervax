@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from sqlalchemy import delete, select
 
-from app import alerts, audit, fixed, known, maint, settings_store, tg_buttons
+from app import alerts, audit, fixed, known, listen_watch, maint, settings_store, tg_buttons
 from app import kube_expiry as kube_expiry_mod
 from app.config import Settings, get_settings
 from app.models import Check, MaintenanceWindow, Server, TgAlert, User
@@ -353,13 +353,14 @@ async def _refresh(cfg: dict, row: TgAlert, tz: str) -> None:
 
 # --- эскалация --------------------------------------------------------------------------------
 
-async def _srv_wanted(session, row: TgAlert, sid: int, now: datetime) -> bool | None:
+async def _srv_wanted(session, row: TgAlert, sid: int, now: datetime,
+                      keys: list[str] | None = None) -> bool | None:
     s = await session.get(Server, sid)
     if s is None or not s.enabled:
         return False
     if (s.snooze_until is not None and _aware(s.snooze_until) > now) or row.kind in _server_mutes(s, now):
         return False
-    keys = _item_keys(row)
+    keys = _item_keys(row) if keys is None else keys
     if keys:
         # глушили поштучно (кнопкой или в панели): все вещи алерта заглушены - не повторять
         cur = set(s.alert_mutes or []) | {k for k, v in (s.alert_snoozes or {}).items()
@@ -367,6 +368,8 @@ async def _srv_wanted(session, row: TgAlert, sid: int, now: datetime) -> bool | 
         ign = s.kube_expiry_ignored if isinstance(s.kube_expiry_ignored, dict) else {}
         if all(k in cur or k[len("kube_expiry:"):] in ign for k in keys):
             return False
+    if row.kind == "listen_gone":
+        return True
     lvl = (s.alert_state or {}).get(row.kind)
     if isinstance(lvl, int) and not isinstance(lvl, bool) and lvl <= 0:
         return None
@@ -378,6 +381,17 @@ async def _still_wanted(session, row: TgAlert, now: datetime) -> bool | None:
     повторять), None - беда ушла, а отбой не пришел (заглушен, мигание) - отметить решенным."""
     obj, ids = _ref(row)
     if obj == "srv" and ids:
+        if row.kind == "listen_gone":
+            groups = []
+            for sid in ids:
+                srv = await session.get(Server, sid, populate_existing=True)
+                if srv is not None and (items := listen_watch.tg_items(row, srv, now)):
+                    groups.append((srv, items))
+            if not listen_watch.tg_prune(row, groups, now):
+                return None
+            return True in [await _srv_wanted(session, row, srv.id, now,
+                                             [listen_watch.MUTE_PREFIX + item["port"] for item in items])
+                            for srv, items in groups]
         # про несколько серверов: повторять, пока не вернутся все незаглушенные
         res = [await _srv_wanted(session, row, i, now) for i in ids]
         if True in res:
@@ -423,6 +437,10 @@ async def escalate(session_factory, settings: Settings, now: datetime | None = N
         tz = cfg.get("tz") or "UTC"
         done = 0
         for row in rows:
+            if row.kind == "listen_gone":
+                await session.refresh(row)
+                if row.resolved_at or row.acked_by or not row.messages:
+                    continue
             start = _aware(row.esc_at) or _aware(row.ts) or now
             if now - start < after or "mute" in (row.undo or {}):
                 continue
@@ -470,6 +488,10 @@ async def dup_catchup(session_factory, settings: Settings, now: datetime | None 
         tz = cfg.get("tz") or "UTC"
         after = timedelta(minutes=alerts.DUP_HOLD_MIN)
         for row in rows:
+            if row.kind == "listen_gone":
+                await session.refresh(row)
+                if row.resolved_at or not (row.undo or {}).get("held"):
+                    continue
             undo = dict(row.undo or {})
             chat = str(undo.pop("held"))
             if row.acked_by or "mute" in undo:
@@ -478,6 +500,7 @@ async def dup_catchup(session_factory, settings: Settings, now: datetime | None 
             if now - (_aware(row.ts) or now) < after:
                 continue
             wanted = await _still_wanted(session, row, now)
+            undo = {key: value for key, value in (row.undo or {}).items() if key != "held"}
             if not wanted:
                 if wanted is None:
                     row.resolved_at = now

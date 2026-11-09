@@ -2140,7 +2140,7 @@ function ArchiveForm({ server: s, repo, host, onCancel, onDone }: {
     <div className="repo-cleanup repo-archive-form">
       <div className="muted small">
         {host
-          ? t('Группа {host} останется в репозитории как есть и больше не будет считаться встающей ротацией.', { host })
+          ? t('Все группы хоста {host} останутся в репозитории. Панель исключит их из проверки ротации.', { host })
           : t('Репозиторий останется как есть: чистка по политике у него ничего не удаляет, раз новых снапшотов нет. Он уйдет в раздел "Архив" и перестанет быть проблемой, а проверка целостности продолжится.')}
       </div>
       <div className="repo-archive-notes">
@@ -2161,9 +2161,6 @@ function ArchiveForm({ server: s, repo, host, onCancel, onDone }: {
   )
 }
 
-// Склейку переименованного сервера с его прежним именем (merge-group) helper умеет с 0.33
-const MERGE_HELPER = '0.33'
-
 function verAtLeast(a: string | undefined | null, b: string): boolean {
   if (!a) return false
   const pa = a.split('.').map((x) => parseInt(x, 10) || 0)
@@ -2179,7 +2176,7 @@ function verAtLeast(a: string | undefined | null, b: string): boolean {
 function renamedTo(groups: BackupGroup[], g: BackupGroup): string {
   const cur = groups.reduce((a, b) => (b.last > a.last ? b : a))
   if (!cur.host || cur.host === g.host) return ''
-  const same = (a: string[], b: string[]) => [...a].sort().join('\n') === [...b].sort().join('\n')
+  const same = (a: string[], b: string[]) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort())
   return same(cur.paths, g.paths) && same(cur.tags, g.tags) && Math.abs(cur.first - g.last) <= 7 * 86400 ? cur.host : ''
 }
 
@@ -2193,9 +2190,8 @@ function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
 }) {
   const { t } = useI18n()
   const [archiving, setArchiving] = useState('')
-  // какая команда раскрыта: "merge:<хост>" или "forget:<хост>"
+  // Одна строка определяется хостом и тегами, архив хранится по хосту.
   const [showCmd, setShowCmd] = useState('')
-  const [copied, setCopied] = useState('')
   const [busy, setBusy] = useState(false)
   const now = Date.now() / 1000
   const g = ext?.repos?.[repo]?.groups
@@ -2214,14 +2210,7 @@ function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
       setBusy(false)
     }
   }
-  const copy = (key: string, v: string) => {
-    navigator.clipboard?.writeText(v)
-    setCopied(key)
-    window.setTimeout(() => setCopied(''), 1500)
-  }
   const toggleCmd = (key: string) => setShowCmd(showCmd === key ? '' : key)
-  const helperVer = s.last_report?.setup_versions?.['backupserver-setup']
-  const canMerge = verAtLeast(helperVer == null ? '' : String(helperVer), MERGE_HELPER)
   const live = old.filter((x) => !arch[`${repo}|${x.host}`])
   return (
     <div className="repo-groups small">
@@ -2232,37 +2221,36 @@ function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
       )}
       {old.map((x) => {
         const entry: BackupArchiveEntry | undefined = arch[`${repo}|${x.host}`]
-        const to = renamedTo(groups, x)
-        // шаги под эту группу собирает бэкенд (app/bsrv_cleanup.py): пробный прогон, применение,
-        // проверка; без них - одна команда, как раньше
-        const fx = s.bsrv_cleanup?.groups?.[repo]?.[x.host]
-        const helper = 'sudo /lib65/kervax/kervax-backupserver-helper'
-        const cmd = `${helper} forget-group ${repo} ${x.host}`
-        const mergeCmd = `${helper} merge-group ${repo} ${x.host} ${to}`
+        const to = groups.filter((row) => row.host === x.host).length === 1 ? renamedTo(groups, x) : ''
+        const key = JSON.stringify([x.host, x.tags])
+        const fx = s.bsrv_cleanup?.groups?.[repo]?.[key]
         return (
-          <div key={x.host + x.tags.join(',')} className="repo-group">
+          <div key={key} className="repo-group">
             <div className="repo-group-line">
               <span className={entry ? 'muted' : 't-degraded'}>
                 {entry ? t('группа {host} в архиве', { host: x.host })
                   : to ? t('прежнее имя сервера {host}', { host: x.host }) : t('старая группа {host}', { host: x.host })}
                 {`: ${t('снапшотов: {n}', { n: x.n })}, ${fmtDay(x.first)} - ${fmtDay(x.last)}`}
+                {g?.exact_tags === true && <>{' · '}{x.tags.length ? <span className="mono">{JSON.stringify(x.tags)}</span> : t('без тегов')}</>}
                 {entry?.note ? ` (${entry.note})` : ''}
               </span>
               {canAct && !entry && (
                 <>
-                  {to && (
-                    <button className="ghost small-btn" onClick={() => toggleCmd(`merge:${x.host}`)}
+                  {to && fx?.merge && (
+                    <button className="ghost small-btn" onClick={() => toggleCmd(`merge:${key}`)}
                       title={t('Отдать эти снапшоты новому имени: дальше их чистит общая политика')}>
                       {t('склеить с {host}', { host: to })}
                     </button>
                   )}
-                  <button className="ghost small-btn" onClick={() => setArchiving(archiving === x.host ? '' : x.host)}
-                    title={t('Хранить группу как есть и не считать её встающей ротацией')}>
+                  <button className="ghost small-btn" onClick={() => setArchiving(archiving === key ? '' : key)}
+                    title={t('Хранить все группы этого хоста в архиве')}>
                     🗄 {t('в архив')}
                   </button>
-                  <button className="ghost small-btn" onClick={() => toggleCmd(`forget:${x.host}`)}>
-                    {t('как удалить')}
-                  </button>
+                  {fx?.forget && (
+                    <button className="ghost small-btn" onClick={() => toggleCmd(`forget:${key}`)}>
+                      {t('как удалить')}
+                    </button>
+                  )}
                 </>
               )}
               {canAct && entry && (
@@ -2270,45 +2258,15 @@ function RepoGroups({ server: s, repo, ext, canAct, onChanged }: {
               )}
             </div>
             {!entry && x.paths.length > 0 && <div className="muted">{t('пути')}: <span className="mono">{x.paths.join(' ')}</span></div>}
-            {archiving === x.host && (
+            {archiving === key && (
               <ArchiveForm server={s} repo={repo} host={x.host} onCancel={() => setArchiving('')}
                 onDone={() => { setArchiving(''); onChanged() }} />
             )}
-            {showCmd === `merge:${x.host}` && fx?.merge && (
+            {showCmd === `merge:${key}` && fx?.merge && (
               <FixSteps steps={fx.merge} text={(st) => bsrvFixText(st, t)} />
             )}
-            {showCmd === `merge:${x.host}` && !fx?.merge && (
-              <div className="repo-cleanup">
-                {canMerge ? (
-                  <>
-                    <div className="muted">
-                      {t('На бэкап-сервере. Снапшоты прежнего имени получат имя {to}, и дальше их чистит общая политика: лишние уйдут ночной чисткой, остальные останутся, пока нужны политике. Данные не копируются. Без --apply команда только покажет, что сделает.', { to })}
-                    </div>
-                    <div className="agent-advice-cmd">
-                      <pre>{mergeCmd}</pre>
-                      <button className="ghost" onClick={() => copy(`m:${x.host}`, mergeCmd)}>{copied === `m:${x.host}` ? t('Скопировано') : t('Копировать')}</button>
-                    </div>
-                  </>
-                ) : (
-                  <div className="muted">
-                    {t('Склейку helper backupserver-setup умеет с версии {v}, здесь {cur}: обновите helper на этом сервере.', { v: MERGE_HELPER, cur: helperVer == null ? '?' : String(helperVer) })}
-                  </div>
-                )}
-              </div>
-            )}
-            {showCmd === `forget:${x.host}` && fx?.forget && (
+            {showCmd === `forget:${key}` && fx?.forget && (
               <FixSteps steps={fx.forget} text={(st) => bsrvFixText(st, t)} />
-            )}
-            {showCmd === `forget:${x.host}` && !fx?.forget && (
-              <div className="repo-cleanup">
-                <div className="muted">
-                  {t('На бэкап-сервере. Без --apply команда только покажет, что удалится, с --apply удалит снапшоты группы, место вернет ночная чистка. Группу, в которую бэкапились последнюю неделю, команда удалять откажется.')}
-                </div>
-                <div className="agent-advice-cmd">
-                  <pre>{cmd}</pre>
-                  <button className="ghost" onClick={() => copy(x.host, cmd)}>{copied === x.host ? t('Скопировано') : t('Копировать')}</button>
-                </div>
-              </div>
             )}
           </div>
         )

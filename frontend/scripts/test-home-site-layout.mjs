@@ -63,25 +63,24 @@ try {
   })
 
   await page.goto(base)
-  const row = (name) => page.locator('.home-block .home-attention-row').filter({ has: page.locator('b', { hasText: name }) })
+  const card = page.locator('#home-issue-queue')
+  const row = (name) => card.locator('.home-attention-row').filter({ has: page.locator('b', { hasText: name }) })
   const grouped = row(domain)
   const status = row(statusName)
   const ssl = row(sslName)
-  const card = grouped.locator('xpath=ancestor::div[contains(@class, "home-block")][1]')
   const snapshot = async (name) => { if (out) await card.screenshot({ path: path.join(out, `${name}.png`) }) }
   const recheck = (item) => item.getByRole('button', { name: 'Исправил: перепроверить', exact: true })
 
   await grouped.getByText('доступно 1 из 9').waitFor()
   await ssl.waitFor()
   assert.equal(await recheck(ssl).count(), 0, 'Unavailable recheck button must be absent')
-  const neighbor = await page.locator('.maint-home-row').boundingBox()
-  assert(neighbor.x > (await card.boundingBox()).x, 'Narrow desktop must render two columns')
+  await page.locator('.maint-home-row').getByText('Demo maintenance', { exact: false }).waitFor()
   for (const width of [850, 1440, 390, 320]) {
     await page.setViewportSize({ width, height: 900 })
     await snapshot(`sites-${width}`)
     const name = await grouped.locator('b').evaluate((element) => element.getClientRects().length)
     assert(name <= (width === 320 ? 2 : 1), `Domain name breaks into ${name} lines at ${width}px`)
-    if (width > 320) assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `Page overflow at ${width}px`)
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `Page overflow at ${width}px`)
     assert(await card.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), `Site card overflow at ${width}px`)
     for (const item of [grouped, status, ssl]) {
       assert(await item.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), `Site alert overflow at ${width}px`)
@@ -102,15 +101,16 @@ try {
   await snapshot('sites-320-snooze')
   assert(await ssl.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), 'Open snooze options overflow')
   await ssl.getByRole('button', { name: 'за 7 дн.', exact: true }).click()
-  await card.getByRole('button', { name: /отложено: 1/ }).click()
-  await ssl.getByRole('button', { name: 'вернуть', exact: true }).click()
+  const snoozed = page.locator('.home-disclosure').filter({ has: page.locator('summary', { hasText: 'Заглушенные сроки сайтов' }) })
+  await snoozed.locator('summary').click()
+  await snoozed.locator('.home-attention-row').filter({ hasText: sslName }).getByRole('button', { name: 'вернуть', exact: true }).click()
   await ssl.locator('.quick-mute').waitFor()
   assert.deepEqual(posts.slice(2), [7, null].map(mode => ({ pathname: '/api/checks/11/expiry-snooze', body: { kind: 'ssl', mode } })))
 
   await grouped.locator('.home-open').click()
   await page.waitForURL((url) => url.searchParams.get('check') === '1')
   assert.deepEqual(errors, [], 'Browser runtime errors')
-  console.log('PASS grouped domain, status and SSL alerts, two-column and mobile layout, recheck, snooze, restore and navigation')
+  console.log('PASS grouped domain, status and SSL alerts, queue layout down to 320px, recheck, snooze, restore and navigation')
 } finally {
   await browser.close()
 }

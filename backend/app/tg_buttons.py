@@ -10,8 +10,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from app import fixed
-from app.models import TgAlert
+from app import fixed, listen_watch
+from app.models import Server, TgAlert
 
 log = logging.getLogger("kervax.tg_buttons")
 
@@ -167,10 +167,21 @@ async def prepare(session_factory, messages: list) -> dict[int, int]:
     try:
         async with session_factory() as session:
             rows = []
+            listen_ids = {int(messages[i].ref[4:]) for i in idx
+                          if getattr(messages[i], "listen_episodes", None) and messages[i].ref[4:].isdigit()}
+            servers = {sid: await session.get(Server, sid, with_for_update=True) for sid in sorted(listen_ids)}
+            now = datetime.now(timezone.utc)
             for i in idx:
                 m = messages[i]
                 # что именно глушить (ITEM_MUTE): ключи вещей из алерта
                 keys = [str(k) for k in getattr(m, "mutes", None) or [] if k][:50]
+                undo = {"keys": keys} if keys else {}
+                if (episodes := getattr(m, "listen_episodes", None)) and m.ref[4:].isdigit():
+                    srv = servers.get(int(m.ref[4:]))
+                    if not listen_watch.can_notify(srv, episodes, now):
+                        continue
+                    undo = {"keys": [listen_watch.MUTE_PREFIX + key.removeprefix("tcp:") for key in episodes],
+                            "listen_episodes": episodes}
                 row = TgAlert(
                     ref=str(getattr(m, "ref", ""))[:255],
                     kind=str(getattr(m, "kind", "") or "")[:40],
@@ -179,7 +190,7 @@ async def prepare(session_factory, messages: list) -> dict[int, int]:
                     grp=str(getattr(m, "group", "") or "")[:255],
                     text=str(m),
                     messages=[],
-                    undo={"keys": keys} if keys else None,
+                    undo=undo or None,
                 )
                 session.add(row)
                 rows.append((i, row))

@@ -212,6 +212,8 @@ class Check(Base):
     name: Mapped[str] = mapped_column(String(128))
     type: Mapped[str] = mapped_column(String(16))  # http | tcp_port | cert
     target: Mapped[str] = mapped_column(String(512))  # URL (http) или host (tcp/cert)
+    # None preserves existing internal monitors. New and retargeted checks record the approval.
+    allow_internal_target: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     port: Mapped[int] = mapped_column(Integer, default=0)  # tcp/cert; 0 = дефолт (443)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     group_name: Mapped[str] = mapped_column(String(64), default="")

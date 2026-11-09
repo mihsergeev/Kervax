@@ -7154,7 +7154,8 @@ def _server_conditions(s: Server, now: datetime,
         lg = listen_watch.problems(s, now)
         out["listen_gone"] = (1 if lg else 0, {"detail": "; ".join(x["text"] for x in lg[:3]),
                                                "sig": [x["key"] for x in lg], "items": lg,
-                                               "parts": [(x["key"], x["text"]) for x in lg]})
+                                               "parts": [(x["key"], x["text"]) for x in lg],
+                                               "_complete": listen_watch.complete(s, now)})
     # Диск тормозит: задержка выше порога держится дольше выдержки
     if online and backup_host:
         sample, complete = backup_transfer.observe(s, now, state.get(backup_transfer.STATE), restart=report_epoch)
@@ -7579,6 +7580,10 @@ async def evaluate_servers(
                                     level=int(ctx.get('level') or ctx.get('_lvl') or 1))
         # кнопка "заглушить" глушит вещи этого алерта, а не вид целиком (tg_buttons.ITEM_MUTE)
         out.mutes = tg_mute_keys(key, ctx)
+        if key == "listen_gone":
+            fresh = ctx.get("fresh")
+            out.listen_episodes = {item["key"]: item["miss"] for item in ctx.get("items") or []
+                                   if not fresh or item["key"] in fresh}
         return out
 
     # Сначала СОБИРАЕМ все переходы за тик (не шлём внутри цикла), чтобы при
@@ -7993,6 +7998,8 @@ async def evaluate_servers(
             if s.onboard_done_at is None:
                 onboard_closed[s.id] = made
         for key, (level, ctx) in conds.items():
+            if key == "listen_gone" and not ctx.get("_complete", True):
+                continue
             if not talking and key != "offline":
                 continue  # нода молчит: остальное замерло (см. выше)
             # Removing a deliberately muted or statically excluded member is a
@@ -9684,20 +9691,32 @@ async def _track_uncovered(session_factory, now: datetime) -> None:
     закрылась старая. На спокойном парке это ноль записей в БД.
     """
     cur = current_setup_versions()
+
+    def coverage(row: Server) -> dict:
+        keys = set()
+        if seen_online(row, now):
+            keys = {key for key, _ in gaps(row.last_report or {}, cur, row.alert_mutes, row.relay_enabled,
+                                          row.gre_enabled, row.backup_mirror_role)}
+        return _uncov_since(row.alert_state or {}, keys, now)
+
     async with session_factory() as session:
         changed = False
-        for srv in await session.scalars(select(Server).where(Server.enabled.is_(True))):
-            keys = {k for k, _ in gaps(srv.last_report or {}, cur, srv.alert_mutes, srv.relay_enabled, srv.gre_enabled,
-                                       srv.backup_mirror_role)} if seen_online(srv, now) else set()
-            state = dict(srv.alert_state or {})
-            fresh = _uncov_since(state, keys, now)
-            if fresh != (state.get("uncov") or {}):
-                if fresh:
-                    state["uncov"] = fresh
-                else:
-                    state.pop("uncov", None)
-                srv.alert_state = state
-                changed = True
+        for srv in await session.scalars(select(Server).where(Server.enabled.is_(True)).order_by(Server.id)):
+            if coverage(srv) == ((srv.alert_state or {}).get("uncov") or {}):
+                continue
+            row = await session.get(Server, srv.id, populate_existing=True, with_for_update=True)
+            if row is None or not row.enabled:
+                continue
+            state = dict(row.alert_state or {})
+            fresh = coverage(row)
+            if fresh == (state.get("uncov") or {}):
+                continue
+            if fresh:
+                state["uncov"] = fresh
+            else:
+                state.pop("uncov", None)
+            row.alert_state = state
+            changed = True
         if changed:
             await session.commit()
 

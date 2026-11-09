@@ -1862,9 +1862,8 @@ async def retire_listening_port(
         return _out(s, now)
 
     report = s.last_report or {}
-    current = listen_watch.current(report)
-    if (not seen_online(s, now) or current is None or key in current
-            or len(report["listen"]) >= listen_watch.TRUNCATED
+    if (not seen_online(s, now) or not listen_watch.complete(s, now)
+            or listen_watch.is_listening(report, key)
             or not any(item["key"] == key and item["miss"] == missed_since
                        for item in listen_watch.problems(s, now))):
         raise HTTPException(status.HTTP_409_CONFLICT, "Port state changed. Refresh and try again.")
@@ -1873,7 +1872,8 @@ async def retire_listening_port(
     if state.get("listen_gone") and not s.alert_state.get("listen_gone"):
         session.add(AlertEvent(kind="listen_gone", target=s.name, section="servers",
                                grp=s.group_name or "", recovery=True,
-                               text=f"{s.name}: порт {port} больше не нужен, алерт закрыт"))
+                               text=listen_watch.closure(s.name, str(port))))
+    await listen_watch.retire_tg(session, s, now)
     await session.commit()
     await session.refresh(s)
     out = _out(s, now)
@@ -4117,6 +4117,11 @@ async def agent_report(
     await _store_web_errors(session, server, body, now)
     await autoban_mod.store(session, server, body.extras, now)
     report_dict = body.model_dump()
+    # An omitted or malformed socket inventory cannot confirm that a listener disappeared.
+    if "listen" not in body.model_fields_set or listen_watch.inventory(report_dict, explicit=True) is None:
+        report_dict.pop("listen", None)
+    else:
+        report_dict[listen_watch.RECEIVED] = True
     # адрес репозитория бэкапа - только без логина и пароля, что бы ни прислал helper
     backup_target.clean_report(report_dict)
     # старый runner (restic в ExecStart юнита): пути бэкапа из самого юнита, а не из скрипта панели

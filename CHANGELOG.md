@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.122] - 2026-11-10
+
+- Apply monitor permissions to discovered domains and certificate checks. Direct HTTP, TCP and TLS probes connect to the addresses they validated.
+- Scope manual Restic cleanup to an exact host and tag group. Deletion requires a preview for the same snapshot IDs, and merges require matching tags.
+- Retire missing-port alerts without stale notifications or escalations. A port that returns can start a new monitoring episode.
+- Update port tracking only from complete inventories. Agent 2.67 distinguishes an empty listener list from a collection failure.
+- Keep dashboard alerts current when refreshes overlap, preserve recheck results when a refresh fails, and fit site actions on narrow screens.
+- Update the backup-server helper to 0.42. Manual snapshot cleanup becomes available after the next scheduled cleanup refreshes its group data.
+
 ## [1.8.121] - 2026-11-09
 
 - Close a missing TCP port alert from the dashboard with “Port no longer needed”. The action is logged and affects only that port.

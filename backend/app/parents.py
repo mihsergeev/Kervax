@@ -32,6 +32,8 @@ from urllib.parse import urlparse
 
 from sqlalchemy import select
 
+from app import net_guard
+
 # откуда взялся родитель - для подписи в карточке монитора
 WHY_LOCAL = "local"    # проверяется изнутри этого сервера
 WHY_SITE = "site"      # домен обслуживает этот сервер
@@ -68,7 +70,12 @@ def target_host(check) -> str:
             return (urlparse(target).hostname or "").strip(".")
         except ValueError:
             return ""
-    # tcp_port / cert: "host" или "host:port"; голый IPv6 оставляем целиком
+    if typ == "cert":
+        try:
+            return net_guard.cert_endpoint(target)[0]
+        except ValueError:
+            return ""
+    # tcp_port: "host" или "host:port"; голый IPv6 оставляем целиком
     t = target.split("://")[-1].split("/")[0]
     if t.startswith("["):
         return t[1:].split("]")[0]

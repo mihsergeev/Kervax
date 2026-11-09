@@ -387,3 +387,26 @@ async def test_links_only_to_fleet(client, auth_headers):
 def test_backup_audit_gb_binary():
     from app import backup_growth
     assert backup_growth.fmt_size(200 * 2**30) == "200 ГБ"
+
+async def test_discovered_adoption_checks_each_network_target(client, auth_headers, monkeypatch):
+    from app import net_guard
+
+    async def resolve(host, timeout):
+        return ["127.0.0.1"] if host == "internal.example" else ["93.184.216.34"]
+
+    monkeypatch.setattr(net_guard, "_resolve", resolve)
+    editor = await _user(client, auth_headers, "network-editor")
+    response = await client.post("/api/checks/adopt", headers=editor, json={
+        "domains": ["public.example", "internal.example"],
+    })
+    assert response.status_code == 201, response.text
+    result = response.json()
+    assert result["created"] == 1
+    assert result["items"][0]["check_id"] > 0
+    assert result["items"][1]["reason"] == "invalid"
+    assert result["items"][1]["problem"] == net_guard.ADMIN_ONLY_TEXT
+
+    response = await client.post("/api/checks", headers=editor, json={
+        "name": "TLS target", "type": "cert", "target": "https://public.example@127.0.0.1:443",
+    })
+    assert response.status_code == 400, response.text

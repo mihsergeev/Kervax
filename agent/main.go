@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.66"
+const version = "2.67"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -260,7 +260,7 @@ type report struct {
 	// Агент 2.26: что слушает нода и по каким публичным адресам её видно (панель проверяет
 	// порты снаружи), давление на ресурсы, процессы, зависшие на диске, файловые дескрипторы,
 	// TCP и обновления ОС. Пусто или nil - источника нет (старое ядро) или еще не мерили.
-	Listen []listenSock       `json:"listen,omitempty"`
+	Listen *[]listenSock      `json:"listen,omitempty"`
 	IPs    []string           `json:"ips,omitempty"`
 	PSI    map[string]float64 `json:"psi,omitempty"`
 	DState *dstateInfo        `json:"dstate,omitempty"`
@@ -5144,9 +5144,7 @@ func collect(prev sample) (report, sample) {
 	if r.TCP != nil {
 		r.TCP.Peers, r.TCP.PeersTotal = retransPeers(r.TCP)
 	}
-	if l := listenLatest.Load(); l != nil {
-		r.Listen = *l
-	}
+	r.Listen = listenLatest.Load()
 	if ips := ipsLatest.Load(); ips != nil {
 		r.IPs = *ips
 	}
@@ -10507,14 +10505,20 @@ func parseListen(proto, text string, users map[string]string, seen map[string]bo
 	return out
 }
 
-func collectListen() []listenSock {
+func collectListen(readFile func(string) ([]byte, error)) []listenSock {
 	users := passwdNames()
 	seen := map[string]bool{}
-	var out []listenSock
+	out := []listenSock{}
 	for _, proto := range []string{"tcp", "tcp6", "udp", "udp6"} {
-		b, err := os.ReadFile("/proc/net/" + proto)
-		if err != nil || len(out) >= maxListen {
+		if len(out) >= maxListen {
+			break
+		}
+		b, err := readFile("/proc/net/" + proto)
+		if strings.HasSuffix(proto, "6") && errors.Is(err, os.ErrNotExist) {
 			continue
+		}
+		if err != nil || len(b) == 0 {
+			return nil
 		}
 		out = parseListen(proto, string(b), users, seen, out)
 	}
@@ -11046,8 +11050,13 @@ var (
 func hostScanLoop() {
 	time.Sleep(20 * time.Second)
 	for {
-		l, ips := collectListen(), publicIPs()
-		listenLatest.Store(&l)
+		l := collectListen(os.ReadFile)
+		if l == nil {
+			listenLatest.Store(nil)
+		} else {
+			listenLatest.Store(&l)
+		}
+		ips := publicIPs()
 		ipsLatest.Store(&ips)
 		time.Sleep(5 * time.Minute)
 	}

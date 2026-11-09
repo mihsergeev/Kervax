@@ -71,15 +71,33 @@ def _cert_days_left(not_after: str) -> float:
     return (expires - now) / 86400.0
 
 
-async def _ssl_probe(host: str, port: int, timeout: float) -> tuple[float | None, str]:
+def _allows_internal(check) -> bool:
+    return getattr(check, "allow_internal_target", None) is not False
+
+
+async def _open_address(addresses, port, **kwargs):
+    last_error = OSError("DNS lookup failed")
+    for address in addresses:
+        try:
+            return await asyncio.open_connection(address, port, flags=socket.AI_NUMERICHOST, **kwargs)
+        except ssl.SSLError:
+            raise
+        except OSError as exc:
+            last_error = exc
+    raise last_error
+
+
+async def _ssl_probe(host: str, port: int, timeout: float, allow_internal=True) -> tuple[float | None, str]:
     """TLS-хендшейк с проверкой цепочки. Возвращает (дней_до_истечения|None, сообщение).
     None + сообщение = сертификат невалиден/недоступен (истёк, mismatch, self-signed…)."""
-    if bad := await net_guard.connect_ok(host):
+    cls, addresses = await net_guard.classified_addresses(host, min(timeout, 2.0))
+    if bad := net_guard.block_reason(cls, allow_internal):
         return None, bad
     ctx = ssl.create_default_context()
+
     try:
         _reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port, ssl=ctx, server_hostname=host), timeout
+            _open_address(addresses, port, ssl=ctx, server_hostname=host.rstrip(".")), timeout
         )
     except ssl.SSLCertVerificationError as exc:
         return None, _short(f"сертификат невалиден: {exc.verify_message or exc}")
@@ -495,7 +513,7 @@ async def probe_expiry(check) -> ExpiryInfo:
         if parsed.scheme == "http":
             info.ssl_message = "не HTTPS"
         else:
-            days, msg = await _ssl_probe(host, parsed.port or 443, timeout)
+            days, msg = await _ssl_probe(host, parsed.port or 443, timeout, _allows_internal(check))
             info.ssl_days = None if days is None else int(days)
             info.ssl_message = msg
     if getattr(check, "check_domain", False):
@@ -835,27 +853,10 @@ def _eval_http(check, r, body: str, latency: int, fell_back: bool, degraded_ms: 
     return CheckOutcome("up", latency, message=f"HTTP {r.status_code} · {latency} мс")
 
 
-async def _resolve_ips(host: str, port: int) -> list[str]:
-    """IPv4-адреса домена (для проверки «все адреса»). Только A-записи: если
-    резолвить и AAAA, а у хоста панели нет IPv6-маршрута — получим ложные «down»."""
-    try:
-        infos = await asyncio.get_running_loop().getaddrinfo(
-            host, port or None, family=socket.AF_INET, type=socket.SOCK_STREAM
-        )
-    except OSError:
-        return []
-    ips: list[str] = []
-    for info in infos:
-        ip = info[4][0]
-        if ip not in ips:
-            ips.append(ip)
-    return ips
-
-
 _STATUS_ORDER = {"down": 0, "degraded": 1, "up": 2}
 
 
-async def _run_http_all_ips(check, url: str, method: str, auth, timeout, degraded_ms, attempt):
+async def _run_http_all_ips(check, url: str, timeout, degraded_ms, attempt):
     """Проверяет КАЖДЫЙ IP домена (Host+SNI = домен, TLS проверяется по домену).
     Возвращает агрегат: худший статус побеждает; None → у домена ≤1 адрес (тогда
     вызывающий делает обычную одиночную проверку, а разбивку оставляет пустой: адрес один).
@@ -864,23 +865,18 @@ async def _run_http_all_ips(check, url: str, method: str, auth, timeout, degrade
     host = parsed.hostname
     if not host:
         return None
-    port = parsed.port
-    ips = await _resolve_ips(host, port or (443 if parsed.scheme == "https" else 80))
+    cls, addresses = await net_guard.classified_addresses(host, min(timeout, 2.0))
+    if bad := net_guard.block_reason(cls, _allows_internal(check)):
+        return CheckOutcome("down", message=bad)
+    # Только A-записи: без IPv6-маршрута AAAA давали бы ложный down в агрегате.
+    ips = [ip for ip in addresses if ":" not in ip]
     if len(ips) <= 1:
         return None  # один адрес (или не зарезолвилось) → обычная проверка
-    host_hdr = parsed.netloc  # host[:port] оригинала — в заголовок Host
     results: list[tuple[str, CheckOutcome]] = []
     for ip in ips:
-        netloc = f"[{ip}]" if ":" in ip else ip
-        if port:
-            netloc += f":{port}"
-        ip_url = parsed._replace(netloc=netloc).geturl()
         t0 = time.perf_counter()
         try:
-            r, body = await attempt(
-                ip_url, extra_headers={"Host": host_hdr},
-                extensions={"sni_hostname": host},
-            )
+            r, body = await attempt(url, address=ip)
         except httpx.HTTPError as exc:
             results.append((ip, CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))))
             continue
@@ -1025,15 +1021,15 @@ async def _run_http(
     # кастомные заголовки монитора (напр. x-application-token для сайтов за 401)
     custom_headers = _parse_headers(getattr(check, "http_headers", ""))
     verify = not getattr(check, "ignore_tls", False)  # игнор TLS-ошибок (самоподпис./mismatch)
+    allow_internal = _allows_internal(check)
 
-    async def attempt(u: str, extra_headers: dict | None = None, extensions: dict | None = None):
+    async def attempt(u: str, extensions: dict | None = None, *, address: str | None = None):
         headers = {"User-Agent": _USER_AGENT, **custom_headers}
-        if extra_headers:
-            headers.update(extra_headers)
+        transport = net_guard.MonitorTransport(verify, allow_internal, timeout, address) if proxy is None else None
         async with httpx.AsyncClient(
             timeout=timeout, follow_redirects=True, proxy=proxy,
-            headers=headers, auth=auth, verify=verify,
-            event_hooks={"request": [net_guard.request_hook(proxy is not None)]},
+            headers=headers, auth=auth, verify=verify, transport=transport, trust_env=False,
+            event_hooks={"request": [net_guard.request_hook(proxy=True, allow_internal=allow_internal)]} if proxy else None,
         ) as client:
             resp = await client.request(method, u, extensions=extensions or {})
             text = resp.text[:_MAX_BODY] if (check.keyword_up or check.keyword_down) else ""
@@ -1043,7 +1039,7 @@ async def _run_http(
     # проверок; через прокси адреса резолвит сам прокси, пинить IP смысла нет
     one_ip = False
     if getattr(check, "check_all_ips", False) and proxy is None:
-        multi = await _run_http_all_ips(check, url, method, auth, timeout, degraded_ms, attempt)
+        multi = await _run_http_all_ips(check, url, timeout, degraded_ms, attempt)
         if multi is not None:
             return await _check_paths(check, multi, url, attempt, degraded_ms)
         # ≤1 адрес → падаем в обычную одиночную проверку ниже. Разбивка пустая, а не None: иначе
@@ -1119,12 +1115,13 @@ async def _run_tcp_port(check) -> CheckOutcome:
     host = check.target.strip()
     port = check.port or 80
     timeout = max(check.timeout_ms, 1000) / 1000.0
-    if bad := await net_guard.connect_ok(host):
+    cls, addresses = await net_guard.classified_addresses(host, min(timeout, 2.0))
+    if bad := net_guard.block_reason(cls, _allows_internal(check)):
         return CheckOutcome("down", message=bad)
     t0 = time.perf_counter()
     try:
         reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), timeout
+            _open_address(addresses, port), timeout
         )
         writer.close()
         try:
@@ -1140,13 +1137,12 @@ async def _run_tcp_port(check) -> CheckOutcome:
 
 
 async def _run_cert(check) -> CheckOutcome:
-    host = check.target.strip()
-    # target может быть URL — вытащим host
-    if "://" in host:
-        host = urlparse(host).hostname or host
-    port = check.port or 443
+    try:
+        host, port = net_guard.cert_endpoint(check.target, check.port)
+    except ValueError:
+        return CheckOutcome("down", message="неверный адрес для проверки сертификата")
     timeout = max(check.timeout_ms, 1000) / 1000.0
-    days, msg = await _ssl_probe(host, port, timeout)
+    days, msg = await _ssl_probe(host, port, timeout, _allows_internal(check))
     if days is None:
         return CheckOutcome("down", message=_short(f"сертификат {msg}"))
     rdays = round(days, 1)
@@ -1417,6 +1413,7 @@ def _short(s: str) -> str:
 # остаётся в скобках, чтобы по сообщению можно было гуглить и сверять с логом.
 _ERROR_HINTS: tuple[tuple[str, str], ...] = (
     # --- DNS
+    ("dns lookup failed", "домен не находится в DNS"),
     ("name or service not known", "домен не находится в DNS"),
     ("nodename nor servname provided", "домен не находится в DNS"),
     ("temporary failure in name resolution", "DNS временно не отвечает"),

@@ -16,10 +16,13 @@ Kubernetes. Через FORGET после пропажи порт снимаем 
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import html
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
 
 from app import tg_fmt
-from app.models import Server
+from app.models import Server, TgAlert
 
 STABLE = timedelta(days=7)
 GONE = timedelta(minutes=15)
@@ -31,6 +34,9 @@ TRUNCATED = 150
 STEP = timedelta(minutes=5)
 EPHEMERAL = 32768
 MUTE_PREFIX = "listen:"
+RECEIVED = "_listen_received"
+MAX_AGE = 2 * STEP
+_PROTOS = frozenset({"tcp", "tcp6", "udp", "udp6"})
 _SKIP_PROCS = frozenset({"docker-proxy", "kube-proxy", "containerd", "containerd-shim", "rootlessport"})
 
 
@@ -41,22 +47,44 @@ def _ts(v) -> datetime | None:
         return None
 
 
+def inventory(rep: dict, *, explicit: bool = False) -> list[dict] | None:
+    listen = (rep or {}).get("listen")
+    if not isinstance(listen, list) or not (listen or explicit or rep.get(RECEIVED) is True):
+        return None
+    if any(not isinstance(sock, dict) or not isinstance(sock.get("p"), str)
+           or sock["p"] not in _PROTOS or type(sock.get("port")) is not int
+           or not 0 < sock["port"] < 65536 for sock in listen):
+        return None
+    return listen
+
+
+def complete(srv: Server, now: datetime) -> bool:
+    listen = inventory(srv.last_report or {})
+    seen = srv.last_seen
+    if seen is None or listen is None or len(listen) >= TRUNCATED:
+        return False
+    seen = seen if seen.tzinfo else seen.replace(tzinfo=timezone.utc)
+    return now - seen <= MAX_AGE
+
+
+def is_listening(rep: dict, key: str) -> bool:
+    return any(sock["p"].startswith("tcp") and key == f'tcp:{sock["port"]}'
+               for sock in inventory(rep) or [])
+
+
 def current(rep: dict) -> dict[str, dict] | None:
     """Слушающие TCP-порты сейчас: {"tcp:22": {"port": 22, "proc": "sshd"}}; None - данных нет
     (агент старше 2.26): тогда историю не трогаем."""
-    listen = (rep or {}).get("listen")
-    if not isinstance(listen, list):
+    listen = inventory(rep)
+    if listen is None:
         return None
     procs = ((rep.get("extras") or {}).get("changes") or {}).get("listen")
     procs = procs if isinstance(procs, dict) else {}
     out: dict[str, dict] = {}
     for s in listen:
-        if not isinstance(s, dict) or not str(s.get("p") or "").startswith("tcp"):
+        if not s["p"].startswith("tcp"):
             continue
-        try:
-            port = int(s.get("port") or 0)
-        except (TypeError, ValueError):
-            continue
+        port = s["port"]
         if not 0 < port < EPHEMERAL:
             continue
         proc = str(procs.get(str(port)) or "")
@@ -79,12 +107,10 @@ def update(state: dict | None, rep: dict, now: datetime) -> dict | None:
         if not isinstance(e, dict) or key in cur:
             continue
         last = _ts(e.get("last"))
-        if last is None or now - last > FORGET:
+        if last is None or (full and now - last > FORGET):
             continue
         e = dict(e)
-        if not full:
-            e.pop("miss", None)  # список обрезан: про этот порт ничего не знаем
-        elif not e.get("miss"):
+        if full and not e.get("miss"):
             e["miss"] = iso
         new[key] = e  # пропал недавно - помним, чтобы сказать
     for key, x in cur.items():
@@ -147,12 +173,99 @@ def retire(state: dict, key: str) -> dict:
 
 
 def merge_tick(before: dict, current_state: dict, proposed: dict) -> dict:
-    """Keep a retirement committed while an alert tick was working on an older snapshot."""
-    if before.get("listen_hist") == current_state.get("listen_hist"):
-        return proposed
-    result = {k: v for k, v in proposed.items() if k != "listen_hist" and not _gone_key(k)}
-    result.update({k: v for k, v in current_state.items() if k == "listen_hist" or _gone_key(k)})
+    """Merge the tick's changes with writes made while it was working."""
+    result = dict(current_state)
+    history_changed = before.get("listen_hist") != current_state.get("listen_hist")
+    for key in before.keys() | proposed.keys():
+        if history_changed and (key == "listen_hist" or _gone_key(key)):
+            continue
+        if key not in proposed:
+            result.pop(key, None)
+        elif key not in before or before[key] != proposed[key]:
+            result[key] = proposed[key]
     return result
+
+
+def matching(state: dict, episodes: dict[str, str]) -> dict[str, str]:
+    history = state.get("listen_hist") or {}
+    return {key: miss for key, miss in episodes.items() if (history.get(key) or {}).get("miss") == miss}
+
+
+def can_notify(srv: Server | None, episodes: dict[str, str], now: datetime) -> bool:
+    return (srv is not None and srv.enabled and complete(srv, now)
+            and matching(srv.alert_state or {}, episodes) == episodes
+            and not any(is_listening(srv.last_report or {}, key) for key in episodes))
+
+
+def mark_delivered(state: dict, episodes: dict[str, str], now: datetime) -> dict:
+    """Commit the notification before a concurrent retirement reads its state."""
+    keys = episodes.keys()
+    return {**state, "listen_gone": 1,
+            "listen_gone_sig": sorted(set(state.get("listen_gone_sig") or []) | keys),
+            "listen_gone_told": sorted(set(state.get("listen_gone_told") or []) | keys),
+            "listen_gone_said": now.isoformat()}
+
+
+def closure(target: str, ports: str) -> str:
+    if ", " in ports:
+        return f"{target}: порты {ports} больше не нужны, алерт закрыт"
+    return f"{target}: порт {ports} больше не нужен, алерт закрыт"
+
+
+def tg_items(row: TgAlert, srv: Server, now: datetime) -> list[dict]:
+    undo = row.undo or {}
+    episodes = undo.get("listen_episodes")
+    items = [item for item in problems(srv, now)
+             if not (complete(srv, now) and is_listening(srv.last_report or {}, item["key"]))]
+    if isinstance(episodes, dict):
+        return [item for item in items if episodes.get(item["key"]) == item["miss"]]
+    # Legacy rows carry only port keys. An episode that began after the message is unrelated.
+    ts = row.ts
+    if ts is None:
+        return []
+    ts = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    keys = undo.get("keys") or []
+    return [item for item in items if MUTE_PREFIX + item["port"] in keys and _ts(item["miss"]) <= ts]
+
+
+def tg_prune(row: TgAlert, groups: list[tuple[Server, list[dict]]], now: datetime) -> bool:
+    """Keep only the current episodes in a partially closed Telegram message."""
+    keys = {MUTE_PREFIX + item["port"] for _, items in groups for item in items}
+    if not keys:
+        row.resolved_at = now
+        return False
+    undo = row.undo or {}
+    old_keys = set(undo.get("keys") or [])
+    if old_keys != keys or "," in row.ref:
+        row.undo = {**undo, "keys": sorted(keys)}
+        if len(groups) == 1:
+            srv, items = groups[0]
+            if "," not in row.ref:
+                row.undo["listen_episodes"] = {item["key"]: item["miss"] for item in items}
+            what, facts = tg_short(items)
+            row.text = tg_fmt.render("⚠️🔌", html.escape(srv.name), what, facts)
+        else:
+            facts = [f'{srv.name}: {tg_fmt.names([item["port"] for item in items])}' for srv, items in groups]
+            row.text = tg_fmt.render("⚠️🔌", "", "Пропали порты", facts)
+    return True
+
+
+async def retire_tg(session, srv: Server, now: datetime) -> None:
+    ref = f"srv:{srv.id}"
+    rows = await session.scalars(select(TgAlert).where(
+        TgAlert.kind == "listen_gone", TgAlert.resolved_at.is_(None),
+        (TgAlert.ref == ref) | (TgAlert.ref.like("srv:%,%")),
+    ).order_by(TgAlert.id).with_for_update())
+    for row in rows:
+        ids = [int(x) for x in row.ref[4:].split(",") if x.isdigit()]
+        if srv.id not in ids:
+            continue
+        groups = []
+        for sid in ids:
+            source = srv if sid == srv.id else await session.get(Server, sid)
+            if source is not None and (items := tg_items(row, source, now)):
+                groups.append((source, items))
+        tg_prune(row, groups, now)
 
 
 def tg_short(items: list[dict]) -> tuple[str, list[str]] | None:

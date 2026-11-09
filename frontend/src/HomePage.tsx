@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   ApiError,
   checksOverview,
@@ -14,7 +14,6 @@ import {
   snoozeServerAlert,
   updateServer,
   type Check,
-  type ChecksOverview,
   type LocalProbeSuggestion,
   type MuteWarning,
   type Server,
@@ -50,6 +49,32 @@ type QueueRow = {
   area: TallyTile
   critical: boolean
   render: () => ReactNode
+}
+
+function useOverviewSource<T>(request: () => Promise<T>, onUnauthorized: () => void) {
+  const [state, setState] = useState<{ data: T | null; updatedAt: number | null; failed: boolean }>({
+    data: null, updatedAt: null, failed: false,
+  })
+  const sequence = useRef(0)
+  const applied = useRef(0)
+  const refresh = useCallback(() => {
+    const id = ++sequence.current
+    request().then((data) => {
+      if (id <= applied.current) return
+      applied.current = id
+      setState({ data, updatedAt: Date.now(), failed: false })
+    }).catch((error: unknown) => {
+      if (id <= applied.current) return
+      applied.current = id
+      if (error instanceof ApiError && error.status === 401) onUnauthorized()
+      else setState((prev) => ({ ...prev, failed: true }))
+    })
+  }, [request, onUnauthorized])
+  const replace = useCallback((update: (prev: T) => T) => {
+    applied.current = ++sequence.current
+    setState((prev) => prev.data === null ? prev : { ...prev, data: update(prev.data) })
+  }, [])
+  return { ...state, refresh, replace }
 }
 
 function HomeDisclosure({ title, count, children }: { title: string; count: number; children: ReactNode }) {
@@ -548,7 +573,7 @@ function expiryWarnings(checks: Check[], hidden = false): Warn[] {
 }
 
 function RetirePortButton({ id, port, since, onDone, onUnauthorized }: {
-  id: number; port: number; since: string; onDone: (server: Server) => void; onUnauthorized: () => void
+  id: number; port: number; since: string; onDone: (port: number, since: string) => void; onUnauthorized: () => void
 }) {
   const { t } = useI18n()
   const [busy, setBusy] = useState(false)
@@ -557,7 +582,8 @@ function RetirePortButton({ id, port, since, onDone, onUnauthorized }: {
     setBusy(true)
     setError('')
     try {
-      onDone(await retireListeningPort(id, port, since))
+      await retireListeningPort(id, port, since)
+      onDone(port, since)
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) onUnauthorized()
       else setError(t(e instanceof ApiError && e.status === 409
@@ -577,7 +603,7 @@ function RetirePortButton({ id, port, since, onDone, onUnauthorized }: {
 }
 
 export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
-  const { t } = useI18n()
+  const { lang, t } = useI18n()
   // Главная — витрина всех разделов, поэтому она обязана уважать нарезку доступа:
   // иначе учётка без «Бэкапов» видит на ней и карточку бэкапов, и пункты, ведущие
   // в закрытый раздел (клик по ним всё равно упрётся в 403).
@@ -586,8 +612,10 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     (sec: Section) => sections.length === 0 || sections.includes(sec),
     [sections],
   )
-  const [ov, setOv] = useState<ChecksOverview | null>(null)
-  const [servers, setServers] = useState<Server[] | null>(null)
+  const sitesSource = useOverviewSource(checksOverview, onUnauthorized)
+  const serversSource = useOverviewSource(listServers, onUnauthorized)
+  const { data: ov, refresh: refreshSites } = sitesSource
+  const { data: servers, refresh: refreshServers, replace: replaceServers } = serversSource
   const viaPanels = useViaPanels()
   // отметить проблему сервера известной (📌 в "Что сломано")
   const [knownFor, setKnownFor] = useState<{ id: number; kind: string; title: string } | null>(null)
@@ -615,16 +643,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   }, [])
 
   const load = useCallback(() => {
-    checksOverview()
-      .then(setOv)
-      .catch((e) => {
-        if (e instanceof ApiError && e.status === 401) onUnauthorized()
-      })
-    listServers()
-      .then(setServers)
-      .catch((e) => {
-        if (e instanceof ApiError && e.status === 401) onUnauthorized()
-      })
+    refreshSites()
+    refreshServers()
     // предложения «проверять локально»: тихо, без ошибок в интерфейсе — это подсказка,
     // а не состояние системы, и её недоступность не должна ничего ломать
     localProbeSuggestions()
@@ -637,7 +657,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         .then((r) => setMutes(r.items))
         .catch(() => setMutes([]))
     else setMutes([])
-  }, [onUnauthorized, isAdmin])
+  }, [refreshSites, refreshServers, isAdmin])
   const rechecks = useAlertRechecks(load)
   const recheckAction = (refs: RecheckRef[]) => {
     if (isViewer || !refs.length) return null
@@ -727,7 +747,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const srvTotal = servers?.length ?? 0
   const srvOnline = servers?.filter((s) => s.online).length ?? 0
   const srvList = servers ?? []
-  const fleetRun = useFleetRollout(srvList, avail, setServers, onUnauthorized, !isViewer)
+  // Fleet actions may finish with a list based on an older render. Read a fresh
+  // snapshot through the same path as dashboard polling.
+  const fleetRun = useFleetRollout(srvList, avail, refreshServers, onUnauthorized, !isViewer)
   const allActions = actionItems(srvList, relProblem, t).filter((x) => canSee(x.section))
   // отказ самообновления, пока идет раскатка, виден в строке агента по ноде - без повтора
   const fleet = allActions.filter((x) => x.fleet && !(fleetRun.agent && x.key.startsWith('adv-')))
@@ -878,7 +900,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       </span>
       {!isViewer && it.listenPort && it.since && (
         <RetirePortButton id={it.id} port={it.listenPort} since={it.since} onUnauthorized={onUnauthorized}
-          onDone={(server) => setServers((prev) => prev?.map((s) => s.id === server.id ? server : s) ?? prev)} />
+          onDone={(port, since) => replaceServers((prev) => prev.map((s) => s.id === it.id ? {
+            ...s, problems: s.problems?.filter((p) => !(p.kind === 'listen_gone' && p.listen_port === port && p.since === since)),
+          } : s))} />
       )}
       {recheckAction([{ object_type: it.section === 'sites' ? 'check' : 'server', object_id: it.id, kind: it.kind }])}
       {it.markable && !isViewer && (
@@ -1113,6 +1137,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     setQueueAll(false)
   }
   const loadingText = t('загрузка…')
+  const unavailableText = t('Данные недоступны')
   const siteSummary = ov
     ? t('работают {n} из {total}', { n: ov.up, total: ov.total })
     : loadingText
@@ -1136,9 +1161,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       title: servers ? t('серверов бэкапа: {n}', { n: backupServers.length }) : undefined },
   ]
   const areas = tiles.filter(({ area }) => canSee(area))
-  const queueLoading = areas.some(({ area }) =>
-    (!queueArea || queueArea === area) && (area === 'sites' ? !ov : !servers),
-  )
+  const sourceFor = (area: TallyTile) => area === 'sites' ? sitesSource : serversSource
+  const queueSources = [...new Set(areas.filter(({ area }) => !queueArea || queueArea === area)
+    .map(({ area }) => sourceFor(area)))]
+  const failedSources = queueSources.filter((source) => source.failed)
+  const queueLoading = queueSources.some((source) => source.data === null && !source.failed)
 
   // шапка карточки блока: подпись и счетчик, тон счетчика - по самому тяжелому в блоке
   const cap = (title: string, n?: number, tone?: 'bad' | 'warn' | 'info') => (
@@ -1170,6 +1197,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
             {areas.map(({ area, label, icon, summary, title }) => {
               const rows = queueRows.filter((row) => row.area === area)
               const critical = rows.some((row) => row.critical)
+              const { data, failed } = sourceFor(area)
               return (
                 <button key={area} type="button" className="home-queue-filter"
                   aria-pressed={queueArea === area} aria-controls="home-issue-queue"
@@ -1181,7 +1209,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                         aria-label={t('Активных проблем: {n}', { n: rows.length })}>{rows.length}</span>
                     )}
                   </span>
-                  <span className="home-queue-filter-summary muted" title={title}>{summary}</span>
+                  <span className="home-queue-filter-summary muted" title={data !== null ? title : undefined}>
+                    {failed ? data !== null ? `${summary} · ${t('данные устарели')}` : unavailableText : summary}
+                  </span>
                 </button>
               )
             })}
@@ -1196,13 +1226,27 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                 </div>
               ) : visibleRows.length > 0 && <span className="muted small">{t('Сначала критичные')}</span>}
             </div>
+            {failedSources.map((source) => {
+              const sites = source === sitesSource
+              return <div key={sites ? 'sites' : 'servers'} className="home-queue-error small">
+                <span role="status">
+                  {t(sites ? 'Не удалось обновить данные о сайтах' : 'Не удалось обновить данные о серверах')}
+                  {source.updatedAt !== null && ` · ${t('Данные на {time}', {
+                    time: new Date(source.updatedAt).toLocaleString(lang, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }),
+                  })}`}
+                </span>
+                <button type="button" className="ghost small" onClick={source.refresh}>{t('Повторить запрос')}</button>
+              </div>
+            })}
             {visibleRows.length > 0 ? (
               <div id="home-issue-queue-rows" className="home-attention-list home-queue-rows">
                 {(queueAll ? visibleRows : visibleRows.slice(0, QUEUE_LIMIT)).map((row) => (
                   <Fragment key={row.key}>{row.render()}</Fragment>
                 ))}
               </div>
-            ) : <p className="muted small home-queue-empty">{queueLoading ? loadingText : t('Нет активных проблем')}</p>}
+            ) : failedSources.length === 0 && (
+              <p className="muted small home-queue-empty">{queueLoading ? loadingText : t('Нет активных проблем')}</p>
+            )}
             {visibleRows.length > QUEUE_LIMIT && (
               <button type="button" className="ghost small home-queue-more"
                 aria-expanded={queueAll} aria-controls="home-issue-queue-rows"

@@ -2250,7 +2250,7 @@ export type BackupServerRepoExtra = {
   check_part?: number // какую часть данных прочитала проверка: часть check_part из check_parts (0 - не читала)
   check_parts?: number
   recent?: number[] // времена последних снапшотов (helper 0.28), по ним бэкенд считает ритм
-  groups?: { ts: number; groups: BackupGroup[] } | null // группы снапшотов, если их больше одной
+  groups?: { ts: number; exact_tags?: boolean; groups: BackupGroup[] } | null // группы снапшотов, если их больше одной
   prune_err?: string // ошибка последнего неудачного прогона чистки (helper 0.30)
   prune_off?: number // 1 - чистку выключили: строка cron.d закомментирована (helper 0.34)
   prune_off_ts?: number // с какого времени (mtime cron.d)
@@ -2297,7 +2297,7 @@ export type BsrvCleanup = {
   dead: { script: string; scheduled: boolean; repos: string[]; fix: OsFixStep[] } | null // блоки на удаленные репозитории
   rotation: BsrvCleanupRot[]
   prune: { repo: string; kind: string; why: string; fix: OsFixStep[] }[] // своя чистка не работает
-  groups: Record<string, Record<string, { forget?: OsFixStep[]; merge?: OsFixStep[] }>> // repo -> старая группа -> шаги
+  groups: Record<string, Record<string, { forget?: OsFixStep[]; merge?: OsFixStep[] }>> // repo -> JSON [host, tags] -> шаги
   // чистку выключили руками (helper 0.34): live - бэкапы при этом идут, since - с какого времени,
   // why - причина из шапки cron.d. Решение, а не поломка: в ротацию и алерты не идет
   off?: BsrvCleanupOff[]

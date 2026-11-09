@@ -47,14 +47,31 @@ export function useAlertRechecks(onChanged: () => void) {
   change.current = onChanged
   const previous = useRef<Record<string, RecheckJob>>({})
   const accept = useCallback((rows: RecheckJob[], fromPoll = false) => {
-    if (!alive.current) return
+    if (!alive.current) return false
     const next = { ...previous.current }
+    let completed = false
     for (const r of rows) {
-      const old = next[recheckKey(r)]
-      if (!(fromPoll && old?.status === 'checking' && !old.id)) next[recheckKey(r)] = r
+      const key = recheckKey(r)
+      const old = next[key]
+      if (fromPoll && old) {
+        // A poll may have taken its snapshot before the current POST was processed.
+        if (!old.id) continue
+        if (old.id !== r.id) {
+          if (!(Date.parse(r.created_at) > Date.parse(old.created_at))) continue
+          if (old.status === 'checking') {
+            next[key] = { ...old, status: 'unavailable', message: 'Проверку заменила более новая. Запустите ее снова.' }
+            continue
+          }
+        } else {
+          if (old.status !== 'checking' && r.status === 'checking') continue
+          completed ||= old.status === 'checking' && r.status !== 'checking'
+        }
+      }
+      next[key] = r
     }
     previous.current = next
     setJobs(next)
+    return completed
   }, [])
   useEffect(() => {
     alive.current = true
@@ -62,9 +79,8 @@ export function useAlertRechecks(onChanged: () => void) {
     let timer: ReturnType<typeof setTimeout> | undefined
     const poll = () => api<RecheckJob[]>('/api/alert-rechecks').then((rows) => {
       if (!active) return
-      const done = rows.some((r) => previous.current[recheckKey(r)]?.status === 'checking' && r.status !== 'checking')
-      accept(rows, true)
-      if (done) change.current()
+      setErr('')
+      if (accept(rows, true)) change.current()
     }).catch(() => {
       if (active && Object.values(previous.current).some((x) => x.status === 'checking')) {
         setErr('Не удалось получить результат проверки. Повторяем запрос; алерт не скрыт.')
@@ -77,6 +93,7 @@ export function useAlertRechecks(onChanged: () => void) {
   }, [accept, watch])
   const run = async (refs: RecheckRef[]) => {
     const unique = [...new Map(refs.map((r) => [recheckKey(r), r])).values()]
+      .filter((r) => previous.current[recheckKey(r)]?.status !== 'checking')
     if (!unique.length) return
     setLast(unique)
     setErr('')
@@ -90,7 +107,7 @@ export function useAlertRechecks(onChanged: () => void) {
         catch (e) { return { ...r, id: '', status: 'unavailable' as const, message: String((e as Error).message || e), created_at: new Date().toISOString() } }
       }))
       accept(rows)
-      if (rows.some((r) => r.status !== 'checking')) change.current()
+      if (alive.current && rows.some((r) => r.id && r.status !== 'checking')) change.current()
     }
   }
   return { jobs, run, last, err }

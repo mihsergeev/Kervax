@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime
 
@@ -38,8 +40,7 @@ LOG_DIR = "/app/rest-server/system/logs"
 _NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 # с какой версии helper'а есть команда
 ADOPT_VER = (0, 25)   # adopt-legacy: перенос со старого скрипта, блоки на удаленные репозитории
-GROUP_VER = (0, 28)   # forget-group: удалить старую группу снапшотов
-MERGE_VER = (0, 33)   # merge-group: склеить переименованный сервер с прежним именем
+GROUP_VER = (0, 42)   # точные теги для forget-group и merge-group
 OFF_VER = (0, 34)     # prune-off / prune-on; adopt-legacy переносит и "чистка выключена"
 
 
@@ -117,32 +118,31 @@ def dead_fix(names: list[str], ver: tuple[int, ...]) -> list[dict]:
     ]
 
 
-def group_fix(repo: str, host: str, to: str, ver: tuple[int, ...]) -> dict:
+def group_fix(repo: str, host: str, tags: list[str], to: str, ver: tuple[int, ...], *, exact_tags: bool) -> dict:
     """Старая группа снапшотов (хост, который сюда больше не бэкапится): удалить ее или, если это
     прежнее имя переименованного сервера, отдать новому имени. Политика такую группу не чистит:
     последние снапшоты каждой группы она держит всегда."""
-    if not (_NAME.match(repo or "") and _NAME.match(host or "")):
+    if not (_NAME.fullmatch(repo or "") and _NAME.fullmatch(host or "")):
         return {}
-    check = {"id": "group_check", "cmd": f"{HELPER} forget-group {repo} {host}"}
-    out: dict = {}
-    if ver < GROUP_VER:
-        out["forget"] = [_update(GROUP_VER)]
-    else:
-        out["forget"] = [
-            {"id": "group_dry", "cmd": f"{HELPER} forget-group {repo} {host}"},
-            {"id": "group_apply", "cmd": f"{HELPER} forget-group {repo} {host} --apply"},
-            check,
-            {"id": "group_keep", "alt": True},
+    can_merge = to and _NAME.fullmatch(to) and to != host
+    if ver < GROUP_VER or not exact_tags:
+        step = _update(GROUP_VER) if ver < GROUP_VER else {"id": "group_refresh"}
+        return {"forget": [step], **({"merge": [step]} if can_merge else {})}
+    selector = hashlib.sha256(json.dumps(sorted(tags), separators=(",", ":")).encode()).hexdigest()
+    command = f"{HELPER} forget-group {repo} {host} --group {selector}"
+    out = {"forget": [
+        {"id": "group_dry", "cmd": command},
+        {"id": "group_apply"},
+        {"id": "group_check", "cmd": command},
+        {"id": "group_keep", "alt": True},
+    ]}
+    if can_merge:
+        merge = f"{HELPER} merge-group {repo} {host} {to} --group {selector}"
+        out["merge"] = [
+            {"id": "merge_dry", "cmd": merge},
+            {"id": "merge_apply", "arg": to, "cmd": f"{merge} --apply"},
+            {"id": "merge_check", "cmd": merge},
         ]
-    if to and _NAME.match(to) and to != host:
-        if ver < MERGE_VER:
-            out["merge"] = [_update(MERGE_VER)]
-        else:
-            out["merge"] = [
-                {"id": "merge_dry", "arg": to, "cmd": f"{HELPER} merge-group {repo} {host} {to}"},
-                {"id": "merge_apply", "arg": to, "cmd": f"{HELPER} merge-group {repo} {host} {to} --apply"},
-                check,
-            ]
     return out
 
 
@@ -214,7 +214,7 @@ def view(s, now: datetime) -> dict | None:
     legacy - живые (не в архиве) репозитории на старом общем скрипте, запланирован ли он и шаги
     переноса на чистку панели; dead - его блоки на удаленные репозитории; rotation - где старье не
     вычищается, одна строка на репозиторий со всеми причинами и тем, отчего так (cause); prune -
-    где не работает своя чистка; groups - шаги по старым группам снапшотов: repo -> host ->
+    где не работает своя чистка; groups - шаги по старым группам: repo -> [host, tags] ->
     {forget, merge}; off - где чистку выключили (live - бэкапы при этом идут); hand - где чистка
     идет, хотя ее строку в crontab root закомментировали руками."""
     rep = s.last_report or {}
@@ -264,15 +264,22 @@ def view(s, now: datetime) -> dict | None:
         else:
             # helper старше 0.23 или встал: кто чистит, не видно
             cause, fix = "unknown", [_update((0, 23))]
-        out["rotation"].append({"repo": name, "reasons": why, "cause": cause,
-                                "hosts": [str(g.get("host") or "") for g in olds], "fix": fix})
+        hosts = list(dict.fromkeys(str(g.get("host") or "") for g in olds))
+        out["rotation"].append({"repo": name, "reasons": why, "cause": cause, "hosts": hosts, "fix": fix})
     for name in obs:
         groups = repo_groups(ext, name, nowts)
+        cache = obs[name]["groups"] if groups else {}
+        exact_tags = cache.get("exact_tags") is True
         for g in old_groups(ext, arch, name, nowts):
             host = str(g.get("host") or "")
-            fx = group_fix(name, host, renamed_to(groups, g), ver)
+            tags = g.get("tags") or []
+            if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+                continue
+            to = renamed_to(groups, g) if sum(row.get("host") == host for row in groups) == 1 else ""
+            fx = group_fix(name, host, tags, to, ver, exact_tags=exact_tags)
             if fx:
-                out["groups"].setdefault(name, {})[host] = fx
+                key = json.dumps([host, tags], ensure_ascii=False, separators=(",", ":"))
+                out["groups"].setdefault(name, {})[key] = fx
     # чистку выключили (helper 0.34): решение, а не поломка, в ротацию и алерты не идет. Бэкапы туда
     # идут (live) - репозиторий растет без чистки, это отдельный пункт с шагами включить; архив или
     # бэкапов давно нет - просто строка "выключена", чистить там нечего
