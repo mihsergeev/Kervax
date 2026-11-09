@@ -9,6 +9,7 @@ import {
   listServers,
   localProbeSuggestions,
   muteServerKeys,
+  retireListeningPort,
   snoozeServer,
   snoozeServerAlert,
   updateServer,
@@ -546,6 +547,35 @@ function expiryWarnings(checks: Check[], hidden = false): Warn[] {
   return out.sort((a, b) => a.days - b.days)
 }
 
+function RetirePortButton({ id, port, since, onDone, onUnauthorized }: {
+  id: number; port: number; since: string; onDone: (server: Server) => void; onUnauthorized: () => void
+}) {
+  const { t } = useI18n()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const retire = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      onDone(await retireListeningPort(id, port, since))
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) onUnauthorized()
+      else setError(t(e instanceof ApiError && e.status === 409
+        ? 'Состояние порта изменилось. Обновите страницу.'
+        : 'Не удалось снять алерт порта'))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <span className="home-recheck-wrap" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+    <button type="button" className="home-recheck" disabled={busy} onClick={retire}
+      title={t('Если порт снова появится, панель начнет отслеживать его заново')}>
+      {busy ? t('Снимаем алерт…') : t('Порт больше не нужен')}
+    </button>
+    {error && <span role="status" className="muted">{error}</span>}
+  </span>
+}
+
 export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const { t } = useI18n()
   // Главная — витрина всех разделов, поэтому она обязана уважать нарезку доступа:
@@ -716,6 +746,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     key: string; id: number; name: string; cc?: string; tone: 't-down' | 't-degraded'; text: string
     kind: string; section: Section; srv?: boolean; sec?: string; mute?: string; since?: string | null
     note?: string
+    listenPort?: number
     markable?: boolean // можно отметить известной: вид, который панель сейчас видит у сервера
   }
   const fromProbs = (items: ProbItem[], section: Section): Broken[] =>
@@ -738,12 +769,13 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     ...srvList.flatMap((s) =>
       srvIssues(s, t)
         .map((i, n) => ({
-          key: `${s.id}-${n}`, id: s.id, name: s.name, cc: s.country, tone: i.tone,
+          key: i.listenPort ? `${s.id}-listen-${i.listenPort}-${i.since}` : `${s.id}-${n}`,
+          id: s.id, name: s.name, cc: s.country, tone: i.tone,
           text: i.kind === 'offline' && behindSilent(s)
             ? `${i.text} · ⛓ ${t('за {srv}, он тоже молчит', { srv: behindSilent(s) })}`
             : i.text,
           kind: i.kind ?? 'server', section: (i.section ?? 'servers') as Section, srv: i.srv ?? true,
-          sec: i.sec, mute: i.mute, since: i.since, note: s.note,
+          sec: i.sec, mute: i.mute, since: i.since, note: s.note, listenPort: i.listenPort,
           markable: !!i.kind && i.kind !== 'offline' && !!s.alert_since?.[i.kind],
         }))
         .filter((i) => canSee(i.section)),
@@ -844,6 +876,10 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           </span>
         )}
       </span>
+      {!isViewer && it.listenPort && it.since && (
+        <RetirePortButton id={it.id} port={it.listenPort} since={it.since} onUnauthorized={onUnauthorized}
+          onDone={(server) => setServers((prev) => prev?.map((s) => s.id === server.id ? server : s) ?? prev)} />
+      )}
       {recheckAction([{ object_type: it.section === 'sites' ? 'check' : 'server', object_id: it.id, kind: it.kind }])}
       {it.markable && !isViewer && (
         <span className="quick-mute" title={t('Известная проблема: алерт молчит, пока не станет хуже')}

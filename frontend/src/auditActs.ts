@@ -50,6 +50,7 @@ export const ACT: Record<string, string> = {
   webfiles_accept: 'отметил новые файлы сайта своими',
   webfiles_mode: 'сменил, правят ли сайт руками',
   exposure_scan: 'проверил, что открыто в интернет',
+  listen_retired: 'отметил порт как ненужный',
   disk_autofix_on: 'включил автоочистку диска',
   disk_autofix_off: 'выключил автоочистку диска',
   server_dev_on: 'пометил сервер разработкой',

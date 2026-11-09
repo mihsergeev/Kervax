@@ -1443,6 +1443,7 @@ export type ServerDisk = {
 export type ServerProblem = {
   kind: string; level: number; text: string; sec: string; mute: string; since?: string | null
   section?: 'kuber' | 'services' | 'backups' | 'docker'; srv?: boolean; sub?: string
+  listen_port?: number
   unit?: string; log?: string[] // юнит в цикле перезапусков и последние строки его лога
   dev?: boolean // сервер разработки, вид приложения: серым, не на главной (backend app/dev_mode.py)
 }
@@ -3429,6 +3430,12 @@ export function acceptWebfiles(id: number, root = ''): Promise<Server> {
 // Изменения доступа сделали свои: строка уходит с главной
 export function ackChanges(id: number): Promise<Server> {
   return api<Server>(`/api/servers/${id}/changes/ack`, { method: 'POST' })
+}
+export function retireListeningPort(id: number, port: number, missedSince: string): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/listen/${port}/retire`, {
+    method: 'POST',
+    body: JSON.stringify({ missed_since: missedSince }),
+  })
 }
 // Проверить снаружи, что открыто в интернет, не дожидаясь планового прогона
 export function scanExposure(id: number): Promise<Server> {

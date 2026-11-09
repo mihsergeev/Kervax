@@ -4691,7 +4691,8 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
             section="backups", srv=False)
     # Пропал порт, который слушался неделями
     for x in listen_watch.problems(s, now):
-        add("listen_gone", 1, x["text"], "exposure", listen_watch.MUTE_PREFIX + x["port"])
+        add("listen_gone", 1, x["text"], "exposure", listen_watch.MUTE_PREFIX + x["port"],
+            since=x["miss"], listen_port=int(x["port"]))
     # Диск тормозит: как и у алерта, только то, что держится дольше выдержки
     if backup_host:
         sample, complete = backup_transfer.observe(s, now, state.get(backup_transfer.STATE))
@@ -7583,7 +7584,8 @@ async def evaluate_servers(
     # Сначала СОБИРАЕМ все переходы за тик (не шлём внутри цикла), чтобы при
     # массовых событиях схлопнуть их в один дайджест. Молчаливые де-эскалации
     # фиксируем всегда, остальные переходы — после подтверждения доставки.
-    cur_by_id = {s.id: dict(s.alert_state or {}) for s in servers}
+    before_by_id = {s.id: s.alert_state or {} for s in servers}
+    cur_by_id = {sid: dict(state) for sid, state in before_by_id.items()}
     changed_ids: set[int] = set()
     fires: list[alerts.Msg] = []
     recoveries: list[alerts.Msg] = []
@@ -9116,10 +9118,10 @@ async def evaluate_servers(
                                        grp=(qs.group_name or "")[:255], recovery=True,
                                        text=f"{qs.name}: {settings_store.SERVER_ALERT_KINDS.get(qk, (qk,))[0]} - "
                                             f"закрыто без отбоя, {why}"[:4000]))
-            for sid in changed_ids:
-                row = await session.get(Server, sid)
+            for sid in sorted(changed_ids):
+                row = await session.get(Server, sid, with_for_update=True)
                 if row is not None:
-                    row.alert_state = cur_by_id[sid]
+                    row.alert_state = listen_watch.merge_tick(before_by_id[sid], row.alert_state or {}, cur_by_id[sid])
             for sid, kk, at, new_k, what in known_upd:
                 row = await session.get(Server, sid)
                 cur = dict((row.known_issues if row is not None else None) or {})

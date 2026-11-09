@@ -99,6 +99,7 @@ export function srvRamPct(s: Server): number | null {
 export type SrvIssue = {
   tone: 't-down' | 't-degraded'; text: string; sec?: string; mute?: string; kind?: string; since?: string | null
   section?: 'kuber' | 'services' | 'backups' | 'docker'; srv?: boolean; level?: number; dev?: boolean
+  listenPort?: number
 }
 
 // Сколько длится проблема, коротко: "40 мин", "5 ч", "3 дн". Меньше минуты - пусто: только что
@@ -175,7 +176,7 @@ export function srvIssuesRaw(
   // же, что у алертов, считать их здесь второй раз незачем
   for (const p of s.problems ?? [])
     out.push({ tone: p.level >= 2 ? 't-down' : 't-degraded', text: p.text, sec: p.sec, mute: p.mute, kind: p.kind,
-      since: p.since, section: p.section, srv: p.srv, level: p.level, dev: p.dev })
+      since: p.since, section: p.section, srv: p.srv, level: p.level, dev: p.dev, listenPort: p.listen_port })
   // с какого момента: панель запоминает начало проблемы каждого вида (alert_since)
   for (const i of out) if (i.since === undefined && i.kind) i.since = s.alert_since?.[i.kind] ?? null
   return out

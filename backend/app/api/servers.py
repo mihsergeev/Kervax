@@ -54,7 +54,7 @@ from app import web_upstream
 from app import web_config
 from app import webfiles as webfiles_mod
 from app import changes as srv_changes
-from app import fixed, known
+from app import fixed, known, listen_watch
 from app import kube_expiry
 from app import dev_mode
 from app import onboard
@@ -77,7 +77,7 @@ from app.collector import (
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
     archived_repo, backup_run_start, dump_local_stale, needed_pod_names, panel_server_names, pod_uid_names, server_backup_names,
     disk_health_block, send_alerts_soon, send_autofix_note, server_problems, web_5xx_total, web_breakdown,
-    web_error_window, web_label_key, web_log_label, web_rate_total, panel_started_at, backup_busy,
+    web_error_window, web_label_key, web_log_label, web_rate_total, panel_started_at, backup_busy, seen_online,
 )
 from app.setup_scripts import (
     current_setup_versions as _current_setup_versions,
@@ -88,6 +88,7 @@ from app.config import get_settings
 from app.deps import LOGS_CLOSED, AdminUser, CurrentUser, SessionDep, group_allowed, scope_query, user_sections, viewer_command_ok
 from app.models import (
     AgentPathProbe,
+    AlertEvent,
     AgentProbe,
     Check,
     BackupCommand,
@@ -1844,6 +1845,40 @@ async def drop_server_known(
         await session.refresh(server)
         await audit.record(session, user.username, "known_drop", server.name, kind)
     return _out(server, datetime.now(timezone.utc))
+
+
+@router.post("/{server_id}/listen/{port}/retire", response_model=ServerOut)
+async def retire_listening_port(
+    server_id: int, port: int, user: CurrentUser, session: SessionDep,
+    missed_since: str = Body(embed=True, min_length=1, max_length=40),
+) -> ServerOut:
+    if not 0 < port < listen_watch.EPHEMERAL:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Invalid monitored TCP port")
+    s = await _get_or_404(server_id, session, user, lock=True)
+    now = datetime.now(timezone.utc)
+    key = f"tcp:{port}"
+    state = s.alert_state or {}
+    if key not in (state.get("listen_hist") or {}):
+        return _out(s, now)
+
+    report = s.last_report or {}
+    current = listen_watch.current(report)
+    if (not seen_online(s, now) or current is None or key in current
+            or len(report["listen"]) >= listen_watch.TRUNCATED
+            or not any(item["key"] == key and item["miss"] == missed_since
+                       for item in listen_watch.problems(s, now))):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Port state changed. Refresh and try again.")
+
+    s.alert_state = listen_watch.retire(state, key)
+    if state.get("listen_gone") and not s.alert_state.get("listen_gone"):
+        session.add(AlertEvent(kind="listen_gone", target=s.name, section="servers",
+                               grp=s.group_name or "", recovery=True,
+                               text=f"{s.name}: порт {port} больше не нужен, алерт закрыт"))
+    await session.commit()
+    await session.refresh(s)
+    out = _out(s, now)
+    await audit.record(session, user.username, "listen_retired", s.name, key)
+    return out
 
 
 @router.post("/{server_id}/exposure/scan", response_model=ServerOut)

@@ -1,8 +1,10 @@
 """Пропал порт, который слушался неделями, и диск, который устойчиво тормозит."""
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import select
+
 from app import collector, listen_watch
-from app.models import Server
+from app.models import AlertEvent, AuditLog, Server
 
 NOW = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
 
@@ -103,6 +105,72 @@ def test_condition_and_home_row():
     rows = [r for r in collector.server_problems(s, NOW) if r["kind"] == "listen_gone"]
     assert len(rows) == 1 and rows[0]["mute"] == "listen:8080" and rows[0]["sec"] == "exposure"
     assert "listen_gone" not in collector._server_conditions(_srv(), NOW)  # истории еще нет
+
+
+async def test_retire_exact_missing_port_from_dashboard(client, auth_headers):
+    factory = client._transport.app.state.session_factory
+    now = datetime.now(timezone.utc)
+    miss = now - timedelta(minutes=25)
+    live = listen_watch.update(None, _rep(), now - timedelta(days=10))
+    live = listen_watch.update(live, _rep(), miss - timedelta(minutes=1))
+    absent = _rep(ports=())
+    state = {
+        "listen_hist": listen_watch.update(live, absent, miss),
+        "listen_gone": 1,
+        "listen_gone_sig": list(live),
+        "listen_gone_told": list(live),
+        "listen_gone_from": miss.isoformat(),
+    }
+    async with factory() as session:
+        s = _srv(state, mutes=["dns"], rep=absent)
+        s.last_seen = now
+        session.add(s)
+        await session.commit()
+        path = f"/api/servers/{s.id}"
+
+    def ports(response):
+        assert response.status_code == 200, response.text
+        return {p["listen_port"]: p["since"] for p in response.json()["problems"] if p["kind"] == "listen_gone"}
+
+    async def retire(port, since):
+        return await client.post(f"{path}/listen/{port}/retire", headers=auth_headers, json={"missed_since": since})
+
+    first = ports(await client.get(path, headers=auth_headers))
+    assert first == {22: miss.isoformat(), 8080: miss.isoformat()}
+    assert (await retire(22, now.isoformat())).status_code == 409
+    assert ports(await retire(22, first[22])) == {8080: first[8080]}
+    assert ports(await retire(22, first[22])) == {8080: first[8080]}
+    assert ports(await client.get(path, headers=auth_headers)) == {8080: first[8080]}
+    assert ports(await retire(8080, first[8080])) == {}
+
+    async with factory() as session:
+        s = await session.get(Server, 1)
+        assert s.alert_state == {"listen_hist": {}}
+        assert s.alert_mutes == ["dns"]
+        records = (await session.scalars(select(AuditLog).where(AuditLog.action == "listen_retired"))).all()
+        assert sorted(record.detail for record in records) == ["tcp:22", "tcp:8080"]
+        event = (await session.scalars(select(AlertEvent).where(AlertEvent.kind == "listen_gone"))).one()
+        assert event.recovery and "8080" in event.text
+
+
+def test_retirement_survives_stale_tick_and_port_can_alert_again():
+    absent = _rep(ports=(22,))
+    history = listen_watch.update(_week_old(), absent, NOW)
+    state = {"listen_hist": history, "listen_gone": 1, "listen_gone_sig": ["tcp:8080"]}
+    retired = listen_watch.retire(state, "tcp:8080")
+    proposed = {**state, "cpu": 1, "listen_hist": listen_watch.update(history, absent, NOW + timedelta(minutes=20))}
+    merged = listen_watch.merge_tick(state, retired, proposed)
+    assert merged == {**retired, "cpu": 1}
+    assert listen_watch.problems(_srv(merged), NOW + timedelta(minutes=30)) == []
+
+    returned = NOW + timedelta(hours=1)
+    history = listen_watch.update(merged["listen_hist"], _rep(), returned)
+    assert history["tcp:8080"]["first"] == returned.isoformat()
+    history = listen_watch.update(history, _rep(), returned + timedelta(days=8))
+    lost = returned + timedelta(days=8, minutes=1)
+    history = listen_watch.update(history, absent, lost)
+    problems = listen_watch.problems(_srv({"listen_hist": history}), lost + timedelta(minutes=20))
+    assert [(item["key"], item["miss"]) for item in problems] == [("tcp:8080", lost.isoformat())]
 
 
 def _disks(*devs):

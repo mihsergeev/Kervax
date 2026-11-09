@@ -105,7 +105,7 @@ def _days(d: timedelta) -> str:
 
 
 def problems(srv: Server, now: datetime) -> list[dict]:
-    """Пропавшие порты: {"key", "port", "proc", "text"} без заглушенных ("listen:<порт>")."""
+    """Пропавшие порты без заглушенных ("listen:<порт>")."""
     st = (srv.alert_state or {}).get("listen_hist")
     if not isinstance(st, dict):
         return []
@@ -123,10 +123,36 @@ def problems(srv: Server, now: datetime) -> list[dict]:
         proc = str(e.get("proc") or "")
         mins = int((now - miss).total_seconds() // 60)
         ago = f"{mins} мин" if mins < 120 else f"{mins // 60} ч"
-        out.append({"key": key, "port": port, "proc": proc,
+        out.append({"key": key, "port": port, "proc": proc, "miss": e["miss"],
                     "text": f"порт {port}{f' ({proc})' if proc else ''} слушался {_days(last - first)} и пропал "
                             f"{ago} назад: то, что его держало, не работает"})
     return out
+
+
+def _gone_key(key: str) -> bool:
+    return key == "listen_gone" or key.startswith("listen_gone_")
+
+
+def retire(state: dict, key: str) -> dict:
+    """Forget one missing listener and remove it from the alert's notified members."""
+    history = dict(state["listen_hist"])
+    del history[key]
+    result = {**state, "listen_hist": history}
+    for field in ("listen_gone_sig", "listen_gone_told"):
+        if field in state:
+            result[field] = [item for item in state[field] or [] if item != key]
+    if not result.get("listen_gone_sig"):
+        return {k: v for k, v in result.items() if not _gone_key(k)}
+    return result
+
+
+def merge_tick(before: dict, current_state: dict, proposed: dict) -> dict:
+    """Keep a retirement committed while an alert tick was working on an older snapshot."""
+    if before.get("listen_hist") == current_state.get("listen_hist"):
+        return proposed
+    result = {k: v for k, v in proposed.items() if k != "listen_hist" and not _gone_key(k)}
+    result.update({k: v for k, v in current_state.items() if k == "listen_hist" or _gone_key(k)})
+    return result
 
 
 def tg_short(items: list[dict]) -> tuple[str, list[str]] | None:

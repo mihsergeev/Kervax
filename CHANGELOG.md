@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.121] - 2026-11-09
+
+- Close a missing TCP port alert from the dashboard with “Port no longer needed”. The action is logged and affects only that port.
+- If the port returns, monitoring starts over and can alert on a future disappearance.
+
 ## [1.8.120] - 2026-11-09
 
 - Fix a server list error when a backup mirror reports structured alert state.
