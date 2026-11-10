@@ -292,7 +292,8 @@ async def test_tg_fixed_button(client, monkeypatch):
     monkeypatch.setattr(tg_bot, "_call", fake_call)
     monkeypatch.setattr("app.alerts.tg_edit", fake_edit)
     cfg = {"telegram_token": "T", "telegram_chat": "-100", "tz": "Europe/Moscow"}
-    cq = {"id": "q1", "data": f"kx:{aid}:fx", "from": {"id": 555}, "message": {"chat": {"id": -100}}}
+    cq = {"id": "q1", "data": f"kx:{aid}:fx", "from": {"id": 555},
+          "message": {"chat": {"id": -100}, "message_id": 7}}
     await tg_bot.handle_callback(f, cfg, cq, now)
     async with f() as s:
         srv = await s.get(Server, sid)

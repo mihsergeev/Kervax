@@ -396,7 +396,7 @@ async def test_button_mutes_one_cronjob_not_the_whole_cluster(tmp_path, monkeypa
 
     async def press(op):
         await tg_bot.handle_callback(factory, cfg_tg, {"id": "q", "data": f"kx:{aid}:{op}", "from": {"id": 555},
-                                                       "message": {"chat": {"id": -100}}}, now)
+                                                       "message": {"chat": {"id": -100}, "message_id": 7}}, now)
 
     await press("pm")
     srv = await _server(factory, "node-a")

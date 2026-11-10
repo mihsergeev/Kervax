@@ -106,8 +106,9 @@ async def _tick(factory, at: datetime, pct: float) -> None:
     async with factory() as s:
         srv = await s.scalar(select(Server))
         srv.last_seen = at
+        total = 100_000
         srv.last_report = {"uptime_seconds": 100000,
-                           "disks": [{"mount": "/", "used": pct, "total": 100}]}
+                           "disks": [{"mount": "/", "used": round(pct / 100 * total), "total": total}]}
         s.add(ServerMetric(server_id=srv.id, ts=at, disk_percent=pct,
                            disks=[{"mount": "/", "pct": pct}]))
         await s.commit()
