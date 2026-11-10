@@ -18,11 +18,11 @@ from types import SimpleNamespace
 from typing import NamedTuple
 from urllib.parse import quote, urlparse
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
-from app import backup_state, backup_verify
+from app import backup_command_result, backup_state, backup_verify
 from app import report_progress
 from app import backup_transfer, bsrv_mirror
 from app import home_mute, kube_coverage, os_support
@@ -9282,7 +9282,18 @@ async def _expire_commands(session_factory: async_sessionmaker[AsyncSession]) ->
         res = await session.execute(
             update(BackupCommand)
             .where(*stuck)
-            .values(status="error", ok=False, result="агент не ответил — команда не доехала")
+            .values(status="error", ok=False, result="агент не ответил — команда не доехала",
+                    payload=case((BackupCommand.action == "disk_fix", BackupCommand.payload)))
+        )
+        # Старые результаты записывались открытым текстом. Новый шифротекст нужен только
+        # ожидающему воркеру, а после его остановки удаляется по тому же таймауту.
+        await session.execute(
+            update(BackupCommand)
+            .where(BackupCommand.action.in_(backup_command_result.PRIVATE_ACTIONS),
+                   BackupCommand.status.in_(("done", "error")), BackupCommand.result != "",
+                   or_(~BackupCommand.result.startswith(backup_command_result.SEALED_PREFIX),
+                       BackupCommand.created_at < cutoff))
+            .values(result="")
         )
         if res.rowcount:
             log.info("закрыто зависших backup-команд: %d", res.rowcount)

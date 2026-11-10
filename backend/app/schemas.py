@@ -422,6 +422,14 @@ class AlertSnoozeIn(BaseModel):
     hours: float = Field(ge=0, le=24 * 30)
 
 
+class AlertMutesIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    add: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
+    remove: list[Annotated[str, Field(min_length=1)]] = Field(default_factory=list)
+    replace_same_group: bool = False
+
+
 class CheckIdList(BaseModel):
     """Список id мониторов для массовой операции (удаление и т.п.)."""
 

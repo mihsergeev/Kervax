@@ -2,6 +2,8 @@ import math
 import re
 import secrets
 import string
+from collections.abc import Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -93,21 +95,32 @@ async def _record_failure(
         await _lockout_alert(session, settings, ban)
 
 
-async def _guarded(session, request: Request, username: str, action: str, ok: bool, err: str) -> None:
-    """Проверка секрета под тем же счетчиком, что и вход: заблокированный адрес не пробует
-    вовсе, неудача считается к блокировке (белый список - только запись в журнал)."""
+@asynccontextmanager
+async def _verify_attempt(session, key: str, trusted: bool):
+    async with ratelimit.claim_attempt(session, key, trusted) as claimed:
+        if not claimed:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS, "Подождите секунду и попробуйте снова",
+                headers={"Retry-After": "1"},
+            )
+        ban = None if trusted else await ratelimit.active_ban(session, key)
+        if ban is not None:
+            await ratelimit.note_blocked(session, ban)
+            left = (_aware(ban.until) - datetime.now(timezone.utc)).total_seconds()
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"locked:{max(1, math.ceil(left / 60))}")
+        yield
+
+
+async def _guarded(session, request: Request, username: str, action: str, ok: Callable[[], bool], err: str) -> None:
+    """Проверка секрета под тем же счетчиком, что и вход."""
     settings = get_settings()
     key = _client_key(request)
     guard = await ratelimit.load(session)
     trusted = guard.allowed(key) is not None
-    ban = None if trusted else await ratelimit.active_ban(session, key)
-    if ban is not None:
-        await ratelimit.note_blocked(session, ban)
-        left = (_aware(ban.until) - datetime.now(timezone.utc)).total_seconds()
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"locked:{max(1, math.ceil(left / 60))}")
-    if not ok:
-        await _record_failure(session, settings, key, username, action, guard, trusted)
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
+    async with _verify_attempt(session, key, trusted):
+        if not ok():
+            await _record_failure(session, settings, key, username, action, guard, trusted)
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -118,33 +131,29 @@ async def login(
     key = _client_key(request)
     guard = await ratelimit.load(session)
     trusted = guard.allowed(key) is not None
-    ban = None if trusted else await ratelimit.active_ban(session, key)
-    if ban is not None:
-        await ratelimit.note_blocked(session, ban)
-        left = (_aware(ban.until) - datetime.now(timezone.utc)).total_seconds()
-        # маркер для страницы входа: она пишет, через сколько минут пробовать
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, f"locked:{max(1, math.ceil(left / 60))}")
-    user = await session.scalar(select(User).where(User.username == body.username))
-    # verify_password вызываем всегда (в т.ч. по фиктивному хэшу), чтобы время
-    # ответа не зависело от существования логина
-    password_ok = verify_password(
-        body.password, user.password_hash if user else _DUMMY_HASH
-    )
-    if user is None or not password_ok:
-        await _record_failure(session, settings, key, body.username, "login_fail", guard, trusted)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный логин или пароль")
-    if user.totp_enabled:
-        # detail — машиночитаемый маркер для фронта (показать поле кода)
-        if not body.otp:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2fa_required")
-        counter = totp.matched_counter(user.totp_secret, body.otp)
-        # отвергаем неверный код И уже использованный (защита от replay)
-        if counter is None or counter <= user.totp_last_counter:
-            await _record_failure(session, settings, key, body.username, "login_2fa_fail", guard, trusted)
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2fa_invalid")
-        user.totp_last_counter = counter
-        await session.commit()  # фиксируем счётчик ДО audit (у audit свой rollback)
-    await ratelimit.clear(session, key)
+    async with _verify_attempt(session, key, trusted):
+        user = await session.scalar(select(User).where(User.username == body.username))
+        # Проверяем и фиктивный хэш, чтобы время ответа не выдавало существование логина.
+        password_ok = verify_password(body.password, user.password_hash if user else _DUMMY_HASH)
+        if user is None or not password_ok:
+            await _record_failure(session, settings, key, body.username, "login_fail", guard, trusted)
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный логин или пароль")
+        if user.totp_enabled:
+            if not body.otp:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2fa_required")
+            counter = totp.matched_counter(user.totp_secret, body.otp)
+            # Один код принимается только один раз, даже при входах с разных адресов.
+            accepted = None
+            if counter is not None and counter > user.totp_last_counter:
+                accepted = await session.scalar(update(User).where(
+                    User.id == user.id, User.username == user.username,
+                    User.token_version == user.token_version, User.totp_enabled.is_(True),
+                    User.totp_secret == user.totp_secret, User.totp_last_counter < counter,
+                ).values(totp_last_counter=counter).returning(User.id).execution_options(synchronize_session=False))
+            if accepted is None:
+                await _record_failure(session, settings, key, body.username, "login_2fa_fail", guard, trusted)
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2fa_invalid")
+        await ratelimit.clear(session, key)
     token = create_access_token(
         user.username, settings.jwt_secret, settings.jwt_ttl_minutes,
         user.token_version, user.id,
@@ -162,7 +171,7 @@ async def change_password(
     # С украденным токеном текущий пароль подбирали без ограничений: тот же счетчик неудач
     # и блокировка адреса, что у входа
     await _guarded(session, request, username, "password_fail",
-                   verify_password(body.current_password, user.password_hash), "Неверный текущий пароль")
+                   lambda: verify_password(body.current_password, user.password_hash), "Неверный текущий пароль")
     # После проверки старая учетка могла исчезнуть, а ее id получить новая. Не меняем
     # пароль новой личности и не выпускаем для нее токен по старому паролю.
     version = await session.scalar(update(User).where(
@@ -287,7 +296,7 @@ async def twofa_disable(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "2FA не включена")
     # шесть цифр с украденным токеном перебирались бы без счета: тот же лимит, что у входа
     await _guarded(session, request, user.username, "2fa_disable_fail",
-                   totp.verify(user.totp_secret, body.otp), "Неверный код")
+                   lambda: totp.verify(user.totp_secret, body.otp), "Неверный код")
     user.totp_enabled = False
     user.totp_secret = ""
     await session.commit()
@@ -386,7 +395,7 @@ async def telegram_confirm(user: CurrentUser, session: SessionDep) -> TelegramOu
             updates = r.json().get("result", [])
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, f"Не удалось опросить бота: {exc}"
+            status.HTTP_502_BAD_GATEWAY, "Не удалось опросить бота"
         ) from exc
     chat = ""
     for upd in updates:
@@ -443,7 +452,7 @@ async def telegram_test(user: CurrentUser, session: SessionDep) -> TelegramOut:
             "Алерты по вашим серверам и сайтам будут приходить сюда.",
         )
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"Не отправлено: {exc}") from exc
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Не удалось отправить проверочное сообщение") from exc
     return await _tg_state(session, user)
 
 

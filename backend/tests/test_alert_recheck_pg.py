@@ -14,6 +14,29 @@ from tests.test_alert_recheck import factory, server, start
 pytestmark = pytest.mark.skipif(not os.getenv("KERVAX_TEST_PG"), reason="dedicated PostgreSQL concurrency test")
 
 
+@pytest.mark.parametrize("operation", ["alert-mutes", "snooze-alert"])
+async def test_parallel_alert_mutes_preserve_distinct_keys(client, auth_headers, operation):
+    from app.main import create_app
+
+    oid = await server(client)
+    other_app = create_app()
+    kinds = ["disk", "mem", "cpu", "web_5xx", "offline", "units"]
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=other_app), base_url="http://test") as other:
+            path = f"/api/servers/{oid}/{operation}"
+            requests = []
+            for kind, target in zip(kinds, [client, other] * 3, strict=True):
+                body = {"add": [kind]} if operation == "alert-mutes" else {"kind": kind, "hours": 1}
+                requests.append(target.post(path, headers=auth_headers, json=body))
+            responses = await asyncio.gather(*requests)
+            assert {response.status_code for response in responses} == {200}
+        res = await client.get(f"/api/servers/{oid}", headers=auth_headers)
+        field = "alert_mutes" if operation == "alert-mutes" else "alert_snoozes"
+        assert set(res.json()[field]) == set(kinds)
+    finally:
+        await other_app.state.engine.dispose()
+
+
 async def test_duplicate_clicks_workers_and_restart_share_one_job(client, auth_headers):
     oid = await server(client)
     from app.main import create_app

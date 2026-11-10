@@ -1,5 +1,6 @@
 """Доступы и проверка входных данных API: группы учеток, роли, что отдается учетке только для
 просмотра, и что принимается от ноды. Каждый тест - одна закрытая дыра."""
+import asyncio
 import gzip
 import json
 from datetime import datetime, timezone
@@ -89,6 +90,77 @@ def test_safe_hostname():
 
 
 # ---------------------------------------------------------------- проверка изнутри и SSRF
+
+
+async def test_editor_trial_location_blocks_internal_targets_and_redirects(client, auth_headers, monkeypatch):
+    from app import net_guard
+
+    editor = await _user(client, auth_headers, "location-editor")
+    received = []
+
+    async def proxy(reader, writer):
+        request = await reader.readuntil(b"\r\n\r\n")
+        request_line = request.split(b"\r\n", 1)[0]
+        received.append(request_line)
+        status = (b"302 Found\r\nLocation: http://inner.example/" if b"outside.example" in request_line
+                  else b"200 OK")
+        writer.write(b"HTTP/1.1 " + status + b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def resolve(host, timeout):
+        return ["127.0.0.1"] if host == "inner.example" else ["8.8.8.8"]
+
+    monkeypatch.setattr(net_guard, "_resolve", resolve)
+    server = await asyncio.start_server(proxy, "127.0.0.1", 0)
+    async with server:
+        port = server.sockets[0].getsockname()[1]
+        loc = await client.post("/api/locations", headers=auth_headers, json={
+            "name": "proxy", "url": f"http://127.0.0.1:{port}",
+        })
+        assert loc.status_code == 201, loc.text
+
+        async def trial(target, headers=editor):
+            return await client.post("/api/checks/try", headers=headers, json={
+                "part": "locations", "type": "http", "target": target,
+            })
+
+        for target in ("http://127.0.0.1/", "http://inner.example/"):
+            r = await trial(target)
+            assert r.status_code == 403, r.text
+        assert (await trial("http://169.254.169.254/", auth_headers)).status_code == 400
+        assert received == []
+
+        r = await trial("http://outside.example/")
+        assert r.status_code == 200, r.text
+        outcome, = r.json()["locations"]
+        assert outcome["status"] == "down" and net_guard.ADMIN_ONLY_TEXT in outcome["message"]
+        assert received == [b"GET http://outside.example/ HTTP/1.1"]
+
+        r = await trial("http://inner.example/", auth_headers)
+        assert r.status_code == 200 and r.json()["locations"][0]["status"] == "up", r.text
+        assert received[-1] == b"GET http://inner.example/ HTTP/1.1"
+
+
+async def test_editor_cannot_change_port_of_admin_internal_monitor(client, auth_headers, monkeypatch):
+    async def skip_first_check(*args):
+        pass
+
+    monkeypatch.setattr("app.api.checks._first_check", skip_first_check)
+    editor = await _user(client, auth_headers, "port-editor")
+    for kind in ("tcp_port", "cert"):
+        created = await client.post("/api/checks", headers=auth_headers, json={
+            "name": kind, "type": kind, "target": "127.0.0.1", "port": 443,
+        })
+        assert created.status_code == 201, created.text
+        path = f"/api/checks/{created.json()['id']}"
+        r = await client.patch(path, headers=editor, json={"port": 2375})
+        assert r.status_code == 403, r.text
+        r = await client.patch(path, headers=editor, json={"name": f"{kind}-renamed", "port": 443})
+        assert r.status_code == 200 and r.json()["port"] == 443, r.text
+        r = await client.patch(path, headers=auth_headers, json={"port": 8443})
+        assert r.status_code == 200 and r.json()["port"] == 8443, r.text
 
 
 async def test_local_probe_only_reads(client, auth_headers):
@@ -334,6 +406,25 @@ async def test_snooze_web_5xx_whole_kind(client, auth_headers):
         r = await client.post(f"/api/servers/{sid}/snooze-alert", json={"kind": kind, "hours": 2},
                               headers=auth_headers)
         assert r.status_code == 200, (kind, r.text)
+
+
+async def test_alert_mute_changes_preserve_other_keys_and_access_scope(client, auth_headers):
+    sid, _ = await _server(client, auth_headers, "node-a", "team-a")
+    other, _ = await _server(client, auth_headers, "node-b", "team-b")
+    editor = await _user(client, auth_headers, "operator", server_groups=["team-a"])
+    viewer = await _user(client, auth_headers, "observer", role="viewer", server_groups=["team-a"])
+    path = f"/api/servers/{sid}/alert-mutes"
+    initial = {"alert_mutes": ["offline", "home:dbdump@old", "home:dockrisk@other"]}
+    assert (await client.patch(f"/api/servers/{sid}", json=initial, headers=auth_headers)).status_code == 200
+    change = {"add": ["home:dbdump@new", "disk@1"], "replace_same_group": True}
+    assert (await client.post(path, json=change, headers=viewer)).status_code == 403
+    assert (await client.post(f"/api/servers/{other}/alert-mutes", json=change, headers=editor)).status_code == 404
+    for _ in range(2):
+        res = await client.post(path, json=change, headers=editor)
+        assert res.status_code == 200, res.text
+        assert res.json()["alert_mutes"] == ["offline", "home:dockrisk@other", "home:dbdump@new", "disk@1"]
+    res = await client.post(path, json={"remove": ["disk@1"]}, headers=editor)
+    assert res.json()["alert_mutes"] == ["offline", "home:dockrisk@other", "home:dbdump@new"]
 
 
 # ---------------------------------------------------------------- вход

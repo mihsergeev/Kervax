@@ -19,6 +19,7 @@ ban_minutes (LoginBan), повторно в течение суток - на с�
 import ipaddress
 import json
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -88,6 +89,34 @@ async def save(session: AsyncSession, g: Guard) -> None:
         {"max_failures": g.max_failures, "ban_minutes": g.ban_minutes, "allow": g.allow},
         ensure_ascii=False,
     ))
+
+
+# SQLite is used by the single-process development setup and tests.
+_local_attempts = set()
+
+
+@asynccontextmanager
+async def claim_attempt(session: AsyncSession, key: str, trusted: bool):
+    """Allow one credential check per source while its result is being recorded."""
+    if trusted:
+        yield True
+        return
+    bind = session.get_bind()
+    if bind.dialect.name == "postgresql":
+        yield await session.scalar(select(func.pg_try_advisory_xact_lock(
+            func.hashtextextended(f"kervax/login/{key}", 0)
+        )))
+        return
+
+    attempt = (bind, key)
+    if attempt in _local_attempts:
+        yield False
+        return
+    _local_attempts.add(attempt)
+    try:
+        yield True
+    finally:
+        _local_attempts.remove(attempt)
 
 
 def _now(now: float | None) -> datetime:

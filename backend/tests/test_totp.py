@@ -1,8 +1,11 @@
+import asyncio
 import time
 
 import httpx
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import totp
+from app.models import User
 
 
 def _code(secret: str) -> str:
@@ -39,6 +42,7 @@ async def test_2fa_full_flow(client: httpx.AsyncClient, auth_headers):
     # setup → секрет
     r = await client.post("/api/auth/2fa/setup", headers=auth_headers)
     assert r.status_code == 200
+
     secret = r.json()["secret"]
     assert r.json()["otpauth_uri"].startswith("otpauth://")
 
@@ -85,3 +89,33 @@ async def test_2fa_full_flow(client: httpx.AsyncClient, auth_headers):
         "/api/auth/login", json={"username": "admin", "password": "testpass-2026"}
     )
     assert r.status_code == 200
+
+
+async def test_2fa_code_cannot_be_replayed_by_parallel_logins(client, auth_headers, monkeypatch):
+    setup = await client.post("/api/auth/2fa/setup", headers=auth_headers)
+    otp = _code(setup.json()["secret"])
+    enabled = await client.post("/api/auth/2fa/enable", headers=auth_headers, json={"otp": otp})
+    assert enabled.status_code == 200
+
+    original = AsyncSession.scalar
+    both_loaded = asyncio.Event()
+    loaded = 0
+
+    async def concurrent_read(self, *args, **kwargs):
+        nonlocal loaded
+        value = await original(self, *args, **kwargs)
+        if isinstance(value, User):
+            loaded += 1
+            if loaded == 2:
+                both_loaded.set()
+            await asyncio.wait_for(both_loaded.wait(), timeout=5)
+        return value
+
+    monkeypatch.setattr(AsyncSession, "scalar", concurrent_read)
+    body = {"username": "admin", "password": "testpass-2026", "otp": otp}
+    replies = await asyncio.gather(*(
+        client.post("/api/auth/login", json=body, headers={"X-Forwarded-For": ip})
+        for ip in ("203.0.113.42", "203.0.113.43")
+    ))
+    assert sorted(reply.status_code for reply in replies) == [200, 401]
+    assert next(reply for reply in replies if reply.status_code == 401).json()["detail"] == "2fa_invalid"

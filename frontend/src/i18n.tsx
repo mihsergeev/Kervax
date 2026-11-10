@@ -132,6 +132,7 @@ const EN: Record<string, string> = {
   'Обновите backup-helper до 0.50: нужна read-only команда inspect.': 'Update backup-helper to 0.50 for the read-only inspect action.',
   'Не удалось получить результат проверки. Повторяем запрос; алерт не скрыт.': 'Could not retrieve the result. Retrying; the alert remains visible.',
   'Проверку заменила более новая. Запустите ее снова.': 'A newer check superseded this one. Run it again.',
+  'Результат проверки недоступен. Запустите ее снова.': 'The check result is unavailable. Run it again.',
   // сервер разработки (ServerEdit.tsx, ServersPage.tsx, cardLayout.tsx, DockerPage.tsx; backend app/dev_mode.py)
   'Назначение': 'Purpose',
   'Прод': 'Production',

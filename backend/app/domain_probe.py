@@ -169,11 +169,12 @@ def pick(root_code: int, codes: dict[str, int]) -> dict:
     return {}
 
 
-async def _ext_hint(domain: str, root_code: int) -> dict:
+async def _ext_hint(domain: str, root_code: int, allow_internal: bool) -> dict:
     """Перебор типовых путей снаружи - разом, каждый со своим таймаутом."""
 
     async def code_of(path: str) -> int:
         chk = manual_probe.domain_check(target(domain) + path)
+        chk.allow_internal_target = allow_internal
         chk.timeout_ms = PATH_TIMEOUT_MS
         chk.expected_status = "200-299"
         try:
@@ -246,7 +247,8 @@ def _same_moment(a: datetime, b: datetime) -> bool:
 
 
 async def run_external(
-    session_factory: async_sessionmaker[AsyncSession], domains: list[str], started_at: datetime
+    session_factory: async_sessionmaker[AsyncSession], domains: list[str], started_at: datetime,
+    *, allow_internal: bool,
 ) -> None:
     """Проверка снаружи — фоном, итог каждого домена пишется, как только готов: мастер
     показывает их по мере поступления, а не ждёт самый медленный сайт."""
@@ -255,14 +257,16 @@ async def run_external(
     async def one(domain: str) -> None:
         async with sem:
             try:
-                outcome = await checks_exec.run_check(manual_probe.domain_check(target(domain)))
+                chk = manual_probe.domain_check(target(domain))
+                chk.allow_internal_target = allow_internal
+                outcome = await checks_exec.run_check(chk)
             except Exception as exc:  # noqa: BLE001 — один домен не должен ронять остальные
                 outcome = checks_exec.CheckOutcome(
                     "down", message=checks_exec.humanize_error(str(exc) or type(exc).__name__)
                 )
             hint = None
             if wants_paths(outcome.status, outcome.message):
-                hint = await _ext_hint(domain, _code(outcome.message))
+                hint = await _ext_hint(domain, _code(outcome.message), allow_internal)
         async with session_factory() as session:
             row = await session.get(DomainProbe, domain)
             # домен успели перепроверить — этот итог уже никому не нужен

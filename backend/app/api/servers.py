@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 
 from app import windows_services
-from app import backup_unit
+from app import backup_command_result, backup_unit
 from app import backup_verify
 from app import gre as gre_mod, relay as relay_mod
 from app import disk_wear
@@ -123,6 +123,7 @@ from app.schemas import (
     FleetRolloutOut,
     HelperRolloutReq,
     HelperRunOut,
+    AlertMutesIn,
     AlertSnoozeIn,
     BackupCommandIn,
     AutobanCmdIn,
@@ -1986,13 +1987,30 @@ async def webfiles_accept(server_id: int, body: dict, user: CurrentUser, session
     return _out(s, datetime.now(timezone.utc))
 
 
+@router.post("/{server_id}/alert-mutes", response_model=ServerOut)
+async def update_alert_mutes(
+    server_id: int, body: AlertMutesIn, user: CurrentUser, session: SessionDep
+) -> ServerOut:
+    """Изменить отдельные заглушки, сохранив остальные."""
+    server = await _get_or_404(server_id, session, user, lock=True)
+    removed = set(body.remove)
+    # Заглушка "до нового" заменяет старый отпечаток того же пункта.
+    prefixes = tuple(key.partition("@")[0] + "@" for key in body.add if "@" in key) if body.replace_same_group else ()
+    kept = [key for key in server.alert_mutes or [] if key not in removed and not key.startswith(prefixes)]
+    server.alert_mutes = list(dict.fromkeys([*kept, *body.add]))
+    await session.commit()
+    await session.refresh(server)
+    await audit.record(session, user.username, "server_update", server.name)
+    return _out(server, datetime.now(timezone.utc))
+
+
 @router.post("/{server_id}/snooze-alert", response_model=ServerOut)
 async def snooze_server_alert(
     server_id: int, body: AlertSnoozeIn, user: CurrentUser, session: SessionDep
 ) -> ServerOut:
     """Точечно приглушить ОДИН тип алерта сервера на N часов (0 = снять). Остальные
     типы (напр. offline) продолжают алертить."""
-    server = await _get_or_404(server_id, session, user)
+    server = await _get_or_404(server_id, session, user, lock=True)
     now = datetime.now(timezone.utc)
     # чистим истёкшие + текущий, затем ставим новый (если hours>0)
     snoozes = {
@@ -2574,20 +2592,29 @@ def _cmd_visible(user, c) -> bool:
     return user.role in ("admin", "editor") or (user.can_read_logs and c.created_by == user.username)
 
 
+async def _claim_commands(session, model, server_id: int) -> list:
+    """Отметить команды за один запрос, чтобы два опроса не выдали одну и ту же."""
+    candidates = (
+        select(model.id)
+        .where(model.server_id == server_id, model.status == "pending")
+        .order_by(model.created_at, model.id)
+        .limit(20)
+        .with_for_update(skip_locked=True)
+    )
+    claimed = await session.scalars(
+        sa_update(model)
+        .where(model.id.in_(candidates), model.status == "pending")
+        .values(status="running")
+        .returning(model)
+    )
+    return sorted(claimed, key=lambda c: (c.created_at, c.id))
+
+
 async def _take_docker_commands(session, server_id: int) -> list[dict]:
     """Забирает pending docker-команды сервера, помечает running (не переслать
     повторно), возвращает для агента. Общий код /report и /commands (НЕ коммитит)."""
-    pending = list(
-        await session.scalars(
-            select(DockerCommand)
-            .where(DockerCommand.server_id == server_id, DockerCommand.status == "pending")
-            .order_by(DockerCommand.created_at)
-            .limit(20)
-        )
-    )
     cmds = []
-    for c in pending:
-        c.status = "running"
+    for c in await _claim_commands(session, DockerCommand, server_id):
         cmds.append({
             "id": c.id, "container": c.container, "action": c.action,
             "tail": c.tail, "since": c.since,
@@ -2650,17 +2677,8 @@ async def docker_command_status(
 async def _take_kube_commands(session, server_id: int) -> list[dict]:
     """Забирает pending kube-команды сервера, помечает running. Общий код /report и
     /commands (НЕ коммитит)."""
-    pending = list(
-        await session.scalars(
-            select(KubeCommand)
-            .where(KubeCommand.server_id == server_id, KubeCommand.status == "pending")
-            .order_by(KubeCommand.created_at)
-            .limit(20)
-        )
-    )
     cmds = []
-    for c in pending:
-        c.status = "running"
+    for c in await _claim_commands(session, KubeCommand, server_id):
         cmds.append({
             "id": c.id, "ns": c.ns, "kind": c.kind, "name": c.name,
             "action": c.action, "tail": c.tail, "since": c.since,
@@ -2780,17 +2798,8 @@ async def kube_command_status(
 async def _take_backup_commands(session, server_id: int) -> list[dict]:
     """Забирает pending backup-команды сервера, помечает running. Общий код /report и
     /commands (НЕ коммитит)."""
-    pending = list(
-        await session.scalars(
-            select(BackupCommand)
-            .where(BackupCommand.server_id == server_id, BackupCommand.status == "pending")
-            .order_by(BackupCommand.created_at)
-            .limit(20)
-        )
-    )
     cmds = []
-    for c in pending:
-        c.status = "running"
+    for c in await _claim_commands(session, BackupCommand, server_id):
         d = {
             "id": c.id, "action": c.action, "mode": c.mode,
             "paths": c.paths or [], "schedule": c.schedule,
@@ -2931,7 +2940,8 @@ async def backup_command_status(
 ) -> BackupCommandOut:
     await _get_or_404(server_id, session, user)
     c = await session.get(BackupCommand, cmd_id)
-    if c is None or c.server_id != server_id or not _cmd_visible(user, c):
+    if (c is None or c.server_id != server_id or c.action in backup_command_result.PRIVATE_ACTIONS
+            or not _cmd_visible(user, c)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
     was = c.status
     out = _backup_cmd_out(c, datetime.now(timezone.utc))
@@ -3110,19 +3120,44 @@ async def _bcmd_create(session_factory, server_id: int, action: str, payload: di
 async def _bcmd_wait(session_factory, cid: int, timeout: int) -> tuple[bool, str]:
     """Ждёт результат агента, опрашивая СВЕЖЕЙ сессией каждую итерацию (новое соединение →
     гарантированно видит коммит агента; не держим долгое соединение/снапшот)."""
-    deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout)
-    while datetime.now(timezone.utc) < deadline:
-        await asyncio.sleep(1.5)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        remaining = deadline - loop.time()
+        if remaining > 0:
+            await asyncio.sleep(min(1.5, remaining))
         async with session_factory() as s:
-            cur = await s.get(BackupCommand, cid)
+            cur = await s.get(BackupCommand, cid, with_for_update=True)
             if cur is not None and cur.status in ("done", "error"):
-                return bool(cur.ok), cur.result or ""
-    async with session_factory() as s:
-        cur = await s.get(BackupCommand, cid)
-        if cur is not None and cur.status not in ("done", "error"):
-            cur.status, cur.ok, cur.result = "error", False, "таймаут ожидания агента"
-            await s.commit()
-    return False, "таймаут ожидания агента"
+                ok, out = bool(cur.ok), cur.result or ""
+                if cur.action in backup_command_result.PRIVATE_ACTIONS:
+                    try:
+                        plaintext = backup_command_result.unseal(cid, out)
+                    except ValueError:
+                        return False, "данные команды недоступны, повторите операцию"
+                    consumed = await s.scalar(
+                        sa_update(BackupCommand).where(BackupCommand.id == cid, BackupCommand.result == out)
+                        .values(result="").returning(BackupCommand.id)
+                    )
+                    await s.commit()
+                    if consumed is None:
+                        return False, "данные команды недоступны, повторите операцию"
+                    out = plaintext
+                return ok, out
+            if loop.time() >= deadline:
+                if cur is not None:
+                    values = {"status": "error", "ok": False, "result": "таймаут ожидания агента"}
+                    if cur.action != "disk_fix":
+                        values["payload"] = None
+                    expired = await s.scalar(
+                        sa_update(BackupCommand).where(BackupCommand.id == cid,
+                                                       BackupCommand.status.not_in(("done", "error")))
+                        .values(**values).returning(BackupCommand.id)
+                    )
+                    await s.commit()
+                    if expired is None:
+                        continue
+                return False, "таймаут ожидания агента"
 
 
 # держим сильные ссылки на фоновые задачи оркестрации: без этого asyncio.create_task
@@ -3130,8 +3165,8 @@ async def _bcmd_wait(session_factory, cid: int, timeout: int) -> tuple[bool, str
 _setup_tasks: set = set()
 
 
-# helper бэкап-сервера возвращает пароль СУЩЕСТВУЮЩЕГО репо (панель его не знает) — в БД и в
-# UI он попасть не должен; живёт только в памяти оркестратора на время настройки клиента.
+# Helper бэкап-сервера возвращает пароль существующего репозитория. Оркестратор получает
+# его из одноразового результата, а в истории шагов оставляет только безопасный вывод.
 _SECRET_OUT_RE = re.compile(r"REPOPASS_B64=\S+")
 
 
@@ -3653,8 +3688,8 @@ async def _fetch_cacert_pem(factory, session, repo_url: str) -> str:
 async def backup_credentials(
     server_id: int, request: Request, user: AdminUser, session: SessionDep
 ) -> BackupCredsOut:
-    """Данные для восстановления (repo URL + пароль) — читаются С НОДЫ по запросу (helper
-    читает env), в БД НЕ хранятся. Это ключ дешифровки бэкапа — показываем осознанно."""
+    """Данные для восстановления (repo URL + пароль) читаются с ноды по запросу.
+    Результат передается воркеру в шифрованном виде и удаляется после прочтения."""
     server = await _get_or_404(server_id, session, user)
     factory = request.app.state.session_factory
 
@@ -3720,7 +3755,7 @@ async def backup_credentials(
 
     raise HTTPException(
         status.HTTP_400_BAD_REQUEST,
-        (out or "").strip() or "не удалось получить данные (клиент недоступен и на бэкап-сервере не нашлось; helper < 1.44?)",
+        "не удалось получить данные (клиент недоступен и на бэкап-сервере не нашлось; helper < 1.44?)",
     )
 
 
@@ -4521,9 +4556,20 @@ async def agent_backup_result(
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
     await require_agent_source(server, request, session)
-    c = await session.get(BackupCommand, body.id)
-    if c is None or c.server_id != server.id:
+    c = await session.scalar(select(BackupCommand).where(
+        BackupCommand.id == body.id, BackupCommand.server_id == server.id
+    ).with_for_update())
+    if c is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
+    if c.action in backup_command_result.PRIVATE_ACTIONS:
+        if c.status == "running":
+            await session.execute(
+                sa_update(BackupCommand).where(BackupCommand.id == c.id, BackupCommand.status == "running")
+                .values(ok=body.ok, status="done" if body.ok else "error", done_at=datetime.now(timezone.utc),
+                        result=backup_command_result.seal(c.id, body.output), payload=None)
+            )
+            await session.commit()
+        return {"ok": True}
     c.ok = body.ok
     # отказ дампа без причины (helper до 0.38) - панель дописывает, что известно; payload с
     # движком еще не стерт

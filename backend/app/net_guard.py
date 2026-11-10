@@ -118,16 +118,14 @@ async def host_class(host: str, timeout: float = 3.0) -> str:
     return cls
 
 
-def request_hook(proxy: bool = False, allow_internal: bool = True):
+def request_hook(allow_internal: bool = True):
     """event_hooks["request"] для httpx: первый запрос задает, внешний ли это адрес, каждый
-    следующий (редирект) не может уйти внутрь, если начинали снаружи. Через прокси адрес
-    резолвит прокси, и смотрим только на само имя/IP."""
+    следующий (редирект) не может уйти внутрь, если начинали снаружи. Для проверки из локации
+    учитываем DNS панели, хотя подключение и собственный DNS остаются на стороне прокси."""
     state: dict[str, str] = {}
 
     async def hook(request: httpx.Request) -> None:
-        host = request.url.host
-        # проверка "все адреса" идет на IP с заголовком Host: смотрим на IP
-        cls = address_class(host.lower().rstrip(".")) if proxy else await host_class(host, 2.0)
+        cls = await host_class(request.url.host, 2.0)
         first = state.setdefault("first", cls)
         if cls == FORBIDDEN:
             raise httpx.ConnectError(FORBIDDEN_TEXT, request=request)

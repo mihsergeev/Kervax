@@ -174,15 +174,39 @@ async def test_scope_viewer_sections_and_client_command_rejected(client, auth_he
     assert (await client.post("/api/alert-rechecks", headers=auth_headers,
                              json={"object_type": "server", "object_id": oid, "kind": "mem"})).status_code == 403
     assert (await client.get("/api/alert-rechecks", headers=auth_headers)).json() == []
+    exact = {"id": job["id"]}
+    assert (await client.get("/api/alert-rechecks", params=exact, headers=auth_headers)).json() == []
     async with factory(client)() as s:
         user = await s.scalar(select(User).where(User.username == "admin"))
         user.role, user.sections, user.server_groups = "editor", ["backups"], []
         await s.commit()
     assert (await client.post("/api/alert-rechecks", headers=auth_headers,
                              json={"object_type": "server", "object_id": oid, "kind": "mem"})).status_code == 403
+    assert (await client.get("/api/alert-rechecks", params=exact, headers=auth_headers)).json() == []
     bad = await client.post("/api/alert-rechecks", headers=auth_headers,
                             json={"object_type": "server", "object_id": oid, "kind": "mem", "command": "repair"})
     assert bad.status_code == 422
+
+
+async def test_active_job_can_be_polled_outside_recent_history(client, auth_headers):
+    oid = await server(client)
+    job = await start(client, auth_headers, oid)
+    now = datetime.now(timezone.utc)
+    async with factory(client)() as s:
+        row = await s.get(AlertRecheck, job["id"])
+        row.created_at = now - timedelta(minutes=1)
+        s.add_all(AlertRecheck(id=f"{i:032x}", object_type="server", object_id=oid, kind="disk",
+                               section="servers", requested_by="fixture", created_at=now, deadline=now,
+                               status="unavailable", done_at=now, spec={}) for i in range(500))
+        await s.commit()
+    path = "/api/alert-rechecks"
+    history = (await client.get(path, headers=auth_headers)).json()
+    assert not any(row["id"] == job["id"] for row in history)
+    params = [("id", job["id"]), ("id", "0" * 32)]
+    exact = await client.get(path, params=params, headers=auth_headers)
+    assert exact.status_code == 200, exact.text
+    assert {row["id"]: row["status"] for row in exact.json()} == {job["id"]: "checking", "0" * 32: "unavailable"}
+    assert (await client.get(path, params={"id": "invalid"}, headers=auth_headers)).status_code == 422
 
 
 async def check(client):

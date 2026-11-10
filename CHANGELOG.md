@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.123] - 2026-11-10
+
+- Serialize concurrent login attempts from the same source and accept each two-factor code once.
+- Keep bot credentials out of Telegram connection and test errors.
+- Apply monitor network permissions to location previews, proxy redirects, discovered-domain checks, and TCP or TLS port changes.
+- Deliver each Docker, Kubernetes, and backup command to one agent poll. Encrypt temporary backup credentials and clear them after use.
+- Keep the dashboard issue queue visible to users with service access. Let users retry when a recheck result is no longer available.
+- Save concurrent alert mute and snooze actions without losing other changes. Keep the mute menu attached to the selected alert.
+
 ## [1.8.122] - 2026-11-10
 
 - Apply monitor permissions to discovered domains and certificate checks. Direct HTTP, TCP and TLS probes connect to the addresses they validated.

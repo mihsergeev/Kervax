@@ -12,8 +12,9 @@ import httpx
 from sqlalchemy import func, select
 
 from app import checks as checks_exec
-from app import domain_probe
+from app import domain_probe, net_guard
 from app.models import Check, CheckIncident, DomainProbe, ProbeRequest, Server
+from tests.test_api_access import _user
 
 REPORT = {
     "hostname": "node", "os": "Ubuntu 24.04", "agent_version": "2.8",
@@ -58,6 +59,40 @@ async def _setup(client, auth_headers, monkeypatch, version="2.8"):
 
 def _by_domain(items: list[dict]) -> dict[str, dict]:
     return {i["domain"]: i for i in items}
+
+
+async def test_editor_external_discovery_blocks_private_dns_on_root_and_hint(client, auth_headers, monkeypatch):
+    editor = await _user(client, auth_headers, "discovery-editor", server_groups=["sites"])
+    async with _factory(client)() as s:
+        s.add(Server(name="sites", group_name="sites", token_hash="fake-server-hash", last_report={
+            "web_services": [{"kind": "caddy", "sites": ["inner.example", "rebinding.example"]}],
+        }))
+        await s.commit()
+
+    dns_queries = []
+    requests = []
+
+    async def resolve(host, timeout):
+        first_public = host == "rebinding.example" and host not in dns_queries
+        dns_queries.append(host)
+        return ["8.8.8.8" if first_public else "127.0.0.1"]
+
+    async def send(self, request):
+        requests.append((request.url.host, request.url.path))
+        return httpx.Response(404)
+
+    monkeypatch.setattr(net_guard, "_resolve", resolve)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", send)
+    r = await client.post("/api/checks/discovered/probe", headers=editor, json={
+        "domains": ["inner.example", "rebinding.example"],
+    })
+    assert r.status_code == 200, r.text
+    result = await client.get("/api/checks/discovered/probes", headers=editor)
+    items = _by_domain(result.json()["items"])
+    assert requests == [("8.8.8.8", "/")]
+    assert net_guard.ADMIN_ONLY_TEXT in items["inner.example"]["ext_message"]
+    assert items["rebinding.example"]["ext_code"] == 404
+    assert dns_queries.count("rebinding.example") == 1 + len(domain_probe.PATHS)
 
 
 async def test_probe_outside_and_inside(client, auth_headers, monkeypatch):

@@ -3323,20 +3323,10 @@ export interface DriveMute {
   crit?: number
   keys?: string[]
 }
-// Мьюты сервера хранятся списком, а PATCH заменяет его целиком. Два быстрых клика "не алертить" у
-// разных пунктов слали каждый свой список из устаревшего s.alert_mutes, и второй затирал первый.
-// Здесь запросы по одному серверу идут по очереди, и каждый правит свежий список с сервера
-const muteChain = new Map<number, Promise<unknown>>()
-export function muteServerKeys(id: number, add: string[], remove: string[] = []): Promise<Server> {
-  const run = (muteChain.get(id) ?? Promise.resolve())
-    .catch(() => undefined)
-    .then(async () => {
-      const cur = (await api<Server>(`/api/servers/${id}`)).alert_mutes ?? []
-      const next = [...new Set([...cur.filter((k) => !remove.includes(k)), ...add])]
-      return updateServer(id, { alert_mutes: next })
-    })
-  muteChain.set(id, run)
-  return run
+export function muteServerKeys(id: number, add: string[], remove: string[] = [], replaceSameGroup = false): Promise<Server> {
+  return api<Server>(`/api/servers/${id}/alert-mutes`, {
+    method: 'POST', body: JSON.stringify({ add, remove, replace_same_group: replaceSameGroup }),
+  })
 }
 interface BackupArchiveRef {
   backup_server_id: number

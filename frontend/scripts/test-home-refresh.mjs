@@ -95,6 +95,35 @@ async function staleRecheck() {
   console.log('PASS stale recheck result discarded and current job confirmed')
 }
 
+async function missingRecheck() {
+  const job = {
+    object_type: 'check', object_id: check.id, kind: 'status', id: '3'.repeat(32),
+    status: 'checking', message: '', created_at: '2026-01-01T10:00:00Z',
+  }
+  let exactPolls = 0
+  await fixture((route, pathname, fallback) => {
+    if (pathname !== '/api/alert-rechecks') return fallback()
+    if (route.request().method() === 'POST') return route.fulfill({ json: job })
+    const ids = new URL(route.request().url()).searchParams.getAll('id')
+    if (ids.length) {
+      assert.deepEqual(ids, [job.id])
+      exactPolls++
+    }
+    return route.fulfill({ json: [] })
+  }, async (page, queue) => {
+    const button = queue.getByRole('button', { name: 'Исправил: перепроверить', exact: true })
+    await button.click()
+    await page.locator('.home-recheck-summary').getByText('Проверяю свежие данные…', { exact: false }).waitFor()
+    await page.clock.runFor(2100)
+    await button.getByText('Не удалось проверить').waitFor()
+    assert(await button.isEnabled(), 'An inaccessible job must not block retries')
+    assert(await queue.getByText(check.name, { exact: true }).isVisible(), 'No result cannot clear the alert')
+    await page.clock.runFor(4500)
+    assert.equal(exactPolls, 1, 'The terminal unavailable job must stop polling')
+  })
+  console.log('PASS inaccessible recheck stops polling and leaves the alert visible')
+}
+
 async function overviewErrors() {
   let failing = '/api/checks/overview'
   await fixture((route, pathname, fallback) => pathname === failing
@@ -183,8 +212,73 @@ async function retireRace() {
   console.log('PASS retirement with a stale refresh, out-of-order responses and a later incident')
 }
 
+async function parallelMutes() {
+  const id = 42
+  const problems = [
+    { kind: 'docker_restarts', level: 1, text: 'Demo container restarts', mute: 'restarts:docker:demo' },
+    { kind: 'mem_leak', level: 1, text: 'Demo memory leak', mute: 'leak:proc:demo' },
+    { kind: 'disk_health', level: 1, text: 'Demo disk read errors', mute: 'disk_health' },
+    { kind: 'disk_health', level: 1, text: 'Demo disk write errors', mute: 'disk_health' },
+  ]
+  const host = { id, name: 'Demo host', online: true, last_report: {}, problems }
+  const firstStarted = Promise.withResolvers(), finishFirst = Promise.withResolvers()
+  const writes = []
+  let mutes = ['offline']
+  await fixture(async (route, pathname, fallback) => {
+    if (pathname === '/api/servers') return route.fulfill({ json: [{ ...host, alert_mutes: mutes }] })
+    if (pathname !== `/api/servers/${id}/alert-mutes` && pathname !== `/api/servers/${id}`) return fallback()
+    const body = route.request().postDataJSON()
+    writes.push(body)
+    if (writes.length === 1) {
+      firstStarted.resolve()
+      await finishFirst.promise
+    }
+    mutes = body.alert_mutes ?? [...mutes.filter((key) => !body.remove.includes(key)), ...body.add]
+    return route.fulfill({ json: { ...host, alert_mutes: mutes } })
+  }, async (page, queue) => {
+    const problem = (i) => queue.locator('.home-attention-row').filter({ hasText: problems[i].text })
+    const mute = (i) => problem(i).getByTitle('Не алертить', { exact: true })
+    await mute(0).click()
+    await firstStarted.promise
+    await mute(1).click()
+    await problem(1).waitFor({ state: 'detached' })
+    await mute(2).click()
+    assert.equal(await problem(3).getByText('постоянно', { exact: true }).count(), 0, 'One mute key may be shared by separate rows')
+    finishFirst.resolve()
+    await problem(0).waitFor({ state: 'detached' })
+    assert.equal(await problem(1).count(), 0, 'A completed mute must survive the other response')
+    assert(await problem(2).getByText('постоянно', { exact: true }).isVisible(), 'A refresh must keep the mute picker on the same problem')
+    assert.deepEqual(mutes, ['offline', problems[1].mute, problems[0].mute])
+    assert.deepEqual(writes, problems.slice(0, 2).map(({ mute }) => ({ add: [mute], remove: [], replace_same_group: false })))
+  })
+  console.log('PASS parallel mute actions preserve both keys and the open picker')
+}
+
+async function servicesScope() {
+  const problem = { kind: 'queue_stuck', level: 2, text: 'Demo queue stalled', section: 'services', sec: 'queues' }
+  const hidden = { kind: 'mem', level: 2, text: 'Server-only alert' }
+  let siteReads = 0
+  await fixture((route, pathname, fallback) => {
+    if (pathname === '/api/auth/me') return route.fulfill({ json: { ...defaults[pathname], role: 'viewer', sections: ['services'] } })
+    if (pathname === '/api/servers') {
+      return route.fulfill({ json: [{ id: 42, name: 'Demo host', online: true, last_report: {}, problems: [problem, hidden] }] })
+    }
+    if (pathname === '/api/checks/overview' || pathname === '/api/checks/local-probe-suggestions') siteReads++
+    return fallback()
+  }, async (page, queue) => {
+    await queue.getByText(problem.text, { exact: false }).waitFor()
+    assert.equal(await queue.getByText(hidden.text, { exact: false }).count(), 0)
+    const filter = page.locator('.home-queue-filter').getByText('Сервисы', { exact: true })
+    await filter.click()
+    await queue.getByRole('button', { name: /Открыть раздел/ }).click()
+    await queue.waitFor({ state: 'detached' })
+    assert.equal(siteReads, 0, 'Home must not fetch forbidden site data')
+  })
+  console.log('PASS services-only account sees its queue and opens the Services section')
+}
+
 try {
-  const results = await Promise.allSettled([staleRecheck(), overviewErrors(), retireRace()])
+  const results = await Promise.allSettled([staleRecheck(), missingRecheck(), overviewErrors(), retireRace(), parallelMutes(), servicesScope()])
   const failures = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : [])
   if (failures.length) throw new AggregateError(failures, 'Home refresh regressions')
 } finally { await browser.close() }

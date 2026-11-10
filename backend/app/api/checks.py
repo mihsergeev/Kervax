@@ -674,7 +674,8 @@ async def probe_discovered(
     await session.commit()
     if started:
         background.add_task(
-            domain_probe.run_external, request.app.state.session_factory, started, now
+            domain_probe.run_external, request.app.state.session_factory, started, now,
+            allow_internal=user.role == "admin",
         )
     labels = {s.id: s.name for s in servers}
     return DomainProbesOut(items=await domain_probe.rows_out(session, names, labels, now))
@@ -755,6 +756,7 @@ async def try_check(body: CheckTryIn, user: CurrentUser, session: SessionDep) ->
     if body.part == "expiry":
         return CheckTryOut(**await try_probe.expiry(chk))
     if body.part == "locations":
+        chk.allow_internal_target = await _target_ok(chk.type, chk.target, "", user)
         return CheckTryOut(locations=await try_probe.locations(session, chk))
     if body.method not in LOCAL_METHODS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
@@ -1403,6 +1405,7 @@ async def update_check(
     old_dns = (check.target, check.dns_type, check.dns_server)
     old_local = (check.probe_local, check.target, check.method)
     old_where = (check.type, check.target, check.dns_server)
+    old_port = check.port
     fields = body.model_dump(exclude_unset=True)
     # перенос монитора в чужую группу: алерты уходили бы ее получателям, а создавать там нельзя
     if "group_name" in fields and fields["group_name"] != check.group_name and (
@@ -1413,7 +1416,8 @@ async def update_check(
     _local_probe_ok(check, user, old_local)
     _push_defaults(check)
     _dns_defaults(check)
-    if (check.type, check.target, check.dns_server) != old_where:
+    port_changed = check.type in ("tcp_port", "cert") and check.port != old_port
+    if (check.type, check.target, check.dns_server) != old_where or port_changed:
         check.allow_internal_target = await _target_ok(check.type, check.target, check.dns_server, user)
     await _parent_check(check, session, user)
     if check.target != old_dns[0] and check.tamper_state:

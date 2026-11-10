@@ -12,7 +12,6 @@ import {
   retireListeningPort,
   snoozeServer,
   snoozeServerAlert,
-  updateServer,
   type Check,
   type LocalProbeSuggestion,
   type MuteWarning,
@@ -30,6 +29,7 @@ import { KnownDialog } from './KnownDialog'
 import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, collectMutes, isDecision, kindLabel, liftMute, muteDate, muteLiveText, muteQuiet, oomCulpritLabel, withLive, type MuteItem } from './mutes'
 import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
+import { toastError } from './toast'
 import { expiryText, registrableDomain } from './checkUtils'
 import { ExpirySnoozePick, ExpirySnoozeState, expEntry, expHidden, expiredDomainMuted, expSnoozeTip } from './ExpirySnooze'
 import { useAuth } from './auth'
@@ -612,6 +612,10 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     (sec: Section) => sections.length === 0 || sections.includes(sec),
     [sections],
   )
+  const showSites = canSee('sites')
+  const showSrv = canSee('servers')
+  const showServicesTile = !showSrv && canSee('services')
+  const showServerData = showSrv || showServicesTile || canSee('docker') || canSee('kuber') || canSee('backups')
   const sitesSource = useOverviewSource(checksOverview, onUnauthorized)
   const serversSource = useOverviewSource(listServers, onUnauthorized)
   const { data: ov, refresh: refreshSites } = sitesSource
@@ -643,11 +647,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   }, [])
 
   const load = useCallback(() => {
-    refreshSites()
-    refreshServers()
+    if (showSites) refreshSites()
+    if (showServerData) refreshServers()
     // предложения «проверять локально»: тихо, без ошибок в интерфейсе — это подсказка,
     // а не состояние системы, и её недоступность не должна ничего ломать
-    localProbeSuggestions()
+    if (showSites) localProbeSuggestions()
       .then((r) => setProbeHints(r.items))
       .catch(() => setProbeHints([]))
     // объекты, по которым не сработает ни один алерт. Доступно только админу
@@ -657,7 +661,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         .then((r) => setMutes(r.items))
         .catch(() => setMutes([]))
     else setMutes([])
-  }, [refreshSites, refreshServers, isAdmin])
+  }, [refreshSites, refreshServers, showSites, showServerData, isAdmin])
   const rechecks = useAlertRechecks(load)
   const recheckAction = (refs: RecheckRef[]) => {
     if (isViewer || !refs.length) return null
@@ -674,24 +678,18 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // быстрый мут прямо с главной: приглушить типы алертов сервера навсегда (alert_mutes).
   // Для диска warn ключ 'disk@1' — крит и проблема продолжат алертить (см. _muted).
   const quickMute = useCallback((id: number, keys: string[]) => {
-    const s = (servers ?? []).find((x) => x.id === id)
-    if (!s) return
-    const next = [...new Set([...(s.alert_mutes ?? []), ...keys])]
-    updateServer(id, { alert_mutes: next }).then(load).catch(() => {})
-  }, [servers, load])
+    muteServerKeys(id, keys).then(load).catch(toastError)
+  }, [load])
   // Заглушить до нового (on) или вернуть пункты "Требует действий": ключ пункта в alert_mutes сервера.
   // Прежние заглушки того же вида (до "@") уходят: они про то, чего на сервере уже нет
-  const muteActs = (list: ActItem[], on: boolean): Promise<unknown> => {
-    const byId = new Map((servers ?? []).map((s) => [s.id, s]))
+  const muteActs = async (list: ActItem[], on: boolean) => {
     const jobs = list.flatMap((it) => {
-      const s = it.id != null ? byId.get(it.id) : undefined
-      if (!s || !it.mute) return []
-      const at = it.mute.indexOf('@')
-      const same = (k: string) => (at < 0 ? k === it.mute : k.startsWith(it.mute!.slice(0, at + 1)))
-      const cur = (s.alert_mutes ?? []).filter((k) => (on ? !same(k) : k !== it.mute))
-      return [updateServer(s.id, { alert_mutes: on ? [...cur, it.mute] : cur })]
+      if (it.id == null || !it.mute) return []
+      return [on ? muteServerKeys(it.id, [it.mute], [], true) : muteServerKeys(it.id, [], [it.mute])]
     })
-    return Promise.allSettled(jobs).then(load)
+    const results = await Promise.allSettled(jobs)
+    for (const result of results) if (result.status === 'rejected') toastError(result.reason)
+    load()
   }
   // 🔕 с выбором срока: на час, день, неделю (снуз) или постоянно. Ключи без снуза (рост памяти,
   // перезапуски, пропавший порт - их бэкенд читает только из alert_mutes) глушатся сразу постоянно
@@ -707,7 +705,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const muteFor = (id: number, key: string, hours: number) => {
     setMutePick(null)
     if (hours < 0) return quickMute(id, [key])
-    snoozeServerAlert(id, key, hours).then(load).catch(() => {})
+    snoozeServerAlert(id, key, hours).then(load).catch(toastError)
   }
 
   useEffect(() => {
@@ -864,7 +862,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       : []),
   ]
   const dropKnown = (it: KnownRow) =>
-    (it.check ? dropCheckKnown(it.id) : dropServerKnown(it.id, it.kind)).then(load).catch(() => {})
+    (it.check ? dropCheckKnown(it.id) : dropServerKnown(it.id, it.kind)).then(load).catch(toastError)
 
   // Хосты для ansible: те, что плейбук реально чинит - устаревший helper (переустановка)
   // ИЛИ не включен watchdog (helper agent-watchdog, ALWAYS)
@@ -872,11 +870,12 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   // Блок "Обновления": строки агента и helper'ов со своими кнопками (подтверждение вторым
   // кликом в ту же точку, прогресс в строке, по успеху строка уходит сама) - FleetUpdate.tsx,
   // строка агента та же, что в баннере "Серверов". Ниже - то, что кнопкой не чинится
-  const canUpd = !isViewer && canSee('servers')
-  const showSrv = canSee('servers')
+  const canUpd = !isViewer && showSrv
   const agentRowOn = showSrv && (agentBehind(srvList, avail).some((s) => s.online) || !!fleetRun.agent)
   const helperRowOn = showSrv && (rolloutHosts.length > 0 || !!fleetRun.helpers)
   const updN = fleet.length + (agentRowOn ? 1 : 0) + (helperRowOn ? 1 : 0)
+  // У нескольких строк одного сервера может быть общий ключ заглушки, например disk_health.
+  const mutePickerKey = (it: Broken) => JSON.stringify([it.id, it.kind, it.mute, it.sec, it.text])
   // строка "Что сломано"; sub - внутри раскрытой группы: сервер и подробности без шапки
   const brokenRow = (it: Broken, sub = false) => (
     <div role="button" tabIndex={0}
@@ -914,7 +913,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           📌
         </span>
       )}
-      {it.mute && !isViewer && mutePick === it.key && (
+      {it.mute && !isViewer && mutePick === mutePickerKey(it) && (
         <span className="home-mute-pick" onClick={(e) => e.stopPropagation()}>
           <span className="muted">{oomMuteText(it.mute) ? `${oomMuteText(it.mute)}:` : t('не алертить:')}</span>
           {[
@@ -930,12 +929,12 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           <span className="home-mute-opt muted" role="button" onClick={() => setMutePick(null)}>✕</span>
         </span>
       )}
-      {it.mute && !isViewer && mutePick !== it.key && (
+      {it.mute && !isViewer && mutePick !== mutePickerKey(it) && (
         // OOM глушится по виновнику: в подсказке, по какому именно (он же в тексте строки)
         <span className="quick-mute" title={oomMuteText(it.mute) ?? t('Не алертить')}
           onClick={(e) => {
             e.stopPropagation()
-            if (snoozable(it.mute!)) setMutePick(it.key)
+            if (snoozable(it.mute!)) setMutePick(mutePickerKey(it))
             else quickMute(it.id, [it.mute!])
           }}>
           🔕
@@ -1150,8 +1149,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   ].filter(Boolean).join(' · ')
   const tiles: { area: TallyTile; label: string; icon: ReactNode; summary: string; title?: string }[] = [
     { area: 'sites', label: t('Сайты'), icon: <IconSites />, summary: siteSummary, title: siteDetails },
-    { area: 'servers', label: t('Серверы'), icon: <IconServers />,
-      summary: servers ? t('онлайн {n} из {total}', { n: srvOnline, total: srvTotal }) : loadingText },
+    { area: 'servers', label: t(showServicesTile ? 'Сервисы' : 'Серверы'), icon: <IconServers />,
+      summary: servers ? showServicesTile ? '' : t('онлайн {n} из {total}', { n: srvOnline, total: srvTotal }) : loadingText },
     { area: 'docker', label: 'Docker', icon: <IconDocker />,
       summary: servers ? t('запущено: {n}', { n: dockerRunning }) : loadingText },
     { area: 'kuber', label: 'Kubernetes', icon: <IconKube />,
@@ -1160,7 +1159,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       summary: servers ? t('под бэкапом: {n}', { n: backupClients.length }) : loadingText,
       title: servers ? t('серверов бэкапа: {n}', { n: backupServers.length }) : undefined },
   ]
-  const areas = tiles.filter(({ area }) => canSee(area))
+  const areas = tiles.filter(({ area }) => canSee(area) || (area === 'servers' && showServicesTile))
   const sourceFor = (area: TallyTile) => area === 'sites' ? sitesSource : serversSource
   const queueSources = [...new Set(areas.filter(({ area }) => !queueArea || queueArea === area)
     .map(({ area }) => sourceFor(area)))]
@@ -1222,7 +1221,10 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
               {queueArea ? (
                 <div className="home-queue-actions">
                   <button type="button" className="ghost small" onClick={() => selectArea(null)}>{t('Все разделы')}</button>
-                  <button type="button" className="ghost small" onClick={() => onNavigate(queueArea)}>{t('Открыть раздел')} →</button>
+                  <button type="button" className="ghost small"
+                    onClick={() => onNavigate(queueArea === 'servers' && showServicesTile ? 'services' : queueArea)}>
+                    {t('Открыть раздел')} →
+                  </button>
                 </div>
               ) : visibleRows.length > 0 && <span className="muted small">{t('Сначала критичные')}</span>}
             </div>

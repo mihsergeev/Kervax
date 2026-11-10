@@ -46,7 +46,7 @@ export function useAlertRechecks(onChanged: () => void) {
   const change = useRef(onChanged)
   change.current = onChanged
   const previous = useRef<Record<string, RecheckJob>>({})
-  const accept = useCallback((rows: RecheckJob[], fromPoll = false) => {
+  const accept = useCallback((rows: RecheckJob[], fromPoll = false, tracked: RecheckJob[] = []) => {
     if (!alive.current) return false
     const next = { ...previous.current }
     let completed = false
@@ -69,6 +69,15 @@ export function useAlertRechecks(onChanged: () => void) {
       }
       next[key] = r
     }
+    const received = new Set(rows.map((r) => r.id))
+    for (const job of tracked) {
+      const key = recheckKey(job)
+      const current = next[key]
+      if (current?.id === job.id && current.status === 'checking' && !received.has(job.id)) {
+        next[key] = { ...job, status: 'unavailable', message: 'Результат проверки недоступен. Запустите ее снова.' }
+        completed = true
+      }
+    }
     previous.current = next
     setJobs(next)
     return completed
@@ -77,17 +86,22 @@ export function useAlertRechecks(onChanged: () => void) {
     alive.current = true
     let active = true
     let timer: ReturnType<typeof setTimeout> | undefined
-    const poll = () => api<RecheckJob[]>('/api/alert-rechecks').then((rows) => {
-      if (!active) return
-      setErr('')
-      if (accept(rows, true)) change.current()
-    }).catch(() => {
-      if (active && Object.values(previous.current).some((x) => x.status === 'checking')) {
-        setErr('Не удалось получить результат проверки. Повторяем запрос; алерт не скрыт.')
-      }
-    }).finally(() => {
-      if (active && Object.values(previous.current).some((x) => x.status === 'checking')) timer = setTimeout(poll, 2000)
-    })
+    const poll = () => {
+      const tracked = Object.values(previous.current).filter((job) => job.id && job.status === 'checking').slice(0, 100)
+      const ids = new URLSearchParams(tracked.map((job) => ['id', job.id]))
+      const path = tracked.length ? `/api/alert-rechecks?${ids}` : '/api/alert-rechecks'
+      return api<RecheckJob[]>(path).then((rows) => {
+        if (!active) return
+        setErr('')
+        if (accept(rows, true, tracked)) change.current()
+      }).catch(() => {
+        if (active && Object.values(previous.current).some((x) => x.status === 'checking')) {
+          setErr('Не удалось получить результат проверки. Повторяем запрос; алерт не скрыт.')
+        }
+      }).finally(() => {
+        if (active && Object.values(previous.current).some((x) => x.status === 'checking')) timer = setTimeout(poll, 2000)
+      })
+    }
     poll()
     return () => { active = false; alive.current = false; clearTimeout(timer) }
   }, [accept, watch])

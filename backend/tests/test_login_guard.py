@@ -1,6 +1,7 @@
 """Защита входа: блокировка адреса на срок, повторная на сутки, белый список, один алерт на
 волну подбора и раздел "Защита входа" в окне Пользователи."""
 
+import asyncio
 import time
 
 import httpx
@@ -62,6 +63,35 @@ async def test_blocked_login_says_when_and_is_not_logged_per_attempt(client: htt
     g = (await client.get("/api/login-guard", headers=auth_headers)).json()
     assert [(b["key"], b["failures"], b["blocked"], b["logins"]) for b in g["bans"]] == [("203.0.113.50", 5, 3, "admin")]
     assert g["recent"][0]["key"] == "203.0.113.50" and g["recent"][0]["banned_until"]
+
+
+async def test_parallel_login_does_not_bypass_failure_limit(client, monkeypatch):
+    from app.api import auth
+
+    ip = _from("203.0.113.51")
+    for _ in range(ratelimit.MAX_FAILURES - 1):
+        assert (await client.post("/api/auth/login", json=BAD, headers=ip)).status_code == 401
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    original = auth._record_failure
+
+    async def pause_failure(*args):
+        started.set()
+        await release.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(auth, "_record_failure", pause_failure)
+    first = asyncio.create_task(client.post("/api/auth/login", json=BAD, headers=ip))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        parallel = await asyncio.wait_for(client.post("/api/auth/login", json=GOOD, headers=ip), timeout=5)
+        assert parallel.status_code == 429
+    finally:
+        release.set()
+        assert (await first).status_code == 401
+    banned = await client.post("/api/auth/login", json=GOOD, headers=ip)
+    assert banned.status_code == 429 and banned.json()["detail"] == "locked:60"
 
 
 async def test_allowlisted_address_is_never_blocked(client: httpx.AsyncClient, auth_headers):

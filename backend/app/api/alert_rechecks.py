@@ -1,9 +1,9 @@
 """Fresh verification only: neither repairs nor dismissals."""
 from datetime import datetime, timedelta, timezone
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
@@ -123,11 +123,17 @@ async def start(body: RecheckIn, user: CurrentUser, session: SessionDep, request
 
 
 @router.get("")
-async def latest(user: CurrentUser, session: SessionDep, request: Request, background: BackgroundTasks) -> list[dict]:
+async def latest(user: CurrentUser, session: SessionDep, request: Request, background: BackgroundTasks,
+                 job_ids: Annotated[list[Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]] | None,
+                                    Query(alias="id", max_length=100)] = None) -> list[dict]:
     now = datetime.now(timezone.utc)
-    rows = list(await session.scalars(select(AlertRecheck).where(
-        AlertRecheck.created_at >= now - timedelta(days=1),
-    ).order_by(AlertRecheck.created_at.desc()).limit(500)))
+    query = select(AlertRecheck)
+    if job_ids is not None:
+        query = query.where(AlertRecheck.id.in_(job_ids))
+    else:
+        query = query.where(AlertRecheck.created_at >= now - timedelta(days=1)).order_by(
+            AlertRecheck.created_at.desc()).limit(500)
+    rows = list(await session.scalars(query))
     objects = {}
     for typ, model in (("check", Check), ("server", Server)):
         ids = {j.object_id for j in rows if j.object_type == typ}
@@ -138,7 +144,7 @@ async def latest(user: CurrentUser, session: SessionDep, request: Request, backg
     out, seen = [], set()
     for job in rows:
         key = (job.object_type, job.object_id, job.kind)
-        if key in seen:
+        if job_ids is None and key in seen:
             continue
         seen.add(key)
         obj = objects.get((job.object_type, job.object_id))

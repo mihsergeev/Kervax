@@ -1,6 +1,7 @@
 """Кнопки под алертами в Telegram и команды бота."""
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -434,6 +435,29 @@ async def test_link_confirm_while_bot_polls(client, auth_headers, tg):
         await s.commit()
     r = await client.post("/api/auth/telegram/confirm", headers=auth_headers)
     assert r.status_code == 200 and r.json()["chat_id"] == "31337"
+
+
+async def test_telegram_confirm_hides_shared_bot_token(client, auth_headers, monkeypatch):
+    factory = _factory(client)
+    token = "example-shared-bot"
+    async with factory() as session:
+        await settings_store.set_alert_config(session, token, "-100", "", "", 6)
+        user = await session.scalar(select(User).where(User.username == "admin"))
+        user.role = "viewer"
+        user.tg_link_code = tg_bot.link_code_store("ABCDEF", datetime.now(timezone.utc))
+        await session.commit()
+
+    def upstream_error(request):
+        assert token in request.url.path
+        return httpx.Response(502)
+
+    async_client = httpx.AsyncClient
+    transport = httpx.MockTransport(upstream_error)
+    monkeypatch.setattr("app.api.auth.httpx.AsyncClient", lambda **kwargs: async_client(transport=transport, **kwargs))
+    response = await client.post("/api/auth/telegram/confirm", headers=auth_headers)
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Не удалось опросить бота"
+    assert token not in response.text
 
 
 # --- эскалация -------------------------------------------------------------------------------

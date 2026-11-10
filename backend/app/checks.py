@@ -1029,7 +1029,7 @@ async def _run_http(
         async with httpx.AsyncClient(
             timeout=timeout, follow_redirects=True, proxy=proxy,
             headers=headers, auth=auth, verify=verify, transport=transport, trust_env=False,
-            event_hooks={"request": [net_guard.request_hook(proxy=True, allow_internal=allow_internal)]} if proxy else None,
+            event_hooks={"request": [net_guard.request_hook(allow_internal=allow_internal)]} if proxy else None,
         ) as client:
             resp = await client.request(method, u, extensions=extensions or {})
             text = resp.text[:_MAX_BODY] if (check.keyword_up or check.keyword_down) else ""
