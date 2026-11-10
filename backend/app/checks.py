@@ -1249,8 +1249,10 @@ async def _run_dns(check) -> CheckOutcome:
     name = (check.target or "").strip()
     server = (getattr(check, "dns_server", "") or "").strip()
     timeout = max(check.timeout_ms, 1000) / 1000.0
-    if server and net_guard.ip_class(server) == net_guard.FORBIDDEN:
-        return CheckOutcome("down", message=net_guard.FORBIDDEN_TEXT)
+    if server:
+        blocked = net_guard.block_reason(net_guard.ip_class(server), _allows_internal(check))
+        if blocked:
+            return CheckOutcome("down", message=blocked)
     res = dns.asyncresolver.Resolver(configure=not server)
     if server:
         res.nameservers = [server]

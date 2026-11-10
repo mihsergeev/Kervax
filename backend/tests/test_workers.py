@@ -49,6 +49,8 @@ def test_what_is_trouble():
     # BACKOFF - переходное: три минуты ждем
     assert wk.trouble(d, _prog("a", "BACKOFF", since=TS - 60)) is None
     assert wk.trouble(d, _prog("a", "BACKOFF", since=TS - 200))[0] == 2
+    assert wk.trouble(d, _prog("a", "BACKOFF", since=0)) is None
+    assert wk._state(d, _prog("a", "BACKOFF", since=TS - 60, r15=4)) == "loop"
     # одноразовая отработала с нулем - норма, с ошибкой - предупреждение
     assert wk.trouble(d, _prog("a", "EXITED", exit=0)) is None
     assert wk.trouble(d, _prog("a", "EXITED", exit=3)) == (1, "завершился с кодом 3 и не перезапускается")
@@ -88,6 +90,31 @@ def test_problems_text_mute_and_home():
 def test_stale_block_is_not_judged():
     s = _srv(_rep([_prog("mailer", "FATAL")], ts=TS - 3600))
     assert wk.problems(s, NOW) == [] and wk.view(s, NOW) is None
+
+
+@pytest.mark.parametrize("bad", [
+    {"since": 10**20}, {"r15": {"value": 3}}, {"p60": "broken"}, {"state": None},
+])
+def test_malformed_worker_keeps_other_observations_but_cannot_confirm_recovery(bad):
+    rep = _rep([_prog("broken") | bad, _prog("healthy")], pm2=[_prog("api", "errored")])
+    s = _srv(rep, held=False)
+    assert [x["name"] for x in wk.problems(s, NOW)] == ["api"]
+    assert [x["name"] for x in wk.view(s, NOW)[0]["progs"]] == ["healthy"]
+    level, ctx = collector._server_conditions(s, NOW)["workers"]
+    assert level == 2 and not ctx["_complete"]
+    rep["extras"]["workers"]["daemons"].pop()
+    level, ctx = collector._server_conditions(s, NOW)["workers"]
+    assert level == 0 and not ctx["_complete"]
+
+
+def test_malformed_worker_daemon_is_partial_and_invalid_timestamp_is_unusable():
+    rep = _rep(pm2=37)
+    s = _srv(rep, held=False)
+    assert wk.view(s, NOW)[0]["progs"][0]["name"] == "queue-listen"
+    assert not collector._server_conditions(s, NOW)["workers"][1]["_complete"]
+    rep["extras"]["workers"]["ts"] = {"value": TS}
+    assert wk.view(s, NOW) is None
+    assert "workers" not in collector._server_conditions(s, NOW)
 
 
 def test_skipped_in_words():

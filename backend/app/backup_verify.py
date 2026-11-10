@@ -51,12 +51,15 @@ def problems(rep: dict, now: datetime) -> list[tuple[int, str]]:
         n = len(bad)
         out.append((2, f"проверка восстановления: {n} {_plural(n, 'файл', 'файла', 'файлов')} из снапшота "
                        f"{'не совпал' if _plural(n, 1, 2, 2) == 1 else 'не совпали'} с диском ({', '.join(bad[:3])})"))
-    for d in b.get("dumps") or []:
-        if isinstance(d, dict) and d.get("ok") is False:
+    dumps = [d for d in b.get("dumps") or [] if isinstance(d, dict)]
+    for d in dumps:
+        if d.get("ok") is False:
             out.append((2, f"дамп {d.get('engine') or '?'} из снапшота не читается ({d.get('file') or '?'})"))
     err = str(b.get("err") or "").strip()
     if err:
         out.append((1, f"проверка восстановления не выполнилась: {err[:160]}"))
+    if not out and not files.get("ok") and not any(d.get("ok") is True for d in dumps):
+        out.append((1, "проверка восстановления не нашла файлов и дампов для проверки"))
     ts = _ts(b)
     if ts is not None and now - ts > STALE:
         days = (now - ts).days

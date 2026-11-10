@@ -156,26 +156,40 @@ async def reset_password(
     await audit.record(session, admin.username, "user_reset_pw", user.username)
 
 
+async def _lock_admin_roles(session: SessionDep, admin: User) -> set[int]:
+    """Serialize role changes and deletions before counting the remaining admins."""
+    admins = User.role == "admin"
+    if session.get_bind().dialect.name == "postgresql":
+        await session.execute(select(func.pg_advisory_xact_lock(func.hashtextextended("kervax/admin_roles", 0))))
+    else:
+        # Acquire the SQLite write lock before reading the current roles.
+        await session.execute(
+            update(User).where(admins).values(role=User.role).execution_options(synchronize_session=False)
+        )
+    rows = await session.execute(select(User.id, User.username, User.token_version).where(admins))
+    identities = {uid: (username, version) for uid, username, version in rows}
+    if identities.get(admin.id) != (admin.username, admin.token_version):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Требуются права администратора")
+    return set(identities)
+
+
 @router.patch("/{user_id}", response_model=UserListItem)
 async def update_user(
     user_id: int, body: UserUpdate, admin: AdminUser, session: SessionDep
 ) -> User:
     """Правка роли и границ доступа. Пароль меняется отдельным маршрутом."""
-    user = await session.get(User, user_id)
+    admin_ids = await _lock_admin_roles(session, admin) if body.role is not None else set()
+    user = await session.get(User, user_id, populate_existing=body.role is not None)
     if user is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Учётка не найдена")
     if body.role is not None and body.role != user.role:
         # Разжаловать последнего админа нельзя ровно по той же причине, что и удалить:
         # панель осталась бы без управления, и вернуть права было бы уже некому.
-        if user.role == "admin":
-            admins = await session.scalar(
-                select(func.count()).select_from(User).where(User.role == "admin")
+        if user.id in admin_ids and len(admin_ids) == 1:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Нельзя снять роль с последнего администратора",
             )
-            if (admins or 0) <= 1:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    "Нельзя снять роль с последнего администратора",
-                )
         user.role = body.role
     if body.sections is not None:
         user.sections = body.sections
@@ -219,15 +233,9 @@ async def delete_user(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Учётка не найдена")
     if user.id == admin.id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Нельзя удалить свою учётку")
-    # нельзя удалить последнего админа — иначе панель останется без управления
     if user.role == "admin":
-        admin_count = await session.scalar(
-            select(func.count()).select_from(User).where(User.role == "admin")
-        )
-        if (admin_count or 0) <= 1:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, "Нельзя удалить последнего администратора"
-            )
+        # The acting admin cannot be demoted while this request deletes another admin.
+        await _lock_admin_roles(session, admin)
     name = user.username
     if not await auth_generations.retire(session, user):
         await session.rollback()

@@ -1,6 +1,9 @@
 """Учётка «наблюдатель» (viewer): вход есть, любые изменения запрещены."""
 
+import asyncio
+
 import httpx
+import pytest
 
 
 async def _mk_viewer(
@@ -108,6 +111,76 @@ async def test_users_crud(client, auth_headers):
     ).status_code == 204
 
 
+@pytest.mark.parametrize("second_action", ["demote", "delete"])
+async def test_concurrent_user_changes_keep_an_admin(client, auth_headers, monkeypatch, second_action):
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.models import User
+
+    users = await client.get("/api/users", headers=auth_headers)
+    first_id = next(u["id"] for u in users.json() if u["username"] == "admin")
+    second_user = {"username": "second-admin", "password": "fakepass-example"}
+    created = await client.post("/api/users", headers=auth_headers, json={**second_user, "role": "admin"})
+    assert created.status_code == 201, created.text
+    second_id = created.json()["id"]
+    login = await client.post("/api/auth/login", json=second_user)
+    assert login.status_code == 200, login.text
+    second_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+    commit = AsyncSession.commit
+    ready = asyncio.Event()
+    resume = asyncio.Event()
+
+    async def pause_demotion(session):
+        if any(isinstance(u, User) and u.id == first_id and u.role == "editor" for u in session.dirty):
+            ready.set()
+            await asyncio.wait_for(resume.wait(), 5)
+        await commit(session)
+
+    monkeypatch.setattr(AsyncSession, "commit", pause_demotion)
+    first = asyncio.create_task(client.patch(f"/api/users/{first_id}", headers=auth_headers, json={"role": "editor"}))
+    second = None
+    try:
+        await asyncio.wait_for(ready.wait(), 5)
+        url = f"/api/users/{second_id}"
+        second = asyncio.create_task(
+            client.patch(url, headers=second_headers, json={"role": "editor"}) if second_action == "demote"
+            else client.delete(url, headers=auth_headers)
+        )
+        # The first change is staged. The second can only commit first if it bypasses the lock.
+        await asyncio.wait({second}, timeout=0.5)
+    finally:
+        resume.set()
+        first_result = await first
+        if second is not None:
+            second_result = await second
+    assert first_result.status_code == 200, first_result.text
+    assert second_result.status_code == (400 if second_action == "demote" else 403), second_result.text
+    async with client._transport.app.state.session_factory() as session:
+        assert list(await session.scalars(select(User.id).where(User.role == "admin"))) == [second_id]
+
+
+async def test_concurrent_promotion_prevents_stale_account_deletion(client, auth_headers, monkeypatch):
+    from app import auth_generations
+
+    await _mk_viewer(client, auth_headers)
+    users = await client.get("/api/users", headers=auth_headers)
+    viewer_id = next(u["id"] for u in users.json() if u["role"] == "viewer")
+    url = f"/api/users/{viewer_id}"
+    retire = auth_generations.retire
+
+    async def promote_first(session, user):
+        result = await client.patch(url, headers=auth_headers, json={"role": "admin"})
+        assert result.status_code == 200, result.text
+        return await retire(session, user)
+
+    monkeypatch.setattr(auth_generations, "retire", promote_first)
+    result = await client.delete(url, headers=auth_headers)
+    assert result.status_code == 404, result.text
+    users = await client.get("/api/users", headers=auth_headers)
+    assert any(u["id"] == viewer_id and u["role"] == "admin" for u in users.json())
+
+
 async def test_short_password_rejected(client: httpx.AsyncClient, auth_headers):
     """Пароль короче минимума не проходит НИ на одном маршруте.
 
@@ -154,8 +227,6 @@ async def test_short_password_rejected(client: httpx.AsyncClient, auth_headers):
 async def test_first_admin_needs_a_long_password(tmp_path):
     """Стартовый пароль из .env проверить больше негде: через API этот
     аккаунт уже не заводится, а на первом старте он становится настоящим."""
-    import pytest
-
     from app.bootstrap import ensure_admin
     from app.config import Settings
     from app.db import Base, create_engine_and_factory

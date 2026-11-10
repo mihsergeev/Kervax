@@ -151,6 +151,39 @@ const fmtEvery = (s?: number) => fmtDur(s).replace(/ 0\D+$/, '')
 const upTone = (u: number | null | undefined): Tone | undefined =>
   u == null ? undefined : u >= 99 ? 'ok' : u >= 95 ? 'warn' : 'bad'
 
+// Один запрос за раз. При смене фильтра/окна старый ответ уже не относится к экрану.
+function pollCurrent<T>(
+  read: (signal: AbortSignal) => Promise<T>,
+  apply: (value: T) => void,
+  fail: (error: unknown) => void,
+  interval?: number,
+) {
+  let stopped = false
+  let active: AbortController | null = null
+  const run = async () => {
+    if (stopped || active) return
+    const request = new AbortController()
+    active = request
+    const timeout = window.setTimeout(() => request.abort(new DOMException('Request timed out', 'TimeoutError')), 20_000)
+    try {
+      const result = await read(request.signal)
+      if (!stopped) apply(result)
+    } catch (e) {
+      if (!stopped) fail(e)
+    } finally {
+      window.clearTimeout(timeout)
+      active = null
+    }
+  }
+  void run()
+  const timer = interval ? window.setInterval(run, interval) : undefined
+  return () => {
+    stopped = true
+    active?.abort()
+    window.clearInterval(timer)
+  }
+}
+
 export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun, onDelete, onUnauthorized }: Props) {
   const { t } = useI18n()
   const { isViewer } = useAuth()
@@ -159,7 +192,9 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
   const [points, setPoints] = useState<CheckSample[] | null>(null)
   const [incidents, setIncidents] = useState<Incident[]>([])
   const [locs, setLocs] = useState<LocationResult[]>([])
-  const [logRows, setLogRows] = useState<CheckSample[]>([])
+  const [logRows, setLogRows] = useState<CheckSample[] | null>(null)
+  const [logError, setLogError] = useState<string | null>(null)
+  const [historyError, setHistoryError] = useState<string | null>(null)
   // сбои показывают инциденты, журнал по умолчанию - все проверки
   const [logFailed, setLogFailed] = useState(false)
   // Старое разворачивают руками. Открытая карточка показывает выбранное окно —
@@ -248,10 +283,10 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     }
   }
 
-  const fail = useCallback(
-    (e: unknown) => {
+  const readError = useCallback(
+    (e: unknown, show: (message: string) => void) => {
       if (e instanceof ApiError && e.status === 401) return onUnauthorized()
-      setErr(e instanceof Error ? e.message : t('Ошибка'))
+      show(e instanceof Error ? e.message : t('Ошибка'))
     },
     [onUnauthorized, t],
   )
@@ -305,6 +340,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
         if (stop) return
         if (r.run_pending == null) return runCb.current.finishRun(r)
       } catch (e) {
+        if (stop) return
         if (e instanceof ApiError && e.status === 401) return runCb.current.onUnauthorized()
         // сеть моргнула — спрашиваем дальше, срок ожидания считает панель
       }
@@ -327,14 +363,16 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
   // статусы/аптайм/инциденты/локации — с автообновлением (пока не редактируем)
   useEffect(() => {
     if (editing) return
+    let stopped = false
+    const fail = (e: unknown) => { if (!stopped) readError(e, setErr) }
     const run = () => {
       // красная ошибка прошлого опроса уходит, как только API снова ответил
-      checkUptime(check.id).then((v) => { setUptime(v); setErr(null) }).catch(fail)
-      listIncidents(50, check.id).then(setIncidents).catch(fail)
-      checkLog(check.id, logFailed, 100).then(setLogRows).catch(fail)
+      checkUptime(check.id).then((v) => { if (!stopped) { setUptime(v); setErr(null) } }).catch(fail)
+      listIncidents(50, check.id).then((rows) => { if (!stopped) setIncidents(rows) }).catch(fail)
       if (check.check_locations)
         checkLocations(check.id)
           .then((rows) => {
+            if (stopped) return
             setLocs(rows)
             setSelectedLoc((cur) =>
               cur ?? rows.find((r) => r.direct)?.location_id ?? rows[0]?.location_id ?? null,
@@ -344,8 +382,26 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     }
     run()
     const id = window.setInterval(run, 12000)
-    return () => window.clearInterval(id)
-  }, [check.id, check.check_locations, editing, logFailed, fail, refresh])
+    return () => { stopped = true; window.clearInterval(id) }
+  }, [check.id, check.check_locations, editing, readError, refresh])
+
+  useEffect(() => {
+    if (editing) return
+    return pollCurrent(
+      (signal) => checkLog(check.id, logFailed, 100, signal),
+      (rows) => { setLogRows(rows); setLogError(null) },
+      (e) => readError(e, setLogError),
+      12000,
+    )
+  }, [check.id, editing, logFailed, readError, refresh])
+
+  const changeLogFilter = (failed: boolean) => {
+    if (failed === logFailed) return
+    setLogRows(null)
+    setLogError(null)
+    setOldLog(false)
+    setLogFailed(failed)
+  }
 
   useEffect(() => {
     setOldInc(false)
@@ -362,35 +418,30 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
   )
   const incHidden = incidents.length - incFresh.length
   const incShown = oldInc ? incidents : incFresh
-  const logFresh = logRows.filter((r) => new Date(r.ts).getTime() >= cutoff)
-  const logHidden = logRows.length - logFresh.length
-  const logShown = oldLog ? logRows : logFresh
+  const logFresh = (logRows ?? []).filter((r) => new Date(r.ts).getTime() >= cutoff)
+  const logHidden = (logRows?.length ?? 0) - logFresh.length
+  const logShown = oldLog ? (logRows ?? []) : logFresh
 
   // выбранная локация: если она прямая — бэкенд отдаст основную серию
   const selLoc = locs.find((l) => l.location_id === selectedLoc)
   const selDirect = selLoc?.direct ?? true
   const selName = selLoc?.name
+  const locationId = selectedIp || selDirect ? undefined : selectedLoc ?? undefined
 
   useEffect(() => {
     setPoints(null) // сброс только при смене окна/локации/IP — на автообновлении без мигания
-    const run = () =>
-      checkHistory(
-        check.id,
-        hours,
-        selectedIp ? undefined : selDirect ? undefined : selectedLoc ?? undefined,
-        undefined,
-        selectedIp ?? undefined,
-      )
-        .then((h) => {
-          setPoints(h.points)
-          setStep(h.step_seconds ?? 0)
-        })
-        .catch(fail)
-    run()
-    if (editing) return
-    const id = window.setInterval(run, 12000)
-    return () => window.clearInterval(id)
-  }, [check.id, hours, selectedLoc, selDirect, selectedIp, editing, fail, refresh])
+    setHistoryError(null)
+    return pollCurrent(
+      (signal) => checkHistory(check.id, hours, locationId, undefined, selectedIp ?? undefined, signal),
+      (h) => {
+        setPoints(h.points)
+        setStep(h.step_seconds ?? 0)
+        setHistoryError(null)
+      },
+      (e) => readError(e, setHistoryError),
+      editing ? undefined : 12000,
+    )
+  }, [check.id, hours, locationId, selectedIp, editing, readError, refresh])
 
   const isCert = check.type === 'cert'
   const chartTs = (points ?? []).map((p) => new Date(p.ts).getTime())
@@ -565,6 +616,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
   const statusBar = (
     <>
       <div className="chart-cap">{t('Доступность за {w}', { w: winLabel })}</div>
+      {historyError && cur.id !== 'rt' && <p className="form-error" role="alert">{historyError}</p>}
       <StatusBar segments={segments} />
     </>
   )
@@ -574,7 +626,8 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
         <span>{chartCap}</span>
         <span className="chart-expand" title={t('Открыть на весь экран')}>⤢</span>
       </button>
-      {points == null ? (
+      {historyError && <p className="form-error" role="alert">{historyError}</p>}
+      {points == null ? !historyError && (
         <div className="chart-empty">{t('загрузка…')}</div>
       ) : chartTs.length ? (
         <StackedAreaChart
@@ -1005,18 +1058,21 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                 <div className="win-switch log-switch">
                   <button
                     className={`win-btn${!logFailed ? ' win-btn-active' : ''}`}
-                    onClick={() => setLogFailed(false)}
+                    onClick={() => changeLogFilter(false)}
                   >
                     {t('Все')}
                   </button>
                   <button
                     className={`win-btn${logFailed ? ' win-btn-active' : ''}`}
-                    onClick={() => setLogFailed(true)}
+                    onClick={() => changeLogFilter(true)}
                   >
                     {t('Только сбои')}
                   </button>
                 </div>
-                {logRows.length === 0 ? (
+                {logError && <p className="form-error" role="alert">{logError}</p>}
+                {logRows == null ? !logError && (
+                  <div className="srv-empty">{t('загрузка…')}</div>
+                ) : logRows.length === 0 ? (
                   <div className="srv-empty">
                     {logFailed ? t('Сбоев не было.') : t('Пока пусто.')}
                   </div>
@@ -1076,7 +1132,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
                         await snoozeCheck(check.id, hours)
                         onSaved?.()
                       } catch (e) {
-                        fail(e)
+                        readError(e, setErr)
                       } finally {
                         setSnoozing(false)
                       }
@@ -1178,8 +1234,11 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
       <CheckChartModal
         check={check}
         isCert={isCert}
-        locationId={selDirect ? undefined : selectedLoc ?? undefined}
+        initialHours={hours}
+        locationId={locationId}
         locName={selName}
+        ip={selectedIp ?? undefined}
+        onError={readError}
         onClose={() => setZoomOpen(false)}
       />
     )}
@@ -1190,35 +1249,42 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
 function CheckChartModal({
   check,
   isCert,
+  initialHours,
   locationId,
   locName,
+  ip,
+  onError,
   onClose,
 }: {
   check: Check
   isCert: boolean
+  initialHours: number
   locationId?: number
   locName?: string
+  ip?: string
+  onError: (e: unknown, show: (message: string) => void) => void
   onClose: () => void
 }) {
   const { t } = useI18n()
-  const [hours, setHours] = useState(24)
+  const [hours, setHours] = useState(initialHours)
   const [zoom, setZoom] = useState<{ from: number; to: number } | null>(null)
   const [points, setPoints] = useState<CheckSample[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [retry, setRetry] = useState(0)
 
   useEffect(() => {
     setPoints(null)
-    const run = () =>
-      checkHistory(check.id, hours, locationId, zoom ?? undefined)
-        .then((h) => setPoints(h.points))
-        .catch(() => {})
-    run()
-    if (zoom) return
-    const id = window.setInterval(run, 15000)
-    return () => window.clearInterval(id)
-  }, [check.id, hours, locationId, zoom])
+    setError(null)
+    return pollCurrent(
+      (signal) => checkHistory(check.id, hours, locationId, zoom ?? undefined, ip, signal),
+      (h) => { setPoints(h.points); setError(null) },
+      (e) => onError(e, setError),
+      zoom ? undefined : 15000,
+    )
+  }, [check.id, hours, locationId, zoom, ip, retry, onError])
 
   const ts = (points ?? []).map((p) => new Date(p.ts).getTime())
-  const phased = !isCert && !locationId ? phaseSeries(points, t) : null
+  const phased = !isCert && !locationId && !ip ? phaseSeries(points, t) : null
   const series = phased ?? [
     {
       name: isCert ? t('дн.') : t('мс'),
@@ -1235,9 +1301,11 @@ function CheckChartModal({
           new Date(ms).toLocaleDateString([], { day: '2-digit', month: '2-digit' })
   const title = isCert
     ? t('Осталось дней сертификата')
-    : locName
-      ? t('Время ответа · {loc}', { loc: locName })
-      : t('Время ответа')
+    : ip
+      ? t('Время ответа · IP {ip}', { ip })
+      : locName
+        ? t('Время ответа · {loc}', { loc: locName })
+        : t('Время ответа')
 
   return (
     <div className="modal-backdrop chart-full-backdrop">
@@ -1281,7 +1349,13 @@ function CheckChartModal({
             <span className="muted small">{t('Выделите участок мышью, чтобы приблизить')}</span>
           )}
         </div>
-        {points == null ? (
+        {error && (
+          <div>
+            <p className="form-error" role="alert">{error}</p>
+            <button className="ghost" onClick={() => setRetry((n) => n + 1)}>{t('Повторить запрос')}</button>
+          </div>
+        )}
+        {points == null ? !error && (
           <div className="chart-empty">{t('загрузка…')}</div>
         ) : ts.length ? (
           <>

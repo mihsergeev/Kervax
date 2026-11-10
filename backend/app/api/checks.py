@@ -8,7 +8,7 @@ import secrets
 from types import SimpleNamespace
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
-from sqlalchemy import case, delete as sa_delete, func, select, true
+from sqlalchemy import case, delete as sa_delete, func, select, true, update as sa_update
 
 from app import allowlist_hint, audit, domain_probe, expiry_snooze, known, manual_probe, net_guard, probe_scope, try_probe
 from app import parents as parents_mod
@@ -450,15 +450,22 @@ async def bulk_update(
     if ids is not None:
         q = q.where(Check.id.in_(ids))
     checks = list(await session.scalars(q))
+    request_edits = {}
     for check in checks:
         old_local = (check.probe_local, check.target, check.method)
+        old_request = _request_config(check)
+        before = _request_edit_state(check, old_request)
         for name, value in fields.items():
             setattr(check, name, value)
         _local_probe_ok(check, user, old_local)
+        if _request_config(check) != old_request:
+            await _validate_request_edit(check, user)
+            request_edits[check.id] = before
         if check.probe_local and not old_local[0]:
             await _check_existing_agent_scope(check, session)
         if "probe_local" in fields or "check_locations" in fields:
             _one_probe_source(check)
+    await _guard_request_edits(session, request_edits)
     if "enabled" in fields:
         await _close_if_disabled(session, checks)
     await session.commit()
@@ -964,6 +971,7 @@ async def local_probe_apply(
     serving = _serving_servers(servers)
     servers_by_id = {s.id: s for s in servers}
     updated = 0
+    request_edits = {}
     for check in await session.scalars(
         select(Check).where(Check.id.in_(body.check_ids), Check.type == "http")
     ):
@@ -984,9 +992,13 @@ async def local_probe_apply(
         if (check.method or "GET") not in LOCAL_METHODS or (
                 local_port(check.target) not in LOCAL_PORTS and user.role != "admin"):
             continue  # такой монитор изнутри не проверяем (_local_probe_ok)
+        if not check.probe_local or check.probe_server_id != hit[0]:
+            request_edits[check.id] = _request_edit_state(check, _request_config(check))
+            await _validate_request_edit(check, user)
         check.probe_local = True
         check.probe_server_id = hit[0]
         updated += 1
+    await _guard_request_edits(session, request_edits)
     await session.commit()
     if updated:
         await audit.record(session, user.username, "local_probe_apply", str(body.check_ids))
@@ -1410,6 +1422,48 @@ async def _target_ok(typ: str, target: str, dns_server: str, user) -> bool:
     return internal
 
 
+# Changing any of these can change the request sent to an approved internal service.
+_REQUEST_FIELDS = (
+    "type", "target", "port", "dns_server", "dns_type", "method", "extra_paths",
+    "auth_method", "auth_user", "auth_pass", "http_headers", "ignore_tls", "keyword_up", "keyword_down",
+    "probe_local", "check_locations", "location_ids", "check_all_ips", "check_ssl", "check_domain",
+    "parent_mode", "parent_server_id",
+)
+_REQUEST_COLUMNS = tuple(getattr(Check, field) for field in _REQUEST_FIELDS)
+
+
+def _request_config(check: Check) -> tuple:
+    return tuple(getattr(check, field) for field in _REQUEST_FIELDS)
+
+
+def _request_edit_state(check: Check, config: tuple) -> tuple:
+    return (*config, check.allow_internal_target, check.group_name, check.probe_server_id)
+
+
+async def _validate_request_edit(check: Check, user, *, destination_changed: bool = False) -> None:
+    # NULL is the legacy state and still permits internal requests at runtime.
+    if destination_changed or (user.role != "admin" and check.allow_internal_target is not False):
+        check.allow_internal_target = await _target_ok(check.type, check.target, check.dns_server, user)
+
+
+async def _guard_request_edits(session: SessionDep, before: dict[int, tuple]) -> None:
+    if not before:
+        return
+    matches = Check.id.in_(before)
+    with session.no_autoflush:
+        if session.get_bind().dialect.name == "sqlite":
+            # Acquire the SQLite write lock before rereading the request configuration.
+            await session.execute(sa_update(Check).where(matches).values(
+                allow_internal_target=Check.allow_internal_target,
+            ).execution_options(synchronize_session=False))
+        rows = await session.execute(
+            select(Check.id, *_REQUEST_COLUMNS, Check.allow_internal_target, Check.group_name, Check.probe_server_id)
+            .where(matches).order_by(Check.id).with_for_update()
+        )
+    if {row[0]: tuple(row[1:]) for row in rows} != before:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Настройки проверки уже изменились. Обновите монитор и повторите правку")
+
+
 def _one_probe_source(check: Check) -> None:
     """Проверять можно ИЛИ изнутри сервера, ИЛИ из локаций, но не одновременно.
 
@@ -1460,6 +1514,8 @@ async def update_check(
     old_dns = (check.target, check.dns_type, check.dns_server)
     old_local = (check.probe_local, check.target, check.method)
     old_where = (check.type, check.target, check.dns_server)
+    old_request = _request_config(check)
+    before = _request_edit_state(check, old_request)
     old_port = check.port
     fields = body.model_dump(exclude_unset=True)
     # перенос монитора в чужую группу: алерты уходили бы ее получателям, а создавать там нельзя
@@ -1472,9 +1528,14 @@ async def update_check(
     _push_defaults(check)
     _dns_defaults(check)
     port_changed = check.type in ("tcp_port", "cert") and check.port != old_port
-    if (check.type, check.target, check.dns_server) != old_where or port_changed:
-        check.allow_internal_target = await _target_ok(check.type, check.target, check.dns_server, user)
+    request_changed = _request_config(check) != old_request
+    if request_changed:
+        await _validate_request_edit(check, user, destination_changed=(
+            (check.type, check.target, check.dns_server) != old_where or port_changed
+        ))
     await _parent_check(check, session, user)
+    if request_changed:
+        await _guard_request_edits(session, {check.id: before})
     if check.target != old_dns[0] and check.tamper_state:
         # другой адрес - другая страница: база признаков взлома от старой не годится
         check.tamper_state = None

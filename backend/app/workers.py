@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app import tg_fmt
 from app.models import Server
@@ -45,21 +45,51 @@ LOOP_HOLD = 1800  # падает и поднимается полчаса - уж
 LOOP_GAP = 900  # перерыв в перезапусках короче 15 минут - тот же эпизод
 LOOP_STATE = "workers_loop"  # ключ alert_state: {ключ беды: [с какого, последний раз]}
 MAX_AGE = 600  # блок старше 10 минут - helper встал, судить не по чему
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_MAX_TIMESTAMP = 253402300799
 KIND_LABEL = {"supervisor": "Supervisor", "pm2": "PM2"}
 _SKIP_WHY = {"auth": "не пустил по паролю из его конфига", "norpc": "у supervisord не включен сокет управления",
              "noconf": "не нашелся конфиг supervisord", "nolib": "не нашелся клиент pm2",
              "down": "не ответил"}
 
 
+def _valid_program(p: object) -> bool:
+    if not isinstance(p, dict) or not all(isinstance(p.get(k), str) and p[k] for k in ("name", "state")):
+        return False
+    try:
+        return (0 <= int(p.get("since") or 0) <= _MAX_TIMESTAMP
+                and all(0 <= int(p.get(k) or 0) <= 2**63 - 1 for k in ("up", "r15", "r60", "p60"))
+                and (p.get("exit") is None or type(p["exit"]) is int and abs(p["exit"]) <= 2**31))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 def block(rep: dict) -> dict | None:
-    b = ((rep or {}).get("extras") or {}).get("workers")
+    extras = (rep or {}).get("extras")
+    b = extras.get("workers") if isinstance(extras, dict) else None
     if not isinstance(b, dict) or b.get("v") != 1:
         return None
-    ts = float(b.get("ts") or 0)
-    ref = float((rep or {}).get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
-    if ts <= 0 or ref - ts > MAX_AGE:
+    try:
+        ts = float(b.get("ts") or 0)
+        ref = float(rep.get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
+    except (TypeError, ValueError, OverflowError):
         return None
-    return b
+    if not (0 < ts <= _MAX_TIMESTAMP and 0 < ref <= _MAX_TIMESTAMP) or abs(ref - ts) > MAX_AGE:
+        return None
+    raw_daemons = b.get("daemons")
+    skipped = b.get("skipped")
+    complete = isinstance(raw_daemons, list) and not skipped
+    daemons = []
+    for daemon in raw_daemons if isinstance(raw_daemons, list) else []:
+        if (not isinstance(daemon, dict) or not isinstance(daemon.get("progs"), list)
+                or not all(isinstance(daemon.get(k), str) and daemon[k] for k in ("kind", "where"))):
+            complete = False
+            continue
+        progs = [p for p in daemon["progs"] if _valid_program(p)]
+        complete = complete and len(progs) == len(daemon["progs"])
+        daemons.append({**daemon, "progs": progs})
+    return {"ts": int(ts), "daemons": daemons, "skipped": skipped if isinstance(skipped, list) else [],
+            "_complete": complete}
 
 
 def daemons(rep: dict) -> list[dict]:
@@ -67,13 +97,10 @@ def daemons(rep: dict) -> list[dict]:
     b = block(rep)
     out = []
     for d in (b or {}).get("daemons") or []:
-        if not isinstance(d, dict):
-            continue
         kind = str(d.get("kind") or "")
         label = KIND_LABEL.get(kind, kind)
         wt = where_text(str(d.get("where") or ""))
-        progs = [p for p in d.get("progs") or [] if isinstance(p, dict) and p.get("name")]
-        out.append({"kind": kind, "label": label, "where": wt, "source": f"{label}, {wt}", "progs": progs,
+        out.append({"kind": kind, "label": label, "where": wt, "source": f"{label}, {wt}", "progs": d["progs"],
                     "ts": int(b.get("ts") or 0)})
     return out
 
@@ -130,6 +157,11 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return few if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else many
 
 
+def _sustained_backoff(d: dict, p: dict) -> bool:
+    since = int(p.get("since") or 0)
+    return p.get("state") == "BACKOFF" and since > 0 and int(d.get("ts") or 0) - since >= BACKOFF_S
+
+
 def trouble(d: dict, p: dict) -> tuple[int, str] | None:
     """(уровень, что с ним) или None, если все в порядке"""
     st = str(p.get("state") or "")
@@ -138,7 +170,7 @@ def trouble(d: dict, p: dict) -> tuple[int, str] | None:
         return 2, "не запускается, supervisor перестал его поднимать"
     if st == "errored":
         return 2, "не запускается, pm2 перестал его поднимать"
-    if st == "BACKOFF" and int(d.get("ts") or 0) - int(p.get("since") or 0) >= BACKOFF_S:
+    if _sustained_backoff(d, p):
         return 2, "не может запуститься, supervisor пробует снова и снова"
     if st == "EXITED" and isinstance(exit_code, int) and exit_code != 0:
         return 1, f"завершился с кодом {exit_code} и не перезапускается"
@@ -154,7 +186,7 @@ def _state(d: dict, p: dict) -> str:
     st = str(p.get("state") or "")
     if st in ("FATAL", "errored"):
         return "dead"
-    if st == "BACKOFF" and int(d.get("ts") or 0) - int(p.get("since") or 0) >= BACKOFF_S:
+    if _sustained_backoff(d, p):
         return "backoff"
     if st == "EXITED":
         return "exit"
@@ -197,7 +229,7 @@ def _all(s: Server) -> list[dict]:
                 text += f"\n↳ {log[:200]}"
             since = min(int(x.get("since") or d["ts"] or 0) for x, _t in items)
             out.append({"key": k, "name": g or str(p["name"]), "source": d["source"], "level": lvl, "why": why,
-                        "text": text, "since": datetime.fromtimestamp(since, timezone.utc).isoformat(),
+                        "text": text, "since": (_UNIX_EPOCH + timedelta(seconds=since)).isoformat(),
                         "copies": [key(d, x) for x, _t in items],
                         # для короткого алерта: где (словами), сколько копий в беде, что с ним, код выхода
                         "where": d["where"], "n": len(items), "state": _state(d, p),

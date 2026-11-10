@@ -163,6 +163,137 @@ async def test_editor_cannot_change_port_of_admin_internal_monitor(client, auth_
         assert r.status_code == 200 and r.json()["port"] == 8443, r.text
 
 
+async def test_editor_cannot_repurpose_admin_internal_http_monitor(client, auth_headers):
+    received = []
+
+    async def upstream(reader, writer):
+        received.append(await reader.readuntil(b"\r\n\r\n"))
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    editor = await _user(client, auth_headers, "internal-editor")
+    server = await asyncio.start_server(upstream, "127.0.0.1", 0)
+    async with server:
+        port = server.sockets[0].getsockname()[1]
+        r = await client.post("/api/checks", headers=auth_headers, json={
+            "name": "internal-health", "type": "http", "target": f"http://127.0.0.1:{port}/health",
+            "check_ssl": False, "check_domain": False,
+        })
+        assert r.status_code == 201, r.text
+        cid = r.json()["id"]
+        path = f"/api/checks/{cid}"
+        assert len(received) == 1
+        received.clear()
+
+        for update in ({"method": "PUT"}, {"extra_paths": ["/admin"]},
+                       {"http_headers": '{"X-Test-Route":"private"}'}, {"keyword_up": "private"},
+                       {"check_locations": True}):
+            r = await client.patch(path, headers=editor, json=update)
+            assert r.status_code == 403, (update, r.text)
+        r = await client.patch("/api/checks/bulk", headers=editor, json={"ids": [cid], "method": "POST"})
+        assert r.status_code == 403, r.text
+        r = await client.patch(path, headers=editor, json={"name": "renamed-health", "method": "GET"})
+        assert r.status_code == 200 and r.json()["name"] == "renamed-health", r.text
+        assert received == []
+        assert (await client.post(f"{path}/run", headers=editor)).status_code == 200
+        assert len(received) == 1 and received[0].startswith(b"GET /health HTTP/1.1\r\n")
+        assert b"x-test-route" not in received[0].lower()
+
+        assert (await client.patch(path, headers=auth_headers, json={"method": "PUT"})).status_code == 200
+        assert (await client.post(f"{path}/run", headers=auth_headers)).status_code == 200
+        assert len(received) == 2 and received[-1].startswith(b"PUT /health HTTP/1.1\r\n")
+
+
+async def test_editor_can_move_legacy_internal_monitor_to_public_target(client, auth_headers):
+    from app.models import Check
+
+    async with client._transport.app.state.session_factory() as session:
+        check = Check(name="legacy-monitor", type="http", target="http://127.0.0.1/health")
+        session.add(check)
+        await session.commit()
+        cid = check.id
+
+    editor = await _user(client, auth_headers, "legacy-editor")
+    path = f"/api/checks/{cid}"
+    assert (await client.patch(path, headers=editor, json={"method": "PUT"})).status_code == 403
+    r = await client.patch(path, headers=editor, json={"target": "https://public.example/", "method": "PUT"})
+    assert r.status_code == 200 and r.json()["method"] == "PUT", r.text
+    async with client._transport.app.state.session_factory() as session:
+        assert (await session.get(Check, cid)).allow_internal_target is False
+
+
+async def test_request_edit_conflicts_with_concurrent_retargeting(client, auth_headers, monkeypatch):
+    from app.api import checks as api_checks
+    from app.models import Check
+
+    async with client._transport.app.state.session_factory() as session:
+        check = Check(name="race-monitor", type="http", target="https://public.example/", allow_internal_target=False)
+        session.add(check)
+        await session.commit()
+        cid = check.id
+
+    editor = await _user(client, auth_headers, "concurrent-editor")
+    ready = asyncio.Event()
+    resume = asyncio.Event()
+    parent_check = api_checks._parent_check
+
+    async def pause_editor(check, session, user):
+        await parent_check(check, session, user)
+        if user.role == "editor":
+            ready.set()
+            await asyncio.wait_for(resume.wait(), 5)
+
+    monkeypatch.setattr(api_checks, "_parent_check", pause_editor)
+    path = f"/api/checks/{cid}"
+    pending = asyncio.create_task(client.patch(path, headers=editor, json={"method": "PUT"}))
+    try:
+        await asyncio.wait_for(ready.wait(), 5)
+        r = await client.patch(path, headers=auth_headers, json={"target": "http://127.0.0.1/health"})
+        assert r.status_code == 200, r.text
+    finally:
+        resume.set()
+        r = await pending
+    assert r.status_code == 409, r.text
+    r = await client.get(path, headers=auth_headers)
+    assert r.json()["target"] == "http://127.0.0.1/health" and r.json()["method"] == "GET"
+
+
+async def test_local_probe_apply_preserves_concurrent_binding(client, auth_headers, monkeypatch):
+    from app.api import checks as api_checks
+    from app.models import Check, Server
+
+    factory = client._transport.app.state.session_factory
+    async with factory() as session:
+        original = Server(name="original-node", token_hash="fake-original")
+        suggested = Server(name="suggested-node", token_hash="fake-suggested",
+                           last_report={"web_services": [{"sites": ["public.example"]}]})
+        replacement = Server(name="replacement-node", token_hash="fake-replacement")
+        session.add_all([original, suggested, replacement])
+        await session.flush()
+        check = Check(name="local-monitor", type="http", target="https://public.example/",
+                      allow_internal_target=False, probe_local=True, probe_server_id=original.id)
+        session.add(check)
+        await session.commit()
+        cid, replacement_id = check.id, replacement.id
+
+    guard = api_checks._guard_request_edits
+
+    async def change_binding(session, before):
+        async with factory() as concurrent:
+            row = await concurrent.get(Check, cid)
+            row.probe_server_id = replacement_id
+            await concurrent.commit()
+        await guard(session, before)
+
+    monkeypatch.setattr(api_checks, "_guard_request_edits", change_binding)
+    r = await client.post("/api/checks/local-probe-apply", headers=auth_headers, json={"check_ids": [cid]})
+    assert r.status_code == 409, r.text
+    async with factory() as session:
+        assert (await session.get(Check, cid)).probe_server_id == replacement_id
+
+
 async def test_local_probe_only_reads(client, auth_headers):
     """Проверка изнутри идет на localhost ноды: только GET/HEAD, порт не 80/443 - только админ."""
     eh = await _user(client, auth_headers, "ed")

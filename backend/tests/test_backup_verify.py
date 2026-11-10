@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,6 +57,14 @@ def test_failures():
     assert backup_verify.problems(old, NOW) == [(1, "восстановление не проверялось 12 дней")]
 
 
+def test_no_recovery_samples_is_unknown():
+    rep = _rep(files={"ok": 0, "skipped": 1, "bad": []}, dumps=[])
+    assert backup_verify.problems(rep, NOW) == [(1, "проверка восстановления не нашла файлов и дампов для проверки")]
+    assert backup_verify.view(rep, NOW)["level"] == 1
+    rep["extras"]["backup-verify"]["dumps"] = [{"engine": "pg", "ok": True}]
+    assert backup_verify.problems(rep, NOW) == []
+
+
 def test_alert_and_home_row():
     s = _srv(_rep(files={"ok": 7, "bad": ["/etc/a.conf"]}))
     lvl, ctx = collector._server_conditions(s, NOW)["backup_restore"]
@@ -71,7 +80,7 @@ def test_alert_and_home_row():
 def test_helper_has_verify():
     """helper отдает проверку командой verify и запускает её из ежеминутного refresh"""
     src = (Path(__file__).resolve().parents[2] / "agent" / "backup-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.52" in src and "verify_bin()" in src
+    assert "KERVAX_SETUP_VERSION=0.53" in src and "verify_bin()" in src
     # настройки бэкапа - из юнита (EnvironmentFile=, User=), файл переменных читается как данные:
     # на старых нодах /etc/systemd-resta.conf - скрипт уведомления с curl, "." слал ложное
     # "бэкап с ошибкой"; под cron PATH без /usr/sbin, и runuser не находился
@@ -150,11 +159,13 @@ def _verify(tmp_path: Path, locks: str = "") -> tuple[dict, dict]:
     fd, path = tempfile.mkstemp(suffix=".sh")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            f.write(_helper_body() + '\nset +e\nT="$(cd "$1" && pwd)"\n' + VERIFY_CASE + locks + "\ncmd_verify\n")
+            f.write(_helper_body() + '\nT="$(cd "$1" && pwd)"\n' + VERIFY_CASE + locks + "\ncmd_verify\n")
         out = subprocess.run([bash, path, tmp_path.as_posix()], capture_output=True, text=True, timeout=120,
                              encoding="utf-8")
     finally:
         os.unlink(path)
+    assert out.returncode == 0, out.stderr
+    assert "unbound variable" not in out.stderr
     rd = lambda n: (tmp_path / n).read_text(encoding="utf-8") if (tmp_path / n).exists() else ""  # noqa: E731
     files = {n: rd(n) for n in ("calls", "locked", "unlocks", "sleeps")}
     files["locks"] = sorted(p.name[:4] for p in (tmp_path / "locks").iterdir())
@@ -195,8 +206,48 @@ def test_verify_waits_out_an_exclusive_lock(tmp_path):
     """живая эксклюзивная блокировка (prune или check сервера бэкапов): проверка ждет, как раньше --retry-lock"""
     rep, f = _verify(tmp_path, 'mklock "$(id64 e)" backup-server root true 60\n')
     assert "locked exclusively" in rep["err"] and f["sleeps"].count("sleep 30") == 39
+    assert rep["snap"] == "" and rep["snap_ts"] == 0
     assert not any(c.startswith(("dump ", "snapshots ")) for c in f["calls"].splitlines())
     assert f["locks"] == ["eeee"] and f["unlocks"] == ""
+
+
+def test_verify_does_not_sample_the_working_directory_without_includes(tmp_path):
+    rep, f = _verify(tmp_path, 'sed -i \'s/INCLUDES_STR="data"/INCLUDES_STR=""/\' "$T/script"\n')
+    assert rep["files"]["ok"] == 0
+    assert rep["dumps"][0]["ok"] is True
+    assert not any(" ./data/" in call for call in f["calls"].splitlines())
+
+
+@pytest.mark.skipif(sys.platform != "linux" or not shutil.which("restic"), reason="needs Linux and restic")
+def test_verify_selects_latest_snapshot_after_backup_paths_change(tmp_path):
+    base = ["restic", "--repo", str(tmp_path / "repo"), "--password-file", str(tmp_path / "password")]
+    (tmp_path / "password").write_text("fixture-password\n", encoding="utf-8")
+    (tmp_path / "dumps").mkdir()
+    subprocess.run(base + ["init", "--quiet"], check=True)
+    host = subprocess.check_output(["hostname"], text=True).strip()
+    for directory, when, backup_host in (("old", "2020-01-01 10:00:00", host),
+                                          ("current", "2020-01-02 10:00:00", host),
+                                          ("other", "2020-01-03 10:00:00", "other-fixture-host")):
+        (tmp_path / directory).mkdir()
+        (tmp_path / directory / "file").write_text(directory, encoding="utf-8")
+        subprocess.run(base + ["backup", "--quiet", "--time", when, "--host", backup_host, directory],
+                       cwd=tmp_path, check=True)
+    newest = json.loads(subprocess.check_output(base + ["snapshots", "--json", "--host", host, "latest"]))[0]
+    check = tmp_path / "check.sh"
+    check.write_text(_helper_body() + r'''
+cd "$1"
+DUMPS_D="$PWD/dumps"
+verify_ctx() { return 0; }
+verify_restic() { restic --repo "$PWD/repo" --password-file "$PWD/password" "$@"; }
+VSCRIPT="$PWD/runner"
+printf 'INCLUDE_MODE="include"\nINCLUDES_STR="current"\n' > "$VSCRIPT"
+touch -t 201901011000 current/file
+cmd_verify
+''', encoding="utf-8")
+    out = subprocess.run(["bash", str(check), str(tmp_path)], capture_output=True, text=True, check=True)
+    report = json.loads(out.stdout)
+    assert report["err"] == ""
+    assert report["snap"] == newest["short_id"] and report["files"]["ok"] == 1
 
 
 def test_verify_reruns_after_an_old_helper():

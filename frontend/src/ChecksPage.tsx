@@ -863,7 +863,10 @@ export function ChecksPage({ onUnauthorized, openCheckId, openSec = null, onCons
           onRun={load}
           onDelete={async () => {
             const r = await remove(detail)
-            if (r === null) setDetailId(null)
+            if (r === null) {
+              setDetailId((current) => current === detail.id ? null : current)
+              setLinkSec((current) => current.id === detail.id ? { id: null, sec: null } : current)
+            }
             return r
           }}
           onUnauthorized={onUnauthorized}

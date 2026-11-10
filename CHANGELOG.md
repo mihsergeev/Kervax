@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.127] - 2026-11-10
+
+- Prevent editors from repurposing approved internal HTTP checks, including through bulk edits or concurrent changes. Enforce the configured access policy for custom DNS resolvers.
+- Keep at least one administrator when account deletions and role changes overlap.
+- Keep monitor history and event filters consistent when requests complete out of order. Full-screen charts preserve the selected range and IP and offer a retry on error. Deleting a monitor no longer closes a different monitor's card.
+- Keep server cards and alert processing working when Supervisor or PM2 reports contain invalid entries. Require complete observations before clearing incidents.
+- Verify the latest Restic snapshot for the host after backup paths change. Flag lock failures and checks that verify no files or dumps. Includes backup-setup 0.53.
+
 ## [1.8.126] - 2026-11-10
 
 - Enforce Telegram alert action and status permissions for the configured sections and groups.

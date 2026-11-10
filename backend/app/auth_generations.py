@@ -51,8 +51,9 @@ async def retire(session, user: User) -> bool:
     # UPDATE блокирует запись до конца этой же транзакции с сохранением seed и DELETE.
     # Между SELECT и UPDATE SQLite мог отдать тот же id совершенно другой учетке.
     # Ее нельзя ни отзывать под чужим именем, ни удалять через устаревший ORM-объект.
+    # Проверяем и роль: после повышения удалять администратора можно только под общей блокировкой.
     version = await session.scalar(update(User).where(
-        User.id == user.id, User.username == user.username,
+        User.id == user.id, User.username == user.username, User.role == user.role,
     ).values(
         token_version=User.token_version + 1,
     ).returning(User.token_version).execution_options(synchronize_session=False))

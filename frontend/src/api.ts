@@ -1109,6 +1109,7 @@ export function checkHistory(
   locationId?: number,
   range?: { from: number; to: number }, // unix-сек — произвольный диапазон (зум)
   ip?: string, // график по конкретному IP (режим «все адреса»)
+  signal?: AbortSignal,
 ): Promise<{
   check_id: number
   interval_seconds: number
@@ -1118,7 +1119,7 @@ export function checkHistory(
   const q = locationId != null ? `&location_id=${locationId}` : ''
   const r = range ? `&from_ts=${range.from}&to_ts=${range.to}` : ''
   const ipq = ip ? `&ip=${encodeURIComponent(ip)}` : ''
-  return api(`/api/checks/${id}/history?hours=${hours}${q}${r}${ipq}`)
+  return api(`/api/checks/${id}/history?hours=${hours}${q}${r}${ipq}`, { signal })
 }
 
 export type Uptime = { day: number | null; week: number | null; month: number | null }
@@ -1131,9 +1132,11 @@ export function checkLog(
   id: number,
   failed = false,
   limit = 100,
+  signal?: AbortSignal,
 ): Promise<CheckSample[]> {
   return api<CheckSample[]>(
     `/api/checks/${id}/log?failed=${failed ? 1 : 0}&limit=${limit}`,
+    { signal },
   )
 }
 

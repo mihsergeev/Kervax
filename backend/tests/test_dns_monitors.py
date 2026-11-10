@@ -7,7 +7,7 @@ import dns.exception
 import dns.resolver
 import pytest
 
-from app import checks, collector
+from app import checks, collector, net_guard
 from app.config import Settings
 from app.models import Check
 
@@ -84,6 +84,17 @@ async def test_failures():
     ANSWERS[("example.com", "MX")] = None
     out = await checks.run_check(_chk(dns_type="MX"))
     assert out.status == "down" and out.message == "записей MX нет"
+
+
+async def test_explicit_resolver_obeys_internal_target_permission():
+    ANSWERS[("example.com", "A")] = _a("203.0.113.10")
+    for approved in (True, None):
+        out = await checks.run_check(_chk(dns_server="127.0.0.1", allow_internal_target=approved))
+        assert out.status == "up"
+    out = await checks.run_check(_chk(dns_server="127.0.0.1", allow_internal_target=False))
+    assert out.status == "down" and out.message == net_guard.ADMIN_ONLY_TEXT
+    out = await checks.run_check(_chk(dns_server="169.254.169.254", allow_internal_target=True))
+    assert out.status == "down" and out.message == net_guard.FORBIDDEN_TEXT
 
 
 async def test_api_create_normalizes_and_validates(client, auth_headers):

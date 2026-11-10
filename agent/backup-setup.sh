@@ -154,7 +154,8 @@ AGENT_USER=kervax
 # explicit read-only inspect for fresh alert rechecks.
 # 0.51: scheduled, standalone Qdrant snapshots via the container-local API.
 # 0.52: standalone Qdrant snapshots from a single Kubernetes pod.
-KERVAX_SETUP_VERSION=0.52  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.53: verify the latest snapshot of this host across changes to backup paths.
+KERVAX_SETUP_VERSION=0.53  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -3737,7 +3738,7 @@ verify_locks_clear() {
 }
 
 cmd_verify() {
-  local now t0 err="" errf tmpf snapj snapid stime sts lock="--no-lock" mode incs excs dirs=() d f live got rc
+  local now t0 err="" errf tmpf snapj snapid="" stime sts=0 lock="--no-lock" mode incs excs dirs=() d f live got rc
   local ok=0 skipped=0 bad="" checked=0 dumps="" e dir newest head kind cleared=0 w
   now=$(date +%s); t0=$now
   if ! verify_ctx; then
@@ -3753,13 +3754,17 @@ cmd_verify() {
     grep -q '^excl ' <<<"$(verify_locks 2>/dev/null)" || break
     [ "$w" -lt 40 ] && sleep 30 || err="the repository is locked exclusively (prune or check) for 20 minutes"
   done
-  # shellcheck disable=SC2086
-  [ -n "$err" ] || snapj=$(verify_restic snapshots --json --latest 1 --host "$(hostname)" $lock 2>"$errf") || err="snapshots: $(tail -c 300 "$errf")"
-  # (|| true: under pipefail a grep without a match would stop the whole helper)
-  snapid=$(printf '%s' "$snapj" | grep -o '"id":"[0-9a-f]\{64\}"' | head -1 | cut -d'"' -f4 || true)
-  stime=$(printf '%s' "$snapj" | grep -o '"time":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
-  sts=$(date -d "$stime" +%s 2>/dev/null || echo 0)
-  [ -z "$err" ] && [ -z "$snapid" ] && err="no snapshots of this host in the repository"
+  if [ -z "$err" ]; then
+    # The positional `latest` selects one snapshot. `--latest 1` returns one per host and path set.
+    if snapj=$(verify_restic snapshots --json --host "$(hostname)" "$lock" latest 2>"$errf"); then
+      snapid=$(printf '%s' "$snapj" | grep -o '"id":"[0-9a-f]\{64\}"' | head -1 | cut -d'"' -f4 || true)
+      stime=$(printf '%s' "$snapj" | grep -o '"time":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+      [ -z "$stime" ] || sts=$(date -d "$stime" +%s 2>/dev/null || echo 0)
+      [ -n "$snapid" ] || err="no snapshots of this host in the repository"
+    else
+      err="snapshots: $(tail -c 300 "$errf")"
+    fi
+  fi
   if [ -z "$err" ]; then
     mode=""; incs=""; excs=""
     if [ -n "$VSCRIPT" ]; then
@@ -3790,7 +3795,7 @@ cmd_verify() {
       checked=$((checked + 1))
       if [ "$got" = "$live" ]; then ok=$((ok + 1))
       else bad="${bad:+$bad,}\"$(verify_json_str "$f")\""; fi
-    done < <(find "${dirs[@]}" -xdev -type f -size +0 -size "-$VERIFY_MAX_SIZE" ! -newermt "@$((sts - 300))" \
+    done < <([ "${#dirs[@]}" -gt 0 ] && find "${dirs[@]}" -xdev -type f -size +0 -size "-$VERIFY_MAX_SIZE" ! -newermt "@$((sts - 300))" \
                2>/dev/null | grep -v -E '/(\.cache|cache|tmp|\.git)/' | head -n 20000 | shuf -n 300 2>/dev/null)
   fi
   # the newest dump of every engine, read back from the snapshot: the first megabytes must

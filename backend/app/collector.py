@@ -7339,13 +7339,14 @@ def _server_conditions(s: Server, now: datetime,
                                 "sig": [x["key"] for x in fp], "items": fp, "parts": [(x["key"], x["text"]) for x in fp], "sep": "\n"})
     # Воркеры под supervisor и pm2: выдержка уже в правилах (BACKOFF три минуты, падает и поднимается
     # полчаса - workers.loop_update), FATAL - сразу. sig - какие воркеры, второй упавший дает свой алерт
-    if online and workers_mod.block(rep) is not None:
+    worker_block = workers_mod.block(rep) if online else None
+    if worker_block is not None:
         wp = workers_mod.problems(s, now)
         out["workers"] = (max((x["level"] for x in wp), default=0),
                           {"detail": "\n".join(x["text"] for x in wp[:3])
                                      + (f"\nи еще {len(wp) - 3}" if len(wp) > 3 else ""),
                            "sig": [x["key"] for x in wp], "items": wp, "parts": [(x["key"], x["text"]) for x in wp], "sep": "\n",
-                           "_complete": not bool(workers_mod.block(rep).get("skipped"))})
+                           "_complete": worker_block["_complete"]})
     # Кроны: выдержка уже в правилах (вторая копия идет 15 минут, висит - не раньше часа). sig -
     # какие задачи: вторая наслоившаяся дает свой алерт
     if online and cron_watch.block(rep) is not None:
