@@ -380,7 +380,7 @@ def test_helpers_and_agent_agree_on_actions():
 
 def test_mirror_helper_rules():
     ms = _src("mirror-setup.sh")
-    assert "\nKERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR" in ms
+    assert "\nKERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR" in ms
     # ставится только туда, где панель сделала сервер резервным
     assert "/api/agent/mirror-wanted" in ms
     # скрипты в /lib65, не в /usr
