@@ -107,7 +107,8 @@ fi
 # 0.40: an empty server deployed by the panel can move to a selected filesystem
 # 0.41: the mirror reader rejects symlinks and uses descriptor-relative reads
 # 0.42: exact tag groups and explicit snapshot IDs for manual cleanup
-KERVAX_SETUP_VERSION=0.42  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.43: create-only provisioning cannot rotate an existing repository's credentials
+KERVAX_SETUP_VERSION=0.43  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -1640,6 +1641,7 @@ cmd_update_image() {
 
 cmd_provision_client() {
   local name="$1" hpass="$2" repopass="$3" client_ip="$4" kl="${5:-3}" kd="${6:-7}" kw="${7:-4}" km="${8:-6}"
+  local policy="${9:-reuse}" fd
   valid_name "$name" || { echo "bad name" >&2; return 2; }
   valid_ip "$client_ip" || { echo "bad ip" >&2; return 2; }
   hpass_ok "$hpass" || { echo "bad hpass: 8-128 letters, digits and . _ ~ -" >&2; return 2; }
@@ -1653,6 +1655,23 @@ cmd_provision_client() {
   [ "$kw" -ge 1 ] 2>/dev/null || kw=1
   [ "$km" -ge 1 ] 2>/dev/null || km=1
   [ -d "$DATA" ] || { echo "no rest-server data dir" >&2; return 2; }
+  # with_storage runs in a subshell and closes this lock when the provision call exits.
+  # Serialize both modes so another provision cannot claim the name after this check.
+  if ! { exec {fd}> "$STATE_DIR/bsrv-provision.lock" && flock -n "$fd"; }; then
+    echo "repository provisioning is already running; retry later" >&2
+    return 2
+  fi
+  local existing=0 envf="$ENV_DIR/$name.env"
+  if [ "$policy" = new ]; then
+    local existing_user=""
+    if [ -e "$HTPASSWD" ] || [ -L "$HTPASSWD" ]; then
+      existing_user="$(awk -F: -v name="$name" '$1 == name { print $1; exit }' "$HTPASSWD")" || return 2
+    fi
+    if [ -e "$DATA/$name" ] || [ -L "$DATA/$name" ] || [ -e "$envf" ] || [ -L "$envf" ] || [ -n "$existing_user" ]; then
+      echo "repository '$name' already exists or is reserved; ask a panel administrator with access to all server groups" >&2
+      return 2
+    fi
+  fi
   # 0) RE-PROVISIONING: the repository already exists.
   # `restic init` is idempotent, but a repository keeps its FIRST password FOREVER. Sending a
   # new one is impossible: the client would get "wrong password" and prune-env would start
@@ -1661,8 +1680,8 @@ cmd_provision_client() {
   # instead of recreating it: its password is taken from prune-env and verified to actually
   # open the repository. There is no deletion here and there will not be - removing a
   # repository stays a manual root operation on this server.
-  local existing=0 envf="$ENV_DIR/$name.env"
   if [ -f "$DATA/$name/config" ]; then
+    [ "$policy" != new ] || { echo "repository '$name' already exists" >&2; return 2; }
     existing=1
     local old=""
     [ -f "$envf" ] && old="$(sed -n 's/^RESTIC_PASSWORD="\?\([^"]*\)"\?$/\1/p' "$envf" | head -1)"
@@ -2343,6 +2362,7 @@ cmd_process_spool() {
       deploy_server)    if out="$(cmd_deploy_server "$port" "$storage_mount" 2>&1)"; then ok=true; fi ;;
       update_image)     if out="$(with_storage cmd_update_image 2>&1)"; then ok=true; fi ;;
       provision_client) if out="$(with_storage cmd_provision_client "$name" "$hpass" "$repopass" "$client_ip" "$kl" "$kd" "$kw" "$km" 2>&1)"; then ok=true; fi ;;
+      provision_new)    if out="$(with_storage cmd_provision_client "$name" "$hpass" "$repopass" "$client_ip" "$kl" "$kd" "$kw" "$km" new 2>&1)"; then ok=true; fi ;;
       deploy_tls_front) if out="$(with_storage cmd_deploy_tls_front "$san_ip" "$san_dns" 2>&1)"; then ok=true; fi ;;
       get_cert)         if out="$(cmd_get_cert 2>&1)"; then ok=true; fi ;;
       allow_tls)        if out="$(cmd_allow_tls "$client_ip" 2>&1)"; then ok=true; fi ;;

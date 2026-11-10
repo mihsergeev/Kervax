@@ -160,7 +160,7 @@ async def test_local_paths_go_to_the_agent(tmp_path):
 
     from app.api.servers import _site_probe_tasks, _store_site_probes
     async with factory() as s:
-        tasks = await _site_probe_tasks(s, sid)
+        tasks = await _site_probe_tasks(s, await s.get(Server, sid))
         chk = await s.get(Check, cid)
         tid = manual_probe.path_task_ids(chk)["/health"]
     assert [t["id"] for t in tasks] == [cid, tid]
@@ -168,7 +168,7 @@ async def test_local_paths_go_to_the_agent(tmp_path):
     assert manual_probe.path_task_check_id(tid) == cid
 
     async with factory() as s:
-        await _store_site_probes(s, sid, [
+        await _store_site_probes(s, await s.get(Server, sid), [
             {"id": cid, "code": 200, "latency_ms": 3, "via": "cluster:default/frontend:80"},
             {"id": tid, "code": 502, "latency_ms": 1, "via": "cluster:default/api-gateway:8080"},
             # an answer about a path the monitor no longer has

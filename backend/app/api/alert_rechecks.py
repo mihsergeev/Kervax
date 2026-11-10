@@ -104,7 +104,7 @@ async def start(body: RecheckIn, user: CurrentUser, session: SessionDep, request
         from app.collector import seen_online
         srv = await session.get(Server, obj.probe_server_id) if obj.probe_server_id else None
         if (srv and group_allowed(user, srv.group_name) and seen_online(srv, now) and obj.type == "http"
-                and probe_scope.server_allowed(obj, srv.id)):
+                and probe_scope.server_allowed(obj, srv)):
             main = ProbeRequest(check_id=obj.id, server_id=srv.id, created_at=now, kind="home",
                                 spec={"recheck": job.id})
             session.add(main)

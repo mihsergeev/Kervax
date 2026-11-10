@@ -162,6 +162,7 @@ async def test_failed_command_started_by_a_person_lands_in_the_journal(client, a
     assert r.status_code == 200, r.text
     cid = r.json()["id"]
     agent = {"Authorization": f"Bearer {token}"}
+    assert (await client.get("/api/agent/commands", headers=agent)).json()["backup_commands"][0]["id"] == cid
     r = await client.post("/api/agent/backup-result", headers=agent, json={
         "id": cid, "ok": False, "output": "checking pg-main\nthe dump probe failed, dumps were NOT enabled: "})
     assert r.status_code == 200
@@ -174,6 +175,7 @@ async def test_failed_command_started_by_a_person_lands_in_the_journal(client, a
     assert x.extra["params"]["payload"]["engine"] == "pg" and x.extra["params"]["payload"]["container"] == "pg-main"
     # успешная команда и команда планировщика (без created_by) в журнал не идут
     r = await client.post(f"/api/servers/{sid}/backup/command", headers=auth_headers, json={"action": "run_now"})
+    await client.get("/api/agent/commands", headers=agent)
     await client.post("/api/agent/backup-result", headers=agent, json={"id": r.json()["id"], "ok": True, "output": "ok"})
     from app.models import BackupCommand
 
@@ -182,6 +184,7 @@ async def test_failed_command_started_by_a_person_lands_in_the_journal(client, a
         s.add(c)
         await s.commit()
         auto_id = c.id
+    await client.get("/api/agent/commands", headers=agent)
     await client.post("/api/agent/backup-result", headers=agent, json={"id": auto_id, "ok": False, "output": "x"})
     assert len(await _rows(client, kind="command")) == 1
 
@@ -333,6 +336,7 @@ async def test_logs_of_a_gone_pod_or_container_are_not_logged(client, auth_heade
         r = await client.post(f"/api/servers/{sid}/kube/command", headers=auth_headers,
                               json={"ns": "default", "kind": "pod", "name": "web-7d9f-abcde", "action": action})
         assert r.status_code == 200, r.text
+        await client.get("/api/agent/commands", headers=agent)
         r = await client.post("/api/agent/kube-result", headers=agent, json={"id": r.json()["id"], "ok": False, "output": output})
         assert r.status_code == 200
 
@@ -340,6 +344,7 @@ async def test_logs_of_a_gone_pod_or_container_are_not_logged(client, auth_heade
     await kube("logs", gone)
     await kube("logs_prev", gone)
     r = await client.post(f"/api/servers/{sid}/docker/command", headers=auth_headers, json={"container": "web", "action": "logs"})
+    await client.get("/api/agent/commands", headers=agent)
     await client.post("/api/agent/docker-result", headers=agent, json={"id": r.json()["id"], "ok": False, "output": "logs 404"})
     assert await _rows(client) == []
     # другой отказ логов и 404 у другого действия - сбой, в журнале

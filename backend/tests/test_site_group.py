@@ -3,9 +3,10 @@
 import re
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select
 
-from app import alerts, collector, parents, site_flap, site_group
+from app import alerts, collector, parents, settings_store, site_flap, site_group
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
 from app.models import AlertEvent, Check, Server
@@ -91,6 +92,48 @@ async def _history(factory):
                 (await s.scalars(select(AlertEvent).order_by(AlertEvent.id))).all()]
 
 
+@pytest.mark.parametrize("failed_target", ["a.example.com", "x.example.edu"])
+async def test_partial_delivery_retries_only_the_undelivered_recovery(tmp_path, monkeypatch, failed_target):
+    names = ["a.example.com", "api.example.org", "x.example.edu"]
+    engine, factory, ids, sent, _ = await _panel(tmp_path, monkeypatch, names)
+    await collector._send_alerts(factory, SET, [_down(name, ids[name], T0) for name in names], T0)
+    assert len(sent) == 2
+
+    now = T0 + timedelta(minutes=8)
+    async with factory() as session:
+        for name in names:
+            row = await session.get(Check, ids[name])
+            row.last_status = "up"
+            collector._queue_site_recovery(row, [], "recstable", "снова отвечает стабильно", now)
+        await session.commit()
+
+    original_send = alerts.send_alert
+
+    async def fail_one(cfg, message, *args):
+        if failed_target in message:
+            return ["Telegram: temporarily unavailable"]
+        return await original_send(cfg, message, *args)
+
+    sent.clear()
+    monkeypatch.setattr(alerts, "send_alert", fail_one)
+    await collector._send_alerts(factory, SET, [], now)
+    assert len(sent) == 1
+    assert failed_target not in sent[0]
+
+    async with factory() as session:
+        queued, _ = await collector._site_recoveries(session, now)
+    expected = names[:2] if failed_target == names[0] else names[2:]
+    assert sorted(p.name for p in queued) == sorted(expected)
+
+    monkeypatch.setattr(alerts, "send_alert", original_send)
+    await collector._send_alerts(factory, SET, [], now + timedelta(minutes=1))
+    await collector._send_alerts(factory, SET, [], now + timedelta(minutes=2))
+    assert len(sent) == 2
+    assert failed_target in sent[1]
+    assert sorted(target for _, target, recovery in await _history(factory) if recovery) == sorted(names)
+    await engine.dispose()
+
+
 async def test_neighbours_join_the_sent_message_and_recover_together(tmp_path, monkeypatch):
     names = ["a.example.com", "api.example.org", "shop.example.net", "x.example.edu"]
     engine, f, ids, sent, edits = await _panel(tmp_path, monkeypatch, names)
@@ -172,6 +215,76 @@ async def test_www_of_the_same_site_keeps_the_domain_fold(tmp_path, monkeypatch)
                               ("flap_state", site_flap.opened("down", T0)), "") for n in names]
     await collector._send_alerts(f, SET, pend, T0)
     assert len(sent) == 1 and "Не отвечает" in sent[0] and "Еще: www.example.com" in sent[0]
+    await engine.dispose()
+
+
+@pytest.mark.parametrize(("kind", "second", "across_ticks", "rule_scope"), [
+    ("bad", "www.example.com", False, False),
+    ("domain", "www.example.com", False, False),
+    ("bad", "api.example.org", False, False),
+    ("bad", "api.example.org", True, False),
+    ("bad", "www.example.com", False, True),
+    ("domain", "www.example.com", False, True),
+])
+async def test_site_folding_preserves_route_and_rule_scope(
+        tmp_path, monkeypatch, kind, second, across_ticks, rule_scope):
+    first = "a.example.com"
+    engine, f, ids, _, edits = await _panel(tmp_path, monkeypatch, [first, second])
+    async with f() as s:
+        (await s.get(Check, ids[first])).group_name = "team-a"
+        (await s.get(Check, ids[second])).group_name = "team-a" if rule_scope else "team-b"
+        if rule_scope:
+            await settings_store.set_site_alert_rules(
+                s, {collector._SITE_RULE_KIND[kind]: {"scope_type": "checks", "scope": [ids[first]]}},
+            )
+        await s.commit()
+    delivered = []
+
+    async def capture(_cfg, _can_send, messages, *_args, **_kwargs):
+        delivered.extend(messages)
+        for message in messages:
+            if getattr(message, "sent_to", None) is not None:
+                message.sent_to.append({"chat": "100", "id": len(delivered)})
+        return True
+
+    monkeypatch.setattr(alerts, "dispatch", capture)
+    pending = [_down(name, ids[name], T0) if kind == "bad" else
+               collector.Pending("domain", name, "up", "домен истекает", None, ids[name], None)
+               for name in [first, second]]
+    if across_ticks:
+        await collector._send_alerts(f, SET, pending[:1], T0)
+        await collector._send_alerts(f, SET, pending[1:], T0 + timedelta(minutes=1))
+    else:
+        await collector._send_alerts(f, SET, pending, T0)
+    expected = [(first, "team-a", f"chk:{ids[first]}")]
+    if not rule_scope:
+        expected.append((second, "team-b", f"chk:{ids[second]}"))
+    assert [(m.target, m.group, m.ref) for m in delivered] == expected
+    assert second not in delivered[0] and second not in delivered[0].full
+    assert not edits
+    if kind == "bad" and rule_scope:
+        async with f() as s:
+            assert site_flap.level((await s.get(Check, ids[second])).flap_state) is None
+    await engine.dispose()
+
+
+async def test_old_group_does_not_repeat_another_groups_monitor(tmp_path, monkeypatch):
+    names = ["a.example.com", "api.example.org"]
+    engine, f, ids, sent, _ = await _panel(tmp_path, monkeypatch, names)
+    await collector._send_alerts(f, SET, [_flaky(n, ids[n], T0) for n in names], T0)
+    async with f() as s:
+        groups = await site_group.load(s)
+        group = next(iter(groups.values()))
+        group.pop("group_scoped", None)
+        await site_group.save(s, groups)
+        (await s.get(Check, ids[names[1]])).group_name = "team-b"
+        await s.commit()
+    t1 = T0 + timedelta(minutes=1)
+    for name in names:
+        await _recover(f, ids[name], t1)
+    await collector._send_alerts(f, SET, [_back(n, ids[n]) for n in names], t1)
+    assert len(sent) == 3
+    assert names[1] not in sent[1] and names[0] not in sent[2]
     await engine.dispose()
 
 

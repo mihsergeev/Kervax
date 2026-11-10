@@ -763,6 +763,7 @@ async def create_server(
     # подключение открыто (app/onboard.py): пока его не закроют, от сервера уходит алертом только
     # офлайн и критичный диск. Метка в состоянии - чтобы сборщик знал, что было что закрывать
     server = Server(**(body.model_dump() | {"name": name}), token_hash=hash_agent_token(token),
+                    token_site_groups=probe_scope.token_site_groups(user),
                     onboard_done_at=None, alert_state={"onboard": 1})
     session.add(server)
     await session.commit()
@@ -2207,9 +2208,25 @@ async def delete_server(
 async def rotate_token(
     server_id: int, user: CurrentUser, session: SessionDep
 ) -> ServerEnrollOut:
-    server = await _get_or_404(server_id, session, user)
+    server = await _get_or_404(server_id, session, user, lock=True)
+    # A replacement bearer impersonates the agent and can take its pending commands.
+    # Editors can still recover an install command before the first report.
+    if user.role != "admin" and (server.first_report_at is not None or server.last_seen is not None):
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Перевыпустить токен подключенного агента может только администратор")
+    groups = probe_scope.token_site_groups(user)
+    if groups is not None:
+        checks = await session.scalars(select(Check).where(
+            Check.type == "http", Check.probe_local.is_(True), Check.parent_mode == "server",
+            Check.parent_server_id == server.id,
+        ))
+        if any(probe_scope.requires_trusted_server(c) and not probe_scope.site_group_allowed(groups, c)
+               for c in checks):
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                "Для перевыпуска токена недостаточно прав на проверки сайтов агента")
     token = generate_agent_token()
     server.token_hash = hash_agent_token(token)
+    server.token_site_groups = groups
     await session.commit()
     await audit.record(session, user.username, "server_rotate", server.name)
     return ServerEnrollOut(
@@ -2613,6 +2630,28 @@ async def _claim_commands(session, model, server_id: int) -> list:
     return sorted(claimed, key=lambda c: (c.created_at, c.id))
 
 
+async def _transition_running_command(session, command, **values) -> bool:
+    model = type(command)
+    return await session.scalar(
+        sa_update(model).where(model.id == command.id, model.server_id == command.server_id, model.status == "running")
+        .values(**values).returning(model.id)
+    ) is not None
+
+
+async def _expire_running_command(session, command, timeout: int = 90) -> bool:
+    if command.status != "running" or (
+        datetime.now(timezone.utc) - _aware_dt(command.created_at)
+    ).total_seconds() <= timeout:
+        return False
+    expired = await _transition_running_command(
+        session, command, status="error", ok=False, result="агент не ответил (таймаут)",
+    )
+    await session.commit()
+    if not expired:
+        await session.refresh(command)
+    return expired
+
+
 async def _take_docker_commands(session, server_id: int) -> list[dict]:
     """Забирает pending docker-команды сервера, помечает running (не переслать
     повторно), возвращает для агента. Общий код /report и /commands (НЕ коммитит)."""
@@ -2625,12 +2664,7 @@ async def _take_docker_commands(session, server_id: int) -> list[dict]:
     return cmds
 
 
-def _docker_cmd_out(c: DockerCommand, now: datetime) -> DockerCommandOut:
-    # застрявшие в running (агент не ответил) старше 90с → таймаут
-    if c.status == "running" and (now - c.created_at.replace(
-        tzinfo=c.created_at.tzinfo or timezone.utc
-    )).total_seconds() > 90:
-        c.status, c.ok, c.result = "error", False, "агент не ответил (таймаут)"
+def _docker_cmd_out(c: DockerCommand) -> DockerCommandOut:
     out = DockerCommandOut.model_validate(c)
     # 403 на действие отвечает не докер, а прокси docker-сокета: на ноде прокси только для
     # чтения (tecnativa с POST=0). Говорим, в чем дело, вместо голого кода; в БД - как было.
@@ -2669,12 +2703,9 @@ async def docker_command_status(
     c = await session.get(DockerCommand, cmd_id)
     if c is None or c.server_id != server_id or not _cmd_visible(user, c):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
-    was = c.status
-    out = _docker_cmd_out(c, datetime.now(timezone.utc))
-    await session.commit()  # зафиксировать возможный таймаут-переход
-    if was != "error" and c.status == "error":  # агент не ответил: человек ждал зря
+    if await _expire_running_command(session, c):
         panel_errors.command_failed(request.app.state.session_factory, "docker", c)
-    return out
+    return _docker_cmd_out(c)
 
 
 async def _take_kube_commands(session, server_id: int) -> list[dict]:
@@ -2687,14 +2718,6 @@ async def _take_kube_commands(session, server_id: int) -> list[dict]:
             "action": c.action, "tail": c.tail, "since": c.since,
         })
     return cmds
-
-
-def _kube_cmd_out(c: KubeCommand, now: datetime) -> KubeCommandOut:
-    if c.status == "running" and (now - c.created_at.replace(
-        tzinfo=c.created_at.tzinfo or timezone.utc
-    )).total_seconds() > 90:
-        c.status, c.ok, c.result = "error", False, "агент не ответил (таймаут)"
-    return KubeCommandOut.model_validate(c)
 
 
 @router.post("/{server_id}/kube/expiry-ignore", response_model=ServerOut)
@@ -2790,12 +2813,9 @@ async def kube_command_status(
     c = await session.get(KubeCommand, cmd_id)
     if c is None or c.server_id != server_id or not _cmd_visible(user, c):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
-    was = c.status
-    out = _kube_cmd_out(c, datetime.now(timezone.utc))
-    await session.commit()
-    if was != "error" and c.status == "error":  # агент не ответил: человек ждал зря
+    if await _expire_running_command(session, c):
         panel_errors.command_failed(request.app.state.session_factory, "kube", c)
-    return out
+    return KubeCommandOut.model_validate(c)
 
 
 async def _take_backup_commands(session, server_id: int) -> list[dict]:
@@ -2816,14 +2836,6 @@ async def _take_backup_commands(session, server_id: int) -> list[dict]:
 # Сколько ждать ответа агента, прежде чем считать команду пропавшей. disk_fix дольше:
 # docker builder prune по кэшу в десятки ГБ идет минутами, агент ждет helper до 15 минут.
 _CMD_TIMEOUT = {"disk_fix": 16 * 60, "unit_fix": 7 * 60, "unit_journal": 2 * 60, "autoban": 3 * 60}
-
-
-def _backup_cmd_out(c: BackupCommand, now: datetime) -> BackupCommandOut:
-    if c.status == "running" and (now - c.created_at.replace(
-        tzinfo=c.created_at.tzinfo or timezone.utc
-    )).total_seconds() > _CMD_TIMEOUT.get(c.action, 90):
-        c.status, c.ok, c.result = "error", False, "агент не ответил (таймаут)"
-    return BackupCommandOut.model_validate(c)
 
 
 @router.post("/{server_id}/backup/command", response_model=BackupCommandOut)
@@ -2946,12 +2958,10 @@ async def backup_command_status(
     if (c is None or c.server_id != server_id or c.action in backup_command_result.PRIVATE_ACTIONS
             or not _cmd_visible(user, c)):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
-    was = c.status
-    out = _backup_cmd_out(c, datetime.now(timezone.utc))
-    await session.commit()
-    if was != "error" and c.status == "error":  # агент не ответил: человек ждал зря
+    # У фоновых задач свой таймаут, порой больше таймаута опроса ручной команды.
+    if c.created_by and await _expire_running_command(session, c, _CMD_TIMEOUT.get(c.action, 90)):
         panel_errors.command_failed(request.app.state.session_factory, "backup", c)
-    return out
+    return BackupCommandOut.model_validate(c)
 
 
 @router.post("/{server_id}/backup/custom-ignore", response_model=ServerOut)
@@ -3299,7 +3309,9 @@ async def _orchestrate_setup(session_factory, job_id: int, params: dict) -> None
         else:
             repo_url = f"rest:http://{name}:{hpass}@{server_ip}:{params['http_port']}/{name}"
 
-        ok, prov_out = await step("provision-repo", params["bs_id"], "provision_client",
+        create_only = params.get("create_only", False)
+        provision_action = "provision_new" if create_only else "provision_client"
+        ok, prov_out = await step("provision-repo", params["bs_id"], provision_action,
                                   {"name": name, "hpass": hpass, "repopass": repopass,
                                    "client_ip": params["client_ip"], **params["retention"]}, 150)
         if not ok:
@@ -3311,6 +3323,8 @@ async def _orchestrate_setup(session_factory, job_id: int, params: dict) -> None
         # История снапшотов сохраняется — ничего не пересоздаём и не удаляем.
         m = re.search(r"REPOPASS_B64=([A-Za-z0-9+/=]+)", prov_out or "")
         if m:
+            if create_only:
+                return await save("error", "сервер бэкапов вернул пароль существующего репозитория")
             try:
                 repopass = base64.b64decode(m.group(1)).decode().strip()
             except (ValueError, UnicodeDecodeError):
@@ -3356,8 +3370,17 @@ async def backup_setup(
     # форма отказывала по одной метрике, и такую ноду нельзя было настроить вовсе
     if backup_state.backup_alive(crep.get("backup")) and not body.reinstall:
         raise HTTPException(status.HTTP_409_CONFLICT, backup_state.BACKUP_EXISTS)
-    if not ((bs.last_report or {}).get("backup_server") or {}).get("present"):
+    backup_report = bs.last_report or {}
+    bs_rep = backup_report.get("backup_server") or {}
+    if not bs_rep.get("present"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "выбранный сервер не является бэкап-сервером")
+    # Имя репозитория зависит от отчета агента. Секрет существующего репозитория
+    # может запросить только администратор с доступом ко всем группам.
+    create_only = user.role != "admin" or bool(user.server_groups)
+    helper = (backup_report.get("setup_versions") or {}).get("backupserver-setup")
+    if create_only and (_ver_key(bs.agent_version) < (2, 69) or _ver_key(helper) < (0, 43)):
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "на бэкап-сервере нужны агент 2.69+ и backupserver-setup 0.43+")
     client_ip, server_ip = _pick_ip(client), _pick_ip(bs)
     if not client_ip or not server_ip:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "не удалось определить IP клиента/сервера")
@@ -3376,13 +3399,12 @@ async def backup_setup(
     # панель разрешает развернуть rest-server на своём порту, и тогда репозиторий
     # надо создавать там же. Раньше здесь стояли 64100/64101, и сервер на другом
     # порту разворачивался успешно, а настройка клиента падала на init.
-    bs_rep = (bs.last_report or {}).get("backup_server") or {}
     params = {
         "client_id": client.id, "bs_id": bs.id, "bs_hostname": bs.hostname or "",
         "http_port": int(bs_rep.get("port") or 64100),
         "tls_port": int(bs_rep.get("tls_port") or 64101),
         "name": name, "client_ip": client_ip, "server_ip": server_ip,
-        "hpass": _gen_secret(), "repopass": _gen_secret(),
+        "hpass": _gen_secret(), "repopass": _gen_secret(), "create_only": create_only,
         "mode": body.mode, "schedule": body.schedule, "paths": paths, "tls": body.tls,
         "retention": {"keep_last": body.keep_last, "keep_daily": body.keep_daily,
                       "keep_weekly": body.keep_weekly, "keep_monthly": body.keep_monthly},
@@ -3654,7 +3676,7 @@ async def backup_setup_status(
     return out
 
 
-async def _backup_server_for(session, repo_url: str):
+async def _backup_server_for(session, repo_url: str, user: User) -> tuple[Server | None, str]:
     """Бэкап-сервер, на который смотрит repo-URL клиента, и имя репо в нём."""
     if not (repo_url or "").startswith(("rest:http://", "rest:https://")):
         return None, ""
@@ -3670,19 +3692,16 @@ async def _backup_server_for(session, repo_url: str):
         if not ((cand.last_report or {}).get("backup_server") or {}).get("present"):
             continue
         if host in ((cand.external_ip or "").lower(), (cand.agent_ip or "").lower(), (cand.hostname or "").lower()):
-            return cand, name
+            return (cand if group_allowed(user, cand.group_name) else None), name
     return None, name
 
 
-async def _fetch_cacert_pem(factory, session, repo_url: str) -> str:
+async def _fetch_cacert_pem(factory, bs: Server | None, repo_url: str) -> str:
     """САМ сертификат бэкап-сервера (PEM). Клиентский helper отдаёт лишь ПУТЬ к файлу
     на своей ноде — на чужой машине это бесполезно, а восстанавливаются как раз не на
     ней. Поэтому content берём у бэкап-сервера его же командой get_cert."""
-    if not (repo_url or "").startswith("rest:https://"):
+    if bs is None or not (repo_url or "").startswith("rest:https://"):
         return ""  # http-репо серт не требует
-    bs, _ = await _backup_server_for(session, repo_url)
-    if bs is None:
-        return ""
     try:
         cid = await _bcmd_create(factory, bs.id, "get_cert", {})
         ok, out = await _bcmd_wait(factory, cid, 40)
@@ -3718,7 +3737,7 @@ async def backup_credentials(
             d = _decode(out)
             await audit.record(session, user.username, "backup_credentials_view", server.name, f"srv={server_id}")
             url = d.get("repo_url", "")
-            bs, name = await _backup_server_for(session, url)
+            bs, name = await _backup_server_for(session, url, user)
             data_dir = ((bs.last_report or {}).get("backup_server") or {}).get("data_dir") if bs else None
             repo_local = f"{data_dir.rstrip('/')}/{name}" if isinstance(data_dir, str) and data_dir and name else ""
             if not re.fullmatch(r"(?:/[A-Za-z0-9._-]+)+", repo_local) or {".", ".."}.intersection(repo_local.split("/")):
@@ -3726,41 +3745,34 @@ async def backup_credentials(
             return BackupCredsOut(
                 repo_url=url, repo_local=repo_local, repopass=d.get("repopass", ""),
                 cacert_file=d.get("cacert_file", ""),
-                cacert_pem=await _fetch_cacert_pem(factory, session, url),
+                cacert_pem=await _fetch_cacert_pem(factory, bs, url),
                 source="client",
             )
         except Exception:  # noqa: BLE001
             pass
 
-    # 2) FALLBACK (клиент мёртв/недоступен): достаём пароль с БЭКАП-СЕРВЕРА (prune-env
-    #    хранит тот же repopass рядом с бэкапами). Сервер находим по repo_dest клиента.
+    # Адрес в отчете клиента не подтверждает владение репозиторием. На общем бэкап-сервере
+    # по нему можно запросить пароль любой ноды, в том числе из чужой группы.
+    if user.server_groups:
+        raise HTTPException(status.HTTP_403_FORBIDDEN,
+                            "Для получения пароля с бэкап-сервера нужны права администратора без ограничений по группам")
     repo_dest = ((server.last_report or {}).get("backup") or {}).get("repo_dest") or ""
-    m = re.match(r"rest:[a-z]+://([^:/]+)", repo_dest)
-    if m:
-        host = m.group(1)
-        name = repo_dest.rstrip("/").rsplit("/", 1)[-1]
-        bs = None
-        for cand in await session.scalars(select(Server).where(Server.enabled.is_(True))):
-            if not ((cand.last_report or {}).get("backup_server") or {}).get("present"):
-                continue
-            if host in (cand.external_ip or "", cand.agent_ip or "", cand.hostname or ""):
-                bs = cand
-                break
-        if bs is not None and name:
-            cid2 = await _bcmd_create(factory, bs.id, "get_client_creds", {"name": name})
-            ok2, out2 = await _bcmd_wait(factory, cid2, 40)
-            if ok2 and (out2 or "").strip():
-                try:
-                    d = _decode(out2)
-                    await audit.record(session, user.username, "backup_credentials_view", f"{server.name} (via {bs.name})", f"srv={server_id}")
-                    return BackupCredsOut(
-                        repo_url=repo_dest, repopass=d.get("repopass", ""),
-                        repo_local=d.get("repo_local", ""),
-                        cacert_pem=await _fetch_cacert_pem(factory, session, repo_dest),
-                        source="backup-server", server_name=bs.name,
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
+    bs, name = await _backup_server_for(session, repo_dest, user)
+    if bs is not None and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}", name):
+        cid2 = await _bcmd_create(factory, bs.id, "get_client_creds", {"name": name})
+        ok2, out2 = await _bcmd_wait(factory, cid2, 40)
+        if ok2 and (out2 or "").strip():
+            try:
+                d = _decode(out2)
+                await audit.record(session, user.username, "backup_credentials_view", f"{server.name} (via {bs.name})", f"srv={server_id}")
+                return BackupCredsOut(
+                    repo_url=repo_dest, repopass=d.get("repopass", ""),
+                    repo_local=d.get("repo_local", ""),
+                    cacert_pem=await _fetch_cacert_pem(factory, bs, repo_dest),
+                    source="backup-server", server_name=bs.name,
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
     raise HTTPException(
         status.HTTP_400_BAD_REQUEST,
@@ -4243,11 +4255,11 @@ async def agent_report(
     cmds = await _take_docker_commands(session, server.id)
     kcmds = await _take_kube_commands(session, server.id)
     bcmds = await _take_backup_commands(session, server.id)
-    pending = await _store_site_probes(session, server.id, body.site_probes or [], now)
+    pending = await _store_site_probes(session, server, body.site_probes or [], now)
     # Ручные проверки — первыми: агент проходит задания по порядку, и «Проверить
     # сейчас» не должно ждать, пока он переберёт медленные плановые сайты.
     manual = await manual_probe.tasks_for_report(session, server, now)
-    probes = manual + await _site_probe_tasks(session, server.id)
+    probes = manual + await _site_probe_tasks(session, server)
     await session.commit()
     background.add_task(send_alerts_soon, request.app.state.session_factory, pending, now)
 
@@ -4282,7 +4294,7 @@ async def agent_packages(
     return {"ok": True, "done": done}
 
 
-async def _store_site_probes(session, server_id: int, results: list, now) -> list:
+async def _store_site_probes(session, server: Server, results: list, now) -> list:
     """Кладёт присланные агентом результаты локальных проверок.
 
     Только для мониторов, которым ЭТОТ сервер назначен проверяющим: иначе агент
@@ -4298,11 +4310,10 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> lis
         except (TypeError, ValueError):
             return 0
 
-    pending = await manual_probe.ingest(
-        session, server_id, [r for r in results if _id(r) < 0], now
-    )
+    server_id = server.id
+    pending = await manual_probe.ingest(session, server, [r for r in results if _id(r) < 0], now)
     await _store_path_probes(
-        session, server_id, [r for r in results if _id(r) >= manual_probe.PATH_TASK_BASE], now
+        session, server, [r for r in results if _id(r) >= manual_probe.PATH_TASK_BASE], now
     )
     ids = [i for r in results if 0 < (i := _id(r)) < manual_probe.PATH_TASK_BASE]
     if not ids:
@@ -4317,7 +4328,7 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> lis
                 Check.type == "http",
             )
         )
-        if probe_scope.server_allowed(check, server_id)
+        if probe_scope.server_allowed(check, server)
     )
     for r in results:
         cid = _id(r)
@@ -4351,7 +4362,7 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> lis
     return pending
 
 
-async def _store_path_probes(session, server_id: int, results: list, now) -> None:
+async def _store_path_probes(session, server: Server, results: list, now) -> None:
     """Planned agent results for the additional paths of local monitors.
 
     The task number carries the monitor and a hash of the path (manual_probe.path_task_ids).
@@ -4360,6 +4371,7 @@ async def _store_path_probes(session, server_id: int, results: list, now) -> Non
     monitor may report on it."""
     if not results:
         return
+    server_id = server.id
     by_check: dict[int, list] = {}
     for r in results:
         try:
@@ -4377,7 +4389,7 @@ async def _store_path_probes(session, server_id: int, results: list, now) -> Non
         )
     )
     for check in checks:
-        if not probe_scope.server_allowed(check, server_id):
+        if not probe_scope.server_allowed(check, server):
             continue
         paths = {tid: path for path, tid in manual_probe.path_task_ids(check).items()}
         for tid, r in by_check.get(check.id, []):
@@ -4404,7 +4416,7 @@ def _aware_dt(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-async def _site_probe_tasks(session, server_id: int) -> list[dict]:
+async def _site_probe_tasks(session, server: Server) -> list[dict]:
     """Плановые задания агенту: что проверять изнутри сервера (см. site_probe_task).
 
     Только мониторы с галочкой «локально»: снятая галочка оставляла привязку, и агент
@@ -4414,12 +4426,12 @@ async def _site_probe_tasks(session, server_id: int) -> list[dict]:
             select(Check).where(
                 Check.enabled.is_(True),
                 Check.probe_local.is_(True),
-                Check.probe_server_id == server_id,
+                Check.probe_server_id == server.id,
                 Check.type == "http",
             )
         )
     )
-    return [task for c in rows if probe_scope.server_allowed(c, server_id) for task in manual_probe.planned_tasks(c)]
+    return [task for c in rows if probe_scope.server_allowed(c, server) for task in manual_probe.planned_tasks(c)]
 
 
 @agent_router.get("/commands")
@@ -4429,8 +4441,9 @@ async def agent_commands(
     """Быстрый опрос очереди docker-команд (агент дёргает чаще, чем шлёт метрики) —
     чтобы restart/logs исполнялись за ~3с, а не за интервал отчёта. Тело крошечное."""
     token = authorization.removeprefix("Bearer ").strip()
+    # Keep the token and its scope stable until all tasks have been selected.
     server = await session.scalar(
-        select(Server).where(Server.token_hash == hash_agent_token(token))
+        select(Server).where(Server.token_hash == hash_agent_token(token)).with_for_update()
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
@@ -4464,13 +4477,13 @@ async def agent_site_probe_result(
     """Агент 2.7+ присылает ответ на ручную проверку сразу, не дожидаясь отчёта."""
     token = authorization.removeprefix("Bearer ").strip()
     server = await session.scalar(
-        select(Server).where(Server.token_hash == hash_agent_token(token))
+        select(Server).where(Server.token_hash == hash_agent_token(token)).with_for_update()
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
     await require_agent_source(server, request, session)
     now = datetime.now(timezone.utc)
-    pending = await _store_site_probes(session, server.id, body.site_probes, now)
+    pending = await _store_site_probes(session, server, body.site_probes, now)
     await session.commit()
     background.add_task(send_alerts_soon, request.app.state.session_factory, pending, now)
     return {"ok": True}
@@ -4518,13 +4531,7 @@ async def agent_docker_result(
     c = await session.get(DockerCommand, body.id)
     if c is None or c.server_id != server.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
-    c.ok = body.ok
-    c.result = (body.output or "")[-20_000_000:]  # хвост, если очень длинно (кап ~20МБ)
-    c.status = "done" if body.ok else "error"
-    c.done_at = datetime.now(timezone.utc)
-    await session.commit()
-    if not body.ok:
-        panel_errors.command_failed(request.app.state.session_factory, "docker", c, server_name=server.name or "")
+    await _save_container_command_result(session, request, server, "docker", c, body)
     return {"ok": True}
 
 
@@ -4546,14 +4553,19 @@ async def agent_kube_result(
     c = await session.get(KubeCommand, body.id)
     if c is None or c.server_id != server.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
-    c.ok = body.ok
-    c.result = (body.output or "")[-20_000_000:]
-    c.status = "done" if body.ok else "error"
-    c.done_at = datetime.now(timezone.utc)
+    await _save_container_command_result(session, request, server, "kube", c, body)
+    return {"ok": True}
+
+
+async def _save_container_command_result(session, request, server, kind, command, body):
+    if command.status != "running" or not await _transition_running_command(
+        session, command, ok=body.ok, status="done" if body.ok else "error",
+        result=(body.output or "")[-20_000_000:], done_at=datetime.now(timezone.utc),
+    ):
+        return
     await session.commit()
     if not body.ok:
-        panel_errors.command_failed(request.app.state.session_factory, "kube", c, server_name=server.name or "")
-    return {"ok": True}
+        panel_errors.command_failed(request.app.state.session_factory, kind, command, server_name=server.name or "")
 
 
 @agent_router.post("/backup-result")
@@ -4567,40 +4579,42 @@ async def agent_backup_result(
     """Агент постит результат backup-команды (по своему токену)."""
     token = authorization.removeprefix("Bearer ").strip()
     server = await session.scalar(
-        select(Server).where(Server.token_hash == hash_agent_token(token))
+        select(Server).where(Server.token_hash == hash_agent_token(token)).with_for_update()
     )
     if server is None or not server.enabled:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный токен агента")
     await require_agent_source(server, request, session)
     c = await session.scalar(select(BackupCommand).where(
         BackupCommand.id == body.id, BackupCommand.server_id == server.id
-    ).with_for_update())
+    ))
     if c is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Команда не найдена")
+    if c.status != "running":
+        return {"ok": True}
+    done_at = datetime.now(timezone.utc)
+    result_status = "done" if body.ok else "error"
     if c.action in backup_command_result.PRIVATE_ACTIONS:
-        if c.status == "running":
-            await session.execute(
-                sa_update(BackupCommand).where(BackupCommand.id == c.id, BackupCommand.status == "running")
-                .values(ok=body.ok, status="done" if body.ok else "error", done_at=datetime.now(timezone.utc),
-                        result=backup_command_result.seal(c.id, body.output), payload=None)
-            )
+        if await _transition_running_command(
+            session, c, ok=body.ok, status=result_status, done_at=done_at,
+            result=backup_command_result.seal(c.id, body.output), payload=None,
+        ):
             await session.commit()
         return {"ok": True}
-    c.ok = body.ok
     # отказ дампа без причины (helper до 0.38) - панель дописывает, что известно; payload с
     # движком еще не стерт
     out = dump_reason.fill_dump_reason(c.action, body.ok, body.output or "", c.payload,
                                        (server.last_report or {}).get("setup_versions"))
-    c.result = out[-100_000:]
-    c.status = "done" if body.ok else "error"
-    c.done_at = datetime.now(timezone.utc)
+    if not await _transition_running_command(
+        session, c, ok=body.ok, status=result_status, done_at=done_at, result=out[-100_000:],
+    ):
+        return {"ok": True}
     if c.action == "deprovision" and body.ok:
         server.backup_setup_err = None  # настройку сняли - упавшей больше нет
     if c.action == "to_https" and body.ok:
         # бэкап уже на https: адрес в отчете сразу, не дожидаясь следующего отчета агента
         # (app/backup_target.py, switched)
         rep = backup_target.switched(server.last_report or {}, (c.payload or {}).get("port"),
-                                     c.done_at.timestamp())
+                                     done_at.timestamp())
         if rep is not None:
             server.last_report = rep
     if not body.ok:

@@ -140,10 +140,7 @@ func TestBackupSecrets(t *testing.T) {
 func TestProvisionClientLines(t *testing.T) {
 	good := backupCommand{Action: "provision_client", Name: "node-a", Hpass: "fake-token-example",
 		Repopass: "fakepass", ClientIP: "203.0.113.5"}
-	if _, ok := backupServerLines(good); !ok {
-		t.Fatal("rejected a good request")
-	}
-	for _, mut := range []func(*backupCommand){
+	invalid := []func(*backupCommand){
 		func(c *backupCommand) { c.Repopass = `a";touch /root/x;"` },
 		func(c *backupCommand) { c.Repopass = "" },
 		func(c *backupCommand) { c.Hpass = "fake:pass1" },
@@ -151,11 +148,18 @@ func TestProvisionClientLines(t *testing.T) {
 		func(c *backupCommand) { c.Name = ".." },
 		func(c *backupCommand) { c.Name = ".htpasswd" },
 		func(c *backupCommand) { c.Name = "-x" },
-	} {
-		c := good
-		mut(&c)
-		if _, ok := backupServerLines(c); ok {
-			t.Fatalf("accepted %+v", c)
+	}
+	for _, action := range []string{"provision_client", "provision_new"} {
+		good.Action = action
+		if lines, ok := backupServerLines(good); !ok || lines[0] != "action="+action {
+			t.Fatalf("wrong spool action for %s: %v", action, lines)
+		}
+		for _, mut := range invalid {
+			c := good
+			mut(&c)
+			if _, ok := backupServerLines(c); ok {
+				t.Fatalf("accepted %+v", c)
+			}
 		}
 	}
 	if _, ok := backupServerLines(backupCommand{Action: "get_client_creds", Name: "."}); ok {

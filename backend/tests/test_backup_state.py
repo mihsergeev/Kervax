@@ -222,8 +222,9 @@ async def test_setup_result_and_deprovision_mark_the_server(client, auth_headers
         srv.token_hash = hash_agent_token(token)
         assert (await s.get(BackupCommand, cid)).action == "deprovision"
         await s.commit()
-    r = await client.post("/api/agent/backup-result", json={"id": cid, "ok": True, "output": "OK removed"},
-                          headers={"Authorization": f"Bearer {token}"})
+    agent = {"Authorization": f"Bearer {token}"}
+    assert (await client.get("/api/agent/commands", headers=agent)).json()["backup_commands"][0]["id"] == cid
+    r = await client.post("/api/agent/backup-result", json={"id": cid, "ok": True, "output": "OK removed"}, headers=agent)
     assert r.status_code == 200, r.text
     async with f() as s:
         assert (await s.get(Server, a)).backup_setup_err is None

@@ -5,7 +5,7 @@ import json
 from app import backup
 from app.config import get_settings
 
-PRIVATE_ACTIONS = frozenset({"get_creds", "get_client_creds", "provision_client"})
+PRIVATE_ACTIONS = frozenset({"get_creds", "get_client_creds", "provision_client", "provision_new"})
 SEALED_PREFIX = "sealed:v1:"
 
 

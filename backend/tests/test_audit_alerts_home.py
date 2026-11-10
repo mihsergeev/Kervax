@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from app import collector, heartbeat, home_mute, kube_cron, mem_trend, panel_errors, tg_bot, tg_buttons
 from app.alerts import full_text
-from app.models import AlertEvent, Check, PanelError, Server, TgAlert, User
+from app.models import AlertEvent, Check, CheckIncident, PanelError, Server, TgAlert, User
 
 
 def _factory(path):
@@ -207,6 +207,8 @@ def test_running_cronjob_keeps_the_failed_verdict():
 # --- Алерты 3: отбой монитора под снузом и при сбое доставки ----------------------------------------
 
 async def test_monitor_recovery_survives_snooze_and_failed_delivery(tmp_path, monkeypatch):
+    from app import settings_store, site_flap
+    from app.checks import CheckOutcome
     from app.config import Settings
     from app.db import Base
 
@@ -215,10 +217,15 @@ async def test_monitor_recovery_survives_snooze_and_failed_delivery(tmp_path, mo
         await conn.run_sync(Base.metadata.create_all)
     now = datetime.now(timezone.utc)
     async with factory() as s:
-        c = Check(name="shop", type="http", target="https://example.com", last_status="up",
-                  snooze_until=now + timedelta(hours=20))
+        c = Check(name="shop", type="http", target="https://example.com", last_status="down",
+                  interval_seconds=3600, snooze_until=now + timedelta(hours=20))
         s.add(c)
-        await s.commit()
+        await s.flush()
+        s.add(CheckIncident(check_id=c.id, status="down", started_at=now - timedelta(minutes=1),
+                            last_message="HTTP 503", notified=True))
+        pending = []
+        await collector.record_outcome(s, c, CheckOutcome("up", message="HTTP 200"), now, pending, manual=True)
+        await settings_store.set_muted(s, True)
         cid = c.id
     sent: list[str] = []
     ok = {"v": False}
@@ -230,16 +237,27 @@ async def test_monitor_recovery_survives_snooze_and_failed_delivery(tmp_path, mo
         return []
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
-    monkeypatch.setattr(collector, "_REC_RETRY", {})
     st = Settings(alert_webhook="http://hook")
-    rec = collector.Pending("recovery", "shop", "up", "HTTP 200", None, cid, None, "")
-    await collector._send_alerts(factory, st, [rec], now)
-    assert sent == [] and cid in collector._REC_RETRY
-    # следующая отправка (любая) подмешивает недоставленный отбой, хоть монитор и под снузом
+    await collector._send_alerts(factory, st, pending, now)
+    assert sent == []
+    async with factory() as s:
+        assert (await s.scalar(select(CheckIncident.ended_at))) is not None
+        assert (await s.get(Check, cid)).flap_state["recovery"]["msg"] == "HTTP 200"
+        await settings_store.set_muted(s, False)
+    # Новый процесс забирает отбой из БД даже без созревших мониторов и без исходного pending.
+    await engine.dispose()
+    engine, factory = _factory(tmp_path / "m.db")
+    assert await collector.run_due_checks(factory, st) == 0
+    assert sent == []
+    async with factory() as s:
+        assert "recovery" in (await s.get(Check, cid)).flap_state
     ok["v"] = True
-    await collector._send_alerts(factory, st, [], now + timedelta(minutes=1))
-    assert len(sent) == 1 and "shop" in full_text(sent[0]) or "example.com" in full_text(sent[0])
-    assert collector._REC_RETRY == {}
+    assert await collector.run_due_checks(factory, st) == 0
+    assert len(sent) == 1 and "example.com" in full_text(sent[0])
+    async with factory() as s:
+        assert (await s.get(Check, cid)).flap_state == site_flap.closed(now)
+    await collector._send_alerts(factory, st, pending, now)
+    assert len(sent) == 1
     # а падение под снузом по-прежнему молчит
     sent.clear()
     bad = collector.Pending("bad", "shop", "down", "HTTP 503", None, cid, None, "")

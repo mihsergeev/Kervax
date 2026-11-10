@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import NamedTuple
 from urllib.parse import quote, urlparse
+from weakref import WeakKeyDictionary
 
 from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -128,6 +129,12 @@ from app.models import (
 
 log = logging.getLogger("kervax.collector")
 
+
+_REC_RETRY_MAX = timedelta(days=1)
+_RECOVERY_KINDS = ("recovery", "recstable")
+_site_alert_locks: WeakKeyDictionary[async_sessionmaker, asyncio.Lock] = WeakKeyDictionary()
+
+
 class Pending(NamedTuple):
     """Элемент очереди сайтовых алертов.
 
@@ -142,7 +149,7 @@ class Pending(NamedTuple):
     inc_id: int | None
     check_id: int | None
     # None (инцидент) либо (атрибут, значение) или список таких пар — что выставить на
-    # мониторе при успехе
+    # мониторе при успехе. Для отбоя — ожидаемое состояние в БД перед очисткой.
     flag: tuple[str, object] | list[tuple[str, object]] | None
     icon: str = ""  # готовая ведущая иконка (сроки: 🔥 истекло / ⚠️ предупреждение)
 
@@ -676,6 +683,7 @@ async def rebind_local_probes(session_factory) -> int:
         if not checks:
             return 0
         servers = sorted(await session.scalars(select(Server).where(Server.enabled.is_(True))), key=lambda x: x.name)
+        servers_by_id = {srv.id: srv for srv in servers}
         group_of = {srv.id: srv.group_name or "" for srv in servers}
         claims: dict[str, list[int]] = {}
         for srv in servers:
@@ -691,7 +699,9 @@ async def rebind_local_probes(session_factory) -> int:
             candidates = claims.get(probe_scope.target_host(c.target), [])
             if probe_scope.requires_trusted_server(c):
                 trusted = probe_scope.trusted_server(c)
-                candidates = [trusted] if trusted in candidates else []
+                candidates = [trusted] if trusted in candidates and probe_scope.server_allowed(
+                    c, servers_by_id[trusted]
+                ) else []
             want = _probe_node(candidates, c.probe_server_id, group_of)
             if want is not None and want == c.probe_server_id:
                 _bound_seen[c.id] = now
@@ -699,7 +709,7 @@ async def rebind_local_probes(session_factory) -> int:
             # это неполный сбор на деплое, а не переезд сайта. Держим привязку, пока не
             # выйдет _UNBIND_GRACE, — агент продолжает проверять, ложного алерта нет.
             if (want is None and c.probe_server_id in online
-                    and probe_scope.server_allowed(c, c.probe_server_id)):
+                    and probe_scope.server_allowed(c, servers_by_id[c.probe_server_id])):
                 seen = _bound_seen.setdefault(c.id, now)
                 if (now - seen).total_seconds() < _UNBIND_GRACE:
                     continue
@@ -844,12 +854,9 @@ async def record_outcome(
             else:
                 # несём up-сообщение («HTTP 200 · N мс» / «порт открыт …») —
                 # чтобы в восстановлении был виден код/латентность, а не пусто
-                pending.append(("recovery", row.name, "up", msg, None, row.id, None, ""))
-                row.flap_state = site_flap.closed(now)
+                _queue_site_recovery(row, pending, "recovery", msg, now)
     elif ep == "down" and site_flap.stable(await _flap_hist(session, row, now, new_status), now):
-        pending.append(Pending("recstable", row.name, "up", f"снова отвечает стабильно: {msg}",
-                               None, row.id, None, ""))
-        row.flap_state = site_flap.closed(now)
+        _queue_site_recovery(row, pending, "recstable", f"снова отвечает стабильно: {msg}", now)
         # "через раз" этого эпизода закрыт тем же отбоем
         row.flaky_since, row.flaky_notified = None, False
     if not manual:
@@ -896,6 +903,13 @@ async def record_outcome(
                 check_id=row.id, ip=ipr["ip"], status=ipr["status"],
                 latency_ms=ipr.get("latency_ms"), ts=now,
             ))
+
+
+def _queue_site_recovery(row: Check, pending: list, kind: str, msg: str, now: datetime) -> None:
+    # Инцидент закрывается в этой же транзакции. Отбой должен пережить падение
+    # канала, паузу и перезапуск, даже если результат записал веб-воркер.
+    row.flap_state = {**site_flap.closed(now), "recovery": {"kind": kind, "msg": msg}}
+    pending.append(Pending(kind, row.name, "up", msg, None, row.id, ("flap_state", row.flap_state)))
 
 
 async def _flap_hist(session: AsyncSession, row: Check, now: datetime, status: str) -> site_flap.Hist:
@@ -995,6 +1009,10 @@ async def run_due_checks(
         )
     due = [c for c in enabled if _is_due(c, now)]
     if not due:
+        try:
+            await _send_alerts(session_factory, settings, [], now)
+        except Exception:  # noqa: BLE001 — алерты не должны ронять цикл
+            log.exception("ошибка отправки алертов")
         return 0
 
     cap = settings.check_max_concurrency
@@ -1013,9 +1031,18 @@ async def run_due_checks(
                 probe_scope.explain_panel_fallback(c, outcome)
         outcomes_map.update(dict(zip((c.id for c in remote), got)))
     if local:
-        assigned = {c.id: c.probe_server_id for c in local if c.probe_server_id is not None
-                    and probe_scope.server_allowed(c, c.probe_server_id)}
+        assigned = {c.id: c.probe_server_id for c in local if c.probe_server_id is not None}
+        protected = [c for c in local if c.id in assigned and probe_scope.requires_trusted_server(c)]
         async with session_factory() as session:
+            if protected:
+                parent_ids = {c.probe_server_id for c in protected}
+                parents = {row.id: row for row in await session.execute(
+                    select(Server.id, Server.token_site_groups).where(Server.id.in_(parent_ids))
+                )}
+                for c in protected:
+                    srv = parents.get(c.probe_server_id)
+                    if srv is None or not probe_scope.server_allowed(c, srv):
+                        assigned.pop(c.id)
             probes = {
                 r.check_id: r
                 for r in await session.scalars(
@@ -1104,12 +1131,10 @@ async def run_due_checks(
                 _apply_expiry(row, exp_map[check.id], now, pending, doms)
         await session.commit()
 
-    # группа мониторов одного места ждет отбоя (app/site_group.py): смотрим и без новых событий
-    if pending or await site_group.any_open(session_factory):
-        try:
-            await _send_alerts(session_factory, settings, pending, now)
-        except Exception:  # noqa: BLE001 — алерты не должны ронять цикл
-            log.exception("ошибка отправки алертов")
+    try:
+        await _send_alerts(session_factory, settings, pending, now)
+    except Exception:  # noqa: BLE001 — алерты не должны ронять цикл
+        log.exception("ошибка отправки алертов")
     return len(due)
 
 
@@ -1169,42 +1194,59 @@ async def _with_before(session_factory, msg: "alerts.Msg", s, end: datetime,
     return msg.tail("\n" + html.escape(tail))
 
 
-# Отбой объявленного падения, который не ушел (канал не принял): инцидент к этому моменту уже
-# закрыт, и раньше отбой терялся навсегда - в чате последним оставалось "лежит". Повторяем при
-# следующих отправках, пока монитор на ногах, не дольше суток. В памяти процесса планировщика
-_REC_RETRY: dict[int, tuple["Pending", datetime]] = {}
-_REC_RETRY_MAX = timedelta(days=1)
-_RECOVERY_KINDS = ("recovery", "recstable")
+async def _site_recoveries(session: AsyncSession, now: datetime) -> tuple[list[Pending], dict[int, dict]]:
+    rows = await session.execute(select(Check.id, Check.name, Check.enabled, Check.last_status, Check.flap_state)
+                                 .where(Check.flap_state["recovery"]["kind"].as_string().is_not(None)))
+    pending = []
+    stale = {}
+    for cid, name, enabled, status, state in rows:
+        recovery = state["recovery"]
+        kind, msg = recovery.get("kind"), recovery.get("msg")
+        at = site_flap.cutoff(state)
+        if (enabled and status == "up" and at is not None and now - at < _REC_RETRY_MAX
+                and kind in _RECOVERY_KINDS and isinstance(msg, str)):
+            pending.append(Pending(kind, name, "up", msg, None, cid, ("flap_state", state)))
+        else:
+            stale[cid] = state
+    return pending, stale
 
 
-async def _with_retries(session_factory, pending: list, now: datetime) -> list:
-    """Подмешать в пачку недоставленные отбои мониторов, которые все еще на ногах."""
-    if not _REC_RETRY:
-        return pending
-    have = {p.check_id for p in map(_as_pending, pending) if p.kind in _RECOVERY_KINDS}
-    want = {cid: p for cid, (p, at) in list(_REC_RETRY.items())
-            if now - at < _REC_RETRY_MAX and cid not in have}
-    for cid in [c for c, (_p, at) in _REC_RETRY.items() if now - at >= _REC_RETRY_MAX]:
-        _REC_RETRY.pop(cid, None)
-    if not want:
-        return pending
-    try:
-        async with session_factory() as session:
-            up = {i for i, st in (await session.execute(select(Check.id, Check.last_status)
-                                                         .where(Check.id.in_(list(want))))).all() if st == "up"}
-    except Exception:  # noqa: BLE001 - не прочиталось: попробуем в следующий раз
-        log.warning("не проверил мониторы для повтора отбоев", exc_info=True)
-        return pending
-    for cid in set(want) - up:
-        _REC_RETRY.pop(cid, None)  # снова лежит: отбой больше не правда
-    return list(pending) + [want[c] for c in sorted(up)]
+async def _clear_site_recoveries(session: AsyncSession, recs: dict[int, dict]) -> None:
+    for cid, state in sorted(recs.items()):
+        row = await session.get(Check, cid, with_for_update=True)
+        if row is not None and row.flap_state == state:
+            row.flap_state = {key: value for key, value in state.items() if key != "recovery"}
 
 
 async def _send_alerts(
     session_factory, settings: Settings, pending, now: datetime
 ) -> None:
-    pending = await _with_retries(session_factory, list(pending), now)
+    # Ручная проверка и планировщик могут забрать один отбой одновременно. Держим
+    # общую блокировку до записи результата доставки, включая состояние групп. Локальная
+    # очередь не дает ожиданиям занять весь пул, который нужен текущей отправке.
+    lock = _site_alert_locks.get(session_factory)
+    if lock is None:
+        lock = _site_alert_locks[session_factory] = asyncio.Lock()
+    async with lock:
+        async with session_factory() as lock_session:
+            if lock_session.get_bind().dialect.name == "postgresql":
+                await lock_session.execute(select(func.pg_advisory_xact_lock(
+                    func.hashtextextended("kervax/site_alerts", 0))))
+            await _send_site_batch(session_factory, settings, pending, now)
+
+
+async def _send_site_batch(session_factory, settings: Settings, pending, now: datetime) -> None:
     async with session_factory() as session:
+        recoveries, stale_recoveries = await _site_recoveries(session, now)
+        if stale_recoveries:
+            await _clear_site_recoveries(session, stale_recoveries)
+            await session.commit()
+        # Ручная проверка передает сигнал об отбое, но читаем сам отбой из БД:
+        # другой воркер мог уже его отправить, а монитор мог снова перестать отвечать.
+        pending = [p for p in map(_as_pending, pending) if p.kind not in _RECOVERY_KINDS or p.flag is None]
+        pending.extend(recoveries)
+        if not pending and not await site_group.load(session):
+            return
         cfg = await settings_store.get_alert_config(session, settings)
         muted = await settings_store.get_muted(session)
         rules = await settings_store.get_site_alert_rules(session)
@@ -1305,14 +1347,14 @@ async def _send_alerts(
     threshold = int(cfg.get("flood_threshold", 6))
     # Собираем сообщения тика + отложенные отметки, затем шлём с антифлудом.
     texts: list[alerts.Msg] = []
-    commits: list[tuple] = []  # (kind, inc_id, check_id, flag)
+    commits: list[tuple] = []  # (text index, kind, inc_id, check_id, flag)
     # Домен продлевают целиком, поэтому истекает ОДНО имя, а мониторов на его
     # поддоменах бывает много: без свёртки в чат прилетало пять одинаковых
     # «регистрация домена истекает через 4 дн.» про один и тот же example.com.
     # Флаги эскалации при этом ставим КАЖДОМУ монитору (иначе на следующем тике
     # остальные напишут по второму разу), а сообщение отправляем одно.
-    dom_at: dict[str, int] = {}   # registrable-домен → индекс его текста в texts
-    dom_n: dict[str, int] = {}    # сколько мониторов он покрывает
+    dom_at: dict[tuple[str, str], int] = {}  # группа и домен → индекс текста
+    dom_n: dict[tuple[str, str], int] = {}   # сколько мониторов он покрывает
     # Сайт и его www (или два поддомена за одним фронтом) падают и поднимаются одним тиком и
     # одинаково: было по сообщению на монитор, с отбоями четыре вместо двух. Одинаковый вид и
     # статус на одном домене в одном тике - одно сообщение, остальные адреса дописаны.
@@ -1330,9 +1372,11 @@ async def _send_alerts(
     # Pending(*p): на вход может прийти и голый кортеж (в т.ч. из тестов) —
     # приводим к именованному, недостающий icon подставит дефолт
     for kind, name, status, msg, inc_id, check_id, flag, icon in map(_as_pending, pending):
+        if kind in _RECOVERY_KINDS:
+            flag = None  # сохраненное состояние отбоя сравним отдельно перед очисткой
         rk = _SITE_RULE_KIND.get(kind)
         rule = rules.get(rk) if rk else None
-        grp = groups.get(check_id, "") if check_id is not None else ""
+        grp = groups.get(check_id) or ""
         if check_id is not None and check_id in snoozed and kind not in _RECOVERY_KINDS:
             # монитор временно приглушён (снуз) — не шлём, но и не помечаем. Кроме отбоя
             # объявленного падения: снуз ставят, чтобы не слышать повторов, а не чтобы не узнать,
@@ -1340,6 +1384,8 @@ async def _send_alerts(
             continue
         if rk and check_id is not None and rk in mutes.get(check_id, set()):
             continue  # тип заглушён именно для этого монитора
+        if rule is not None and (not rule["enabled"] or not _site_scope_ok(rule, check_id, grp)):
+            continue  # фильтруем до свёртки, иначе адрес и кнопки попадут в чужое сообщение
         if kind == "known":
             # напоминание об известной проблеме монитора: без кнопок и без свертки по домену
             k_what, k_facts = known_mod.remind_short(msg)
@@ -1357,23 +1403,24 @@ async def _send_alerts(
         site_url = _site_url(tgt, typ)  # ссылка «открыть сам сайт» (без query/токена)
         link_url = (f"{base}/?check={check_id}" + (f"&sec={_SITE_SEC[kind]}" if kind in _SITE_SEC else "")
                     if base and check_id is not None else "")
-        zone = ""
+        domain_key = None
         if kind == "domain":
             # в шапке показываем САМО истекающее имя, а не поддомен одного из
             # мониторов; ссылку на сайт убираем — она вела бы не туда, куда текст
             zone = checks_exec._registrable_domain(tgt or name)
             host, site_url = zone, ""
-            if zone in dom_at:
-                dom_n[zone] = dom_n.get(zone, 1) + 1
+            domain_key = (grp, zone)
+            if domain_key in dom_at:
+                dom_n[domain_key] += 1
                 if check_id is not None:
-                    more_ids.setdefault(dom_at[zone], []).append(check_id)
-                more_names.setdefault(dom_at[zone], []).append(name)
-                commits.append((kind, inc_id, check_id, flag))
+                    more_ids.setdefault(dom_at[domain_key], []).append(check_id)
+                more_names.setdefault(dom_at[domain_key], []).append(name)
+                commits.append((dom_at[domain_key], kind, inc_id, check_id, flag))
                 continue
         same = None
         # push и dns в один заголовок не сворачиваем: у каждого свой смысл, а не "тот же сайт"
         if kind in ("bad", "recovery", "recstable") and tgt and typ not in ("push", "dns"):
-            same = (kind, status, checks_exec._registrable_domain(tgt))
+            same = (grp, kind, status, checks_exec._registrable_domain(tgt))
             if same in same_at:
                 same_hosts[same].append(host or name)
                 if check_id is not None:
@@ -1383,11 +1430,9 @@ async def _send_alerts(
                     grp_fold.setdefault(same_at[same], []).append(
                         (check_id, _grp_member(name, host, link_url, _site_why(kind, status, msg))))
                 more_names.setdefault(same_at[same], []).append(name)
-                commits.append((kind, inc_id, check_id, flag))
+                commits.append((same_at[same], kind, inc_id, check_id, flag))
                 continue
         if rule is not None:
-            if not rule["enabled"] or not _site_scope_ok(rule, check_id, grp):
-                continue  # тип выключен или монитор вне области применения
             default = settings_store.SITE_ALERT_KINDS[rk][1]
             is_default = (
                 rule["text"] == default
@@ -1425,9 +1470,9 @@ async def _send_alerts(
             else:
                 text = tg_fmt.render(icon or '⚠️🌐', head, what, facts)
             line = tg_fmt.one_line(icon or '⚠️🌐', head, what, facts)
-        if zone:
-            dom_at[zone] = len(texts)
-            dom_n[zone] = 1
+        if domain_key is not None:
+            dom_at[domain_key] = len(texts)
+            dom_n[domain_key] = 1
         if same is not None:
             same_at[same] = len(texts)
             same_hosts[same] = []
@@ -1444,13 +1489,13 @@ async def _send_alerts(
                                 target=name, recovery=kind in _SITE_RECOVERY,
                                 ref=f"chk:{check_id}" if check_id is not None and rk else "",
                                 full=full, line=line))
-        commits.append((kind, inc_id, check_id, flag))
+        commits.append((len(texts) - 1, kind, inc_id, check_id, flag))
         if is_default and check_id in places and (g_lvl := site_group.lvl_of(kind, status)):
             grp_src[len(texts) - 1] = (g_lvl, check_id, _grp_member(name, host, link_url, _site_why(kind, status, msg)))
 
     # дописываем счётчик только там, где мониторов реально больше одного (в полный текст)
-    for zone, idx in dom_at.items():
-        n = dom_n.get(zone, 1)
+    for domain_key, idx in dom_at.items():
+        n = dom_n[domain_key]
         if n > 1:
             texts[idx] = texts[idx].tail(f" · мониторов: {n}")
 
@@ -1485,24 +1530,25 @@ async def _send_alerts(
         log.warning("не свернул мониторы по серверу и адресу", exc_info=True)
 
     # parse_mode=HTML: имя монитора идёт ссылкой <a href>. Весь контент экранирован.
-    recs = {p.check_id: p for p in map(_as_pending, pending)
-            if p.kind in _RECOVERY_KINDS and p.check_id is not None}
-    if not await alerts.dispatch(cfg, True, texts, threshold, parse_mode="HTML",
-                                 session_factory=session_factory):
-        # не доставлено — не помечаем, повторим на следующем тике. Отбой - тоже: его инцидент
-        # уже закрыт, и сам он не повторится
-        for cid, p in recs.items():
-            _REC_RETRY.setdefault(cid, (p, now))
-        return
-    for cid in recs:
-        _REC_RETRY.pop(cid, None)
+    finished: set[int] = set()
+    delivered = await alerts.dispatch(cfg, True, texts, threshold, parse_mode="HTML",
+                                     session_factory=session_factory, finished=finished)
+    if delivered:
+        finished.update(range(len(texts)))
     if grp_after is not None:
         try:
-            await grp_after()
+            finished = await grp_after(finished)
         except Exception:  # noqa: BLE001 - сообщения уже ушли, группы поправятся на следующем тике
             log.warning("группы мониторов не записаны", exc_info=True)
+            if not delivered:
+                return  # индексы сообщений после свертки уже отличаются
+    if not delivered:
+        commits = [c for c in commits if c[0] in finished]
+        confirmed = {cid for _, kind, _, cid, _ in commits if kind in _RECOVERY_KINDS}
+        recoveries = [p for p in recoveries if p.check_id in confirmed]
     async with session_factory() as session:
-        for kind, inc_id, check_id, flag in commits:
+        await _clear_site_recoveries(session, {p.check_id: p.flag[1] for p in recoveries})
+        for _, kind, inc_id, check_id, flag in commits:
             if kind == "bad" and inc_id is not None:
                 inc = await session.get(CheckIncident, inc_id)
                 if inc is not None:
@@ -1550,15 +1596,33 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
     recs = {p.check_id for p in p_all if p.check_id is not None and p.kind in _GROUP_REC}
     drop: set[int] = set()
     swap: dict[int, alerts.Msg] = {}
-    quiet: list = []         # дописанные в отправленное: только в историю
-    edits: set[str] = set()  # группы, чье сообщение поправить
+    quiet: dict[str, list[alerts.Msg]] = {}  # дописанные в отправленное: только в историю
     fresh: dict[str, alerts.Msg] = {}  # группы, чье сообщение уходит сейчас: запомнить, куда ушло
+    grouped: dict[int, set[str]] = {}  # какие группы подтверждают каждый исходный алерт
     # править отправленное умеет только Telegram: без него id сообщений не нужны
     track = bool(cfg.get("telegram_token"))
 
+    want = {int(c) for g in groups.values() for c in g.get("members") or {}}
+    for i, (_lvl, cid, _member) in src.items():
+        want.add(cid)
+        want.update(c for c, _ in fold.get(i, []))
+    db: dict[int, tuple] = {}
+    if want:
+        async with session_factory() as session:
+            db = {i: (en, fs, fn, grp or "") for i, en, fs, fn, grp in (await session.execute(
+                select(Check.id, Check.enabled, Check.flap_state, Check.flaky_notified, Check.group_name)
+                .where(Check.id.in_(want)))).all()}
+    # Группы старых версий могли смешивать разные маршруты. Их нельзя дописывать или отправлять
+    # повторно. Это же относится к мониторам, перемещённым в другую группу после отправки.
+    for gid, g in list(groups.items()):
+        group = g.get("grp") or ""
+        members = (db.get(int(c)) for c in g.get("members") or {})
+        if any(row[3] != group if row is not None else not g.get("group_scoped") for row in members):
+            groups.pop(gid)
+
     by_place: dict[tuple, list[int]] = {}
     for i, (lvl, cid, _m) in src.items():
-        by_place.setdefault((places[cid][0], lvl), []).append(i)
+        by_place.setdefault((places[cid][0], lvl, texts[i].group), []).append(i)
     srv_ids = {places[src[i][1]][2] for idxs in by_place.values() for i in idxs} - {None}
     srv_ids |= {g.get("srv") for g in groups.values() if g.get("srv")}
     cause: dict[int, list[str]] = {}
@@ -1574,26 +1638,27 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
         except Exception:  # noqa: BLE001 - без строки про сервер
             log.warning("не прочитал тревоги серверов для группы мониторов", exc_info=True)
 
-    for (key, lvl), idxs in by_place.items():
-        g = site_group.open_for(groups, key, lvl, now)
+    for (key, lvl, grp), idxs in by_place.items():
+        g = site_group.open_for(groups, key, lvl, grp, now)
         new = g is None
         if new:
             _k, label, srv = places[src[idxs[0]][1]]
             g = site_group.new_group(key, lvl, await site_group.label_for(key, label), srv, now)
             first = texts[idxs[0]]
-            g.update(first=first.target, kind=first.kind, grp=first.group)
+            g.update(first=first.target, kind=first.kind, grp=grp, group_scoped=True)
             groups[g["id"]] = g
         for i in idxs:
             _lvl, cid, mem = src[i]
             for c, mm in [(cid, mem)] + fold.get(i, []):
                 g["members"].setdefault(str(c), mm)
         g["last"] = now.isoformat()
+        for i in idxs:
+            grouped[i] = {g["id"]}
         if not new:
             # о месте уже написали: этот сбой - строкой в том сообщении
             drop.update(idxs)
-            quiet.extend(texts[i] for i in idxs)
+            quiet.setdefault(g["id"], []).extend(texts[i] for i in idxs)
             g["solo"] = False
-            edits.add(g["id"])
         elif len(idxs) > 1:
             g["solo"] = False
             text, full, line = site_group.alert_text(g, base, cause.get(g.get("srv")))
@@ -1615,17 +1680,11 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
         if i in drop or not getattr(m, "recovery", False):
             continue
         obj, ids = alerts._ref_ids(getattr(m, "ref", ""))  # noqa: SLF001
-        if obj == "chk" and ids and all(
-                any(g.get("kind") == m.kind for g in site_group.member_of(groups, c)) for c in ids):
+        memberships = [{g["id"] for g in site_group.member_of(groups, c, m.group) if g.get("kind") == m.kind}
+                       for c in ids] if obj == "chk" else []
+        if memberships and all(memberships):
             drop.add(i)
-
-    want = {int(c) for g in groups.values() for c in g.get("members") or {}}
-    db: dict[int, tuple] = {}
-    if want:
-        async with session_factory() as session:
-            db = {i: (en, fs, fn) for i, en, fs, fn in (await session.execute(
-                select(Check.id, Check.enabled, Check.flap_state, Check.flaky_notified)
-                .where(Check.id.in_(want)))).all()}
+            grouped[i] = set().union(*memberships)
 
     def is_ok(c: int) -> bool:
         if c in fails:
@@ -1636,7 +1695,7 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
         # монитор удален или выключен - ждать от него нечего
         return row is None or not row[0] or (site_flap.level(row[1]) is None and not row[2])
 
-    backs: list[alerts.Msg] = []
+    backs: dict[str, alerts.Msg] = {}
     for gid, g in list(groups.items()):
         oks = {c: site_group.ok_since(g, c, is_ok(int(c)), now) for c in g.get("members") or {}}
         if g.get("solo"):
@@ -1664,25 +1723,36 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
         else:
             m.resolves = [(g.get("kind", ""), g.get("first", ""))] + [(p.kind, p.target) for p in m.parts]
             groups.pop(gid)
-        backs.append(m)
+        backs[gid] = m
 
     for gid in [k for k, g in groups.items() if site_group.stale(g, now)]:
         groups.pop(gid)
 
-    out = [swap.get(i, m) for i, m in enumerate(texts) if i not in drop] + backs
+    direct = {i: swap.get(i, m) for i, m in enumerate(texts) if i not in drop}
+    out = list(direct.values()) + list(backs.values())
+    indices = {id(m): i for i, m in enumerate(out)}
 
-    async def after() -> None:
+    async def after(finished: set[int]) -> set[int]:
+        failed = {gid for batch in (fresh, backs) for gid, m in batch.items() if indices[id(m)] not in finished}
+        for gid in failed:
+            if gid in state:
+                groups[gid] = state[gid]
+            else:
+                groups.pop(gid, None)
         for gid, m in fresh.items():
-            if gid in groups:
+            if gid not in failed and gid in groups:
                 groups[gid]["msgs"] = list(getattr(m, "sent_to", None) or [])
         if groups != state:
             async with session_factory() as session:
                 await site_group.save(session, groups)
-        if quiet:
-            await alerts.record_history(session_factory, quiet)
-        for gid in edits:
+        for gid, messages in quiet.items():
+            if gid in failed:
+                continue
+            await alerts.record_history(session_factory, messages)
             if gid in groups:
                 await _site_group_edit(session_factory, cfg, groups[gid], base, cause.get(groups[gid].get("srv")))
+        return ({i for i, m in direct.items() if indices[id(m)] in finished and i not in grouped}
+                | {i for i, gids in grouped.items() if not gids & failed})
 
     return out, after
 
@@ -1849,7 +1919,7 @@ async def _forget_stale_locations(session_factory, enabled: list[Location]) -> N
     for r in rows:
         have.setdefault(r.check_id, set()).add(r.location_id)
     drop: list[tuple[int, int]] = []  # (check_id, location_id) — лишние результаты
-    forget: list[int] = []            # мониторы, у которых пора снять отметку
+    forget: dict[int, bool] = {}       # монитор -> у него больше нет назначенных локаций
     for c in checks:
         want = (
             {loc.id for loc in effective_locations(c, enabled)}
@@ -1857,8 +1927,10 @@ async def _forget_stale_locations(session_factory, enabled: list[Location]) -> N
             else set()
         )
         drop += [(c.id, lid) for lid in have.get(c.id, set()) - want]
-        if c.loc_alerted and not (set(c.loc_alerted) & want):
-            forget.append(c.id)
+        if not want and (c.loc_alerted is not None or c.loc_notified is not None or c.loc_partial_since is not None):
+            forget[c.id] = True
+        elif c.loc_alerted and not (set(c.loc_alerted) & want):
+            forget[c.id] = False
     if not drop and not forget:
         return
     async with session_factory() as session:
@@ -1868,10 +1940,13 @@ async def _forget_stale_locations(session_factory, enabled: list[Location]) -> N
                     LocationResult.check_id == cid, LocationResult.location_id == lid
                 )
             )
-        for cid in forget:
+        for cid, no_locations in forget.items():
             row = await session.get(Check, cid)
             if row is not None:
                 row.loc_alerted = None
+                if no_locations:
+                    row.loc_notified = None
+                    row.loc_partial_since = None
         await session.commit()
     log.info(
         "локации: снято вердиктов %d, удалено устаревших результатов %d",
@@ -1919,7 +1994,8 @@ async def evaluate_location_alerts(
         down_ids: list[int] = []
         n_up = n_down = 0
         thr = max(c.alert_after_failures, 1)  # столько же подряд-сбоев, как для основного алерта
-        for loc in effective_locations(c, enabled):
+        locations = effective_locations(c, enabled)
+        for loc in locations:
             if loc.id in broken:
                 # о сломанном прокси - отдельный алерт. Уже объявленную "недоступен отсюда" не
                 # трогаем: ни нового алерта, ни ложного "снова доступен отовсюду"
@@ -1965,13 +2041,13 @@ async def evaluate_location_alerts(
                     ("locpart", c.name, "", "\n".join(lines), None, c.id,
                      ("loc_notified", down_ids), "")
                 )
-        elif not n_down:  # снова доступен отовсюду
+        elif n_up and n_up == len(locations):  # все точки подтвердили, что сайт доступен
             if prev is not None or c.loc_partial_since is not None:
                 state_updates.append((c.id, None, None))
             # Отбой — только по алерту, который действительно был отправлен.
             if notified is not None:
                 pending.append(("locrec", c.name, "", "", None, c.id, ("loc_notified", None), ""))
-        elif not n_up and c.loc_partial_since is not None:
+        elif n_down and not n_up and c.loc_partial_since is not None:
             # Не виден ниоткуда: полное падение ведёт основной инцидент, а здесь
             # важно обнулить отсчёт. Точки поднимаются по одной, и без сброса
             # выдержка была бы уже выдержана к моменту, когда встала первая из них —

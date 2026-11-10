@@ -188,10 +188,10 @@ async def _open(session: AsyncSession, server: Server, now: datetime) -> list[tu
     for req, chk in rows:
         if req.check_id == 0 and req.url:
             chk = request_check(req)
-            if not await _standalone_task_allowed(session, chk, req, server.id):
+            if not await _standalone_task_allowed(session, chk, req, server):
                 continue
         else:
-            if not _monitor_task_allowed(chk, req, server.id):
+            if not _monitor_task_allowed(chk, req, server):
                 continue  # настройки могли измениться после постановки запроса в очередь
             if req.url:
                 chk = checks_exec.path_view(chk, req.url)
@@ -200,21 +200,22 @@ async def _open(session: AsyncSession, server: Server, now: datetime) -> list[tu
     return out
 
 
-async def _standalone_task_allowed(session, check, req: ProbeRequest, server_id: int) -> bool:
+async def _standalone_task_allowed(session, check, req: ProbeRequest, server: Server) -> bool:
     if not probe_scope.requires_trusted_server(check):
         return True
     cid = (req.spec or {}).get("trusted_check_id")
     trusted = await session.get(Check, cid) if cid else None
-    return (trusted is not None and probe_scope.trusted_server(trusted) == server_id
+    return (trusted is not None and probe_scope.trusted_server(trusted) == server.id
+            and probe_scope.site_group_allowed(server.token_site_groups, trusted)
             and probe_scope.target_host(trusted.target) == probe_scope.target_host(req.url))
 
 
-def _monitor_task_allowed(check: Check | None, req: ProbeRequest, server_id: int) -> bool:
+def _monitor_task_allowed(check: Check | None, req: ProbeRequest, server: Server) -> bool:
     if check is None or not check.enabled or check.type != "http":
         return False
     if req.kind == inside_probe.KIND:
         return not check.probe_local and not probe_scope.requires_trusted_server(check)
-    return check.probe_local and check.probe_server_id == server_id and probe_scope.server_allowed(check, server_id)
+    return check.probe_local and check.probe_server_id == server.id and probe_scope.server_allowed(check, server)
 
 
 async def take_fast_tasks(session: AsyncSession, server: Server, now: datetime) -> list[dict]:
@@ -245,12 +246,13 @@ async def tasks_for_report(session: AsyncSession, server: Server, now: datetime)
 
 
 async def ingest(
-    session: AsyncSession, server_id: int, results: list, now: datetime
+    session: AsyncSession, server: Server, results: list, now: datetime
 ) -> list:
     """Раскладывает ответы агента на ручные проверки (номера < 0).
 
     Возвращает очередь алертов: успех закрывает инцидент, и если о падении уже
     написали, нужен отбой. Не коммитит."""
+    server_id = server.id
     pending: list = []
     for r in results:
         try:
@@ -263,7 +265,10 @@ async def ingest(
         if req is None or req.server_id != server_id or req.ts is not None:
             continue  # чужая, повтор уже учтённого ответа или давно вычищенная
         if req.check_id == 0 and req.url and not await _standalone_task_allowed(
-                session, request_check(req), req, server_id):
+                session, request_check(req), req, server):
+            continue
+        check = await session.get(Check, req.check_id) if req.check_id else None
+        if check is not None and not probe_scope.server_allowed(check, server):
             continue
         req.ts = now
         req.code = int(r.get("code") or 0)
@@ -281,8 +286,7 @@ async def ingest(
 
         if req.kind == inside_probe.KIND:
             # сайт из панели упал, спрашивали сервер сайта: ответ - в монитор, статус не трогаем
-            check = await session.get(Check, req.check_id)
-            if _monitor_task_allowed(check, req, server_id):
+            if _monitor_task_allowed(check, req, server):
                 inside_probe.store(check, req, server_id, now)
             continue
         if req.kind == "dpath":
@@ -291,7 +295,6 @@ async def ingest(
         if req.check_id == 0:
             await _ingest_domain(session, req, now)
             continue
-        check = await session.get(Check, req.check_id)
         if req.kind == "home":
             # Home verification binds every path to the same immutable request.
             # A late reply may not change a disabled, moved or recreated monitor.
@@ -302,7 +305,7 @@ async def ingest(
                     or check is None or alert_recheck.identity(check) != job.spec["identity"]
                     or alert_recheck.digest(alert_recheck.check_snapshot(check, "status")) != job.spec["baseline"]):
                 continue
-        if not _monitor_task_allowed(check, req, server_id):
+        if not _monitor_task_allowed(check, req, server):
             # пока ждали, монитор удалили, перевели на проверку из панели или сайт
             # переехал — ответ этой ноды про него больше ничего не значит
             continue

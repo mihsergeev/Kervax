@@ -143,7 +143,8 @@ async def inside(session: AsyncSession, body, servers: list[Server], now: dateti
     spec = {k: getattr(body, k) for k in manual_probe.SPEC_FIELDS}
     if probe_scope.requires_trusted_server(body):
         trusted = probe_scope.trusted_server(trusted_check) if trusted_check is not None else None
-        servers = [s for s in servers if s.id == trusted]
+        servers = [s for s in servers if s.id == trusted
+                   and probe_scope.site_group_allowed(s.token_site_groups, trusted_check)]
         if trusted_check is None or not servers or probe_scope.target_host(trusted_check.target) != host:
             return {"status": "none", "kind": "no_trusted_server",
                     "message": "Для проверки с учетными данными изнутри укажите сервер в зависимостях монитора"}

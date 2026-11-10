@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.68"
+const version = "2.69"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -6611,7 +6611,7 @@ func demuxDockerLogs(b []byte) string {
 // Тело ответа крошечное (обычно пусто) — на нагрузку панели влияет незначительно.
 func commandLoop(panelURL, token string) {
 	tr := panelTransport(true)
-	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr, CheckRedirect: panelRedirect}
+	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr, CheckRedirect: authenticatedRedirect}
 	endpoint := strings.TrimRight(panelURL, "/") + "/api/agent/commands"
 	// Соединение переиспользуем (опрос ежесекундный, рукопожатие на каждый — дорого),
 	// но принудительно роняем раз в _pollRecycle запросов. Иначе за минуту в одном
@@ -6842,7 +6842,7 @@ func kubeTransport(caB64 string) *http.Transport {
 }
 
 func kubeClient(kc *kubeConf) *http.Client {
-	return &http.Client{Timeout: 8 * time.Second, Transport: kubeTransport(kc.CA)}
+	return &http.Client{Timeout: 8 * time.Second, Transport: kubeTransport(kc.CA), CheckRedirect: authenticatedRedirect}
 }
 
 func kubeGet(cl *http.Client, kc *kubeConf, path string, out any) error {
@@ -8343,7 +8343,8 @@ func kubePodLogs(cl *http.Client, kc *kubeConf, cmd kubeCommand) (bool, string) 
 		return false, err.Error()
 	}
 	req.Header.Set("Authorization", "Bearer "+kc.Token)
-	lc := &http.Client{Timeout: 30 * time.Second, Transport: cl.Transport} // логи могут быть большими
+	lc := *cl
+	lc.Timeout = 30 * time.Second
 	resp, err := lc.Do(req)
 	if err != nil {
 		return false, err.Error()
@@ -8986,7 +8987,7 @@ func runBackupCommand(panelURL, token string, cmd backupCommand) {
 		res, out := spoolInFor(backupReqDir, backupResDir, cmd.ID, lines, "backup-setup", 4*time.Minute)
 		postBackupResult(panelURL, token, cmd.ID, res, out)
 		return
-	case "deploy_server", "update_image", "provision_client", "deploy_tls_front", "get_cert", "get_client_creds", "allow_tls", "mirror_allow":
+	case "deploy_server", "update_image", "provision_client", "provision_new", "deploy_tls_front", "get_cert", "get_client_creds", "allow_tls", "mirror_allow":
 		// команды бэкап-СЕРВЕРА → отдельный спул bsrv-req
 		lines, ok := backupServerLines(cmd)
 		if !ok {
@@ -9106,7 +9107,7 @@ func backupServerLines(cmd backupCommand) ([]string, bool) {
 	case "update_image":
 		// обновить образ rest-server до зашитого в helper — параметров нет
 		return []string{"action=update_image"}, true
-	case "provision_client":
+	case "provision_client", "provision_new":
 		if !backupRepoNameOK(cmd.Name) || !backupIPOK(cmd.ClientIP) {
 			return nil, false
 		}
@@ -9116,7 +9117,7 @@ func backupServerLines(cmd backupCommand) ([]string, bool) {
 			return nil, false
 		}
 		return []string{
-			"action=provision_client", "name=" + cmd.Name, "hpass=" + cmd.Hpass,
+			"action=" + cmd.Action, "name=" + cmd.Name, "hpass=" + cmd.Hpass,
 			"repopass=" + cmd.Repopass, "client_ip=" + cmd.ClientIP,
 			fmt.Sprintf("keep_last=%d", cmd.KeepLast), fmt.Sprintf("keep_daily=%d", cmd.KeepDaily),
 			fmt.Sprintf("keep_weekly=%d", cmd.KeepWeekly), fmt.Sprintf("keep_monthly=%d", cmd.KeepMonthly),
@@ -9761,7 +9762,7 @@ func send(url, token string, r report) (config, error) {
 //     Прежний комментарий винил ECMP — это была неверная догадка, замеры её не подтвердили.
 var (
 	reportTransport = panelTransport(false)
-	reportClient    = &http.Client{Timeout: 15 * time.Second, Transport: reportTransport, CheckRedirect: panelRedirect}
+	reportClient    = &http.Client{Timeout: 15 * time.Second, Transport: reportTransport, CheckRedirect: authenticatedRedirect}
 )
 
 // Прокси до панели. Нужен ноде, чей адрес режут на пути к панели (IP в списке блокировок
@@ -9815,12 +9816,12 @@ func proxyLabel(panelURL string) string {
 
 // panelClient - короткий запрос в панель тем же путем, что и отчет (прокси, без keep-alive)
 func panelClient(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout, Transport: panelTransport(false), CheckRedirect: panelRedirect}
+	return &http.Client{Timeout: timeout, Transport: panelTransport(false), CheckRedirect: authenticatedRedirect}
 }
 
 // Authenticated requests can contain private reports or command results.
 // Keep both the bearer token and the request body at the configured origin.
-func panelRedirect(req *http.Request, via []*http.Request) error {
+func authenticatedRedirect(req *http.Request, via []*http.Request) error {
 	first := via[0]
 	if first.Header.Get("Authorization") != "" &&
 		(req.URL.Scheme != first.URL.Scheme || !strings.EqualFold(req.URL.Host, first.URL.Host)) {

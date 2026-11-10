@@ -195,6 +195,19 @@ async def test_location_partial_alert(tmp_path, monkeypatch):
     await collector.evaluate_location_alerts(factory, settings, now)
     assert sent == []
 
+    # Потеря результата или первая неудача после сброса счетчика - не восстановление.
+    async with factory() as s:
+        await s.delete((await s.scalars(select(LocationResult))).one())
+        await s.commit()
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent == []
+    async with factory() as s:
+        assert (await s.get(Check, cid)).loc_notified == [proxy.id]
+        s.add(LocationResult(check_id=cid, location_id=proxy.id, status="down", consecutive_fails=1))
+        await s.commit()
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent == []
+
     # прокси вернулся → recovery «снова доступен отовсюду»
     async with factory() as s:
         r = (await s.scalars(select(LocationResult))).one()
@@ -206,6 +219,21 @@ async def test_location_partial_alert(tmp_path, monkeypatch):
     assert ': открывается отовсюду · <a href="https://p.example.com/?check=' in sent[0]
     assert sent[0].endswith(">монитор</a>")
     assert "снова доступен" in full_text(sent[0])
+
+    # Снятие всех локаций после алерта сбрасывает отметки без сообщения о восстановлении.
+    sent.clear()
+    async with factory() as s:
+        check = await s.get(Check, cid)
+        check.loc_alerted = check.loc_notified = [proxy.id]
+        check.loc_partial_since = now
+        for location in await s.scalars(select(Location)):
+            location.monitors = False
+        await s.commit()
+    await collector.evaluate_location_alerts(factory, settings, now)
+    assert sent == []
+    async with factory() as s:
+        check = await s.get(Check, cid)
+        assert check.loc_alerted is check.loc_notified is check.loc_partial_since is None
     await engine.dispose()
 
 

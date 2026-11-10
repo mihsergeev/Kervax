@@ -2,6 +2,18 @@
 
 from urllib.parse import urlsplit
 
+from app.deps import user_sections
+
+
+def token_site_groups(user) -> list[str] | None:
+    if "sites" not in user_sections(user):
+        return []
+    return list(user.site_groups) if user.site_groups else None
+
+
+def site_group_allowed(groups: list[str] | None, check) -> bool:
+    return groups is None or (check.group_name or "") in groups
+
 
 def requires_trusted_server(check) -> bool:
     if getattr(check, "http_headers", "") or (getattr(check, "auth_method", "") == "basic" and (
@@ -29,8 +41,10 @@ def trusted_server(check) -> int | None:
     return check.parent_server_id if check.parent_mode == "server" else None
 
 
-def server_allowed(check, server_id: int) -> bool:
-    return trusted_server(check) == server_id or not requires_trusted_server(check)
+def server_allowed(check, server) -> bool:
+    return not requires_trusted_server(check) or (
+        trusted_server(check) == server.id and site_group_allowed(server.token_site_groups, check)
+    )
 
 
 def uses_agent(check) -> bool:

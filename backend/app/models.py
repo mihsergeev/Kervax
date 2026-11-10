@@ -683,6 +683,9 @@ class Server(Base):
     name: Mapped[str] = mapped_column(String(128))
     group_name: Mapped[str] = mapped_column(String(64), default="")
     token_hash: Mapped[str] = mapped_column(String(64), index=True)  # sha256 токена
+    # Site groups visible to the issuer when this token was created. SQL NULL means all sites
+    # (also the legacy default); an empty list means no access to credential-bearing checks.
+    token_site_groups: Mapped[list[str] | None] = mapped_column(JSON(none_as_null=True))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # сообщается агентом

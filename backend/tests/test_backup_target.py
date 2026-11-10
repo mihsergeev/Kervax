@@ -295,6 +295,7 @@ async def test_https_shows_right_after_the_switch(client, auth_headers):
             s.add(c)
             await s.commit()
             cid = c.id
+        assert (await client.get("/api/agent/commands", headers=agent)).json()["backup_commands"][0]["id"] == cid
         r = await client.post("/api/agent/backup-result", json={"id": cid, "ok": ok, "output": "x"}, headers=agent)
         assert r.status_code == 200, r.text
         return (await client.get(f"/api/servers/{sid}", headers=auth_headers)).json()
@@ -319,7 +320,7 @@ def test_helpers_know_the_new_actions():
     cl = (agent / "backup-setup.sh").read_text(encoding="utf-8")
     bs = (agent / "backupserver-setup.sh").read_text(encoding="utf-8")
     assert "KERVAX_SETUP_VERSION=0.52" in cl and 'to_https)     if out="$(cmd_to_https' in cl
-    assert "KERVAX_SETUP_VERSION=0.42" in bs and 'allow_tls)        if out="$(cmd_allow_tls' in bs
+    assert "KERVAX_SETUP_VERSION=0.43" in bs and 'allow_tls)        if out="$(cmd_allow_tls' in bs
     import re
 
     main = (agent / "main.go").read_text(encoding="utf-8")

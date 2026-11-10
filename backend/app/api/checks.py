@@ -204,9 +204,30 @@ async def _parent_check(check: Check, session, user) -> None:
         return
     if not check.parent_server_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Выберите сервер, от которого зависит монитор")
-    srv = await session.get(Server, check.parent_server_id)
+    sensitive = check.type == "http" and check.probe_local and probe_scope.requires_trusted_server(check)
+    # Serialize changes to trusted assignments with token replacement. Take the server
+    # lock before flushing a check, in the same order as the agent report.
+    with session.no_autoflush:
+        srv = await session.get(Server, check.parent_server_id, with_for_update=sensitive)
     if srv is None or not group_allowed(user, srv.group_name, "servers"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Такого сервера нет")
+    if sensitive:
+        _agent_scope_check(check, srv)
+
+
+def _agent_scope_check(check: Check, srv: Server) -> None:
+    if not probe_scope.site_group_allowed(srv.token_site_groups, check):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Токен агента не дает доступ к этой группе сайтов. Перевыпустите его с нужными правами")
+
+
+async def _check_existing_agent_scope(check: Check, session) -> None:
+    parent = probe_scope.trusted_server(check)
+    if check.type == "http" and check.probe_local and parent and probe_scope.requires_trusted_server(check):
+        with session.no_autoflush:
+            srv = await session.get(Server, parent, with_for_update=True)
+        if srv is not None:
+            _agent_scope_check(check, srv)
 
 
 async def _uptime_24h(session) -> dict[int, float]:
@@ -435,6 +456,8 @@ async def bulk_update(
         for name, value in fields.items():
             setattr(check, name, value)
         _local_probe_ok(check, user, old_local)
+        if check.probe_local and not old_local[0]:
+            await _check_existing_agent_scope(check, session)
         if "probe_local" in fields or "check_locations" in fields:
             _one_probe_source(check)
     if "enabled" in fields:
@@ -494,6 +517,7 @@ async def reorder_checks(
         new_group = grp.get(check.id)
         if new_group is not None and check.group_name != new_group:
             check.group_name = new_group
+            await _check_existing_agent_scope(check, session)
             changed = True
         if changed:
             updated += 1
@@ -1603,7 +1627,7 @@ async def _run_via_agent(check, user, session, request, background) -> CheckRunO
     srv = await session.get(Server, check.probe_server_id) if check.probe_server_id else None
     if srv is not None and not group_allowed(user, srv.group_name):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Сервер проверки не найден")
-    if srv is not None and not probe_scope.server_allowed(check, srv.id):
+    if srv is not None and not probe_scope.server_allowed(check, srv):
         return _run_out(check, user, run_source="agent", run_error="Доверенный сервер еще не назначен для проверки")
     if srv is None:
         # Ни одна нода не держит этот домен — это и есть честный ответ проверки.

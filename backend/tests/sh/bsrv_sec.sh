@@ -79,6 +79,28 @@ check "the prune script keeps its check state out of /var/tmp" 'grep -q "^CHECK_
 
 # 3) the weekly check state: a file someone else planted is neither imported nor evaluated
 mkdir -p "$D/node-a"; : > "$D/node-a/config"
+cp "$T/htpasswd.log" "$T/htpasswd.before"; cp "$T/ufw.log" "$T/ufw.before"
+spool action=provision_new name=node-a hpass=synthetic-other-http repopass=synthetic-other-restic client_ip=203.0.113.7
+check "provision_new keeps an existing repo, password and firewall rule" '
+  [ "$ok" = false ] && [[ "$out" == *"already exists"* && "$out" != *"REPOPASS_B64"* ]] &&
+  cmp -s "$T/htpasswd.before" "$T/htpasswd.log" && cmp -s "$T/ufw.before" "$T/ufw.log" &&
+  grep -qx "RESTIC_PASSWORD=\"fakepass\"" "$T/app/rest-server/system/envs/node-a.env"'
+printf '%s\n' 'node-partial:synthetic-hash' > "$D/.htpasswd"
+spool action=provision_new name=node-partial hpass=synthetic-other-http repopass=synthetic-other-restic client_ip=203.0.113.7
+check "provision_new keeps a reserved htpasswd identity" '[ "$ok" = false ] && cmp -s "$T/htpasswd.before" "$T/htpasswd.log"'
+(
+  flock -x 9 || exit 2
+  spool action=provision_new name=node-fresh hpass=synthetic-fresh-http repopass=synthetic-fresh-restic client_ip=203.0.113.7
+  check "provision_new requires the lock before making changes" '[ "$ok" = false ] && [[ "$out" == *"already running"* ]] && cmp -s "$T/htpasswd.before" "$T/htpasswd.log"'
+  exit "$fail"
+) 9>"$T/var/bsrv-provision.lock" || fail=1
+spool action=provision_new name=node-fresh hpass=synthetic-fresh-http repopass=synthetic-fresh-restic client_ip=203.0.113.7
+check "provision_new creates an unused repository" '[ "$ok" = true ] && [[ "$out" == *"OK provisioned node-fresh"* ]]'
+cp "$T/htpasswd.log" "$T/htpasswd.before"
+spool action=provision_new name=node-fresh hpass=synthetic-retry-http repopass=synthetic-retry-restic client_ip=203.0.113.7
+check "provision_new retry does not overwrite a repository reservation" '
+  [ "$ok" = false ] && cmp -s "$T/htpasswd.before" "$T/htpasswd.log" &&
+  grep -qx "RESTIC_PASSWORD=\"synthetic-fresh-restic\"" "$T/app/rest-server/system/envs/node-fresh.env"'
 printf 'a[$(touch${IFS}%s/pwned2)] 1\n' "$T" > "$T/vartmp/restic-check-node-a.state"; chown nobody "$T/vartmp/restic-check-node-a.state"
 bash "$PS"
 check "a planted /var/tmp state is not imported" '[ ! -e "$T/pwned2" ] && ! grep -q pwned2 "$T/var/bsrv-check/node-a.state"'

@@ -1,18 +1,66 @@
 """Observation/recovery state survives PostgreSQL sessions and engine replacement."""
+import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app import collector
+from app.checks import CheckOutcome
 from app.config import Settings
 from app.db import create_engine_and_factory
-from app.models import Server
+from app.models import Check, CheckIncident, Server
 from tests.test_alert_repeat import _tick, _workers
 from tests.test_alert_observation_gaps import _observe_until, _server
 
 pytestmark = [pytest.mark.calm, pytest.mark.skipif(not os.getenv("KERVAX_TEST_PG"), reason="PostgreSQL fixture only")]
+
+
+async def test_pg_workers_do_not_send_same_site_recovery_twice(client, monkeypatch):
+    factory = client._transport.app.state.session_factory  # noqa: SLF001
+    now = datetime.now(timezone.utc)
+    async with factory() as session:
+        check = Check(name="shop", type="http", target="https://example.com")
+        session.add(check)
+        await session.flush()
+        session.add(CheckIncident(check_id=check.id, status="down", started_at=now - timedelta(minutes=1),
+                                  last_message="HTTP 503", notified=True))
+        pending = []
+        await collector.record_outcome(session, check, CheckOutcome("up", message="HTTP 200"),
+                                       now, pending, manual=True)
+        await session.commit()
+
+    sending = asyncio.Event()
+    finish = asyncio.Event()
+    sent = []
+
+    async def capture(cfg, text, parse_mode=None):
+        sent.append(text)
+        sending.set()
+        await finish.wait()
+        return []
+
+    monkeypatch.setattr("app.alerts.send_alert", capture)
+    cfg = Settings(alert_webhook="http://fixture.invalid")
+    engine, other_worker = create_engine_and_factory(os.environ["KERVAX_TEST_PG"])
+    first = asyncio.create_task(collector._send_alerts(factory, cfg, pending, now))
+    second = None
+    try:
+        await asyncio.wait_for(sending.wait(), timeout=5)
+        second = asyncio.create_task(collector._send_alerts(other_worker, cfg, [], now))
+        # Второй воркер уже дошел до advisory lock, пока первый держит доставку.
+        async with factory() as session:
+            async with asyncio.timeout(5):
+                while not await session.scalar(text("SELECT EXISTS (SELECT 1 FROM pg_locks "
+                                                   "WHERE locktype = 'advisory' AND NOT granted)")):
+                    await asyncio.sleep(0.01)
+        assert len(sent) == 1
+    finally:
+        finish.set()
+        await asyncio.gather(*(task for task in (first, second) if task is not None))
+        await engine.dispose()
+    assert len(sent) == 1
 
 
 async def _env(client, monkeypatch):

@@ -270,11 +270,11 @@ def ts(raw) -> datetime | None:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
-def open_for(groups: dict, key: str, lvl: str, now: datetime) -> dict | None:
+def open_for(groups: dict, key: str, lvl: str, group: str, now: datetime) -> dict | None:
     """Группа, в которую можно дописать новый сбой места: прошлый сбой не раньше JOIN."""
     best = None
     for g in groups.values():
-        if g.get("key") != key or g.get("lvl") != lvl:
+        if g.get("key") != key or g.get("lvl") != lvl or (g.get("grp") or "") != group:
             continue
         last = ts(g.get("last"))
         if last is None or now - last > JOIN:
@@ -284,9 +284,10 @@ def open_for(groups: dict, key: str, lvl: str, now: datetime) -> dict | None:
     return best
 
 
-def member_of(groups: dict, cid: int) -> list[dict]:
+def member_of(groups: dict, cid: int, group: str) -> list[dict]:
     """Группы, объявленные сообщением про несколько мониторов, где этот монитор ждет отбоя."""
-    return [g for g in groups.values() if not g.get("solo") and str(cid) in (g.get("members") or {})]
+    return [g for g in groups.values() if not g.get("solo") and (g.get("grp") or "") == group
+            and str(cid) in (g.get("members") or {})]
 
 
 def ok_since(g: dict, cid: str, ok: bool, now: datetime) -> datetime | None:
@@ -319,12 +320,3 @@ async def load(session) -> dict:
 
 async def save(session, groups: dict) -> None:
     await settings_store.set_raw(session, STATE_KEY, json.dumps(groups, ensure_ascii=False) if groups else "")
-
-
-async def any_open(session_factory) -> bool:
-    """Есть ли группа, которая ждет отбоя: тогда цикл алертов смотрит на нее и без новых событий."""
-    try:
-        async with session_factory() as session:
-            return bool(await load(session))
-    except Exception:  # noqa: BLE001
-        return False

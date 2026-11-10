@@ -399,7 +399,7 @@ def test_cleanup_off_rows_and_steps():
 def test_helper_turns_cleanup_off_and_keeps_it_off():
     """helper 0.34: prune-off / prune-on, regen-prune и adopt-legacy сохраняют выключенное состояние."""
     src = HELPER.read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.42" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.43" in src and "\r" not in src
     assert 'prune-off)        shift; with_storage cmd_prune_switch off "$@" ;;' in src
     assert 'prune-on)         shift; with_storage cmd_prune_switch on "$@" ;;' in src
     regen = src[src.index("cmd_regen_prune() {"):]

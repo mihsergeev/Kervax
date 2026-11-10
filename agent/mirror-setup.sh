@@ -44,7 +44,7 @@ fi
 #      sha256, removals reach the copy only after KEEP_DAYS, a large loss at once freezes the copy
 # 0.2: keep repository files regardless of deletions at the source; accept only complete pulls
 # 0.3: weekly sandboxed restore from the destination, with an optional local recovery password
-KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+KERVAX_SETUP_VERSION=0.5  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Only where the panel made this server a mirror (Backups -> Mirror servers). Being a mirror is a
 # decision of a person, not a property of the node: the playbook and the installer ask the panel.
 KERVAX_SETUP_WHEN="sed -n s/^token=//p /etc/kervax-agent.conf | curl -fsS -m 15 --data-binary @- $(sed -n s/^url=//p /etc/kervax-agent.conf 2>/dev/null)/api/agent/mirror-wanted | grep -qx yes"
@@ -352,7 +352,8 @@ host_ok() {
 }
 port_ok() { [[ "$1" =~ ^[0-9]{1,5}$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ]; }
 hostkey_ok() {
-  [[ "$1" =~ ^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-rsa)\ [A-Za-z0-9+/]{20,2000}={0,3}$ ]]
+  [[ "$1" =~ ^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521|ssh-rsa)\ ([A-Za-z0-9+/]+)={0,3}$ ]] \
+    && (( ${#BASH_REMATCH[2]} >= 20 && ${#BASH_REMATCH[2]} <= 2000 ))
 }
 num() { [[ "${1:-}" =~ ^[0-9]+$ ]] && printf '%s' "$1" || printf 0; }
 json_escape() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }

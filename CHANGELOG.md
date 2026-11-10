@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.125] - 2026-11-10
+
+- Restrict backup credential recovery and protect existing repositories from setup requests made by users with limited access.
+- Scope newly issued agent tokens to the issuer's permitted sites and protect trusted tokens from unauthorized rotation.
+- Accept Docker, Kubernetes and backup command results only after dispatch and keep completed results intact on retries.
+- Preserve pending site recovery notifications across restarts, serialize concurrent checks, and retry only undelivered messages in a partially delivered batch.
+- Keep grouped site alerts and recoveries within their configured routing groups.
+- Prevent the Linux agent from forwarding Kubernetes credentials across redirects to another origin.
+- Fix backup mirror SSH key parsing on systems using musl.
+- Wait for a fresh report after rotating an agent token and ignore late setup checks after switching platforms.
+- Linux agent 2.69, backup server helper 0.43, mirror helper 0.5, database migration 0148.
+
 ## [1.8.124] - 2026-11-10
 
 - Keep proxy credentials out of editor install commands and enforce server-group access for HTTPS backup changes and manual site checks.

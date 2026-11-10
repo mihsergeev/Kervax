@@ -6257,21 +6257,26 @@ export function InstallModal({
   const [st, setSt] = useState<InstallStatus | null>(null)
   useEffect(() => {
     if (connected) return
+    let active = true
     const poll = async () => {
       try {
         const [list, now] = await Promise.all([listServers(), installStatus(enroll.server.id)])
+        if (!active) return
         setSt(now)
         const s = list.find((x) => x.id === enroll.server.id)
-        if (s?.last_seen && (!windows || (
-          s.last_report?.platform === 'windows' && s.last_seen !== enroll.server.last_seen
-        ))) setConnected(s)
+        const previous = enroll.server.last_seen
+        if (s?.last_seen && (!previous || Date.parse(s.last_seen) > Date.parse(previous)) &&
+            (s.last_report?.platform === 'windows') === windows) setConnected(s)
       } catch {
         /* транзиентные сбои поллинга не мешают ожиданию */
       }
     }
     void poll()
     const id = window.setInterval(poll, 4000)
-    return () => window.clearInterval(id)
+    return () => {
+      active = false
+      window.clearInterval(id)
+    }
   }, [enroll.server.id, enroll.server.last_seen, connected, windows])
   // GRE, включенный кнопкой в этом окне, не остается включенным молча: закрыли окно, а агент так и
   // не пришел и нода даже установщик не скачала - выключаем, иначе обычная установка потом увела бы
@@ -6862,7 +6867,8 @@ function ServerDetail({
   onOpenSection?: (section: Section, srv?: boolean, sec?: string) => void
 }) {
   const { t } = useI18n()
-  const { isViewer } = useAuth()
+  const { isAdmin, isViewer } = useAuth()
+  const canReissue = !isViewer && (isAdmin || (!s.first_report_at && !s.last_seen))
   const [updBusy, setUpdBusy] = useState(false)
   const [snoozing, setSnoozing] = useState(false)
   // починили и, если еще видно, известная проблема по строке сводки (FixedDialog.tsx)
@@ -7241,7 +7247,7 @@ function ServerDetail({
   const overview = (
     <div className="srv-sec">
       <OnboardBlock server={s} t={t} canManage={!isViewer} onChanged={onChanged} onOpenSection={onOpenSection}
-        onInstall={isViewer ? undefined : () => reissue()} />
+        onInstall={canReissue ? () => reissue() : undefined} />
       {!windows && !isViewer && (s.agent_fix_command || (s.helper_advice?.length ?? 0) > 0) && (
         <ServerFixBanner titles={s.agent_advice} command={s.agent_fix_command} helpers={s.helper_advice || []} t={t} />
       )}
@@ -7480,13 +7486,13 @@ function ServerDetail({
               {t('Агент ещё не выходил на связь. Установите и запустите kervax-agent на ноде — метрики появятся здесь. Изменить или удалить сервер — кнопка ✎.')}
             </p>
             {/* команда показывается один раз при добавлении; потеряли - новая с новым токеном */}
-            {!isViewer && !s.first_report_at && agentLate(s) && (
+            {canReissue && !s.first_report_at && agentLate(s) && (
               <div className="install-late">
                 <span>{t('Агент не достает до панели? Поставьте его через ретранслятор, локацию или GRE.')}</span>
                 <button className="small-btn" onClick={() => reissue('relay')}>{t('Выбрать путь')}</button>
               </div>
             )}
-            {!isViewer && !s.first_report_at && (
+            {canReissue && !s.first_report_at && (
               <>
                 <button className="small-btn" onClick={() => reissue()}>{t('Команда установки')}</button>
                 <p className="muted small">{t('Панель выпустит новый токен: прежняя команда перестанет работать.')}</p>

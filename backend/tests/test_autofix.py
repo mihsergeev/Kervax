@@ -100,6 +100,7 @@ async def test_autofix_flow(client, auth_headers, monkeypatch):
     assert await autofix_disks(factory, now) == 1
     cmds = await _fix_cmds(factory, sid)
     assert cmds[-1].payload["name"] == "rotated-logs"
+    assert (await _report(client, token, _rep(91)))["backup_commands"][0]["id"] == cmds[-1].id
     await client.post("/api/agent/backup-result", json={"id": cmds[-1].id, "ok": False, "output": "boom"},
                       headers={"Authorization": f"Bearer {token}"})
     assert "<b>Не получилось почистить диск</b>" in sent[-1] and "старые ротированные логи" in sent[-1]

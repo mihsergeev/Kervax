@@ -6,6 +6,8 @@ from pydantic import ValidationError
 
 from app.schemas import BackupServerDeployIn, BackupServerStorageIn
 
+from test_api_access import _user
+
 
 @pytest.mark.parametrize("mount", ["backup", "/backup/../other", "/backup//data", "/backup\nport=5", "/backup:$HOME"])
 def test_deploy_rejects_unsafe_mount_syntax(mount):
@@ -15,8 +17,8 @@ def test_deploy_rejects_unsafe_mount_syntax(mount):
         BackupServerStorageIn(storage_mount=mount)
 
 
-async def _node(client, auth_headers, name):
-    created = (await client.post("/api/servers", json={"name": name}, headers=auth_headers)).json()
+async def _node(client, auth_headers, name, **fields):
+    created = (await client.post("/api/servers", json={"name": name, **fields}, headers=auth_headers)).json()
     return created["server"]["id"], {"Authorization": f"Bearer {created['token']}"}
 
 
@@ -139,3 +141,40 @@ async def test_restore_credentials_use_selected_storage_path(client, auth_header
     response = await client.post(f"/api/servers/{sid}/backup/credentials", headers=auth_headers)
     assert response.status_code == 200, response.text
     assert response.json()["repo_local"] == "/backup/kervax-rest-server/data/source"
+
+
+@pytest.mark.parametrize("role", ["editor", "admin"])
+async def test_scoped_setup_cannot_attach_existing_repository(client, auth_headers, role):
+    operator = await _user(client, auth_headers, "scoped-operator", role=role, server_groups=["team-a"])
+    source_id, source_agent = await _node(client, auth_headers, "source", group_name="team-a", agent_ip="192.0.2.10")
+    backup_id, backup_agent = await _node(client, auth_headers, "backup", group_name="team-a", agent_ip="192.0.2.11")
+    await _report(client, source_agent, "2.69", "0.43", hostname="existing-repo")
+    backup_server = {"present": True, "running": True, "repos": [{"name": "existing-repo"}]}
+    path = f"/api/servers/{source_id}/backup/setup"
+    body = {"backup_server_id": backup_id, "reinstall": True, "tls": False}
+    await _report(client, backup_agent, "2.68", "0.43", backup_server=backup_server)
+    assert (await client.post(path, headers=operator, json=body)).status_code == 409
+    await _report(client, backup_agent, "2.69", "0.42", backup_server=backup_server)
+    assert (await client.post(path, headers=operator, json=body)).status_code == 409
+    assert (await client.get("/api/agent/commands", headers=backup_agent)).json()["backup_commands"] == []
+
+    await _report(client, backup_agent, "2.69", "0.43", backup_server=backup_server)
+    created = await client.post(path, headers=operator, json=body)
+    assert created.status_code == 200, created.text
+    command = await _wait_for_command(client, backup_agent)
+    assert command["action"] == "provision_new" and command["name"] == "existing-repo"
+    # Even an unexpected response resembling legacy provisioning cannot send this password to the client.
+    secret = "synthetic-existing-password"
+    encoded = base64.b64encode(secret.encode()).decode()
+    result = await client.post("/api/agent/backup-result", headers=backup_agent,
+                               json={"id": command["id"], "ok": True, "output": f"REPOPASS_B64={encoded}"})
+    assert result.status_code == 200, result.text
+    for _ in range(40):
+        response = await client.get(f"{path}/{created.json()['id']}", headers=operator)
+        assert response.status_code == 200, response.text
+        if response.json()["status"] != "running":
+            break
+        await asyncio.sleep(0.06)
+    assert response.json()["status"] == "error"
+    assert encoded not in response.text and secret not in response.text
+    assert (await client.get("/api/agent/commands", headers=source_agent)).json()["backup_commands"] == []

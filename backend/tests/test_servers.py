@@ -482,6 +482,7 @@ async def test_docker_command_flow(client, auth_headers):
     r = await client.post(f"/api/servers/{sid}/docker/command",
                           json={"container": "web", "action": "restart"}, headers=auth_headers)
     cid = r.json()["id"]
+    assert (await client.get("/api/agent/commands", headers=ah)).json()["docker_commands"][0]["id"] == cid
     r = await client.post("/api/agent/docker-result",
                           json={"id": cid, "ok": False, "output": "docker вернул 403"}, headers=ah)
     st = (await client.get(f"/api/servers/{sid}/docker/command/{cid}", headers=auth_headers)).json()
