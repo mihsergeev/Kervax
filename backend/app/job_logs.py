@@ -11,7 +11,7 @@ from __future__ import annotations
 import html
 import re
 
-from app import alerts
+from app import alerts, podnames
 
 _WAIT = 90        # сек ждем лог, дальше алерт без него
 _TAIL = 60        # строк просим у агента: последние бывают пустыми или служебными
@@ -60,8 +60,8 @@ def find_pod(rep: dict, job: dict) -> dict | None:
     ns, name = job.get("ns"), str(job.get("name") or "")
     if not name:
         return None
-    pods = [p for p in (rep.get("kube") or {}).get("pods") or []
-            if isinstance(p, dict) and p.get("ns") == ns and p.get("owner") == "Job"
+    pods = [p for p in podnames.inventory(rep)
+            if p.get("ns") == ns and p.get("owner") == "Job"
             and _is_job_pod(str(p.get("name") or ""), name)]
     failed = [p for p in pods if p.get("phase") == "Failed"]
     return (failed or pods or [None])[0]

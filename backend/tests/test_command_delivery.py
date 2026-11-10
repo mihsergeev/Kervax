@@ -117,6 +117,72 @@ async def test_status_poll_cannot_apply_manual_timeout_to_backup_job_command(cli
     assert (await client.get(path, headers=auth_headers)).json()["status"] == "done"
 
 
+@pytest.mark.parametrize("endpoint", ["report", "commands"])
+async def test_expired_container_commands_never_reach_reconnected_agent(client, auth_headers, endpoint, monkeypatch):
+    # Each parametrized fixture uses a new database with the same server IDs.
+    monkeypatch.setattr(collector.panel_errors, "_recent", {})
+    server_id, agent = await _server(client, auth_headers, "node-a")
+    factory = client._transport.app.state.session_factory
+    old = datetime.now(timezone.utc) - timedelta(minutes=5)
+    async with factory() as session:
+        commands = {
+            "docker": (
+                DockerCommand(server_id=server_id, action="restart", container="stale", created_at=old,
+                              created_by="admin"),
+                DockerCommand(server_id=server_id, action="logs", container="fresh"),
+            ),
+            "kube": (
+                KubeCommand(server_id=server_id, action="delete_pod", ns="default", kind="pod", name="stale",
+                            created_at=old, created_by="admin"),
+                KubeCommand(server_id=server_id, action="logs", ns="default", kind="pod", name="fresh"),
+            ),
+        }
+        session.add_all([command for pair in commands.values() for command in pair])
+        await session.commit()
+
+    if endpoint == "report":
+        reply = await client.post("/api/agent/report", headers=agent, json=_report())
+    else:
+        reply = await client.get("/api/agent/commands", headers=agent)
+    assert reply.status_code == 200, reply.text
+    for kind, (_, fresh) in commands.items():
+        assert [item["id"] for item in reply.json()[f"{kind}_commands"]] == [fresh.id]
+
+    await collector._expire_commands(factory)
+    async with factory() as session:
+        for stale, fresh in commands.values():
+            assert (await session.get(type(stale), stale.id)).status == "error"
+            assert (await session.get(type(fresh), fresh.id)).status == "running"
+        errors = await session.scalars(select(PanelError).where(PanelError.kind == "command"))
+        assert {error.action for error in errors} == {"docker restart", "kube delete_pod"}
+
+
+async def test_cleanup_preserves_deploy_wait_and_expires_abandoned_backups(client, auth_headers):
+    server_id, agent = await _server(client, auth_headers, "node-a")
+    factory = client._transport.app.state.session_factory
+    now = datetime.now(timezone.utc)
+    async with factory() as session:
+        deploy = BackupCommand(server_id=server_id, action="deploy_server", status="running",
+                               created_at=now - timedelta(minutes=10, seconds=30))
+        stuck = BackupCommand(server_id=server_id, action="provision", status="running",
+                              created_at=now - timedelta(minutes=10, seconds=30))
+        abandoned = BackupCommand(server_id=server_id, action="deploy_server", status="running",
+                                   created_at=now - timedelta(minutes=15))
+        session.add_all([deploy, stuck, abandoned])
+        await session.commit()
+
+    await collector._expire_commands(factory)
+    async with factory() as session:
+        assert (await session.get(BackupCommand, deploy.id)).status == "running"
+        assert (await session.get(BackupCommand, stuck.id)).status == "error"
+        assert (await session.get(BackupCommand, abandoned.id)).status == "error"
+    response = await client.post("/api/agent/backup-result", headers=agent,
+                                 json={"id": deploy.id, "ok": True, "output": "deployed"})
+    assert response.status_code == 200, response.text
+    async with factory() as session:
+        assert (await session.get(BackupCommand, deploy.id)).status == "done"
+
+
 @pytest.mark.parametrize("action", ["get_creds", "get_client_creds", "provision_client", "provision_new"])
 async def test_backup_result_with_password_is_private(client, auth_headers, action):
     server_id, agent_headers = await _server(client, auth_headers, "node-a")

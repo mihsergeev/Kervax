@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from app import alerts, collector, settings_store, tg_bot
 from app.config import get_settings
-from app.models import Server, TgAlert
+from app.models import Server, TgAlert, User
 from tests.test_alert_routes import ROUTE, FakeTG, _cfg, _factory, _site, _srv, tg  # noqa: F401
 
 NOW = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
@@ -192,3 +192,22 @@ async def test_bot_copies_command(client, tg):
         assert (await settings_store.get_dup_pause(s))["on"]
     toast = [j for m, j in tg.calls if m == "answerCallbackQuery"][-1]
     assert "основного чата" in toast["text"]
+
+
+async def test_bot_group_copies_requires_admin(client, tg):
+    f = _factory(client)
+    cfg = _cfg(tg_buttons=True, dup_pause={"on": False})
+    async with f() as s:
+        s.add_all([User(username="editor-a", password_hash="x", role="editor", tg_chat_id="42"),
+                   User(username="admin-b", password_hash="x", role="admin", tg_chat_id="43")])
+        await s.commit()
+    message = {"chat": {"id": -100, "type": "supergroup"}, "message_id": 7}
+    cq = {"id": "q1", "data": "kxc:2h", "message": message}
+    await tg_bot.handle_message(f, cfg, {**message, "text": "/copies", "from": {"id": 42}}, NOW)
+    assert "reply_markup" not in [j for m, j in tg.calls if m == "sendMessage"][-1]
+    await tg_bot.handle_callback(f, cfg, {**cq, "from": {"id": 42}}, NOW)
+    async with f() as s:
+        assert not (await settings_store.get_dup_pause(s)).get("on")
+    await tg_bot.handle_callback(f, cfg, {**cq, "from": {"id": 43}}, NOW)
+    async with f() as s:
+        assert (await settings_store.get_dup_pause(s))["by"] == "admin-b"

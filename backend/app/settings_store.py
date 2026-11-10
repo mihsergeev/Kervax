@@ -2,7 +2,7 @@
 
 import json
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -342,17 +342,31 @@ LEGACY_SITE_DEFAULTS: frozenset[str] = frozenset({
 _ANSIBLE_KEY = "ansible_access"
 
 
-async def get_ansible_access(session: AsyncSession) -> dict:
+async def get_ansible_access(session: AsyncSession) -> tuple[dict, str | None]:
     raw = await _get_raw(session, _ANSIBLE_KEY)
     try:
         data = json.loads(raw) if raw else {}
     except ValueError:
         data = {}
-    return data if isinstance(data, dict) else {}
+    return (data if isinstance(data, dict) else {}), raw
 
 
 async def set_ansible_access(session: AsyncSession, data: dict | None) -> None:
     await _set_raw(session, _ANSIBLE_KEY, json.dumps(data) if data else "")
+
+
+async def mark_ansible_used(session: AsyncSession, data: dict, raw: str, used_at: str) -> bool:
+    # Keep a token revoked or rotated while the inventory request was in flight.
+    result = await session.execute(
+        update(AppSetting).where(AppSetting.key == _ANSIBLE_KEY, AppSetting.value == raw)
+        .values(value=json.dumps({**data, "used_at": used_at}))
+    )
+    await session.commit()
+    if result.rowcount == 1:
+        return True
+    # A concurrent request with the same token may have already updated used_at.
+    current, _ = await get_ansible_access(session)
+    return current.get("hash") == data["hash"]
 
 
 async def get_raw(session: AsyncSession, key: str) -> str | None:

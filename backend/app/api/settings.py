@@ -38,7 +38,7 @@ async def put_retention(
 # нодах всех панелей сразу, без копирования списка хостов из каждой.
 @router.get("/ansible", response_model=AnsibleAccessOut)
 async def get_ansible_access(_: AdminUser, session: SessionDep) -> AnsibleAccessOut:
-    acc = await settings_store.get_ansible_access(session)
+    acc, _ = await settings_store.get_ansible_access(session)
     return AnsibleAccessOut(enabled=bool(acc.get("hash")), created_at=acc.get("created_at"),
                             used_at=acc.get("used_at"))
 

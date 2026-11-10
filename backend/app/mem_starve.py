@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from app import tg_fmt
+from app import podnames, tg_fmt
 
 # Память кончилась на всем сервере: осталось (MemAvailable) не больше стольких процентов. Без
 # этого давление памяти бывает и у одного контейнера, уперевшегося в свой лимит (app/mem_limit.py)
@@ -188,8 +188,8 @@ def eaters(rep: dict | None) -> list[tuple[str, float]]:
         for c in ((rep.get("docker") or {}).get("containers") or []):
             if isinstance(c, dict) and _f(c.get("mem")):
                 by[f"контейнер {tg_fmt.field(c.get('name') or '?', 60)}"] = _f(c.get("mem")) or 0
-        for p in ((rep.get("kube") or {}).get("pods") or []):
-            if isinstance(p, dict) and _f(p.get("mem")):
+        for p in podnames.inventory(rep):
+            if _f(p.get("mem")):
                 by[f"под {tg_fmt.field(p.get('ns') or '?', 40)}/{tg_fmt.field(p.get('name') or '?', 60)}"] = \
                     _f(p.get("mem")) or 0
         if not by:

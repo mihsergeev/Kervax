@@ -1028,10 +1028,13 @@ async def _run_http(
     async def attempt(u: str, extensions: dict | None = None, *, address: str | None = None):
         headers = {"User-Agent": _USER_AGENT, **custom_headers}
         transport = net_guard.MonitorTransport(verify, allow_internal, timeout, address) if proxy is None else None
+        hooks = [net_guard.credential_origin_hook(custom_headers)]
+        if proxy:
+            hooks.append(net_guard.request_hook(allow_internal=allow_internal))
         async with httpx.AsyncClient(
             timeout=timeout, follow_redirects=True, proxy=proxy,
             headers=headers, auth=auth, verify=verify, transport=transport, trust_env=False,
-            event_hooks={"request": [net_guard.request_hook(allow_internal=allow_internal)]} if proxy else None,
+            event_hooks={"request": hooks},
         ) as client:
             resp = await client.request(method, u, extensions=extensions or {})
             text = resp.text[:_MAX_BODY] if (check.keyword_up or check.keyword_down) else ""

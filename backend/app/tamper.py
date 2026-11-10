@@ -805,7 +805,8 @@ async def scan(check) -> dict:
         not getattr(check, "ignore_tls", False), checks_exec._allows_internal(check), _TIMEOUT
     )
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True, auth=auth, headers=headers,
-                                 transport=transport, trust_env=False) as client:
+                                 transport=transport, trust_env=False,
+                                 event_hooks={"request": [net_guard.credential_origin_hook(headers)]}) as client:
         try:
             r, text = await _get(client, url, checks_exec._USER_AGENT)
         except httpx.HTTPError as exc:

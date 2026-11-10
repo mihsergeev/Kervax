@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from app import alerts, collector, settings_store, tg_bot, tg_buttons
-from app.models import Check, Server, TgAlert, User
+from app.models import Check, MaintenanceWindow, Server, TgAlert, User
 
 
 class _Resp:
@@ -86,21 +86,74 @@ async def _row(factory, ref, kind, chat="-100") -> int:
         return row.id
 
 
-async def _linked(factory, uid="555", name="@petya", role="operator") -> None:
+async def _linked(factory, uid="555", name="@petya", role="operator", **scope) -> None:
     """Глушить кнопкой может только привязанная учетка с правом правки: нажимающий по умолчанию -
     оператор "@petya" с привязанным Telegram (если чат 555 уже чей-то, оставляем как есть)."""
     async with factory() as s:
         if await s.scalar(select(User).where(User.tg_chat_id == uid)) is None:
-            s.add(User(username=name, password_hash="x", role=role, tg_chat_id=uid))
+            s.add(User(username=name, password_hash="x", role=role, tg_chat_id=uid, **scope))
             await s.commit()
 
 
-async def _press(factory, aid, op, frm=None, chat="-100"):
+async def _press(factory, aid, op, frm=None, chat="-100", message_id=7):
     if frm is None:
         await _linked(factory)
     cq = {"id": "q1", "data": f"kx:{aid}:{op}", "from": frm or {"id": 555, "username": "petya"},
-          "message": {"chat": {"id": int(chat)}, "message_id": 7}}
+          "message": {"chat": {"id": int(chat)}, "message_id": message_id}}
     await tg_bot.handle_callback(factory, CFG, cq, NOW)
+
+
+async def test_callbacks_respect_live_scope_for_all_targets(client, tg):
+    f = _factory(client)
+    own = await _server(f, name="web-a", group_name="web")
+    other = await _server(f, name="db-b", group_name="db")
+    await _linked(f, sections=["servers"], server_groups=["web"])
+    async with f() as s:
+        check = Check(name="example", type="http", target="https://example.com", group_name="web")
+        s.add(check)
+        await s.commit()
+        cid = check.id
+
+    allowed = await _row(f, f"srv:{own}", "disk")
+    grouped = await _row(f, f"srv:{own},{other}", "disk")
+    website = await _row(f, f"chk:{cid}", "down")
+    await _press(f, allowed, tg_buttons.OP_HOUR, message_id=8)
+    assert tg.of("answerCallbackQuery")[-1]["text"] == "Алерт устарел"
+    for aid in (grouped, website):
+        await _press(f, aid, tg_buttons.OP_HOUR)
+        assert "доступа" in tg.of("answerCallbackQuery")[-1]["text"]
+    async with f() as s:
+        assert not (await s.get(Server, own)).alert_snoozes
+        assert not (await s.get(Server, other)).alert_snoozes
+        assert (await s.get(Check, cid)).snooze_until is None
+
+    await _press(f, allowed, tg_buttons.OP_HOUR)
+    async with f() as s:
+        node = await s.get(Server, own)
+        assert "disk" in node.alert_snoozes
+        node.group_name = "db"
+        await s.commit()
+    await _press(f, allowed, tg_buttons.OP_UNDO)
+    assert "доступа" in tg.of("answerCallbackQuery")[-1]["text"]
+    async with f() as s:
+        assert "disk" in (await s.get(Server, own)).alert_snoozes
+
+
+async def test_status_counts_and_maintenance_follow_chat_scope(client, tg):
+    f = _factory(client)
+    own = await _server(f, name="web-a", group_name="web")
+    other = await _server(f, name="db-b", group_name="db")
+    async with f() as s:
+        s.add(Check(name="site", type="http", target="https://example.com", group_name="web"))
+        for title, sid in [("Web maintenance", own), ("DB maintenance", other)]:
+            s.add(MaintenanceWindow(title=title, server_ids=[sid],
+                                    starts_at=NOW - timedelta(minutes=5), ends_at=NOW + timedelta(hours=1)))
+        await s.commit()
+    cfg = {**CFG, "routes": {"chats": [{"chat": "-200", "server_groups": ["web"], "site_groups": []}]}}
+    await tg_bot.handle_message(f, cfg, {"text": "/status", "chat": {"id": -200}}, NOW)
+    result = tg.of("sendMessage")[-1]["text"]
+    assert "серверов 1, сайтов 0" in result
+    assert "Web maintenance" in result and "DB maintenance" not in result
 
 
 # --- отправка -------------------------------------------------------------------------------
@@ -642,10 +695,11 @@ async def test_storm_one_message_buttons_cover_all(client, tg):
     # в историю - полный текст каждого сервера, с его временем
     assert sorted(h.text for h in hist) == [f"⚠️⚙️ web-{c} — упал x.service: ошибка, {n} мин назад"
                                             for c, n in zip("abc", (2, 3, 2))]
-    await _press(f, row.id, "h1")
+    message_id = row.messages[0]["id"]
+    await _press(f, row.id, "h1", message_id=message_id)
     async with f() as s:
         assert all("units" in srv.alert_snoozes for srv in [await s.get(Server, i) for i in ids])
-    await _press(f, row.id, "un")
+    await _press(f, row.id, "un", message_id=message_id)
     async with f() as s:
         assert all("units" not in (srv.alert_snoozes or {}) for srv in [await s.get(Server, i) for i in ids])
     # отбои в разные тики: первый не решает, последний решает (у вернувшегося уровень 0)

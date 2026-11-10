@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 import httpx
@@ -131,6 +132,28 @@ def request_hook(allow_internal: bool = True):
             raise httpx.ConnectError(FORBIDDEN_TEXT, request=request)
         if cls == INTERNAL and (not allow_internal or first == PUBLIC):
             raise httpx.ConnectError(INTERNAL_TEXT if allow_internal else ADMIN_ONLY_TEXT, request=request)
+
+    return hook
+
+
+def credential_origin_hook(custom_headers: Iterable[str]):
+    """Limit configured headers and Basic auth to the first request's origin."""
+    names = {name.lower() for name in custom_headers} | {"authorization"}
+    replace_host = "host" in names
+    names.discard("host")
+    origin = None
+
+    async def hook(request: httpx.Request) -> None:
+        nonlocal origin
+        url = request.url
+        current = (url.scheme, url.host, url.port)
+        if origin is None:
+            origin = current
+        elif current != origin:
+            for name in names:
+                request.headers.pop(name, None)
+            if replace_host:
+                request.headers["Host"] = url.netloc.decode("ascii")
 
     return hook
 

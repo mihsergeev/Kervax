@@ -1,12 +1,12 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
-  ApiError, agentUpdate, agentUpdateCancel, closeFleetRollout, getAnsibleAccess, getFleetRollout, startHelperRollout,
+  ApiError, agentUpdate, agentUpdateCancel, closeFleetRollout, getFleetRollout, startHelperRollout,
   type FleetRollout, type Server,
 } from './api'
-import { useAuth } from './auth'
 import { useI18n } from './i18n'
 import { fmtSetupVersion, shortList } from './serverUtils'
 import { HOST_RE, shq } from './shell'
+import { toastError } from './toast'
 
 // Обновление парка из блока "Обновления" главной и баннера "Серверов": агент - OTA через
 // панель (/api/servers/agent-update), helper'ы - командой ansible. Панель helper'ы сама не ставит:
@@ -54,8 +54,7 @@ export function helperGroups(servers: Server[]): HelperGroup[] {
   return [...by.values()]
 }
 
-// имя для ansible -l: hostname ноды, если он похож на имя хоста (его присылает сама нода), иначе имя
-// сервера в панели. В команду оно все равно идет через shq (shell.ts)
+// Имя для инвентаря: hostname агента, если он похож на имя хоста, иначе имя сервера.
 export const hostOf = (s: Server) =>
   s.hostname && HOST_RE.test(s.hostname) ? s.hostname : s.name || s.hostname || ''
 
@@ -78,7 +77,7 @@ const nodesLoc = (n: number, t: T) => (n % 10 === 1 && n % 100 !== 11 ? t('но�
 // Ход раскатки: читается с панели вместе с серверами, запуск и закрытие - тоже через панель.
 // canWrite=false (просмотр) - строки видно, закрыть "готово" можно только у себя на странице
 export function useFleetRollout(
-  servers: Server[], avail: string, onServers: (s: Server[]) => void, onUnauthorized: () => void, canWrite: boolean,
+  servers: Server[] | null, avail: string, onServers: (s: Server[]) => void, onUnauthorized: () => void, canWrite: boolean,
 ) {
   const { t } = useI18n()
   const [data, setData] = useState<FleetRollout | null>(null)
@@ -98,10 +97,11 @@ export function useFleetRollout(
   const unauth = useRef(onUnauthorized)
   useEffect(() => { unauth.current = onUnauthorized }, [onUnauthorized])
   useEffect(() => {
+    if (servers === null) return
     let live = true
     getFleetRollout()
       .then((d) => { if (live) setData(d) })
-      .catch((e) => { if (e instanceof ApiError && e.status === 401) unauth.current() })
+      .catch((e) => { if (live && e instanceof ApiError && e.status === 401) unauth.current() })
     return () => { live = false }
   }, [servers])
 
@@ -128,6 +128,7 @@ export function useFleetRollout(
 
   // ответ - только затронутые серверы: подменяем их в общем списке
   const merge = useCallback((upd: Server[]) => {
+    if (!servers) return
     const by = new Map(upd.map((s) => [s.id, s]))
     onServers(servers.map((s) => by.get(s.id) ?? s))
   }, [servers, onServers])
@@ -362,49 +363,52 @@ export function AgentUpdRow({ servers, avail, fleet, canUpd, canary, onOpen, onO
   )
 }
 
-// Команда ansible для helper'ов. С доступом ansible одна команда на все панели (плагин
-// инвентаря сам спрашивает панели), иначе - список хостов этой панели. Нод немного - по
-// именам и с доступом: имя в команде видно сразу, и не нужно гадать, попала ли нода в группу
-const BY_NAME_MAX = 3
-export function ansibleCmd(hosts: string[], viaPanels: boolean): string {
-  return viaPanels && (hosts.length === 0 || hosts.length > BY_NAME_MAX)
-    ? 'ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated'
-    : helperCmd(hosts)
+// Ansible interprets --limit after the shell has removed quotes. Accept only host aliases,
+// and keep the inventory-wide group command in the Ansible settings screen.
+export function helperCmd(hosts: string[]): string | null {
+  if (!hosts.length || hosts.some((h) =>
+    h.trim() !== h || !HOST_RE.test(h) || h.startsWith('-') ||
+    /^(?:all|ungrouped|localhost|127\.0\.0\.1|kervax(?:_.*)?)$/i.test(h)
+  )) return null
+  const aliases = shq(hosts.join(','))
+  // An ordinary name also selects an inventory group when the host is absent. Check the
+  // controller's inventory before running the playbook and refuse aliases shared with groups.
+  const check = 'import json,sys; inventory=json.load(sys.stdin); wanted=set(sys.argv[1].split(",")); ' +
+    'hosts={h for name,group in inventory.items() if name!="_meta" for h in group.get("hosts",[])}; ' +
+    'sys.exit("Ansible limit must contain only existing host aliases, not groups.") ' +
+    'if wanted.intersection(inventory) or not wanted.issubset(hosts) else None'
+  return `ansible-inventory --playbook-dir playbooks --list | python3 -c ${shq(check)} ${aliases} && ansible-playbook playbooks/kervax_helpers.yml --limit=${aliases}`
 }
 
-// Та же команда по именам нод: работает и без доступа ansible, и когда группа еще не собралась
-export function helperCmd(hosts: string[]): string {
-  return `ansible-playbook playbooks/kervax_helpers.yml -l ${shq(hosts.join(','))}`
-}
-
-export function useViaPanels(): boolean {
-  const { isAdmin } = useAuth()
-  const [via, setVia] = useState(false)
-  useEffect(() => {
-    if (!isAdmin) return
-    getAnsibleAccess().then((a) => setVia(a.enabled)).catch(() => setVia(false))
-  }, [isAdmin])
-  return via
-}
-
-const copy = (s: string) => {
-  try { navigator.clipboard?.writeText(s)?.catch(() => {}) } catch { /* без буфера команда видна в строке */ }
+async function copy(s: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(s)
+    return true
+  } catch {
+    return false
+  }
 }
 
 // Запуск helper'ов: копируем команду и ждем прогона (одна и та же команда в строке и в "Обновить все")
-export function startHelpers(fleet: Fleet, hosts: string[], via: boolean) {
-  copy(ansibleCmd(hosts, via))
+async function startHelpers(fleet: Fleet, hosts: string[], copyError: string) {
+  const cmd = helperCmd(hosts)
+  if (!cmd) return false
+  if (!await copy(cmd)) {
+    toastError(copyError)
+    return false
+  }
   return fleet.startHelpers(hosts)
 }
 
 // Строка helper'ов: одна на все helper'ы, потому что их чинит одна команда ansible.
 // Скопировали команду -> ждем, пока хосты перестанут требовать прогона -> готово (уходит сама)
-export function HelperUpdRow({ servers, fleet, canUpd, via, onOpen }: {
-  servers: Server[]; fleet: Fleet; canUpd: boolean; via: boolean; onOpen?: () => void
+export function HelperUpdRow({ servers, fleet, canUpd, onOpen }: {
+  servers: Server[]; fleet: Fleet; canUpd: boolean; onOpen?: () => void
 }) {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   const pending = rolloutHosts(servers)
+  const pendingCmd = helperCmd(pending)
   const run = fleet.helpers
   const left = run ? run.hosts.filter((h) => pending.includes(h)) : []
   const finished = !!run && left.length === 0
@@ -442,11 +446,12 @@ export function HelperUpdRow({ servers, fleet, canUpd, via, onOpen }: {
           {t('helper\'ы: обновить на {n} {nodes}', { n, nodes: nodesLoc(n, t) })}{' '}
           <span className="muted small"><Words text={`(${shortList(pending, t, 3)})`} /></span>
           {what.length > 0 && <span className="muted small upd-notes"><Words text={what.join(' · ')} /></span>}
-          {canUpd && <UpdCmd cmd={ansibleCmd(pending, via)} />}
+          {canUpd && (pendingCmd ? <UpdCmd cmd={pendingCmd} /> : <HelperHostWarning />)}
         </span>
         <span className="upd-acts">
-          {canUpd && (
-            <button className="ghost small" disabled={fleet.busy} onClick={() => startHelpers(fleet, pending, via)}>
+          {canUpd && pendingCmd && (
+            <button className="ghost small" disabled={fleet.busy}
+              onClick={() => startHelpers(fleet, pending, t('Не удалось скопировать'))}>
               {t('Скопировать команду')}
             </button>
           )}
@@ -470,10 +475,13 @@ export function HelperUpdRow({ servers, fleet, canUpd, via, onOpen }: {
       </div>
     )
   }
-  const cmd = ansibleCmd(run.hosts, via)
-  const again = (
-    <button className="ghost small" onClick={() => {
-      copy(cmd)
+  const cmd = helperCmd(run.hosts)
+  const again = cmd && (
+    <button className="ghost small" onClick={async () => {
+      if (!await copy(cmd)) {
+        toastError(t('Не удалось скопировать'))
+        return
+      }
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1500)
     }}>{copied ? t('Скопировано') : t('копировать еще раз')}</button>
@@ -501,7 +509,7 @@ export function HelperUpdRow({ servers, fleet, canUpd, via, onOpen }: {
           </div>
         )}
         {/* команда нужна, пока прогона нет; пошел - видно прогресс, копия - кнопкой */}
-        {(done === 0 || stuck) && <UpdCmd cmd={cmd} />}
+        {canUpd && (done === 0 || stuck) && (cmd ? <UpdCmd cmd={cmd} /> : <HelperHostWarning />)}
       </span>
       <span className="upd-acts">
         {canUpd && again}
@@ -514,22 +522,27 @@ export function HelperUpdRow({ servers, fleet, canUpd, via, onOpen }: {
 
 // "Обновить все" в шапке блока: нужна, только когда обновить можно и агент, и helper'ы -
 // с одной строкой хватает ее кнопки. Тот же второй клик в ту же точку
-export function UpdateAllButton({ servers, avail, fleet, via }: {
-  servers: Server[]; avail: string; fleet: Fleet; via: boolean
+export function UpdateAllButton({ servers, avail, fleet }: {
+  servers: Server[]; avail: string; fleet: Fleet
 }) {
   const { t } = useI18n()
   if (fleet.agent || fleet.helpers) return null
   const on = agentBehind(servers, avail).filter((s) => s.online)
   const hosts = rolloutHosts(servers)
-  if (!on.length || !hosts.length) return null
+  if (!on.length || !helperCmd(hosts)) return null
   return (
     <ConfirmButton big disabled={fleet.busy}
       label={t('Обновить все')}
       sure={t('Точно? агент на {a} + helper\'ы на {h}', { a: on.length, h: hosts.length })}
       onGo={async () => {
         // по очереди: обе части пишутся в одну запись на панели
-        await startHelpers(fleet, hosts, via)
-        await fleet.startAgent(on.map((s) => s.id))
+        if (await startHelpers(fleet, hosts, t('Не удалось скопировать')))
+          await fleet.startAgent(on.map((s) => s.id))
       }} />
   )
+}
+
+export function HelperHostWarning() {
+  const { t } = useI18n()
+  return <span className="form-error small">{t('Команда Ansible недоступна: проверьте имена хостов в инвентаре.')}</span>
 }

@@ -82,15 +82,16 @@ async def nodes(session, now: datetime) -> list[AnsibleNodeOut]:
 async def ansible_servers(request: Request, session: SessionDep) -> AnsibleServersOut:
     auth = request.headers.get("authorization", "")
     token = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-    acc = await settings_store.get_ansible_access(session)
+    acc, raw = await settings_store.get_ansible_access(session)
     want = acc.get("hash") or ""
-    if not token or not want or not hmac.compare_digest(hash_agent_token(token), want):
-        raise HTTPException(401, "Токен ansible не подошел или доступ выключен")
+    unauthorized = HTTPException(401, "Токен ansible не подошел или доступ выключен")
+    if not token or not raw or not want or not hmac.compare_digest(hash_agent_token(token), want):
+        raise unauthorized
 
     now = datetime.now(timezone.utc)
     out = [AnsibleServerOut(name=n.name, hostname=n.hostname, ips=n.ips, online=n.online, enabled=n.enabled,
                             rollout=n.rollout, outdated=[a.name for a in n.outdated], issues=n.issues)
            for n in await nodes(session, now)]
-    acc["used_at"] = now.isoformat()
-    await settings_store.set_ansible_access(session, acc)
+    if not await settings_store.mark_ansible_used(session, acc, raw, datetime.now(timezone.utc).isoformat()):
+        raise unauthorized
     return AnsibleServersOut(version=get_settings().version, servers=out)

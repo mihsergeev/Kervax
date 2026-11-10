@@ -2229,7 +2229,7 @@ def kube_bad_pods(rep: dict) -> list[dict]:
     работают, но не готовы. Выдержка (alert_sustain_seconds) отсекает обычный выкат:
     новый под несколько минут не готов, и это не авария."""
     out = []
-    for p in ((rep.get("kube") or {}).get("pods") or []):
+    for p in podnames.inventory(rep):
         if p.get("owner") not in _POD_OWNERS or p.get("phase") in _POD_FINISHED:
             continue
         # ready is False, а не falsy: агент, который поля не шлёт, иначе дал бы алерт
@@ -3609,7 +3609,7 @@ def _backup_disk_space(s: Server, disks: list[dict], now: datetime) -> dict[str,
 def _disk_fill_sample(s: Server, now: datetime) -> tuple[float, str | None, bool]:
     """Заполнение худшего подходящего раздела. Для томов бэкапов важны оба порога."""
     rep = s.last_report or {}
-    disks = [d for d in rep.get("disks") or [] if isinstance(d, dict) and d.get("total")]
+    disks = list(dfc.disk_inventory(rep.get("disks")))
     storage = _backup_disk_space(s, disks, now)
     samples = [(d["used"] / d["total"] * 100, d.get("mount"), False)
                for d in disks if d.get("mount") not in storage]
@@ -3861,10 +3861,25 @@ def dns_block(rep: dict) -> dict | None:
     d = rep.get("dns")
     if not isinstance(d, dict):
         return None
-    ref = float(rep.get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
-    if ref - float(d.get("ts") or 0) > _DNS_FRESH:
+    resolvers = d.get("servers")
+    if resolvers is not None and not isinstance(resolvers, list):
         return None
-    return d
+    try:
+        ref = float(rep.get("clock_unix") or 0) or datetime.now(timezone.utc).timestamp()
+        if ref - float(d.get("ts") or 0) > _DNS_FRESH:
+            return None
+        miss_ts = float(d.get("miss_ts") or 0)
+        miss_ms = int(d.get("miss_ms") or 0)
+        valid_resolvers = []
+        for resolver in resolvers or []:
+            if isinstance(resolver, dict) and resolver.get("addr"):
+                if not isinstance(resolver["addr"], str):
+                    return None
+                ms = int(resolver["ms"]) if resolver.get("ms") is not None else -1
+                valid_resolvers.append({**resolver, "ms": ms})
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return {**d, "miss_ts": miss_ts, "miss_ms": miss_ms, "servers": valid_resolvers}
 
 
 def _dns_answer(x: dict) -> str:
@@ -4538,7 +4553,7 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
     if lvl and (dpct or mount):
         add("disk", lvl, f"Диск {round(dpct)}%" + (" 🚨" if lvl >= 3 else ""), "diskfill",
             "disk" if lvl >= 3 else f"disk@{lvl}")
-    ino = [d for d in rep.get("disks") or [] if isinstance(d, dict) and d.get("inodes")]
+    ino = [d for d in dfc.disk_inventory(rep.get("disks")) if d.get("inodes")]
     if ino:
         wi = max(ino, key=lambda d: (d.get("inodes_used") or 0) / d["inodes"])
         ipct = (wi.get("inodes_used") or 0) / wi["inodes"] * 100
@@ -5542,8 +5557,8 @@ def pod_uid_names(servers) -> dict[str, str]:
     Агент воркера без доступа к kube-api знает свои поды только по uid из cgroup."""
     out: dict[str, str] = {}
     for s in servers:
-        for p in (((s.last_report or {}).get("kube") or {}).get("pods") or []):
-            if isinstance(p, dict) and p.get("u"):
+        for p in podnames.inventory(s.last_report):
+            if p.get("u"):
                 out[str(p["u"])] = f"{p.get('ns') or '?'}/{p.get('name') or '?'}"
     return out
 
@@ -5734,8 +5749,7 @@ def cause_text(rep: dict, kind: str, base: dict[str, float], now: datetime | Non
         # держат поды, и перезапускают их деплоймент
         pods = sorted(
             ((f"{p.get('ns') or '?'}/{p.get('name') or '?'}", float(p.get("mem") or 0))
-             for p in ((rep.get("kube") or {}).get("pods") or [])
-             if isinstance(p, dict) and p.get("mem")),
+             for p in podnames.inventory(rep) if p.get("mem")),
             key=lambda x: -x[1],
         )[:2]
         if pods:
@@ -5927,7 +5941,7 @@ async def fill_history(session: AsyncSession, servers: list[Server],
         rep = s.last_report or {}
         pct, mount, _ = _disk_fill_sample(s, now)
         ino = max(((d.get("inodes_used") or 0) / d["inodes"] * 100
-                   for d in rep.get("disks") or [] if isinstance(d, dict) and d.get("inodes")), default=0.0)
+                   for d in dfc.disk_inventory(rep.get("disks")) if d.get("inodes")), default=0.0)
         if max(pct, ino) >= low:
             ids.append(s.id)
             if _bsrv_role(rep, s) or bsrv_mirror.is_mirror(s):
@@ -6717,7 +6731,8 @@ def _server_conditions(s: Server, now: datetime,
                 {"value": round(memp), "threshold": s.mem_alert_percent, "cause": ""},
                 below=memp < s.mem_alert_percent - _HYST)
     worst, worst_mount, backup_storage = _disk_fill_sample(s, now)
-    if rep.get("disks") or worst_mount or (state.get("disk") and backup_host):
+    disks = list(dfc.disk_inventory(rep.get("disks")))
+    if disks or worst_mount or (state.get("disk") and backup_host):
         crit, prob, warn = s.disk_crit_percent, s.disk_alert_percent, s.disk_warn_percent
         low = _fill_low(s)
 
@@ -6746,7 +6761,7 @@ def _server_conditions(s: Server, now: datetime,
         # Inode кончаются отдельно от места: миллионы мелких файлов (сессии PHP, кэш) забивают
         # ФС, когда df показывает свободные гигабайты, и ничего нового не создать. Пороги те
         # же, что у места. Считают агенты 2.15+, у btrfs inode нет вовсе.
-        ino = [d for d in rep.get("disks") or [] if d.get("inodes")]
+        ino = [d for d in disks if d.get("inodes")]
         if ino:
             wi = max(ino, key=lambda d: (d.get("inodes_used") or 0) / d["inodes"])
             ipct = (wi.get("inodes_used") or 0) / wi["inodes"] * 100
@@ -6864,7 +6879,8 @@ def _server_conditions(s: Server, now: datetime,
     # ClickHouse (нет секрета) и PostgreSQL (нет сертификата) лежали по семь часов, и
     # панель об этом не сказала ни разу: в «Кубере» их видно, только если открыть.
     # Шума не будет: по парку в 26 нод таких подов было ровно четыре, все на этой ноде.
-    if online and (rep.get("kube") or {}).get("access"):
+    kube = rep.get("kube") or {}
+    if online and kube.get("access") and ("pods" not in kube or podnames.inventory_known(kube)):
         # заглушенные поштучно (кнопкой под алертом): kube_pod:<ns>/<ворклоад>
         pm = item_mutes(s, now, "kube_pod:")
         # новая ревизия, пока рядом работает прошлая, - идет выкатка, сервис жив: ждем час
@@ -7437,8 +7453,9 @@ def mute_present(s: Server, now: datetime, cur: dict[str, str | None]) -> dict[s
     need = {p for k in cur for p in mute_watch.PRESENT_PREFIXES if k.startswith(p) or k == p[:-1]}
     rep, st = s.last_report or {}, s.alert_state or {}
     out: dict[str, dict[str, str]] = {}
-    if (rep.get("kube") or {}).get("access"):
-        if "kube_pod:" in need:
+    kube = rep.get("kube") or {}
+    if kube.get("access"):
+        if "kube_pod:" in need and ("pods" not in kube or podnames.inventory_known(kube)):
             pods: dict[str, list[dict]] = {}
             for p in kube_bad_pods(rep):
                 pods.setdefault(pod_item(p), []).append(p)
@@ -9355,9 +9372,23 @@ async def maintenance_tick(
 
 # Команда живёт секунды: агент забирает её за 1-15с, helper отвечает в пределах 90с
 # (столько же ждёт спул на ноде). Всё, что висит дольше, до ноды не доехало.
+CONTAINER_COMMAND_TIMEOUT = 90
+BACKUP_DEPLOY_TIMEOUT = 12 * 60
 _CMD_STUCK_SECONDS = 10 * 60
 # disk_fix run ждет helper до 15 минут (docker builder prune по большому кэшу)
 _FIX_STUCK_SECONDS = 20 * 60
+
+
+def command_expired(model, now: datetime):
+    if model is not BackupCommand:
+        return model.created_at <= now - timedelta(seconds=CONTAINER_COMMAND_TIMEOUT)
+    return or_(
+        and_(model.action == "disk_fix", model.created_at <= now - timedelta(seconds=_FIX_STUCK_SECONDS)),
+        and_(model.action == "deploy_server",
+             model.created_at <= now - timedelta(seconds=BACKUP_DEPLOY_TIMEOUT + 60)),
+        and_(model.action.not_in(("disk_fix", "deploy_server")),
+             model.created_at <= now - timedelta(seconds=_CMD_STUCK_SECONDS)),
+    )
 
 
 async def _expire_commands(session_factory: async_sessionmaker[AsyncSession]) -> None:
@@ -9369,17 +9400,14 @@ async def _expire_commands(session_factory: async_sessionmaker[AsyncSession]) ->
     """
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(seconds=_CMD_STUCK_SECONDS)
-    fix_cutoff = now - timedelta(seconds=_FIX_STUCK_SECONDS)
-    stuck = (BackupCommand.status.in_(("pending", "running")),
-             or_(and_(BackupCommand.action != "disk_fix", BackupCommand.created_at < cutoff),
-                 and_(BackupCommand.action == "disk_fix", BackupCommand.created_at < fix_cutoff)))
+    stuck = (BackupCommand.status.in_(("pending", "running")), command_expired(BackupCommand, now))
     async with session_factory() as session:
         # поставленные человеком - в журнал ошибок панели: кнопка "ничего не сделала"
         mine = list(await session.scalars(select(BackupCommand).where(*stuck, BackupCommand.created_by != "")))
         expired = set(await session.scalars(
             update(BackupCommand)
             .where(*stuck)
-            .values(status="error", ok=False, result="агент не ответил — команда не доехала",
+            .values(status="error", ok=False, result="агент не ответил (таймаут)", done_at=now,
                     payload=case((BackupCommand.action == "disk_fix", BackupCommand.payload)))
             .returning(BackupCommand.id)
             .execution_options(synchronize_session=False)
@@ -9397,10 +9425,24 @@ async def _expire_commands(session_factory: async_sessionmaker[AsyncSession]) ->
         if expired:
             log.info("закрыто зависших backup-команд: %d", len(expired))
         await session.commit()
+    # Do not hold backup locks while waiting on container commands, which are claimed first.
+    expired_containers = []
+    async with session_factory() as session:
+        for kind, model in (("docker", DockerCommand), ("kube", KubeCommand)):
+            commands = await session.scalars(
+                update(model)
+                .where(model.status.in_(("pending", "running")), command_expired(model, now))
+                .values(status="error", ok=False, result="агент не ответил (таймаут)", done_at=now)
+                .returning(model)
+            )
+            expired_containers.extend((kind, c) for c in commands if c.created_by)
+        await session.commit()
+    for kind, c in expired_containers:
+        await panel_errors.command_failed(session_factory, kind, c, soon=False)
     for c in mine:
         if c.id not in expired:
             continue  # агент успел ответить после SELECT
-        c.result = "агент не ответил - команда не доехала"
+        c.result = "агент не ответил (таймаут)"
         await panel_errors.command_failed(session_factory, "backup", c, soon=False)
 
 

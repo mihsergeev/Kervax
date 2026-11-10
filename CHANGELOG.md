@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.126] - 2026-11-10
+
+- Enforce Telegram alert action and status permissions for the configured sections and groups.
+- Keep revoked or rotated Ansible tokens invalid during concurrent inventory requests.
+- Keep HTTP credentials and custom headers on the configured origin across redirects.
+- Restrict draft and discovered-domain probe results to their authorized requester and source. Restart draft probes and refresh discovered-domain results started before the update.
+- Keep server alert processing running when pod, disk or DNS data is malformed. Accept Linux reports with unavailable disk or load metrics.
+- Expire queued Docker and Kubernetes commands and honor the configured timeout for backup server setup and moves.
+- Ignore stale alert history pages after changing filters, and stop repeated rollout status requests when the server list is unavailable.
+- Limit generated helper commands to the selected Ansible hosts and report clipboard errors.
+- Linux agent 2.69, backup server helper 0.43, mirror helper 0.5, database migration 0148.
+
 ## [1.8.125] - 2026-11-10
 
 - Restrict backup credential recovery and protect existing repositories from setup requests made by users with limited access.

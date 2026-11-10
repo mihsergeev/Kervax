@@ -218,6 +218,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     res = await fetch(path, { ...options, headers })
   } catch (e) {
     if (!isCurrentSession(token)) throw sessionChanged(method)
+    if (options.signal?.reason?.name === 'AbortError') options.signal.throwIfAborted()
     // сеть или панель недоступна: вместо "Failed to fetch" (у каждого браузера свой текст) - по-человечески
     noteApiFailure(method, path, 0, e instanceof Error ? e.message : String(e))
     throw new ApiError(tr('Нет связи с панелью'), 0, [], method)
@@ -231,6 +232,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const text = await res.text().catch(() => null)
   // Запоздалый ответ от прежнего JWT не должен менять новый сеанс или его журнал.
   if (!isCurrentSession(token)) throw sessionChanged(method)
+  if (options.signal?.reason?.name === 'AbortError') options.signal.throwIfAborted()
   let body = null
   let broken = text === null
   if (text) {
@@ -1340,10 +1342,10 @@ export type AlertHistoryQuery = {
   only?: 'all' | 'fires' | 'recoveries'
   before_id?: number
 }
-export function alertHistory(p: AlertHistoryQuery): Promise<AlertHistory> {
+export function alertHistory(p: AlertHistoryQuery, signal?: AbortSignal): Promise<AlertHistory> {
   const qs = new URLSearchParams()
   for (const [k, v] of Object.entries(p)) if (v !== undefined && v !== '' && v !== 0) qs.set(k, String(v))
-  return api<AlertHistory>(`/api/alert-history?${qs}`)
+  return api<AlertHistory>(`/api/alert-history?${qs}`, { signal })
 }
 
 export type AnsibleAccess = { enabled: boolean; created_at: string | null; used_at: string | null }

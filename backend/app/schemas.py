@@ -2093,6 +2093,13 @@ class AgentReportIn(BaseModel):
     swap_total: int = 0
     load: list[float] = []  # [1м, 5м, 15м]
     disks: list[dict] = []  # [{"mount","used","total"}]
+
+    @field_validator("load", "disks", mode="before")
+    @classmethod
+    def _empty_linux_inventory(cls, value):
+        # Go encodes a nil slice as null when no sample is available.
+        return [] if value is None else value
+
     # СУБД, найденные сканом процессов (нативные + в контейнерах + в подах). Поле верхнего
     # уровня, поэтому его ОБЯЗАТЕЛЬНО объявлять здесь: незадекларированное pydantic молча
     # выбрасывает, и в last_report оно бы не доехало.

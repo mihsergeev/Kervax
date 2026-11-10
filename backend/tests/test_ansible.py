@@ -6,6 +6,10 @@ Helper'ы на нодах выкатывает плейбук kervax_helpers.yml
 токену только на чтение.
 """
 
+import asyncio
+
+import pytest
+
 from tests.test_users import _mk_viewer
 
 
@@ -86,6 +90,45 @@ async def test_only_admin_manages_the_token(client, auth_headers):
     assert (await client.post("/api/settings/ansible", headers=viewer)).status_code == 403
     # и JWT обычной учетки ansible-ручку не открывает: там только свой токен
     assert (await client.get("/api/ansible/servers", headers=auth_headers)).status_code == 401
+
+
+@pytest.mark.parametrize("rotate", [False, True])
+async def test_inventory_request_cannot_restore_old_token(client, auth_headers, monkeypatch, rotate):
+    from app.api import ansible
+
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+    original = ansible.nodes
+
+    async def paused_nodes(*args):
+        entered.set()
+        await resume.wait()
+        return await original(*args)
+
+    monkeypatch.setattr(ansible, "nodes", paused_nodes)
+    issued = await client.post("/api/settings/ansible", headers=auth_headers)
+    old_headers = {"Authorization": f"Bearer {issued.json()['token']}"}
+    pending = asyncio.create_task(client.get("/api/ansible/servers", headers=old_headers))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        if rotate:
+            changed = await client.post("/api/settings/ansible", headers=auth_headers)
+            assert changed.status_code == 200
+        else:
+            changed = await client.delete("/api/settings/ansible", headers=auth_headers)
+            assert changed.status_code == 204
+    finally:
+        resume.set()
+        result = await asyncio.wait_for(pending, timeout=5)
+    assert (await client.get("/api/ansible/servers", headers=old_headers)).status_code == 401
+    assert result.status_code == 401
+
+    status = await client.get("/api/settings/ansible", headers=auth_headers)
+    assert status.json()["enabled"] is rotate
+    assert not status.json()["used_at"]
+    if rotate:
+        new_headers = {"Authorization": f"Bearer {changed.json()['token']}"}
+        assert (await client.get("/api/ansible/servers", headers=new_headers)).status_code == 200
 
 
 def test_webserver_helper_is_needed_where_it_already_counts_requests():

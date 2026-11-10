@@ -241,6 +241,33 @@ async def test_inside_without_a_serving_server_or_answer(client, auth_headers):
         await s.commit()
     got = (await client.get(f"/api/checks/try/{rid}", headers=auth_headers)).json()["inside"]
     assert got["status"] == "none" and got["kind"] == "no_answer" and got["deadline"] > 0
+
+
+async def test_inside_result_is_visible_only_to_the_requester(client, auth_headers):
+    from tests.test_api_scope_regressions import _user
+
+    sid, agent = await _node(client, auth_headers)
+    cid = await _trust_for_trial(client, sid)
+    _, other = await _user(client, auth_headers, "other-editor", site_groups=["other-sites"])
+    assert (await client.get(f"/api/checks/{cid}", headers=other)).status_code == 404
+
+    body = dict(FORM, part="inside", check_id=cid, http_headers='{"X-Check-Key": "fixture-key"}')
+    started = await client.post("/api/checks/try", headers=auth_headers, json=body)
+    assert started.json()["inside"]["status"] == "pending"
+    rid = started.json()["inside"]["request_id"]
+    path = f"/api/checks/try/{rid}"
+    pending = await client.get(path, headers=other)
+
+    tasks = await client.get("/api/agent/commands", headers=agent)
+    assert [t["id"] for t in tasks.json()["site_probes"]] == [-rid]
+    result = await client.post("/api/agent/site-probe-result", headers=agent, json={"site_probes": [
+        {"id": -rid, "code": 200, "latency_ms": 2, "via": "cluster:private-ns/web:8080"},
+    ]})
+    assert result.status_code == 200
+    owned = await client.get(path, headers=auth_headers)
+    assert "private-ns" in owned.json()["inside"]["message"]
+    assert (await client.get(path, headers=other)).status_code == 404
+    assert pending.status_code == 404
     async with _factory(client)() as s:
         assert "auth_pass" not in (await s.get(ProbeRequest, rid)).spec
 

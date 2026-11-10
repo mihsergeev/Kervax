@@ -3637,6 +3637,7 @@ const EN: Record<string, string> = {
   'напр. Прод / БД': 'e.g. Prod / DB',
   'Сервер создан': 'Server created',
   'Скопировать команду': 'Copy command',
+  'Команда Ansible недоступна: проверьте имена хостов в инвентаре.': 'Ansible command unavailable. Check the host names in the inventory.',
   'Скопировано ✓': 'Copied ✓',
   'аптайм': 'uptime',
   'агент': 'agent',

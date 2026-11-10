@@ -24,6 +24,7 @@ backup-a, +3% в сутки) и ни одного ложного у бэкап-�
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -61,6 +62,24 @@ def _epoch(ts: datetime) -> float:
     return (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).timestamp()
 
 
+def _disk_count(value: object) -> bool:
+    return type(value) is int and 0 <= value < 2**64
+
+
+def disk_inventory(disks: object) -> Iterator[dict]:
+    """Yield valid filesystem samples from current or previously stored reports."""
+    if not isinstance(disks, list):
+        return
+    for disk in disks:
+        if not isinstance(disk, dict) or not isinstance(disk.get("mount"), str) or not disk["mount"]:
+            continue
+        total = disk.get("total")
+        optional = (disk.get("avail"), disk.get("inodes"), disk.get("inodes_used"))
+        if (_disk_count(total) and total > 0 and _disk_count(disk.get("used"))
+                and all(value is None or _disk_count(value) for value in optional)):
+            yield disk
+
+
 def growth_rate(points: list[tuple[float, float]], now: float) -> float | None:
     """Рост в процентных пунктах в сутки по минимумам трех суточных окон, None - если
     устойчивого роста нет или данных мало."""
@@ -92,13 +111,13 @@ def build(rows, rep: dict, now: float) -> list[dict]:
     for ts, disks in rows:
         t = _epoch(ts)
         for d in disks or []:
-            if not isinstance(d, dict) or not d.get("mount"):
+            if not isinstance(d, dict) or not isinstance(d.get("mount"), str) or not d["mount"]:
                 continue
             if d.get("pct") is not None:
                 series.setdefault((d["mount"], "space"), []).append((t, float(d["pct"])))
             if d.get("ipct") is not None:
                 series.setdefault((d["mount"], "inode"), []).append((t, float(d["ipct"])))
-    cur = {d.get("mount"): d for d in rep.get("disks") or [] if isinstance(d, dict)}
+    cur = {d["mount"]: d for d in disk_inventory(rep.get("disks"))}
     items = []
     for (mount, kind), pts in series.items():
         d = cur.get(mount)

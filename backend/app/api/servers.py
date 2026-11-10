@@ -54,7 +54,7 @@ from app import web_upstream
 from app import web_config
 from app import webfiles as webfiles_mod
 from app import changes as srv_changes
-from app import fixed, known, listen_watch
+from app import fixed, known, listen_watch, podnames
 from app import kube_expiry
 from app import dev_mode
 from app import onboard
@@ -72,7 +72,8 @@ from app import dump_reason
 from app import fleet_rollout
 from app import oom as oom_mod
 from app import software as software_mod
-from app.collector import _ver_tuple
+from app.collector import BACKUP_DEPLOY_TIMEOUT, CONTAINER_COMMAND_TIMEOUT, _ver_tuple, command_expired
+from app.disk_forecast import disk_inventory
 from app.collector import (
     _OFFLINE_ALERT_EXTRA, _backup_problem_repos, alert_since, awaiting_after_pause, backup_cadence, backup_rotation_items, backup_unmonitored,
     bsrv_extra, bsrv_restic_old, clock_skew_window, cron_job_issues, disk_analyze_ok, prune_problems, repo_reason, docker_since,
@@ -1084,7 +1085,7 @@ def _qdrant_dump_block(agent_version: str, rep: dict, container: str) -> str:
             return "для снапшотов Qdrant нужен StatefulSet или Deployment с одним подом"
         if block := _kube_dump_block(rep, "qdrant"):
             return block
-        pods = [p for p in ((rep.get("kube") or {}).get("pods") or [])
+        pods = [p for p in podnames.inventory(rep)
                 if _kube_workload(p) == container and p.get("phase") in ("Running", "Pending")]
         if (len(pods) != 1 or pods[0].get("phase") != "Running" or pods[0].get("ready") is not True
                 or _db_engine_of(pods[0].get("image") or "", pods[0].get("name") or "") != "Qdrant"):
@@ -1256,7 +1257,7 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
     # CreateContainerConfigError (нет секрета), а панель предлагала включить ему дамп.
     down_pods: dict[str, str] = {}
     pod_node: dict[str, str] = {}  # ns/name -> нода, на которой под крутится
-    for p in ((rep.get("kube") or {}).get("pods") or []):
+    for p in podnames.inventory(rep):
         # Succeeded/Failed - это отработавшие поды Job'ов, живой базой они не были
         if not p.get("image") or p.get("phase") not in ("Running", "Pending"):
             continue
@@ -2404,8 +2405,10 @@ async def _store_web_errors(session, server: Server, body, now: datetime) -> Non
     if dup is not None:
         return
     kube = getattr(body, "kube", None) or {}
-    namespaces = {str(p.get("ns")) for k in ("pods", "workloads") for p in kube.get(k) or []
-                  if isinstance(p, dict) and p.get("ns")}
+    namespaces = {str(p["ns"]) for p in podnames.inventory({"kube": kube}) if p.get("ns")}
+    workloads = kube.get("workloads")
+    if isinstance(workloads, list):
+        namespaces.update(str(p["ns"]) for p in workloads if isinstance(p, dict) and p.get("ns"))
     for x in bad[:20]:
         codes = x.get("c5") if isinstance(x.get("c5"), dict) else None
         paths = [p for p in (x.get("p5") or []) if isinstance(p, dict)][:8] or None
@@ -2616,7 +2619,8 @@ async def _claim_commands(session, model, server_id: int) -> list:
     """Отметить команды за один запрос, чтобы два опроса не выдали одну и ту же."""
     candidates = (
         select(model.id)
-        .where(model.server_id == server_id, model.status == "pending")
+        .where(model.server_id == server_id, model.status == "pending",
+               ~command_expired(model, datetime.now(timezone.utc)))
         .order_by(model.created_at, model.id)
         .limit(20)
         .with_for_update(skip_locked=True)
@@ -2638,13 +2642,14 @@ async def _transition_running_command(session, command, **values) -> bool:
     ) is not None
 
 
-async def _expire_running_command(session, command, timeout: int = 90) -> bool:
+async def _expire_running_command(session, command, timeout: int = CONTAINER_COMMAND_TIMEOUT) -> bool:
+    now = datetime.now(timezone.utc)
     if command.status != "running" or (
-        datetime.now(timezone.utc) - _aware_dt(command.created_at)
+        now - _aware_dt(command.created_at)
     ).total_seconds() <= timeout:
         return False
     expired = await _transition_running_command(
-        session, command, status="error", ok=False, result="агент не ответил (таймаут)",
+        session, command, status="error", ok=False, result="агент не ответил (таймаут)", done_at=now,
     )
     await session.commit()
     if not expired:
@@ -3241,7 +3246,8 @@ async def _orchestrate_deploy_server(session_factory, job_id: int, params: dict)
         payload = {"port": params["port"]}
         if params["storage_mount"]:
             payload["storage_mount"] = params["storage_mount"]
-        ok, out = await step("move-storage" if move else "deploy-server", params["node_id"], "deploy_server", payload, 720)
+        ok, out = await step("move-storage" if move else "deploy-server", params["node_id"], "deploy_server",
+                             payload, BACKUP_DEPLOY_TIMEOUT)
         if not ok:
             if move:
                 lines = (out or "").splitlines()
@@ -4053,12 +4059,12 @@ async def agent_report(
     mem_pct = (
         round(body.mem_used / body.mem_total * 100, 1) if body.mem_total else None
     )
+    disks = list(disk_inventory(body.disks))
     disks_pct = [
         {"mount": d["mount"], "pct": round(d["used"] / d["total"] * 100, 1)}
         # inode с агента 2.15: по их истории прогноз видит, когда они кончатся
         | ({"ipct": round((d.get("inodes_used") or 0) / d["inodes"] * 100, 1)} if d.get("inodes") else {})
-        for d in body.disks
-        if d.get("total") and d.get("mount")
+        for d in disks
     ]
     disk_pct = max((d["pct"] for d in disks_pct), default=None)
     tot = body.mem_total or 0
@@ -4173,6 +4179,7 @@ async def agent_report(
     await _store_web_errors(session, server, body, now)
     await autoban_mod.store(session, server, body.extras, now)
     report_dict = body.model_dump()
+    report_dict["disks"] = disks
     # An omitted or malformed socket inventory cannot confirm that a listener disappeared.
     if "listen" not in body.model_fields_set or listen_watch.inventory(report_dict, explicit=True) is None:
         report_dict.pop("listen", None)

@@ -15,6 +15,7 @@ type Props = {
 }
 
 const PERIODS = [1, 7, 30, 180]
+const errorMessage = (e: unknown) => e instanceof Error ? e.message : String(e)
 
 // История отправленных алертов (backend api/alert_history.py), раскладка как у карточки сервера.
 // Нужна на два вопроса: приходил ли алерт про эту беду и когда, и что шумит больше всего. На
@@ -28,6 +29,7 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
   // сводка и меню: весь период без отбора
   const [base, setBase] = useState<AlertHistory | null>(null)
   const [baseDays, setBaseDays] = useState<number | null>(null)
+  const [baseError, setBaseError] = useState<{ days: number; signal: AbortSignal; text: string } | null>(null)
   // лента: отбор
   const [only, setOnly] = useState<'all' | 'fires' | 'recoveries'>('all')
   const [kind, setKind] = useState('')
@@ -35,11 +37,10 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
   const [q, setQ] = useState('')
   const [qDebounced, setQDebounced] = useState('')
   // раздел ленты или объекта: его ответ и подгруженные раньше сообщения
-  const [part, setPart] = useState<AlertHistory | null>(null)
-  const [partKey, setPartKey] = useState('')
-  const [events, setEvents] = useState<AlertEventDto[]>([])
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState<string | null>(null)
+  const [part, setPart] = useState<{ key: string; signal: AbortSignal; data: AlertHistory } | null>(null)
+  const [paging, setPaging] = useState<AbortSignal | null>(null)
+  const [partError, setPartError] = useState<{ key: string; signal: AbortSignal; text: string } | null>(null)
+  const activeFeed = useRef<AbortController | null>(null)
   const mainRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -48,20 +49,21 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
   }, [q])
 
   useEffect(() => {
-    let alive = true
-    alertHistory({ days })
+    const request = new AbortController()
+    const { signal } = request
+    alertHistory({ days }, signal)
       .then((d) => {
-        if (!alive) return
+        if (signal.aborted) return
         setBase(d)
         setBaseDays(days)
+        setBaseError(null)
       })
       .catch((e) => {
+        if (signal.aborted) return
         if (e instanceof ApiError && e.status === 401) onUnauthorized()
-        else if (alive) setErr(e instanceof Error ? e.message : String(e))
+        else setBaseError({ days, signal, text: errorMessage(e) })
       })
-    return () => {
-      alive = false
-    }
+    return () => request.abort()
   }, [days, onUnauthorized])
 
   const secTarget = sec.startsWith('t:') ? sec.slice(2) : ''
@@ -75,45 +77,43 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
 
   useEffect(() => {
     if (!key) return
-    let alive = true
-    alertHistory(JSON.parse(key) as AlertHistoryQuery)
+    const request = new AbortController()
+    activeFeed.current = request
+    const { signal } = request
+    alertHistory(JSON.parse(key) as AlertHistoryQuery, signal)
       .then((d) => {
-        if (!alive) return
-        setPart(d)
-        setPartKey(key)
-        setEvents(d.events)
-        setErr(null)
+        if (signal.aborted) return
+        setPart({ key, signal, data: d })
       })
       .catch((e) => {
+        if (signal.aborted) return
         if (e instanceof ApiError && e.status === 401) onUnauthorized()
-        else if (alive) setErr(e instanceof Error ? e.message : String(e))
+        else setPartError({ key, signal, text: errorMessage(e) })
       })
-    return () => {
-      alive = false
-    }
+    return () => request.abort()
   }, [key, onUnauthorized])
 
-  // "Показать раньше" - только к ленте того же отбора: сменили отбор, пока шел запрос (или
-  // лента еще старая), - ответ не подмешиваем
-  const keyRef = useRef(key)
-  useEffect(() => {
-    keyRef.current = key
-  }, [key])
+  // Страница относится к экземпляру запроса, даже когда пользователь вернулся к тому же отбору.
+  const fresh = part?.key === key && !part.signal.aborted ? part.data : null
+  const busy = paging != null && !paging.aborted
   const more = async () => {
-    const last = events[events.length - 1]
-    if (!last || !query || partKey !== key) return
-    const k = key
-    setBusy(true)
+    const last = fresh?.events.at(-1)
+    const signal = activeFeed.current?.signal
+    if (!last || !query || !signal || signal !== part?.signal || busy) return
+    setPaging(signal)
+    setPartError(null)
     try {
-      const d = await alertHistory({ ...query, before_id: last.id })
-      if (keyRef.current !== k) return
-      setEvents((prev) => [...prev, ...d.events])
-      setPart((prev) => (prev ? { ...prev, more: d.more } : d))
+      const d = await alertHistory({ ...query, before_id: last.id }, signal)
+      if (signal.aborted) return
+      setPart((prev) => prev?.signal === signal
+        ? { ...prev, data: { ...prev.data, more: d.more, events: [...prev.data.events, ...d.events] } }
+        : prev)
     } catch (e) {
+      if (signal.aborted) return
       if (e instanceof ApiError && e.status === 401) return onUnauthorized()
-      setErr(e instanceof Error ? e.message : String(e))
+      setPartError({ key, signal, text: errorMessage(e) })
     } finally {
-      setBusy(false)
+      setPaging((prev) => prev === signal ? null : prev)
     }
   }
 
@@ -146,8 +146,9 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
   for (const x of navTargets) side[`t:${x.target}`] = x.n ? String(x.n) : ''
   const cur = SECS.find((x) => x.id === sec) ?? SECS[0]
   const curT = navTargets.find((x) => `t:${x.target}` === cur.id)
-  // ответ именно на текущий отбор: пока идет новый, старый виден приглушенным
-  const fresh = part && partKey === key ? part : null
+  const feedError = partError?.key === key && !partError.signal.aborted ? partError.text : null
+  const summaryError = baseError?.days === days && !baseError.signal.aborted ? baseError.text : null
+  const err = key ? feedError : summaryError
   // карточка объекта: id из сводки, иначе из строк раздела
   const ids = curT && (curT.srv_id != null || curT.chk_id != null) ? curT : fresh?.summary.items[0]
 
@@ -202,7 +203,7 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
       </div>
     )
   }
-  const moreBtn = part?.more && (
+  const moreBtn = fresh?.more && (
     <div className="ans-acts">
       <button className="ghost" disabled={busy} onClick={more}>
         {busy ? '...' : t('Показать раньше')}
@@ -277,7 +278,7 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
           {t('Срабатываний: {f}, отбоев: {r}', { f: fresh.summary.fires, r: fresh.summary.recoveries })}
         </p>
       )}
-      {part && feed(events, true)}
+      {fresh && feed(fresh.events, true)}
       {moreBtn}
     </>
   )
@@ -295,7 +296,7 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
           </>
         )}
         <div className="srv-nav-grp rt-cap">{t('Сообщения')}</div>
-        {feed(events, false)}
+        {feed(fresh.events, false)}
         {moreBtn}
       </>
     )
@@ -325,16 +326,13 @@ export function AlertHistoryModal({ onClose, onUnauthorized, initialTarget, onOp
                 </button>
               )}
             </div>
-            {err && <p className="form-error">{err}</p>}
-            {!base ? (
-              !err && <p className="muted small">{t('загрузка…')}</p>
-            ) : (
-              <div className={`srv-sec${baseDays !== days || (key && partKey !== key) ? ' rp-busy' : ''}`}>
-                {cur.id === 'over' && overview()}
-                {cur.id === 'feed' && feedSec()}
-                {curT && targetSec()}
-              </div>
-            )}
+            {err && <p className="form-error" role="alert">{err}</p>}
+            {!err && (key ? !fresh : !base) && <p className="muted small">{t('загрузка…')}</p>}
+            <div className={`srv-sec${!key && baseDays !== days ? ' rp-busy' : ''}`}>
+              {cur.id === 'over' && overview()}
+              {cur.id === 'feed' && feedSec()}
+              {curT && targetSec()}
+            </div>
           </div>
         </div>
       </div>

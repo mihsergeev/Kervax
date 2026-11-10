@@ -6,8 +6,7 @@ Telegram до них не достучится. Читать апдейты бо
 это в настройках и ждем, а не воюем за апдейты.
 
 Кто вправе жать кнопки: "взял" - всякий в чате, куда ушел алерт. Глушить, "это мы" и "вернуть" -
-только тот, чей Telegram привязан к учетке панели с правом правки (оператор, админ): в групповом
-чате бывают гости, и любой из них навсегда глушил алерты, а "это мы" гасило алерт о смене доступа.
+только тот, чей Telegram привязан к учетке панели с правом правки всех объектов алерта.
 """
 from __future__ import annotations
 
@@ -24,6 +23,7 @@ from sqlalchemy import delete, select
 from app import alerts, audit, fixed, known, listen_watch, maint, settings_store, tg_buttons
 from app import kube_expiry as kube_expiry_mod
 from app.config import Settings, get_settings
+from app.deps import group_allowed, section_allowed
 from app.models import Check, MaintenanceWindow, Server, TgAlert, User
 
 log = logging.getLogger("kervax.tg_bot")
@@ -269,13 +269,32 @@ async def _unmute(session, row: TgAlert, how: dict) -> None:
                 c.alert_mutes = [m for m in (c.alert_mutes or []) if m != row.kind]
 
 
+async def _can_edit_targets(session, row: TgAlert, user: User) -> bool:
+    obj, ids = _ref(row)
+    if obj == "srv":
+        model, path, kind = Server, "/api/servers", "servers"
+    elif obj == "chk":
+        model, path, kind = Check, "/api/checks", "sites"
+    else:
+        return False
+    if not section_allowed(user, path):
+        return False
+    groups = await session.scalars(
+        select(model.group_name).where(model.id.in_(ids)).order_by(model.id).with_for_update()
+    )
+    return all(group_allowed(user, group, kind) for group in groups)
+
+
 async def apply(session, row: TgAlert, op: str, who: str, user: User | None,
                 now: datetime, tz: str) -> tuple[str, str]:
     """Нажатие кнопки: (текст всплывашки, запись для журнала действий; пусто - не писать)."""
-    if op != tg_buttons.OP_ACK and user is None:
-        return "Привяжите Telegram к учетке панели (/link), тогда кнопки заработают", ""
-    if user is not None and user.role == "viewer" and op != tg_buttons.OP_ACK:
-        return "Нужны права оператора", ""
+    if op != tg_buttons.OP_ACK:
+        if user is None:
+            return "Привяжите Telegram к учетке панели (/link), тогда кнопки заработают", ""
+        if user.role == "viewer":
+            return "Нужны права оператора", ""
+        if not await _can_edit_targets(session, row, user):
+            return "Нет доступа к объектам алерта", ""
     undo = dict(row.undo or {})
     if op == tg_buttons.OP_ACK:
         if row.acked_by:
@@ -536,10 +555,14 @@ async def handle_callback(session_factory, cfg: dict, cq: dict, now: datetime) -
     row = None
     if m:
         aid, op = int(m.group(1)), m.group(2)
-        chat = str(((cq.get("message") or {}).get("chat") or {}).get("id") or "")
+        message = cq.get("message") or {}
+        chat = str((message.get("chat") or {}).get("id") or "")
+        mid = message.get("message_id")
         async with session_factory() as session:
             row = await session.get(TgAlert, aid)
-            if row is None or chat not in {str(x.get("chat")) for x in (row.messages or [])}:
+            if row is None or not chat or mid is None or not any(
+                chat == str(copy.get("chat")) and str(mid) == str(copy.get("id")) for copy in row.messages or []
+            ):
                 toast, row = "Алерт устарел", None
             else:
                 who, user = await _who(session, cq.get("from") or {})
@@ -589,10 +612,17 @@ async def status_text(session, user: User | None, now: datetime) -> str:
     """Что сейчас горит: активные алерты серверов (alert_state) и лежащие сайты."""
     servers = (await session.scalars(select(Server).where(Server.enabled.is_(True)))).all()
     checks = (await session.scalars(select(Check).where(Check.enabled.is_(True)))).all()
+    if user is not None:
+        servers = [s for s in servers if alerts.wants(user, alerts.Msg("", "servers", s.group_name or ""))]
+        checks = [c for c in checks if alerts.wants(user, alerts.Msg("", "sites", c.group_name or ""))]
     lines, n_srv = [], 0
     # идущие окна обслуживания: строкой сверху, а их серверы и мониторы помечены 🚧
     tz = (await settings_store.get_alert_config(session, get_settings())).get("tz") or "Europe/Moscow"
     windows = list(await session.scalars(select(MaintenanceWindow)))
+    if user is not None:
+        server_ids, check_ids = {s.id for s in servers}, {c.id for c in checks}
+        windows = [w for w in windows if server_ids.intersection(w.server_ids or [])
+                   or check_ids.intersection(w.check_ids or [])]
     m_srv, m_chk = maint.active(windows, now, tz)
     maint_lines = []
     for w in windows:
@@ -600,8 +630,6 @@ async def status_text(session, user: User | None, now: datetime) -> str:
         if cur is not None:
             maint_lines.append(f"🚧 Обслуживание: {html.escape(w.title)} до {tg_buttons.hhmm(cur[1], tz, now)}")
     for s in sorted(servers, key=lambda x: x.name):
-        if user is not None and not alerts.wants(user, alerts.Msg("", "servers", s.group_name or "")):
-            continue
         st = s.alert_state or {}
         active = [k for k, v in st.items()
                   if k in settings_store.SERVER_ALERT_KINDS and isinstance(v, int) and not isinstance(v, bool) and v > 0]
@@ -618,8 +646,7 @@ async def status_text(session, user: User | None, now: datetime) -> str:
             mark = "🔕 " if (snoozed or k in mutes) else ("📌 " if k in kn else "")
             parts.append(mark + _label(k))
         lines.append(("🚧 " if s.id in m_srv else "") + f"<b>{html.escape(s.name)}</b>: {html.escape(', '.join(parts))}")
-    down = [c for c in checks if c.last_status == "down"
-            and (user is None or alerts.wants(user, alerts.Msg("", "sites", c.group_name or "")))]
+    down = [c for c in checks if c.last_status == "down"]
     if down:
         lines.append("")
         lines.append(f"<b>Сайты лежат: {len(down)}</b>")
@@ -773,13 +800,12 @@ def copies_keyboard(cfg: dict, now: datetime) -> dict:
 
 
 async def _copies_allowed(session, cfg: dict, chat: str, chat_type: str, frm: dict) -> tuple[bool, str, str]:
-    """Пауза копий - только из основного чата. Личный чат - его владельца, в групповом нужен
-    привязанный Telegram с правом правки, как у кнопок "заглушить"."""
+    """Пауза копий - только из основного чата. В групповом нужен привязанный администратор."""
     if not chat or chat != str(cfg.get("telegram_chat") or ""):
         return False, "", "Копии ставятся на паузу из основного чата алертов"
     who, user = await _who(session, frm)
-    if chat_type != "private" and (user is None or user.role == "viewer"):
-        return False, who, "Привяжите Telegram к учетке панели с правом правки (/link)"
+    if chat_type != "private" and (user is None or user.role != "admin"):
+        return False, who, "Нужна привязанная учетка администратора панели (/link)"
     return True, who, ""
 
 

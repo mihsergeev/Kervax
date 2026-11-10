@@ -1113,3 +1113,58 @@ async def test_monitor_transport_pins_address_and_preserves_host_on_redirect(mon
             with pytest.raises(httpx.ConnectError, match=re.escape(net_guard.ADMIN_ONLY_TEXT)):
                 await client.get(url)
         assert len(requests) == 2
+
+
+@pytest.mark.parametrize("mode", ["direct", "location", "tamper"])
+async def test_monitor_credentials_stay_on_original_origin(monkeypatch, mode):
+    from app import net_guard, tamper
+
+    requests = {}
+
+    async def serve(reader, writer):
+        raw = (await reader.readuntil(b"\r\n\r\n")).decode("ascii")
+        first, *headers = raw.strip().split("\r\n")
+        path = httpx.URL(first.split()[1]).path
+        requests[path] = dict(line.lower().split(": ", 1) for line in headers)
+        foreign = f"http://sibling.example.com:{port}"
+        status, body = "200 OK", b""
+        extra = ""
+        if path == "/start":
+            status, extra = "302 Found", "Location: /same\r\n"
+        elif path == "/same" and mode != "tamper":
+            status, extra = "302 Found", f"Location: {foreign}/foreign\r\n"
+        elif path == "/same":
+            extra = "Content-Type: text/html\r\n"
+            body = (f'<script src="/same.js"></script><script src="{foreign}/foreign.js"></script>').encode()
+        writer.write((f"HTTP/1.1 {status}\r\n{extra}Content-Length: {len(body)}\r\n"
+                      "Connection: close\r\n\r\n").encode() + body)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    async def resolve(host, timeout):
+        assert host in ("origin.example.com", "sibling.example.com")
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr(net_guard, "_resolve", resolve)
+    server = await asyncio.start_server(serve, "127.0.0.1", 0)
+    async with server:
+        port = server.sockets[0].getsockname()[1]
+        check = types.SimpleNamespace(
+            target=f"http://origin.example.com:{port}/start", timeout_ms=3000, degraded_ms=2000,
+            method="GET", keyword_up="", keyword_down="", expected_status="200-399",
+            http_headers='{"X-Check-Key": "fixture-key"}', auth_method="basic",
+            auth_user="fixture", auth_pass="fixture-password",
+        )
+        if mode == "tamper":
+            assert "obs" in await tamper.scan(check)
+        else:
+            proxy = f"http://127.0.0.1:{port}" if mode == "location" else None
+            assert (await checks_exec._run_http(check, proxy=proxy)).status == "up"
+
+    for path in ("/start", "/same", "/same.js") if mode == "tamper" else ("/start", "/same"):
+        assert requests[path]["x-check-key"] == "fixture-key"
+        assert requests[path]["authorization"].startswith("basic ")
+    other = requests["/foreign.js" if mode == "tamper" else "/foreign"]
+    assert "x-check-key" not in other
+    assert "authorization" not in other

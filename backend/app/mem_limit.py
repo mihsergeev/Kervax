@@ -78,8 +78,8 @@ def block(rep: dict | None) -> list[dict] | None:
 def _ctrls(rep: dict) -> dict[str, str]:
     """"ns/под" -> ctrl агента ("statefulset/имя") по списку подов кластера"""
     out = {}
-    for p in ((rep or {}).get("kube") or {}).get("pods") or []:
-        if isinstance(p, dict) and p.get("name") and p.get("ctrl"):
+    for p in podnames.inventory(rep):
+        if p.get("name") and p.get("ctrl"):
             out[f"{p.get('ns') or '?'}/{p['name']}"] = str(p["ctrl"])
     return out
 

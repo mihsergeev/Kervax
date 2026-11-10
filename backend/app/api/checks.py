@@ -32,7 +32,6 @@ from app.models import (
     CheckIncident,
     CheckIpSample,
     CheckSample,
-    DomainProbe,
     Location,
     IgnoredDomain,
     LocationResult,
@@ -693,27 +692,34 @@ async def probe_discovered(
         if not _adopt_problem(domain):
             names.append(domain)
     now = datetime.now(timezone.utc)
+    is_admin = user.role == "admin"
+    requester = domain_probe.requester_key(user)
     started = await domain_probe.start(
-        session, names, serving, {s.id: s for s in servers}, user.username, body.force, now
+        session, names, serving, {s.id: s for s in servers}, requester, body.force, now,
+        allow_internal=is_admin,
     )
     await session.commit()
     if started:
         background.add_task(
             domain_probe.run_external, request.app.state.session_factory, started, now,
-            allow_internal=user.role == "admin",
+            allow_internal=is_admin,
         )
-    labels = {s.id: s.name for s in servers}
-    return DomainProbesOut(items=await domain_probe.rows_out(session, names, labels, now))
+    return DomainProbesOut(items=await domain_probe.rows_out(
+        session, names, serving, now, None if is_admin else requester,
+    ))
 
 
 @router.get("/discovered/probes", response_model=DomainProbesOut)
 async def discovered_probes(user: CurrentUser, session: SessionDep) -> DomainProbesOut:
     """Свежие итоги разовых проверок найденных доменов — мастер опрашивает, пока идут."""
     servers = list(await session.scalars(scope_query(user, select(Server), Server)))
-    labels = {s.id: s.name for s in servers}
+    serving = _serving_servers(servers)
     now = datetime.now(timezone.utc)
     return DomainProbesOut(
-        items=await domain_probe.rows_out(session, list(_serving_servers(servers)), labels, now)
+        items=await domain_probe.rows_out(
+            session, list(serving), serving, now,
+            None if user.role == "admin" else domain_probe.requester_key(user),
+        ),
     )
 
 
@@ -793,7 +799,7 @@ async def try_check(body: CheckTryIn, user: CurrentUser, session: SessionDep) ->
     own = await session.get(Check, body.check_id) if body.check_id else None
     if own is not None and (own.type != "http" or not group_allowed(user, own.group_name, "sites")):
         own = None
-    out = await try_probe.inside(session, body, servers, datetime.now(timezone.utc), trusted_check=own)
+    out = await try_probe.inside(session, body, servers, datetime.now(timezone.utc), user=user, trusted_check=own)
     await session.commit()
     return CheckTryOut(inside=out)
 
@@ -801,12 +807,20 @@ async def try_check(body: CheckTryIn, user: CurrentUser, session: SessionDep) ->
 @router.get("/try/{request_id}", response_model=CheckTryOut)
 async def try_check_inside(request_id: int, user: CurrentUser, session: SessionDep) -> CheckTryOut:
     """Ответ агента на пробную проверку изнутри - форма спрашивает, пока ждет."""
+    missing = HTTPException(status.HTTP_404_NOT_FOUND, "Проверка не найдена")
     req = await session.get(ProbeRequest, request_id)
-    srv = await session.get(Server, req.server_id) if req is not None else None
+    if req is None or not try_probe.owns_request(req, user):
+        raise missing
+    cid = (req.spec or {}).get("trusted_check_id")
+    if cid is not None:
+        check = await session.get(Check, cid)
+        if check is None or not group_allowed(user, check.group_name, "sites"):
+            raise missing
+    srv = await session.get(Server, req.server_id)
     allowed = srv is not None and await session.scalar(
         scope_query(user, select(Server.id), Server).where(Server.id == srv.id))
-    if req is None or req.kind != try_probe.KIND or not allowed:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Проверка не найдена")
+    if not allowed:
+        raise missing
     out = try_probe.inside_answer(req, srv, datetime.now(timezone.utc))
     await session.commit()
     return CheckTryOut(inside=out)
@@ -1047,7 +1061,10 @@ async def adopt_domains(
         if local else {}
     )
     now = datetime.now(timezone.utc)
-    hints = await _adopt_hints(session, {_norm_domain(d) for d in body.paths}, now)
+    hints = await _adopt_hints(
+        session, {_norm_domain(d) for d in body.paths}, serving, now,
+        None if user.role == "admin" else domain_probe.requester_key(user),
+    )
     # итог по каждому домену: без него мастер после добавления не может показать,
     # что заведено, как оно будет проверяться и что нет — только общие числа
     items: list[AdoptItemOut] = []
@@ -1136,13 +1153,13 @@ async def adopt_domains(
 
 
 async def _adopt_hints(
-    session, domains: set[str], now: datetime
+    session, domains: set[str], serving: dict[str, tuple[int, str]],
+    now: datetime, requester: str | None,
 ) -> dict[str, tuple[dict | None, dict | None]]:
     """Подобранные мастером типовые пути: {домен: (снаружи, изнутри)}."""
-    if not domains:
-        return {}
-    rows = list(await session.scalars(select(DomainProbe).where(DomainProbe.domain.in_(domains))))
-    inside = await domain_probe.local_hints(session, rows, now)
+    rows = await domain_probe.fresh_rows(session, domains, now, requester)
+    local_rows = [r for r in rows if r.domain in serving and r.local_server_id == serving[r.domain][0]]
+    inside = await domain_probe.local_hints(session, local_rows, now)
     return {r.domain: (r.ext_hint or None, inside.get(r.domain, (None, False))[0] or None)
             for r in rows}
 

@@ -29,7 +29,7 @@ from app import checks as checks_exec
 from app import domain_probe, manual_probe, probe_scope
 from app.collector import _aware, seen_online
 from app.config import get_settings
-from app.models import Check, Location, ProbeRequest, Server
+from app.models import Check, Location, ProbeRequest, Server, User
 
 KIND = "try"
 # так checks._run_dns помечает ответ, который монитор запомнил как правильный
@@ -136,11 +136,21 @@ def serving_web(servers: list[Server], host: str) -> tuple[Server, str] | None:
     return None
 
 
-async def inside(session: AsyncSession, body, servers: list[Server], now: datetime, *,
+def _requester(user: User) -> list:
+    # IDs can be reused by SQLite; deleting a username also retires its token generation.
+    return [user.id, user.username, user.token_version]
+
+
+def owns_request(req: ProbeRequest, user: User) -> bool:
+    return req.kind == KIND and (req.spec or {}).get("requester") == _requester(user)
+
+
+async def inside(session: AsyncSession, body, servers: list[Server], now: datetime, *, user: User,
                  trusted_check: Check | None = None) -> dict:
     """Задание агенту сервера сайта. Ответ форма забирает опросом (poll)."""
     host = probe_scope.target_host(body.target)
     spec = {k: getattr(body, k) for k in manual_probe.SPEC_FIELDS}
+    spec["requester"] = _requester(user)
     if probe_scope.requires_trusted_server(body):
         trusted = probe_scope.trusted_server(trusted_check) if trusted_check is not None else None
         servers = [s for s in servers if s.id == trusted

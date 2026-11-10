@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 
 from app import checks as checks_exec
 from app import domain_probe, net_guard
-from app.models import Check, CheckIncident, DomainProbe, ProbeRequest, Server
+from app.models import Check, CheckIncident, DomainProbe, ProbeRequest, Server, User
 from tests.test_api_access import _user
 
 REPORT = {
@@ -59,6 +59,51 @@ async def _setup(client, auth_headers, monkeypatch, version="2.8"):
 
 def _by_domain(items: list[dict]) -> dict[str, dict]:
     return {i["domain"]: i for i in items}
+
+
+async def test_shared_discovered_domain_does_not_reuse_another_scope(client, auth_headers):
+    editor = await _user(client, auth_headers, "second-editor", server_groups=["second"])
+    domain = "shared.example"
+    report = {"web_services": [{"kind": "caddy", "sites": [domain]}]}
+    now = datetime.now(timezone.utc)
+    async with _factory(client)() as s:
+        first = Server(name="first", group_name="first", token_hash="first-fake", last_report=report)
+        second = Server(name="second", group_name="second", token_hash="second-fake", last_report=report)
+        s.add_all([first, second])
+        await s.flush()
+        path = ProbeRequest(check_id=0, server_id=first.id, url=f"https://{domain}/health",
+                            kind=domain_probe.PATH_KIND, created_at=now, ts=now, code=200)
+        s.add(path)
+        await s.flush()
+        s.add(DomainProbe(domain=domain, started_at=now, by_user="admin", local_server_id=first.id,
+                          local_status="down", local_message="HTTP 404",
+                          local_paths={"/health": path.id}, ext_ts=now, ext_status="down",
+                          ext_hint={"path": "/api", "code": 200, "expect": ""}))
+        await s.commit()
+
+    found = await client.get("/api/checks/discovered/probes", headers=editor)
+    assert found.status_code == 200, found.text
+    assert found.json()["items"] == []
+    adopted = await client.post("/api/checks/adopt", headers=editor, json={
+        "domains": [domain], "paths": [domain], "local": [domain],
+    })
+    assert adopted.status_code == 201, adopted.text
+    item = adopted.json()["items"][0]
+    assert item["local"] and item["server"] == "second" and item["path"] == ""
+
+
+async def test_discovered_probe_rechecks_access_after_demotion(client, auth_headers, monkeypatch):
+    await _setup(client, auth_headers, monkeypatch)
+    result = await client.post("/api/checks/discovered/probe", headers=auth_headers, json={
+        "domains": ["open.example"],
+    })
+    assert result.status_code == 200 and len(result.json()["items"]) == 1
+    async with _factory(client)() as s:
+        admin = await s.scalar(select(User).where(User.username == "admin"))
+        admin.role = "editor"
+        await s.commit()
+    result = await client.get("/api/checks/discovered/probes", headers=auth_headers)
+    assert result.status_code == 200 and result.json()["items"] == []
 
 
 async def test_editor_external_discovery_blocks_private_dns_on_root_and_hint(client, auth_headers, monkeypatch):

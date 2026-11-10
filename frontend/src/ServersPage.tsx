@@ -5414,7 +5414,7 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
   // доступная (подписанная) версия агента для управляемого обновления
   const [avail, setAvail] = useState('')
   // обновление агента: та же строка, что на главной (FleetUpdate.tsx), здесь еще с canary
-  const fleetRun = useFleetRollout(servers ?? [], avail, setServers, onUnauthorized, !isViewer)
+  const fleetRun = useFleetRollout(servers, avail, setServers, onUnauthorized, !isViewer)
   useEffect(() => {
     getAgentRelease()
       .then((r) => setAvail(r.version))

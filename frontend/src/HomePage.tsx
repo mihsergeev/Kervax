@@ -39,7 +39,7 @@ import { ActGroup, QuickMute } from './ActGroup'
 import { grpMuteTip } from './homeGroups'
 import { HomeDomainSuggestions } from './HomeDomainSuggestions'
 import { backupProblems, dockerProblems, type ProbItem } from './sectionIssues'
-import { AgentUpdRow, HelperUpdRow, UpdateAllButton, agentBehind, rolloutHosts as fleetHosts, useFleetRollout, useViaPanels } from './FleetUpdate'
+import { AgentUpdRow, HelperUpdRow, UpdateAllButton, agentBehind, rolloutHosts as fleetHosts, useFleetRollout } from './FleetUpdate'
 
 const ATTENTION_LIMIT = 15
 const QUEUE_LIMIT = 5
@@ -620,7 +620,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const serversSource = useOverviewSource(listServers, onUnauthorized)
   const { data: ov, refresh: refreshSites } = sitesSource
   const { data: servers, refresh: refreshServers, replace: replaceServers } = serversSource
-  const viaPanels = useViaPanels()
   // отметить проблему сервера известной (📌 в "Что сломано")
   const [knownFor, setKnownFor] = useState<{ id: number; kind: string; title: string } | null>(null)
   const [avail, setAvail] = useState('')
@@ -747,7 +746,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const srvList = servers ?? []
   // Fleet actions may finish with a list based on an older render. Read a fresh
   // snapshot through the same path as dashboard polling.
-  const fleetRun = useFleetRollout(srvList, avail, refreshServers, onUnauthorized, !isViewer)
+  const fleetRun = useFleetRollout(servers, avail, refreshServers, onUnauthorized, !isViewer)
   const allActions = actionItems(srvList, relProblem, t).filter((x) => canSee(x.section))
   // отказ самообновления, пока идет раскатка, виден в строке агента по ноде - без повтора
   const fleet = allActions.filter((x) => x.fleet && !(fleetRun.agent && x.key.startsWith('adv-')))
@@ -1293,14 +1292,14 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           )}
           {updN > 0 && (
             <HomeDisclosure title={t('Обновления')} count={updN}>
-              {canUpd && <div className="home-queue-actions"><UpdateAllButton servers={srvList} avail={avail} fleet={fleetRun} via={viaPanels} /></div>}
+              {canUpd && <div className="home-queue-actions"><UpdateAllButton servers={srvList} avail={avail} fleet={fleetRun} /></div>}
               <div className="home-attention-list">
                 {showSrv && (
                   <AgentUpdRow servers={srvList} avail={avail} fleet={fleetRun} canUpd={canUpd}
                     onOpen={() => onOpen('servers')} onOpenNode={(id) => onOpen('servers', id)} />
                 )}
                 {showSrv && (
-                  <HelperUpdRow servers={srvList} fleet={fleetRun} canUpd={canUpd} via={viaPanels}
+                  <HelperUpdRow servers={srvList} fleet={fleetRun} canUpd={canUpd}
                     onOpen={() => onOpen('servers')} />
                 )}
                 {fleet.map(actRow)}

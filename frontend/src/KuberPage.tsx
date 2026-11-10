@@ -29,7 +29,7 @@ import {
 import { useAuth } from './auth'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { FixSteps } from './FixSteps'
-import { helperCmd, hostOf } from './FleetUpdate'
+import { HelperHostWarning, helperCmd, hostOf } from './FleetUpdate'
 import { KUBE_NAME_RE } from './shell'
 import { useI18n } from './i18n'
 import { toastError } from './toast'
@@ -56,9 +56,6 @@ import { LockedLogs, LOGS_LOCKED } from './LogsLocked'
 // кладёт токен в /etc/kervax/kube.json (root:kervax), перезапускает агент.
 const KUBE_ENABLE_CMD = `curl -fsSL ${window.location.origin}/api/agent/kube-setup.sh | sudo bash
 sudo systemctl restart kervax-agent`
-// то же плейбуком из репо ansible: kube-setup помечен "только вручную" и массовым прогоном не
-// ставится, -e kervax_install называет его явно, плейбук ставит и перезапускает агент
-const kubeAnsibleCmd = (s: Server) => `${helperCmd([hostOf(s)])} -e kervax_install=kube-setup`
 
 // Что именно истекает. Путь к файлу сам по себе инженеру ничего не говорит —
 // пока не сказано, чем этот файл держит кластер.
@@ -179,6 +176,8 @@ function KubeLogo() {
 
 function EnableBlock({ server }: { server: Server }) {
   const { t } = useI18n()
+  // kube-setup ставится только вручную или плейбуком с явным kervax_install.
+  const ansible = helperCmd([hostOf(server)])
   return (
     <div className="chart-card net-card net-card-wide">
       <div className="net-head">
@@ -187,11 +186,13 @@ function EnableBlock({ server }: { server: Server }) {
       <div className="net-note">
         {t('Кластер есть, но у агента нет доступа к kube-api')}
       </div>
-      <FixSteps steps={[{ id: 'enable', cmd: KUBE_ENABLE_CMD }, { id: 'ansible', alt: true, cmd: kubeAnsibleCmd(server) }]}
+      <FixSteps steps={[{ id: 'enable', cmd: KUBE_ENABLE_CMD },
+        ...(ansible ? [{ id: 'ansible', alt: true, cmd: `${ansible} -e kervax_install=kube-setup` }] : [])]}
         text={(st) => st.id === 'ansible'
           ? t('через ansible: плейбук поставит kube-setup и перезапустит агент')
           : t('Включить доступ на чтение и точечное управление')}
         foot={t('Скрипт создает ServiceAccount с узким RBAC (не cluster-admin) и кладет токен для агента.')} />
+      {!ansible && <HelperHostWarning />}
     </div>
   )
 }

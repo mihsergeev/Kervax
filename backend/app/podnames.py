@@ -9,6 +9,7 @@ mail-worker-6b8b56c769-f4k8m после выкатки становится mail
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
 # Алфавит сгенерированных суффиксов Kubernetes (без гласных и похожих цифр)
 _A = "bcdfghjklmnpqrstvwxz2456789"
@@ -44,11 +45,23 @@ def pod_key(key: str, ctrl: str = "") -> str:
     return f"pod:{ns}/{workload(name, ctrl)}"
 
 
+def inventory(rep: dict | None) -> Iterator[dict]:
+    kube = (rep or {}).get("kube")
+    pods = kube.get("pods") if isinstance(kube, dict) else None
+    if isinstance(pods, list):
+        yield from (pod for pod in pods if isinstance(pod, dict))
+
+
+def inventory_known(kube: dict) -> bool:
+    pods = kube.get("pods")
+    return isinstance(pods, list) and all(isinstance(pod, dict) for pod in pods)
+
+
 def ctrls(rep: dict | None) -> dict[str, str]:
     """"pod:<ns>/<под>" -> ctrl из отчета агента, у кого он есть."""
     out = {}
-    for p in ((rep or {}).get("kube") or {}).get("pods") or []:
-        if isinstance(p, dict) and p.get("name") and p.get("ctrl"):
+    for p in inventory(rep):
+        if p.get("name") and p.get("ctrl"):
             out[f"pod:{p.get('ns') or '?'}/{p['name']}"] = str(p["ctrl"])
     return out
 

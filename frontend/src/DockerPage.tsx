@@ -28,7 +28,7 @@ import { CountryFlag } from './CountryFlag'
 import { FixSteps, useFixDone } from './FixSteps'
 import { dockRiskText, memLimChip, proxyBuilt, shortList, srvIpHit, srvIssues, srvMuted } from './serverUtils'
 import { fmtRel } from './ServersPage'
-import { helperCmd, hostOf } from './FleetUpdate'
+import { HelperHostWarning, helperCmd, hostOf } from './FleetUpdate'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type OvRow, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { NetTile, TileFilterChip, useTileFilter } from './NetLinks'
 import { HomeTile, tileIssues, usePlural, type TileIssue } from './HomeTiles'
@@ -183,6 +183,7 @@ function SockWarning({ items, server }: { items: Exposed[]; server: Server }) {
   const { t } = useI18n()
   const ready = items.filter((i) => i.fix?.ok)
   const manual = items.filter((i) => !i.fix?.ok)
+  const ansible = helperCmd([hostOf(server)])
   // снипет руками: с настоящим gid сокета и именем сервиса, если helper их прислал
   const snippet = (i: Exposed) => {
     let s = SOCK_FIX[i.kind] ?? ''
@@ -237,8 +238,8 @@ function SockWarning({ items, server }: { items: Exposed[]; server: Server }) {
           </div>
           <FixSteps steps={[
             // без helper'а: плейбук по имени ноды ставит его по условию из самого скрипта
-            ...(i.helper === 'missing' ? [{ id: 'helper', cmd: helperCmd([hostOf(server)]) }] : []),
-            { id: 'rm', alt: i.helper === 'missing' },
+            ...(i.helper === 'missing' && ansible ? [{ id: 'helper', cmd: ansible }] : []),
+            { id: 'rm', alt: i.helper === 'missing' && !!ansible },
             { id: 'add', cmd: SOCK_FIX[i.kind] ? snippet(i) : undefined },
             { id: 'up' },
           ]} text={(st) => st.id === 'helper'
@@ -249,6 +250,7 @@ function SockWarning({ items, server }: { items: Exposed[]; server: Server }) {
               : t('В compose прокси убрать из volumes строку с docker.sock'))
             : st.id === 'add' ? t('Добавить сервису environment и networks, рядом сервис и сеть docker-api, как в примере')
             : t('docker compose up -d в каталоге проекта, в логе docker-api не должно быть blocked')} />
+          {i.helper === 'missing' && !ansible && <HelperHostWarning />}
         </div>
       ))}
       <details className="fix-more">

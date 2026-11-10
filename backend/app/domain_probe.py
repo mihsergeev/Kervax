@@ -22,6 +22,7 @@
 import asyncio
 import re
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app import checks as checks_exec
 from app import manual_probe
 from app.collector import _aware, seen_online
-from app.models import DomainProbe, ProbeRequest, Server
+from app.models import DomainProbe, ProbeRequest, Server, User
 from app.schemas import DomainProbeOut, PathHint
 
 # Сколько живёт итог: повторное открытие мастера показывает его, а не гоняет по сайтам
@@ -73,6 +74,12 @@ def target(domain: str) -> str:
     return f"https://{domain}"
 
 
+def requester_key(user: User) -> str:
+    # A role change or replacement account must not inherit privileged probe results.
+    scope = f"{user.id}:{user.token_version}:{user.role}:{user.username}"
+    return sha256(scope.encode()).hexdigest()
+
+
 def _local_deadline() -> int:
     return manual_probe.deadline_seconds(manual_probe.domain_check(""))
 
@@ -93,6 +100,8 @@ async def start(
     by_user: str,
     force: bool,
     now: datetime,
+    *,
+    allow_internal: bool,
 ) -> list[str]:
     """Запускает проверку доменов, у которых нет свежего итога (force — и со свежим).
 
@@ -109,12 +118,14 @@ async def start(
     }
     started: list[str] = []
     for domain in domains:
+        sid, name = serving[domain]
         row = rows.get(domain)
         if row is not None:
             age = (now - _aware(row.started_at)).total_seconds()
             if _busy(row, now) or age < RECHECK_MIN_SECONDS:
                 continue
-            if not force and age < FRESH_SECONDS:
+            same_scope = row.local_server_id == sid and (allow_internal or row.by_user == by_user)
+            if not force and age < FRESH_SECONDS and same_scope:
                 continue
         else:
             row = DomainProbe(domain=domain)
@@ -125,7 +136,6 @@ async def start(
         row.local_ts, row.local_status, row.local_latency_ms, row.local_message = None, "", None, ""
         row.local_request_id = None
         row.ext_hint, row.local_paths = None, None
-        sid, name = serving[domain]
         row.local_server_id = sid
         srv = servers.get(sid)
         if srv is not None and seen_online(srv, now):
@@ -358,18 +368,29 @@ def out(
     )
 
 
-async def rows_out(
-    session: AsyncSession, domains: list[str], names: dict[int, str], now: datetime
-) -> list[DomainProbeOut]:
-    """Свежие итоги по этим доменам (старше FRESH_SECONDS — как будто проверки не было)."""
+async def fresh_rows(
+    session: AsyncSession, domains: list[str] | set[str], now: datetime, requester: str | None,
+) -> list[DomainProbe]:
     if not domains:
         return []
-    rows = list(await session.scalars(
-        select(DomainProbe).where(
-            DomainProbe.domain.in_(domains),
-            DomainProbe.started_at >= now - timedelta(seconds=FRESH_SECONDS),
-        )
-    ))
+    query = select(DomainProbe).where(
+        DomainProbe.domain.in_(domains),
+        DomainProbe.started_at >= now - timedelta(seconds=FRESH_SECONDS),
+    )
+    # An admin's external probe can reach private addresses.
+    if requester is not None:
+        query = query.where(DomainProbe.by_user == requester)
+    return list(await session.scalars(query))
+
+
+async def rows_out(
+    session: AsyncSession, domains: list[str], serving: dict[str, tuple[int, str]],
+    now: datetime, requester: str | None,
+) -> list[DomainProbeOut]:
+    """Свежие итоги для нод, с которых мастер предлагает добавить эти домены."""
+    rows = [row for row in await fresh_rows(session, domains, now, requester)
+            if row.local_server_id == serving[row.domain][0]]
+    names = dict(serving.values())
     hints = await local_hints(session, rows, now)
     ids = [r.local_request_id for r in rows if r.local_request_id]
     vias = dict((await session.execute(

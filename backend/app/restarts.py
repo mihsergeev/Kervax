@@ -57,8 +57,8 @@ def targets(rep: dict) -> dict[str, int]:
         for c in dk.get("containers") or []:
             if isinstance(c, dict) and c.get("name"):
                 out["docker:" + str(c["name"])] = int(c.get("restarts") or 0)
-    for p in ((rep or {}).get("kube") or {}).get("pods") or []:
-        if isinstance(p, dict) and p.get("owner") in _POD_OWNERS and p.get("name"):
+    for p in podnames.inventory(rep):
+        if p.get("owner") in _POD_OWNERS and p.get("name"):
             out[f"pod:{p.get('ns') or '?'}/{p['name']}"] = int(p.get("restarts") or 0)
     return out
 
@@ -136,7 +136,7 @@ def update(state: dict | None, rep: dict, now: datetime) -> dict:
     pods = _pods(rep)
     new = {k: step(old.get(k), rc, now, _last_of(pods.get(k)), k.startswith("pod:")) for k, rc in targets(rep).items()}
     has_docker = bool(((rep or {}).get("docker") or {}).get("access"))
-    has_pods = "pods" in (((rep or {}).get("kube") or {}))
+    has_pods = podnames.inventory_known((rep or {}).get("kube") or {})
     for k, v in old.items():
         if k not in new and ((k.startswith("docker:") and not has_docker) or (k.startswith("pod:") and not has_pods)):
             new[k] = v
@@ -254,8 +254,8 @@ def _short(s: str, n: int) -> str:
 
 def _pods(rep: dict | None) -> dict[str, dict]:
     out = {}
-    for p in ((rep or {}).get("kube") or {}).get("pods") or []:
-        if isinstance(p, dict) and p.get("name"):
+    for p in podnames.inventory(rep):
+        if p.get("name"):
             out[f"pod:{p.get('ns') or '?'}/{p['name']}"] = p
     return out
 

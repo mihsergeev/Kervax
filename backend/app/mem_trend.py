@@ -58,9 +58,8 @@ def targets(rep: dict) -> dict[str, int]:
                 continue
             if int(c.get("mem") or 0) >= 2**20 and not _cache_db(str(c.get("image") or "")):
                 out["docker:" + str(c["name"])] = int(c["mem"]) >> 20
-    kube = (rep or {}).get("kube") or {}
-    for p in (kube.get("pods") or []) if isinstance(kube, dict) else []:
-        if not isinstance(p, dict) or p.get("owner") not in _POD_OWNERS or not p.get("name") or p.get("image"):
+    for p in podnames.inventory(rep):
+        if p.get("owner") not in _POD_OWNERS or not p.get("name") or p.get("image"):
             continue
         mem = int(p.get("mem") or ((p.get("use") or {}).get("mem") if isinstance(p.get("use"), dict) else 0) or 0)
         if mem >= 2**20:
@@ -111,12 +110,12 @@ def inventory_complete(rep: dict, kind: str) -> bool:
 def members(rep: dict) -> dict[str, dict]:
     """Active identities, independently of whether a memory sample is available."""
     out = {}
-    docker, kube = rep.get("docker") or {}, rep.get("kube") or {}
+    docker = rep.get("docker") or {}
     for c in (docker.get("containers") or []) if isinstance(docker, dict) else []:
         if isinstance(c, dict) and c.get("name") and c.get("state") == "running" and not _cache_db(str(c.get("image") or "")):
             out["docker:" + str(c["name"])] = c
-    for pod in (kube.get("pods") or []) if isinstance(kube, dict) else []:
-        if isinstance(pod, dict) and pod.get("owner") in _POD_OWNERS and pod.get("name") and not pod.get("image") \
+    for pod in podnames.inventory(rep):
+        if pod.get("owner") in _POD_OWNERS and pod.get("name") and not pod.get("image") \
                 and pod.get("phase") in (None, "", "Running"):
             out[f"pod:{pod.get('ns') or '?'}/{pod['name']}"] = pod
     for proc in rep.get("top_mem") or []:

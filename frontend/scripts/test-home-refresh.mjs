@@ -277,8 +277,40 @@ async function servicesScope() {
   console.log('PASS services-only account sees its queue and opens the Services section')
 }
 
+async function rolloutWaitsForServers() {
+  let failed = true, rolloutReads = 0
+  await fixture((route, pathname, fallback) => {
+    if (pathname === '/api/servers') return failed
+      ? route.fulfill({ status: 503, json: { detail: 'Fixture servers unavailable' } })
+      : route.fulfill({ json: [] })
+    if (pathname === '/api/servers/fleet-rollout') {
+      rolloutReads++
+      return route.fulfill({ json: { agent: null, helpers: null } })
+    }
+    return fallback()
+  }, async (page, queue) => {
+    await queue.getByText('Не удалось обновить данные о серверах', { exact: false }).waitFor()
+    await page.clock.runFor(100)
+    assert.equal(rolloutReads, 0, 'Home must wait for the initial server list')
+    await page.locator('.topnav').getByRole('button', { name: 'Серверы', exact: true }).click()
+    await page.getByText('Fixture servers unavailable', { exact: true }).waitFor()
+    await page.clock.runFor(100)
+    assert.equal(rolloutReads, 0, 'Servers must wait for the initial server list')
+    failed = false
+    const rollout = page.waitForResponse((r) => r.url().endsWith('/api/servers/fleet-rollout'))
+    await page.clock.fastForward(12_000)
+    await (await rollout).finished()
+    await page.getByText('Пока нет серверов.', { exact: false }).waitFor()
+    await page.clock.runFor(100)
+    assert.equal(rolloutReads, 1, 'A successful empty list must trigger one request')
+  })
+  console.log('PASS fleet status waits for the first server list and resumes after an outage')
+}
+
 try {
-  const results = await Promise.allSettled([staleRecheck(), missingRecheck(), overviewErrors(), retireRace(), parallelMutes(), servicesScope()])
+  const results = await Promise.allSettled([
+    staleRecheck(), missingRecheck(), overviewErrors(), retireRace(), parallelMutes(), servicesScope(), rolloutWaitsForServers(),
+  ])
   const failures = results.flatMap((result) => result.status === 'rejected' ? [result.reason] : [])
   if (failures.length) throw new AggregateError(failures, 'Home refresh regressions')
 } finally { await browser.close() }

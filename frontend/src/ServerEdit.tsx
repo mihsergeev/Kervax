@@ -2,7 +2,8 @@ import { useState, type ReactNode } from 'react'
 import { type GreView, type RelayView } from './api'
 import { useAuth } from './auth'
 import { CardNav, type SecDef } from './cardLayout'
-import { UpdCmd, helperCmd } from './FleetUpdate'
+import { HelperHostWarning, helperCmd } from './FleetUpdate'
+import { FixCmd } from './FixSteps'
 import { useI18n } from './i18n'
 import { SRV_ALERT_KINDS, WINDOWS_ALERT_KINDS, kindLabel } from './mutes'
 import { useEscape } from './useEscape'
@@ -86,7 +87,6 @@ const HW_ONLY = ['temp', 'disktemp']
 // Как дела у ретранслятора: что сказал helper relay-setup и когда
 function RelayStatus({ relay, host }: { relay: RelayView; host: string }) {
   const { t } = useI18n()
-  const [copied, setCopied] = useState(false)
   const fw = relay.firewall === 'none' ? t('без фаервола: адреса проверяет сам прокси') : relay.firewall
   const line =
     relay.state === 'ok'
@@ -111,18 +111,7 @@ function RelayStatus({ relay, host }: { relay: RelayView; host: string }) {
   return (
     <div className="small form-error">
       📡 {line}
-      <UpdCmd cmd={cmd} />
-      <button
-        type="button"
-        className="ghost small"
-        onClick={() => {
-          try { navigator.clipboard?.writeText(cmd)?.catch(() => {}) } catch { /* команда видна в строке */ }
-          setCopied(true)
-          window.setTimeout(() => setCopied(false), 1500)
-        }}
-      >
-        {copied ? t('Скопировано ✓') : t('Скопировать команду')}
-      </button>
+      {cmd ? <FixCmd cmd={cmd} /> : <HelperHostWarning />}
     </div>
   )
 }
@@ -130,7 +119,6 @@ function RelayStatus({ relay, host }: { relay: RelayView; host: string }) {
 // Как дела у GRE до панели: что сказал helper gre-setup, хост панели и агент
 function GreStatus({ gre, host }: { gre: GreView; host: string }) {
   const { t } = useI18n()
-  const [copied, setCopied] = useState(false)
   const line =
     gre.state === 'ok'
       ? t('Работает: агент ходит в панель через туннель {node} -> {panel}, адрес сервера {peer}', {
@@ -167,18 +155,7 @@ function GreStatus({ gre, host }: { gre: GreView; host: string }) {
   return (
     <div className="small form-error">
       🚇 {line}
-      <UpdCmd cmd={cmd} />
-      <button
-        type="button"
-        className="ghost small"
-        onClick={() => {
-          try { navigator.clipboard?.writeText(cmd)?.catch(() => {}) } catch { /* команда видна в строке */ }
-          setCopied(true)
-          window.setTimeout(() => setCopied(false), 1500)
-        }}
-      >
-        {copied ? t('Скопировано ✓') : t('Скопировать команду')}
-      </button>
+      {cmd ? <FixCmd cmd={cmd} /> : <HelperHostWarning />}
     </div>
   )
 }
