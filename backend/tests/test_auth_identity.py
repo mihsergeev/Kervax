@@ -13,12 +13,16 @@ from app.security import create_access_token
 PW = "fakepass-example"
 
 
-async def _create(client, admin, name="reused-viewer", role="viewer", password=PW):
+async def _create_user(client, admin, name, role, password):
     r = await client.post("/api/users", headers=admin, json={
         "username": name, "password": password, "role": role,
     })
     assert r.status_code == 201, r.text
-    uid = r.json()["id"]
+    return r.json()["id"]
+
+
+async def _create(client, admin, name="reused-viewer", role="viewer", password=PW):
+    uid = await _create_user(client, admin, name, role, password)
     r = await client.post("/api/auth/login", json={"username": name, "password": password})
     assert r.status_code == 200, r.text
     return uid, {"Authorization": f"Bearer {r.json()['access_token']}"}
@@ -230,8 +234,8 @@ async def test_password_change_cannot_take_over_recreated_account(client, auth_h
         if action == "password_fail" and not replaced:
             replaced = True
             assert (await client.delete(f"/api/users/{uid}", headers=auth_headers)).status_code == 204
-            new_id, _ = await _create(client, auth_headers, name=replacement_name, role="admin",
-                                      password="fakepass-owner")
+            # Verify the replacement login after the in-flight password check releases its source.
+            new_id = await _create_user(client, auth_headers, replacement_name, "admin", "fakepass-owner")
             _assert_sqlite_reuses_id(client, new_id, uid)
 
     monkeypatch.setattr(auth, "_guarded", replace_after_check)

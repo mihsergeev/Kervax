@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [1.8.123] - 2026-11-10
 
-- Serialize concurrent login attempts from the same source and accept each two-factor code once.
+- Allow one login attempt at a time from the same source and accept each two-factor code once.
 - Keep bot credentials out of Telegram connection and test errors.
 - Apply monitor network permissions to location previews, proxy redirects, discovered-domain checks, and TCP or TLS port changes.
 - Deliver each Docker, Kubernetes, and backup command to one agent poll. Encrypt temporary backup credentials and clear them after use.
