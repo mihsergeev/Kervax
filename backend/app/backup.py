@@ -203,6 +203,11 @@ async def import_data(session: AsyncSession, data: dict, settings: Settings) -> 
         raise ValueError("Это не файл бэкапа Kervax")
     # только таблицы из файла: в бэкапе старой версии нет связей, окон и сейфа - их не трогаем
     present = [(n, m) for n, m in _MODELS if isinstance(tables.get(n), list)]
+    postgres = session.get_bind().dialect.name == "postgresql"
+    if postgres and present:
+        # Записи в эти таблицы ждут завершения восстановления и обновления sequence.
+        names = ", ".join(model.__tablename__ for _, model in reversed(present))
+        await session.execute(text(f"LOCK TABLE {names} IN SHARE ROW EXCLUSIVE MODE"))
 
     # чистим существующие (в обратном порядке) и вставляем заново
     for _name, model in reversed(present):
@@ -222,18 +227,18 @@ async def import_data(session: AsyncSession, data: dict, settings: Settings) -> 
                 session.add(model(**_deserialize(row, model)))
         counts[name] = len(rows)
 
-    # Postgres: после вставки явных id надо подвинуть sequence, иначе следующая
-    # авто-вставка словит конфликт по primary key.
-    if settings.db_url.startswith("postgresql"):
+    if postgres:
+        # Сначала вставляем явные id. RESTART откатывается вместе с импортом.
+        await session.flush()
         for _name, model in present:
-            if any(c.name == "id" for c in _cols(model)):
-                tbl = model.__tablename__
-                await session.execute(
-                    text(
-                        f"SELECT setval(pg_get_serial_sequence('{tbl}', 'id'), "
-                        f"COALESCE((SELECT MAX(id) FROM {tbl}), 1))"
-                    )
-                )
+            if "id" not in model.__table__.columns:
+                continue
+            sequence, last_id = (await session.execute(select(
+                func.pg_get_serial_sequence(model.__tablename__, "id"), func.max(model.id),
+            ))).one()
+            if sequence:
+                next_id = max(1, (last_id or 0) + 1)
+                await session.execute(text(f"ALTER SEQUENCE {sequence} RESTART WITH {next_id}"))
     await session.commit()
     return counts
 

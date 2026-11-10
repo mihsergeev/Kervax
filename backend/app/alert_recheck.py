@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from sqlalchemy import delete, func, select, update
 
-from app import fixed, home_mute, tamper
+from app import fixed, home_mute, probe_scope, tamper
 from app.collector import _ALERT_SECTION, _aware, seen_online
 from app.models import AlertRecheck, Check, Server, User
 
@@ -61,7 +61,8 @@ def section(object_type: str, kind: str) -> str:
 
 
 def identity(obj) -> str:
-    fields = ("target", "type", "enabled", "probe_local", "probe_server_id", "method", "http_headers",
+    fields = ("target", "type", "enabled", "probe_local", "probe_server_id", "parent_mode", "parent_server_id",
+              "method", "http_headers",
               "auth_method", "auth_user", "auth_pass", "ignore_tls", "created_at",
               "expected_status", "keyword_up", "keyword_down", "ssl_warn_days", "domain_warn_days",
               "port", "timeout_ms", "degraded_ms", "retries", "check_all_ips", "extra_paths",
@@ -143,7 +144,7 @@ def unavailable(obj, kind: str, spec: dict, now: datetime) -> str:
     if not obj.enabled:
         return "Не удалось проверить: мониторинг объекта выключен"
     if isinstance(obj, Check):
-        if obj.probe_local:
+        if probe_scope.uses_agent(obj):
             return "" if kind == "status" else "Не удалось проверить: для этой проверки изнутри сервера пока нет свежего разбора"
         if obj.type == "push":
             return "Не удалось проверить: push-монитор ждет новый сигнал от источника"
@@ -342,6 +343,7 @@ async def panel_work(factory, job_id: str) -> None:
                         raise ValueError("нет свежего срока")
                 else:
                     outcome = await asyncio.wait_for(checks_exec.run_check(obj), PANEL_TIMEOUT)
+                    probe_scope.explain_panel_fallback(obj, outcome)
             except Exception:
                 await session.rollback()
                 job = await session.get(AlertRecheck, job_id)

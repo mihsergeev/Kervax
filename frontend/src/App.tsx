@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, IMP_ADMIN_KEY, getPanelErrorCount, getToken, impersonating, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
+import { ApiError, getPanelErrorCount, getToken, impersonating, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
+import { isCurrentSession, TOKEN_KEY } from './sessionToken'
 import { AuthProvider } from './auth'
 import { useI18n, type Lang } from './i18n'
 import { useUrlSection } from './deeplink'
@@ -30,7 +31,7 @@ import { ErrorBoundary } from './ErrorBoundary'
 import { ImpersonationBar } from './ImpersonationBar'
 import { ProblemModal } from './ProblemModal'
 import { PanelErrorsModal } from './PanelErrorsModal'
-import { setUiSection } from './errorLog'
+import { clearClientLog, setUiSection } from './errorLog'
 import { Toasts } from './toast'
 
 type Modal =
@@ -80,6 +81,7 @@ export default function App() {
   const [sections, setSections] = useState<string[]>([])
   const [logsOpen, setLogsOpen] = useState(false) // галка "может читать логи" учетки только для просмотра
   const [username, setUsername] = useState('')
+  const [userId, setUserId] = useState<number | null>(null)
   // админ вошел под этой учеткой: кто, до какого времени и что ей видно (плашка сверху)
   const [imp, setImp] = useState<{ by: string; expires: string; serverGroups: string[]; siteGroups: string[] } | null>(null)
   // диплинк из алерта/главной: ?check=<id> → «Сайты» и деталь монитора,
@@ -263,20 +265,25 @@ export default function App() {
   // сразу несколько запросов: второй вызов не должен принять админа за вышедшего и стереть его токен
   const leaving = useRef(false)
   const returnToSelf = useCallback(() => {
-    if (leaving.current) return
+    if (leaving.current || !isCurrentSession(getToken())) return
     leaving.current = true
+    setAuthed(null)
+    setModal(null)
     stopImpersonation().finally(() => window.location.assign(window.location.pathname))
   }, [])
 
   const loadMe = useCallback(() => {
+    const token = getToken()
     me()
       .then((u) => {
+        if (!isCurrentSession(token) || leaving.current) return
         setRole(u.role)
         // под чужой учеткой бэкенд режет любые изменения - кнопки правки не рисуем, как у viewer
         setReadOnly(u.role === 'viewer', !!u.can_read_logs, u.impersonator ? u.username : '')
         setLogsOpen(!!u.can_read_logs)
         setSections(u.sections ?? [])
         setUsername(u.username)
+        setUserId(u.id)
         setImp(
           u.impersonator && u.imp_expires
             ? { by: u.impersonator, expires: u.imp_expires, serverGroups: u.server_groups ?? [], siteGroups: u.site_groups ?? [] }
@@ -285,21 +292,29 @@ export default function App() {
         setAuthed(true)
       })
       .catch((err) => {
+        if (!isCurrentSession(token) || leaving.current) return
         // вход под чужой учеткой истек или закрыт в другой вкладке - обратно к себе
-        if (err instanceof ApiError && err.status === 401 && (impersonating() || leaving.current)) return returnToSelf()
+        if (err instanceof ApiError && err.status === 401 && impersonating()) return returnToSelf()
         if (err instanceof ApiError && err.status === 401) setToken(null)
         setAuthed(false)
       })
   }, [returnToSelf])
 
-  // токен общий для всех вкладок: вошли под чужой учеткой или вернулись к себе в одной - другие
-  // перезагружаются, иначе показывали бы админа, а спрашивали бы с правами пользователя
+  // При выходе, входе или просмотре глазами другой учетки сбрасываем старый экран во всех вкладках.
   useEffect(() => {
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === IMP_ADMIN_KEY) window.location.assign(window.location.pathname)
+    const reloadIfChanged = () => {
+      if (!isCurrentSession(getToken())) window.location.reload()
     }
+    const onStorage = (e: StorageEvent) => {
+      if (e.storageArea === localStorage && (e.key === TOKEN_KEY || e.key === null)) reloadIfChanged()
+    }
+    reloadIfChanged()
     window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
+    window.addEventListener('pageshow', reloadIfChanged)
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener('pageshow', reloadIfChanged)
+    }
   }, [])
 
   // по истечении срока входа под чужой учеткой - сразу к себе, не дожидаясь отказа сервера
@@ -316,15 +331,19 @@ export default function App() {
   }, [loadMe])
 
   const logout = useCallback(() => {
+    if (!isCurrentSession(getToken())) return
     // выход под чужой учеткой (и ее протухший токен) закрывает только этот вход
     if (impersonating() || leaving.current) return returnToSelf()
     setToken(null)
+    clearClientLog()
     setAuthed(false)
     setMenuOpen(false)
     setModal(null)
   }, [returnToSelf])
 
   const logoutFromMenu = useCallback(async () => {
+    const token = getToken()
+    if (!isCurrentSession(token)) return
     if (impersonating() || leaving.current) return returnToSelf()
     try {
       // Сначала отзываем JWT на панели, пока он еще доступен запросу.
@@ -332,7 +351,7 @@ export default function App() {
     } catch {
       // При потере связи все равно закрываем локальный вход.
     }
-    logout()
+    if (isCurrentSession(token)) logout()
   }, [logout, returnToSelf])
 
   const toggleTheme = () => {
@@ -771,6 +790,7 @@ export default function App() {
       )}
       {modal === 'search' && (
         <SearchModal
+          historyOwner={imp || userId === null ? null : JSON.stringify([userId, username])}
           onClose={() => setModal(null)}
           onUnauthorized={logout}
           onOpen={(sec, id, detail) => {

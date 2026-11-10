@@ -3,7 +3,9 @@
 // боевым данным, и ошибка здесь стоит дороже любой другой в панели.
 
 import { tr } from './i18n'
+import { oneLine } from './shell'
 import { byteUnits } from './units'
+import { BACKUP_SERVER_ROOT, backupStorageGuard, safeBackupDataDir } from './backupStorageCommand'
 
 export type CleanupRepo = {
   name: string
@@ -33,17 +35,17 @@ function ago(ts?: number): string {
   return d > 0 ? tr('{n} д назад', { n: d }) : tr('сегодня')
 }
 
-/** Скрипт удаления. `root` — корень rest-server, `server` — имя ноды (только в шапку). */
-export function bulkCleanupScript(repos: CleanupRepo[], root: string, server: string): string {
+/** Скрипт удаления. `dataDir` — данные rest-server, `server` — имя ноды (только в шапку). */
+export function bulkCleanupScript(repos: CleanupRepo[], dataDir: string, server: string): string {
   const ok = repos.filter((r) => safeRepoName(r.name))
-  if (ok.length === 0) return ''
+  if (ok.length === 0 || !safeBackupDataDir(dataDir)) return ''
   const total = ok.reduce((a, r) => a + (r.size_bytes || 0), 0)
   const pad = Math.max(...ok.map((r) => r.name.length))
   const list = ok
     .map((r) => `#   ${r.name.padEnd(pad)}  ${String(r.snapshots).padStart(3)} ${tr('снап.')}  ${human(r.size_bytes || 0).padStart(8)}  ${ago(r.last_activity)}`)
     .join('\n')
   return `#!/usr/bin/env bash
-# ${tr('Kervax: зачистка репозиториев на {server}.', { server })}
+# ${tr('Kervax: зачистка репозиториев на {server}.', { server: oneLine(server) })}
 #
 # ${tr('БУДЕТ УДАЛЕНО БЕЗВОЗВРАТНО: {n} шт., {size}.', { n: ok.length, size: human(total) })}
 ${list}
@@ -51,7 +53,7 @@ ${list}
 # ${tr('Других копий этих данных у панели нет. Сверьте список ВЫШЕ перед запуском.')}
 # ${tr('Выполнять от root на бэкап-сервере.')}
 set -eu
-B=${root}
+B=${BACKUP_SERVER_ROOT}
 REPOS="${ok.map((r) => r.name).join(' ')}"
 N=${ok.length}
 
@@ -60,10 +62,11 @@ printf '${tr('Удалить %s репозиториев БЕЗВОЗВРАТН�
 read -r ANSWER
 [ "$ANSWER" = "$N" ] || { echo "${tr('отменено')}"; exit 1; }
 
+${backupStorageGuard(dataDir).join('\n')}
 for R in $REPOS; do
-  rm -rf "$B/data/$R"
+  rm -rf -- "$DATA/$R"
   # ${tr('htpasswd/prune могут отсутствовать (репу заводили руками) — это не ошибка')}
-  htpasswd -D "$B/data/.htpasswd" "$R" 2>/dev/null || true
+  htpasswd -D "$DATA/.htpasswd" "$R" 2>/dev/null || true
   rm -f "$B/system/scripts/restic-prune-$R.sh" "$B/system/envs/$R.env"
   rm -f "/etc/cron.d/kervax-prune-$R"
   echo "${tr('удалён')}: $R"

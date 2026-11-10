@@ -21,16 +21,15 @@
 import asyncio
 from datetime import datetime
 from types import SimpleNamespace
-from urllib.parse import urlparse
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import checks as checks_exec
-from app import domain_probe, manual_probe
+from app import domain_probe, manual_probe, probe_scope
 from app.collector import _aware, seen_online
 from app.config import get_settings
-from app.models import Location, ProbeRequest, Server
+from app.models import Check, Location, ProbeRequest, Server
 
 KIND = "try"
 # так checks._run_dns помечает ответ, который монитор запомнил как правильный
@@ -124,13 +123,6 @@ async def locations(session: AsyncSession, chk) -> list[dict]:
     return list(await asyncio.gather(*(one(loc) for loc in locs)))
 
 
-def host_of(target: str) -> str:
-    t = (target or "").strip().lower()
-    if "://" not in t:
-        t = "http://" + t
-    return (urlparse(t).hostname or "").strip(".")
-
-
 def serving_web(servers: list[Server], host: str) -> tuple[Server, str] | None:
     """Сервер, чей веб-сервер держит домен, и что это за веб-сервер (для подписи "домен
     есть в nginx"). Несколько нод - первая по имени, как у привязки локального монитора."""
@@ -144,9 +136,18 @@ def serving_web(servers: list[Server], host: str) -> tuple[Server, str] | None:
     return None
 
 
-async def inside(session: AsyncSession, body, servers: list[Server], now: datetime) -> dict:
+async def inside(session: AsyncSession, body, servers: list[Server], now: datetime, *,
+                 trusted_check: Check | None = None) -> dict:
     """Задание агенту сервера сайта. Ответ форма забирает опросом (poll)."""
-    host = host_of(body.target)
+    host = probe_scope.target_host(body.target)
+    spec = {k: getattr(body, k) for k in manual_probe.SPEC_FIELDS}
+    if probe_scope.requires_trusted_server(body):
+        trusted = probe_scope.trusted_server(trusted_check) if trusted_check is not None else None
+        servers = [s for s in servers if s.id == trusted]
+        if trusted_check is None or not servers or probe_scope.target_host(trusted_check.target) != host:
+            return {"status": "none", "kind": "no_trusted_server",
+                    "message": "Для проверки с учетными данными изнутри укажите сервер в зависимостях монитора"}
+        spec["trusted_check_id"] = trusted_check.id
     hit = serving_web(servers, host) if host else None
     if hit is None:
         return {"status": "none", "kind": "no_server"}
@@ -156,7 +157,7 @@ async def inside(session: AsyncSession, body, servers: list[Server], now: dateti
         return {**base, "status": "none", "kind": "offline"}
     req = ProbeRequest(
         check_id=0, server_id=srv.id, url=body.target.strip(), kind=KIND, created_at=now,
-        spec={k: getattr(body, k) for k in manual_probe.SPEC_FIELDS},
+        spec=spec,
     )
     session.add(req)
     srv.probe_pending_at = now
@@ -167,7 +168,7 @@ async def inside(session: AsyncSession, body, servers: list[Server], now: dateti
 
 def inside_answer(req: ProbeRequest, srv: Server | None, now: datetime) -> dict:
     """Итог задания: ждем, готово или агент не ответил вовремя."""
-    hit = serving_web([srv], host_of(req.url)) if srv is not None else None
+    hit = serving_web([srv], probe_scope.target_host(req.url)) if srv is not None else None
     base = {"server_id": req.server_id, "server_name": srv.name if srv else "",
             "web": hit[1] if hit else "", "request_id": req.id,
             "fast": manual_probe.fast_agent(srv)}

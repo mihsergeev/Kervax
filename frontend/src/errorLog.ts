@@ -6,7 +6,8 @@
 // за BURST_MS с вкладки (зациклившийся эффект не должен засыпать журнал). Бэкенд ограничивает
 // еще раз со своей стороны.
 
-const TOKEN_KEY = 'kervax_token' // тот же ключ, что в api.ts (импорт оттуда дал бы цикл)
+import { getToken, isCurrentSession } from './sessionToken'
+
 const SAME_MS = 60_000
 const BURST_MS = 5 * 60_000
 const MAX_BURST = 10
@@ -47,6 +48,10 @@ export function noteApiFailure(method: string, path: string, status: number, det
 export function recentClientLog(): ClientLogItem[] {
   const edge = Date.now() - RECENT_MS
   return log.filter((x) => Date.parse(x.ts) >= edge)
+}
+
+export function clearClientLog(): void {
+  log.length = 0
 }
 
 // --- вкладка со старой сборкой ---------------------------------------------------------------
@@ -110,14 +115,8 @@ let burst: number[] = []
 const IGNORED = [/^ResizeObserver loop/, /^Script error\.?$/]
 
 export function reportFront(kind: 'error' | 'rejection' | 'render', message: string, stack = '', component = ''): boolean {
-  const token = (() => {
-    try {
-      return localStorage.getItem(TOKEN_KEY)
-    } catch {
-      return null
-    }
-  })()
-  if (!token) return false
+  const token = getToken()
+  if (!token || !isCurrentSession(token)) return false
   const msg = (message || '').slice(0, 2000)
   if (IGNORED.some((r) => r.test(msg))) return false
   const now = Date.now()
@@ -140,7 +139,7 @@ export function reportFront(kind: 'error' | 'rejection' | 'render', message: str
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...uiHeaders() }
   // вкладка со старой сборкой: ошибка не про текущую версию (см. staleBuild)
   void staleBuild().then((fresh) => {
-    if (fresh) return
+    if (fresh || !isCurrentSession(token)) return
     return fetch('/api/panel-errors/front', { method: 'POST', headers, body, keepalive: true })
   }).catch(() => undefined)
   return true

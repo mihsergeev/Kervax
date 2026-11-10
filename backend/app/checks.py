@@ -21,6 +21,7 @@ import httpx
 
 from app import net_guard
 from app.config import get_settings
+from app.secret_masks import mask_probe_urls
 
 # верхняя граница читаемого тела при поиске ключевого слова (защита от гигантских ответов)
 _MAX_BODY = 2_000_000
@@ -731,7 +732,8 @@ def via_text(via: str) -> str:
 def _outcome_local(check, probe, degraded_ms: int, own: str) -> CheckOutcome:
     """Вердикт по ответу через localhost или через свой адрес сервера own."""
     if probe.error:
-        low = probe.error.lower()
+        error = mask_probe_urls(probe.error)
+        low = error.lower()
         # У несостоявшегося запроса задержки нет. Агент присылает 0, и в журнале
         # стояло «0 мс сервер оборвал соединение», а в графике времени ответа этот
         # ноль тянул среднее вниз — сбой выглядел как самый быстрый ответ за день.
@@ -741,8 +743,8 @@ def _outcome_local(check, probe, degraded_ms: int, own: str) -> CheckOutcome:
         # изнутри читается как «подпись неизвестного центра». Почти всегда это
         # значит, что сайт живёт по HTTP, а в мониторе записан https.
         if "unknown authority" in low or "x509" in low:
-            why, _ = x509_reason(probe.error)
-            return CheckOutcome("down", lat, message=f"{why} ({probe.error[:200]})")
+            why, _ = x509_reason(error)
+            return CheckOutcome("down", lat, message=f"{why} ({error[:200]})")
         if "connection refused" in low:
             # «Отказано в соединении» — это НЕ белый список: тот рвёт уже принятое
             # соединение, а здесь на localhost этот порт вообще никто не слушает.
@@ -756,7 +758,7 @@ def _outcome_local(check, probe, degraded_ms: int, own: str) -> CheckOutcome:
                 message=f"изнутри сервера порт {_target_port(check)} закрыт — веб-сервер "
                         "не слушает localhost (так бывает у Kubernetes), локальная "
                         "проверка здесь не сработает, проверяйте из панели "
-                        f"({probe.error[:200]})",
+                        f"({error[:200]})",
             )
         if "eof" in low or "reset by peer" in low:
             # Обрыв уже принятого соединения на локальной проверке почти всегда
@@ -772,7 +774,7 @@ def _outcome_local(check, probe, degraded_ms: int, own: str) -> CheckOutcome:
                 return CheckOutcome(
                     "down", lat,
                     message=f"сервер оборвал запрос изнутри: похоже, белый список сайта - "
-                            f"добавьте в него адрес сервера {own} ({probe.error[:200]})",
+                            f"добавьте в него адрес сервера {own} ({error[:200]})",
                 )
             return CheckOutcome(
                 "down", lat,
@@ -781,11 +783,11 @@ def _outcome_local(check, probe, degraded_ms: int, own: str) -> CheckOutcome:
                         "::1/128 и адрес шлюза docker-сети прокси (docker network "
                         "inspect caddy -f '{{(index .IPAM.Config 0).Gateway}}'), "
                         "подсеть целиком добавлять не надо "
-                        f"({probe.error[:200]})",
+                        f"({error[:200]})",
             )
         # Остальное прогоняем через тот же словарь подсказок, что и свои ошибки:
         # «connection refused» инженеру понятно, дежурному — нет, а читают одни люди.
-        return CheckOutcome("down", lat, message=humanize_error(probe.error))
+        return CheckOutcome("down", lat, message=humanize_error(error))
     return eval_parts(check, probe.code, probe.kw_up_found, probe.kw_down_found,
                       probe.latency_ms or 0, degraded_ms)
 
@@ -798,7 +800,7 @@ def _outcome_via_proxy(check, probe, degraded_ms: int, via: str) -> CheckOutcome
     значит "приложение отвечает". Прокси проверен TLS-рукопожатием, с него и сертификат."""
     where = via_text(via)
     if probe.error:
-        err = probe.error
+        err = mask_probe_urls(probe.error)
         if err.startswith("front "):
             # приложение отвечает, а прокси не принимает соединения - посетители сайт не видят
             addr = err[len("front "):].split(": ", 1)[0]
@@ -821,7 +823,7 @@ def _outcome_via_cluster(check, probe, degraded_ms: int, svc: str) -> CheckOutco
     через шлюз». Сам шлюз всё же проверен: сертификат снят TLS-рукопожатием с него."""
     where = f"сервис {svc} в обход шлюза"
     if probe.error:
-        err = probe.error
+        err = mask_probe_urls(probe.error)
         if err.startswith("gateway "):
             # приложение отвечает, а шлюз не принимает соединения — посетители сайт не видят
             addr = err[len("gateway "):].split(": ", 1)[0]

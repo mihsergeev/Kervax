@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, search, type SearchItem, type SearchResult } from './api'
 import { useI18n } from './i18n'
+import { useEscape } from './useEscape'
 import type { Section } from './App'
 
 // Поиск по всему парку (backend app/search.py): Ctrl+K или кнопка в шапке. Стрелки выбирают,
@@ -10,35 +11,39 @@ type Props = {
   onClose: () => void
   onUnauthorized: () => void
   onOpen: (section: Section, id: number, sec?: string) => void
+  historyOwner: string | null
 }
 
-const RECENT_KEY = 'kervax_search_recent'
+const recentKey = (owner: string) => `kervax_search_recent:${owner}`
 
-function loadRecent(): string[] {
+function loadRecent(owner: string | null): string[] {
+  if (owner === null) return []
   try {
-    const v = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]')
+    const v = JSON.parse(localStorage.getItem(recentKey(owner)) || '[]')
     return Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, 6) : []
   } catch {
     return []
   }
 }
 
-function saveRecent(q: string) {
+function saveRecent(owner: string | null, q: string) {
+  if (owner === null) return
   try {
-    const next = [q, ...loadRecent().filter((x) => x !== q)].slice(0, 6)
-    localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+    const next = [q, ...loadRecent(owner).filter((x) => x !== q)].slice(0, 6)
+    localStorage.setItem(recentKey(owner), JSON.stringify(next))
   } catch {
     // приватное окно или запрет хранилища: просто без истории
   }
 }
 
-export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
+export function SearchModal({ onClose, onUnauthorized, onOpen, historyOwner }: Props) {
   const { t } = useI18n()
+  useEscape(onClose)
   const [q, setQ] = useState('')
   const [res, setRes] = useState<SearchResult | null>(null)
-  const [err, setErr] = useState('')
+  const [failure, setFailure] = useState<{ query: string; text: string } | null>(null)
   const [cur, setCur] = useState(0)
-  const [recent] = useState(loadRecent)
+  const [recent] = useState(() => loadRecent(historyOwner))
   const listRef = useRef<HTMLDivElement>(null)
   const query = q.trim()
   const long = query.length >= 2
@@ -51,12 +56,13 @@ export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
         .then((r) => {
           if (!alive) return
           setRes(r)
-          setErr('')
+          setFailure(null)
           setCur(0)
         })
         .catch((e) => {
+          if (!alive) return
           if (e instanceof ApiError && e.status === 401) return onUnauthorized()
-          if (alive) setErr(String((e as Error).message || e))
+          setFailure({ query, text: e instanceof Error ? e.message : String(e) })
         })
     }, 180)
     return () => {
@@ -67,6 +73,7 @@ export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
 
   // ответ на прошлый запрос не показываем: пока печатают, список не прыгает чужими строками
   const shown = long && res && res.q === query ? res : null
+  const err = long && failure?.query === query ? failure.text : ''
   const busy = long && !shown && !err
   const flat = useMemo(() => (shown ? shown.groups.flatMap((g) => g.items.map((it) => ({ g: g.kind, it }))) : []), [shown])
 
@@ -75,7 +82,7 @@ export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
   }, [cur])
 
   const open = (it: SearchItem) => {
-    saveRecent(query)
+    saveRecent(historyOwner, query)
     // пакет: карточка пакетов (PackagesCard) откроется уже с ним в фильтре
     if (it.sec === 'pkgs') {
       try {
@@ -88,10 +95,7 @@ export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
   }
 
   const onKey = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      e.preventDefault() // окно под поиском (карточка сервера) по этому Esc не закрывается
-      onClose()
-    } else if (e.key === 'ArrowDown') {
+    if (e.key === 'ArrowDown') {
       e.preventDefault()
       setCur((c) => Math.min(c + 1, Math.max(flat.length - 1, 0)))
     } else if (e.key === 'ArrowUp') {
@@ -168,7 +172,8 @@ export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
   let idx = -1
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="card modal search-modal" onClick={(e) => e.stopPropagation()}>
+      <div className="card modal search-modal" role="dialog" aria-label={t('Поиск')}
+        onClick={(e) => e.stopPropagation()}>
         <input
           className="search-input"
           autoFocus
@@ -179,7 +184,7 @@ export function SearchModal({ onClose, onUnauthorized, onOpen }: Props) {
           aria-label={t('Поиск')}
         />
         <div className="search-results" ref={listRef}>
-          {err && <p className="form-error search-empty">{err}</p>}
+          {err && <p role="alert" className="form-error search-empty">{err}</p>}
           {!long && (
             <div className="search-empty">
               {recent.length > 0 && (

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import case, delete as sa_delete, func, select, true
 
-from app import allowlist_hint, audit, domain_probe, expiry_snooze, known, manual_probe, net_guard, try_probe
+from app import allowlist_hint, audit, domain_probe, expiry_snooze, known, manual_probe, net_guard, probe_scope, try_probe
 from app import parents as parents_mod
 from app.checks import status_matches
 from app import checks as checks_exec
@@ -117,6 +117,7 @@ async def _execute_and_store(session: SessionDep, check: Check):
     """Исполняет монитор из панели сейчас и записывает результат той же дорожкой,
     что и планировщик: снимок, статус, инцидент. Возвращает (исход, момент, алерты)."""
     outcome = await checks_exec.run_check(check)
+    probe_scope.explain_panel_fallback(check, outcome)
     now = datetime.now(timezone.utc)
     pending: list = []
     await record_outcome(session, check, outcome, now, pending, manual=True)
@@ -536,7 +537,7 @@ async def _first_check(session_factory, check_id: int) -> None:
     try:
         async with session_factory() as session:
             check = await session.get(Check, check_id)
-            if check is not None and not check.probe_local:
+            if check is not None and not probe_scope.uses_agent(check):
                 await _execute_and_store(session, check)
     except Exception:  # noqa: BLE001 — не критично
         pass
@@ -765,7 +766,10 @@ async def try_check(body: CheckTryIn, user: CurrentUser, session: SessionDep) ->
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "Проверку изнутри сервера на порт, кроме 80 и 443, задает только администратор")
     servers = list(await session.scalars(scope_query(user, select(Server), Server)))
-    out = await try_probe.inside(session, body, servers, datetime.now(timezone.utc))
+    own = await session.get(Check, body.check_id) if body.check_id else None
+    if own is not None and (own.type != "http" or not group_allowed(user, own.group_name, "sites")):
+        own = None
+    out = await try_probe.inside(session, body, servers, datetime.now(timezone.utc), trusted_check=own)
     await session.commit()
     return CheckTryOut(inside=out)
 
@@ -813,6 +817,14 @@ def _serving_servers(servers) -> dict[str, tuple[int, str]]:
     return found
 
 
+def _serving_for_check(check, serving, servers_by_id) -> tuple[int, str] | None:
+    host = _host_of(check)
+    if not probe_scope.requires_trusted_server(check):
+        return serving.get(host)
+    server = servers_by_id.get(probe_scope.trusted_server(check))
+    return _serving_servers([server]).get(host) if server is not None and server.enabled else None
+
+
 async def _outside_uptime(session, check_id: int, now: datetime, days: int) -> float | None:
     """Доля проверок снаружи без "down" за days дней, %; None - проверок не было."""
     total, ok = (await session.execute(
@@ -835,6 +847,7 @@ async def local_probe_suggestions(
     now = datetime.now(timezone.utc)
     servers = list(await session.scalars(scope_query(user, select(Server), Server)))
     serving = _serving_servers(servers)
+    servers_by_id = {s.id: s for s in servers}
     enabled_locs = list(await session.scalars(
         select(Location).where(Location.enabled.is_(True), Location.monitors.is_(True))))
     out: list[LocalProbeSuggestion] = []
@@ -851,7 +864,7 @@ async def local_probe_suggestions(
         msg = (check.last_message or "")[:200]
         host = _host_of(check)
         code = _closed_code(check, msg)
-        hit = serving.get(host)
+        hit = _serving_for_check(check, serving, servers_by_id)
         outside = allowlist_hint.outside_kind(msg, check.last_phases, code)
         # подключиться не дают, а сайт не на нашей ноде - проверить изнутри негде
         if not outside or (outside != "code" and not hit):
@@ -911,6 +924,7 @@ async def local_probe_apply(
     проверку с чужой ноды и увидеть ответ сайта, к которому доступа не имеет."""
     servers = list(await session.scalars(scope_query(user, select(Server), Server)))
     serving = _serving_servers(servers)
+    servers_by_id = {s.id: s for s in servers}
     updated = 0
     for check in await session.scalars(
         select(Check).where(Check.id.in_(body.check_ids), Check.type == "http")
@@ -926,7 +940,7 @@ async def local_probe_apply(
             check.expected_status = f"{spec},{code}" if spec else f"200-399,{code}"
             updated += 1
             continue
-        hit = serving.get(_host_of(check))
+        hit = _serving_for_check(check, serving, servers_by_id)
         if not hit:
             continue
         if (check.method or "GET") not in LOCAL_METHODS or (
@@ -1550,7 +1564,7 @@ async def run_check_now(
     Сайт, который проверяет агент на ноде, проверяем через агента: из панели его либо
     не видно, либо видно не то (панель в белом списке, а изнутри сайт сломан)."""
     check = await _get_or_404(check_id, session, user)
-    if check.probe_local:
+    if probe_scope.uses_agent(check):
         return await _run_via_agent(check, user, session, request, background)
     # «Проверить сейчас» должно проверять СЕЙЧАС — в том числе срок домена и
     # сертификата, которые обычно берутся из кэша (регистратуры не любят частых
@@ -1587,6 +1601,10 @@ async def _run_via_agent(check, user, session, request, background) -> CheckRunO
                       "переключите этот монитор на проверку из панели",
         )
     srv = await session.get(Server, check.probe_server_id) if check.probe_server_id else None
+    if srv is not None and not group_allowed(user, srv.group_name):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Сервер проверки не найден")
+    if srv is not None and not probe_scope.server_allowed(check, srv.id):
+        return _run_out(check, user, run_source="agent", run_error="Доверенный сервер еще не назначен для проверки")
     if srv is None:
         # Ни одна нода не держит этот домен — это и есть честный ответ проверки.
         outcome = checks_exec.outcome_from_agent(check, None, now, check.degraded_ms)
@@ -1643,6 +1661,8 @@ async def run_check_result(
     if req is None or req.check_id != check.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Проверка не найдена")
     srv = await session.get(Server, req.server_id)
+    if srv is not None and not group_allowed(user, srv.group_name):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Проверка не найдена")
     name = srv.name if srv else ""
     base = {"probe_server_name": name or None, "run_source": "agent", "run_server": name}
     if req.ts is not None and not req.status and await manual_probe.batch_waiting(session, req):

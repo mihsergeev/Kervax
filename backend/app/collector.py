@@ -30,6 +30,7 @@ from app import mute_watch
 from app import request_watch
 from app import panel_errors
 from app import inside_probe
+from app import probe_scope
 from app import site_flap
 from app import site_group
 from app import job_logs, kube_cron
@@ -628,15 +629,6 @@ def _apply_expiry(row: Check, info, now: datetime, pending: list, doms: DomainAl
                 row.domain_alerted_days = bucket  # о домене уже сказано по другому монитору
 
 
-def _host_of_target(target: str) -> str:
-    """Хост из адреса монитора: «https://gr.example.ru/health» → «gr.example.ru»."""
-    d = (target or "").strip().lower().rstrip(".")
-    if "://" in d:
-        d = d.split("://", 1)[1]
-    d = d.split("/")[0]
-    return d.split(":", 1)[0]
-
-
 # Сколько домен может отсутствовать в списке ноды, прежде чем монитор от неё отвяжут.
 # Список собирается раз в 15 минут, и один неполный сбор — деплой, пересоздание
 # контейнера, упавший helper — не повод считать, что сайт с ноды ушёл: два полных цикла.
@@ -683,28 +675,31 @@ async def rebind_local_probes(session_factory) -> int:
         )
         if not checks:
             return 0
-        servers = sorted(await session.scalars(select(Server)), key=lambda x: x.name)
+        servers = sorted(await session.scalars(select(Server).where(Server.enabled.is_(True))), key=lambda x: x.name)
         group_of = {srv.id: srv.group_name or "" for srv in servers}
         claims: dict[str, list[int]] = {}
         for srv in servers:
             for web in (srv.last_report or {}).get("web_services") or []:
                 for raw in web.get("sites") or []:
-                    host = _host_of_target(raw)
+                    host = probe_scope.target_host(raw)
                     if host and srv.id not in claims.setdefault(host, []):
                         claims[host].append(srv.id)
         changed = 0
         now = datetime.now(timezone.utc)
-        online = {
-            srv.id for srv in await session.scalars(select(Server)) if seen_online(srv, now)
-        }
+        online = {srv.id for srv in servers if seen_online(srv, now)}
         for c in checks:
-            want = _probe_node(claims.get(_host_of_target(c.target)) or [], c.probe_server_id, group_of)
+            candidates = claims.get(probe_scope.target_host(c.target), [])
+            if probe_scope.requires_trusted_server(c):
+                trusted = probe_scope.trusted_server(c)
+                candidates = [trusted] if trusted in candidates else []
+            want = _probe_node(candidates, c.probe_server_id, group_of)
             if want is not None and want == c.probe_server_id:
                 _bound_seen[c.id] = now
             # Домен пропал из списка, а нода, которая его держала, на связи: скорее всего
             # это неполный сбор на деплое, а не переезд сайта. Держим привязку, пока не
             # выйдет _UNBIND_GRACE, — агент продолжает проверять, ложного алерта нет.
-            if want is None and c.probe_server_id is not None and c.probe_server_id in online:
+            if (want is None and c.probe_server_id in online
+                    and probe_scope.server_allowed(c, c.probe_server_id)):
                 seen = _bound_seen.setdefault(c.id, now)
                 if (now - seen).total_seconds() < _UNBIND_GRACE:
                     continue
@@ -1007,20 +1002,26 @@ async def run_due_checks(
     # Сайт за белым списком панель проверить не может — снаружи соединение просто
     # рвут. За неё это делает агент НА САМОМ СЕРВЕРЕ и присылает сырой результат;
     # здесь мы его только оцениваем — теми же порогами, что и всё остальное.
-    local = [c for c in due if c.probe_local]
-    remote = [c for c in due if not c.probe_local]
+    local = [c for c in due if probe_scope.uses_agent(c)]
+    remote = [c for c in due if not probe_scope.uses_agent(c)]
     outcomes_map: dict[int, object] = {}
     probes: dict[int, AgentProbe] = {}
     if remote:
         got = await _gather_capped([checks_exec.run_check(c) for c in remote], cap, jitter)
+        for c, outcome in zip(remote, got):
+            if isinstance(outcome, checks_exec.CheckOutcome):
+                probe_scope.explain_panel_fallback(c, outcome)
         outcomes_map.update(dict(zip((c.id for c in remote), got)))
     if local:
+        assigned = {c.id: c.probe_server_id for c in local if c.probe_server_id is not None
+                    and probe_scope.server_allowed(c, c.probe_server_id)}
         async with session_factory() as session:
             probes = {
                 r.check_id: r
                 for r in await session.scalars(
-                    select(AgentProbe).where(AgentProbe.check_id.in_([c.id for c in local]))
+                    select(AgentProbe).where(AgentProbe.check_id.in_(assigned))
                 )
+                if r.server_id == assigned[r.check_id]
             }
         # Молчание агента в первые минуты после привязки — это не «сайт лежит», а
         # «результат ещё в пути». Раньше монитор успевал покраснеть, открыть инцидент
@@ -1047,7 +1048,7 @@ async def run_due_checks(
                     path_rows.setdefault(r.check_id, {})[r.path] = r
         for c in local:
             main = checks_exec.outcome_from_agent(c, probes.get(c.id), now, c.degraded_ms)
-            rows = {p: r for p, r in path_rows.get(c.id, {}).items() if r.server_id == c.probe_server_id}
+            rows = {p: r for p, r in path_rows.get(c.id, {}).items() if r.server_id == assigned.get(c.id)}
             outcomes_map[c.id] = checks_exec.outcome_with_agent_paths(
                 c, main, rows, now, c.degraded_ms, _paths_warming_up(c, now)
             )
@@ -1059,8 +1060,8 @@ async def run_due_checks(
     # сертификате. Агент видел его на том же соединении, которым проверял сайт, —
     # берём оттуда. Срок ДОМЕНА при этом считает панель как обычно: это запрос в
     # RDAP, а не к самому сайту, и он проходит.
-    exp_local = [c for c in refresh if c.probe_local]
-    exp_remote = [c for c in refresh if not c.probe_local]
+    exp_local = [c for c in refresh if probe_scope.uses_agent(c)]
+    exp_remote = [c for c in refresh if not probe_scope.uses_agent(c)]
     exp_results = await _gather_capped(
         [checks_exec.probe_expiry(c) for c in exp_remote], cap, jitter
     )
@@ -9213,12 +9214,14 @@ async def maintenance_tick(
     Сверка через maint.VERIFY_AFTER после конца: к этому времени сборщик уже прошел по
     серверам без снуза, и alert_state говорит, что сломано на самом деле."""
     msgs: list[alerts.Msg] = []
+    pending: list[tuple[MaintenanceWindow, datetime]] = []
     async with session_factory() as session:
-        windows = list(await session.scalars(select(MaintenanceWindow)))
+        windows = list(await session.scalars(select(MaintenanceWindow).order_by(MaintenanceWindow.id)))
         if not windows:
             return
         cfg = await settings_store.get_alert_config(session, settings)
         muted = await settings_store.get_muted(session)
+        can_send = not muted and alerts.alerts_enabled(cfg)
         tz = cfg.get("tz") or "Europe/Moscow"
         for w in windows:
             if maint.finished(w, now) and (now - _aware(w.ends_at)).total_seconds() > maint.KEEP_DONE:
@@ -9227,7 +9230,9 @@ async def maintenance_tick(
             occ = maint.due_verify(w, now, tz)
             if occ is None:
                 continue
-            w.verified_end = occ[1]
+            if not can_send:
+                w.verified_end = occ[1]
+                continue
             srvs = list(await session.scalars(select(Server).where(
                 Server.id.in_(w.server_ids or []), Server.enabled.is_(True)))) if w.server_ids else []
             chks = list(await session.scalars(select(Check).where(
@@ -9250,10 +9255,26 @@ async def maintenance_tick(
             msgs.append(alerts.Msg(
                 tg_fmt.render("⚠️🚧" if bad else "🚧", f"<b>{html.escape(w.title)}</b>", m_what, m_facts),
                 "servers", "", kind="maint", full=("⚠️ " if bad else "🚧 ") + html.escape(text)))
+            pending.append((w, occ[1]))
         await session.commit()
-    if msgs and not muted and alerts.alerts_enabled(cfg):
-        await alerts.dispatch(cfg, True, msgs, int(cfg.get("flood_threshold", 6)), parse_mode="HTML",
-                              session_factory=session_factory)
+    if not msgs:
+        return
+    finished: set[int] = set()
+    if await alerts.dispatch(cfg, True, msgs, int(cfg.get("flood_threshold", 6)), parse_mode="HTML",
+                             session_factory=session_factory, finished=finished):
+        finished.update(range(len(msgs)))
+    if finished:
+        async with session_factory() as session:
+            for i in sorted(finished):
+                snapshot, end = pending[i]
+                w = await session.get(MaintenanceWindow, snapshot.id, with_for_update=True)
+                # Правка окна во время отправки может потребовать новой сверки.
+                if w is not None and all(getattr(w, key) == getattr(snapshot, key) for key in (
+                    "created_at", "title", "server_ids", "check_ids", "starts_at", "ends_at",
+                    "repeat", "weekdays", "verify", "verified_end",
+                )):
+                    w.verified_end = end
+            await session.commit()
 
 
 # Команда живёт секунды: агент забирает её за 1-15с, helper отвечает в пределах 90с
@@ -9279,12 +9300,14 @@ async def _expire_commands(session_factory: async_sessionmaker[AsyncSession]) ->
     async with session_factory() as session:
         # поставленные человеком - в журнал ошибок панели: кнопка "ничего не сделала"
         mine = list(await session.scalars(select(BackupCommand).where(*stuck, BackupCommand.created_by != "")))
-        res = await session.execute(
+        expired = set(await session.scalars(
             update(BackupCommand)
             .where(*stuck)
             .values(status="error", ok=False, result="агент не ответил — команда не доехала",
                     payload=case((BackupCommand.action == "disk_fix", BackupCommand.payload)))
-        )
+            .returning(BackupCommand.id)
+            .execution_options(synchronize_session=False)
+        ))
         # Старые результаты записывались открытым текстом. Новый шифротекст нужен только
         # ожидающему воркеру, а после его остановки удаляется по тому же таймауту.
         await session.execute(
@@ -9295,10 +9318,12 @@ async def _expire_commands(session_factory: async_sessionmaker[AsyncSession]) ->
                        BackupCommand.created_at < cutoff))
             .values(result="")
         )
-        if res.rowcount:
-            log.info("закрыто зависших backup-команд: %d", res.rowcount)
+        if expired:
+            log.info("закрыто зависших backup-команд: %d", len(expired))
         await session.commit()
     for c in mine:
+        if c.id not in expired:
+            continue  # агент успел ответить после SELECT
         c.result = "агент не ответил - команда не доехала"
         await panel_errors.command_failed(session_factory, "backup", c, soon=False)
 

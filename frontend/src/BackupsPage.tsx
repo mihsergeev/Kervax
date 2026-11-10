@@ -47,6 +47,8 @@ import { backupDiskTone } from './bsrvStorage'
 import { CoverageAudit } from './CoverageAudit'
 import { helperText } from './helperText'
 import { bulkCleanupScript, safeRepoName } from './bulkCleanupScript'
+import { shq } from './shell'
+import { BACKUP_SERVER_ROOT as BSRV_ROOT, DEFAULT_BACKUP_DATA as DEFAULT_BSRV_STORAGE, backupStorageGuard, safeBackupDataDir } from './backupStorageCommand'
 import { useAuth } from './auth'
 import { useEscape } from './useEscape'
 import { useUrlCard, useUrlParam } from './deeplink'
@@ -1429,15 +1431,22 @@ function RestoreInfo({ server: s }: { server: Server }) {
       setBusy(false)
     }
   }
-  const copy = (v: string, key: string) => {
-    navigator.clipboard?.writeText(v); setCopied(key); window.setTimeout(() => setCopied(''), 1500)
+  const copy = async (v: string, key: string) => {
+    try {
+      if (!navigator.clipboard) throw new Error(t('Не удалось скопировать'))
+      await navigator.clipboard.writeText(v)
+      setCopied(key)
+      window.setTimeout(() => setCopied((current) => current === key ? '' : current), 1500)
+    } catch {
+      toastError(t('Не удалось скопировать'))
+    }
   }
   // локальный путь репо на бэкап-сервере: из fallback (repo_local) или из URL клиента
   const localRepo = creds
-    ? (creds.repo_local || '/app/rest-server/data/' + (creds.repo_url.split('/').pop() || ''))
+    ? (creds.repo_local || DEFAULT_BSRV_STORAGE + '/' + (creds.repo_url.split('/').pop() || ''))
     : ''
   const restoreCmd = creds
-    ? `RESTIC_REPOSITORY='${localRepo}' RESTIC_PASSWORD='${creds.repopass}' restic snapshots`
+    ? `RESTIC_REPOSITORY=${shq(localRepo)} RESTIC_PASSWORD=${shq(creds.repopass)} restic snapshots`
     : ''
   return (
     <div className="restore-info">
@@ -1617,9 +1626,6 @@ function ServerResticOld({ ver, target }: { ver: string; target: string }) {
   )
 }
 
-// Раскладка бэкап-сервера — та же, что создаёт backupserver-setup.sh / deploy-server.
-const BSRV_ROOT = '/app/rest-server'
-
 // Битую репу панель удалить НЕ может и не должна (иначе взлом панели = стирание бэкапов).
 // Поэтому даём готовую команду для root'а на самом бэкап-сервере: скопировал → вставил.
 // Показываем ТОЛЬКО когда терять нечего: репо не инициализирован И снапшотов ноль.
@@ -1798,17 +1804,28 @@ function rotationLimitDays(r: RepoStat): number {
 }
 
 // раскрывает кнопка "Как удалить" в RepoDetail
-function RepoCleanup({ r }: { r: RepoStat }) {
+function RepoCleanup({ r, dataDir }: { r: RepoStat; dataDir: string }) {
   const { t } = useI18n()
+  if (!safeRepoName(r.name)) {
+    return (
+      <div className="repo-cleanup form-error small">
+        {t('Имя репозитория выглядит небезопасно — команда не показана, разберитесь на сервере вручную.')}
+      </div>
+    )
+  }
+  if (!safeBackupDataDir(dataDir)) return <UnknownBackupDataDir />
   const hasData = r.snapshots > 0
-  const cmd = [
+  const body = [
+    'set -e',
+    ...backupStorageGuard(dataDir),
     `R=${r.name}`,
-    `sudo rm -rf ${BSRV_ROOT}/data/$R`,
-    `sudo htpasswd -D ${BSRV_ROOT}/data/.htpasswd $R`,
-    `sudo rm -f ${BSRV_ROOT}/system/scripts/restic-prune-$R.sh ${BSRV_ROOT}/system/envs/$R.env`,
-    `sudo rm -f /etc/cron.d/kervax-prune-$R`,
-    `sudo /lib65/kervax/kervax-backupserver-helper refresh`,
+    'rm -rf -- "$DATA/$R"',
+    'htpasswd -D "$DATA/.htpasswd" "$R" 2>/dev/null || true',
+    `rm -f "${BSRV_ROOT}/system/scripts/restic-prune-$R.sh" "${BSRV_ROOT}/system/envs/$R.env"`,
+    'rm -f "/etc/cron.d/kervax-prune-$R"',
+    '/lib65/kervax/kervax-backupserver-helper refresh',
   ].join('\n')
+  const cmd = `sudo bash -c ${shq(body)}`
   return (
     <div className="repo-cleanup">
       {hasData ? (
@@ -1835,7 +1852,7 @@ function RepoCleanup({ r }: { r: RepoStat }) {
 // договорённости не имеет ни одной операции записи/удаления над бэкапами. Показываем
 // готовую команду для root'а на бэкап-сервере.
 // раскрывает кнопка "Как снять лок" в RepoDetail
-function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
+function RepoUnlock({ r, dataDir, onChanged }: { r: RepoStat; dataDir: string; onChanged: () => void }) {
   const { t } = useI18n()
   const [checking, setChecking] = useState(false)
   // пароль берём из prune-env ВНУТРИ sudo bash -c: так он не светится в списке процессов
@@ -1843,12 +1860,14 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
     // Тело в ОДИНАРНЫХ кавычках: имя репо подставляет панель, а внешний шелл ничего
     // не разворачивает. Логика через if, а не `A && B || C`: раньше при неверном пароле
     // срабатывала ветка «restic не установлен» и человек получал второе, ложное сообщение.
-    `sudo bash -c '`,
+    'set -e',
+    ...backupStorageGuard(dataDir),
     `R=${r.name}`,
-    `REPO=${BSRV_ROOT}/data/$R; ENV=${BSRV_ROOT}/system/envs/$R.env`,
+    `REPO="$DATA/$R"; ENV="${BSRV_ROOT}/system/envs/$R.env"`,
+    'secure_dir "$REPO" && [ ! -L "$REPO/locks" ] && [ ! -L "$ENV" ] || wrong_storage',
     `RESTIC=$(command -v restic || echo /lib65/kervax/restic)`,
-    `if [ -x "$RESTIC" ] && [ -f "$ENV" ] && (set -a; . "$ENV"; set +a; "$RESTIC" cat config >/dev/null 2>&1); then`,
-    `  (set -a; . "$ENV"; set +a; "$RESTIC" unlock) && echo "${tr('лок снят штатно')}"`,
+    'if [ -x "$RESTIC" ] && [ -f "$ENV" ] && secure_dir "${ENV%/*}" && (set -a; . "$ENV"; set +a; "$RESTIC" -r "$REPO" cat config >/dev/null 2>&1); then',
+    `  (set -a; . "$ENV"; set +a; "$RESTIC" -r "$REPO" unlock) && echo "${tr('лок снят штатно')}"`,
     `else`,
     // Репозитории из старых деплоев созданы с другим паролем, и env к ним не подходит —
     // штатный unlock невозможен в принципе. Лок restic — это обычный файл в репо: удалить
@@ -1861,7 +1880,6 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
     `  find "$REPO"/locks -maxdepth 1 -type f -mmin +30 -print -delete`,
     `  echo "${tr('готово, живые локи (моложе 30 минут) не тронуты')}"`,
     `fi`,
-    `'`,
   ].join('\n')
   // имя репо уходит в rm/пути: то же правило, что в массовой зачистке. Панель получает
   // имя от агента, но команду с подозрительным именем показывать нельзя — её скопируют.
@@ -1872,9 +1890,10 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
       </div>
     )
   }
+  if (!safeBackupDataDir(dataDir)) return <UnknownBackupDataDir />
   return (
     <div className="repo-cleanup">
-      <FixSteps steps={[{ id: 'unlock', cmd }]} text={() => t('Снять висячие локи на бэкап-сервере от root')}
+      <FixSteps steps={[{ id: 'unlock', cmd: `sudo bash -c ${shq(cmd)}` }]} text={() => t('Снять висячие локи на бэкап-сервере от root')}
         foot={t('Живой лок идущего бэкапа или чистки (моложе 30 минут) команда не тронет. Пароль читается из env внутри команды и в списке процессов не виден.')} />
       {/* Статус снимается не мгновенно: helper пересчитывает статистику раз в минуту,
           потом отчёт агента и опрос UI. Без этой подсказки снятый лок выглядел как
@@ -1889,6 +1908,15 @@ function RepoUnlock({ r, onChanged }: { r: RepoStat; onChanged: () => void }) {
           {t('Статус обновится сам в течение минуты.')}
         </span>
       </div>
+    </div>
+  )
+}
+
+function UnknownBackupDataDir() {
+  const { t } = useI18n()
+  return (
+    <div className="repo-cleanup form-error small">
+      {t('Каталог бэкапов не распознан. Проверьте путь на сервере.')}
     </div>
   )
 }
@@ -2029,6 +2057,8 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
   // разовый бэкап, проект заморожен. Предлагаем там, где бэкапы и так не приходят: не при
   // идущем прямо сейчас прогоне
   const dead = st === 'stale' && !repoRunning(r)
+  const canDelete = canAct && (junk || dead)
+  const canUnlock = canAct && (st === 'locked' || st === 'stuck')
   if (canAct && (dead || isMuted))
     acts.push(
       <button key="arch" className={`ghost row-act${open === 'archive' ? ' on' : ''}`} onClick={() => flip('archive')}
@@ -2047,13 +2077,13 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
   // «как удалить» даём только у проблемных: пустой мусор и заброшенные репо — это те,
   // что реально выводят из эксплуатации. У живого репозитория с ежедневным бэкапом
   // такая кнопка была бы приглашением к беде.
-  if (canAct && (junk || dead))
+  if (canDelete)
     acts.push(
       <button key="rm" className={`ghost row-act${open === 'rm' ? ' on' : ''}`} onClick={() => flip('rm')}>
         {open === 'rm' ? t('Скрыть команду') : t('Как удалить')}
       </button>,
     )
-  if (canAct && (st === 'locked' || st === 'stuck'))
+  if (canUnlock)
     acts.push(
       <button key="unlock" className={`ghost row-act${open === 'unlock' ? ' on' : ''}`} onClick={() => flip('unlock')}>
         {open === 'unlock' ? t('Скрыть команду') : t('Как снять лок')}
@@ -2095,8 +2125,8 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
             <ArchiveForm server={s} repo={r.name} host="" onCancel={() => setOpen('')}
               onDone={() => { setOpen(''); onChanged() }} />
           )}
-          {open === 'rm' && <RepoCleanup r={r} />}
-          {open === 'unlock' && <RepoUnlock r={r} onChanged={onChanged} />}
+          {open === 'rm' && canDelete && <RepoCleanup r={r} dataDir={dataDir} />}
+          {open === 'unlock' && canUnlock && <RepoUnlock r={r} dataDir={dataDir} onChanged={onChanged} />}
         </div>
       )}
       <RepoTiles server={s} r={r} ctx={ctx} growth={growth} />
@@ -2463,6 +2493,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
     for (const n of [c.hostname, c.name]) if (n) growthOf.set(n, g)
   }
   const ctx = repoCtx(s)
+  const dataDir = info.data_dir || DEFAULT_BSRV_STORAGE
   const muted = ctx.muted
   const every = info.repos ?? []
   // архив отдельным разделом: в общем списке он выглядел бы заброшкой среди живых
@@ -2854,7 +2885,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
                       {selRepo && (
                         <RepoDetail key={selRepo.name} server={s} r={selRepo} ctx={ctx} canAct={canAct} onChanged={onChanged} servers={servers}
                           growth={growthOf.get(selRepo.name)} unmonitored={unmon.has(selRepo.name)}
-                          dataDir={info.data_dir || `${BSRV_ROOT}/data`} onGo={go} />
+                          dataDir={dataDir} onGo={go} />
                       )}
                     </div>
                   </div>
@@ -2936,7 +2967,7 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
                 {!pruneNames.length && !rotRows.length && !cl?.legacy && !cl?.dead && !cl?.off?.length && !cl?.hand?.length && (
                   <div className="srv-empty">{ok.cleanup}</div>
                 )}
-                {canAct && <BulkCleanup server={s} all={all} muted={muted} />}
+                {canAct && <BulkCleanup server={s} all={all} muted={muted} dataDir={dataDir} />}
               </div>
             )}
 
@@ -2985,14 +3016,13 @@ function BackupServerModal({ server: s, info, servers, canAct, initialSec, onCha
 // Массовая зачистка: на серверах, живущих годами, «устарел» копится десятками — разбирать
 // их по одной кнопке никто не станет. Отбор ТОЛЬКО по явному признаку (приглушён вручную
 // или давно не обновлялся), здоровые репозитории под него не попадают ни при каких настройках.
-function BulkCleanup({ server, all, muted }: {
-  server: Server; all: RepoStat[]; muted: Set<string>
+function BulkCleanup({ server, all, muted, dataDir }: {
+  server: Server; all: RepoStat[]; muted: Set<string>; dataDir: string
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const [mode, setMode] = useState<'stale' | 'muted'>('stale')
   const [days, setDays] = useState(365)
-  const [copied, setCopied] = useState(false)
   const now = Date.now() / 1000
   const picked = all.filter((r) => {
     if (mode === 'muted') return muted.has(r.name)
@@ -3000,9 +3030,10 @@ function BulkCleanup({ server, all, muted }: {
     const age = r.last_activity ? (now - r.last_activity) / 86400 : Infinity
     return age >= days
   })
-  const unsafe = picked.filter((r) => !safeRepoName(r.name))
-  const script = bulkCleanupScript(picked, BSRV_ROOT, server.name)
-  const totalBytes = picked.reduce((a, r) => a + (r.size_bytes || 0), 0)
+  const safe = picked.filter((r) => safeRepoName(r.name))
+  const skipped = picked.length - safe.length
+  const script = bulkCleanupScript(safe, dataDir, server.name)
+  const totalBytes = safe.reduce((a, r) => a + (r.size_bytes || 0), 0)
   if (all.length < 5) return null  // на паре репозиториев массовость смысла не имеет
   return (
     <div className="repo-cleanup bulk-cleanup">
@@ -3028,26 +3059,23 @@ function BulkCleanup({ server, all, muted }: {
             <div className="muted small">{t('Под условие никто не попал.')}</div>
           ) : (
             <>
-              <div className="form-error small">
+              {script && <div className="form-error small">
                 ⚠️ {t('Попадает под удаление: {n} шт., {sz}. Восстановить будет нечем.', {
-                  n: picked.length, sz: fmtBytes(totalBytes),
+                  n: safe.length, sz: fmtBytes(totalBytes),
                 })}
-              </div>
-              {unsafe.length > 0 && (
+              </div>}
+              {skipped > 0 && (
                 <div className="form-error small">
-                  {t('Пропущено с подозрительными именами: {n} — удалите вручную, разобравшись.', { n: unsafe.length })}
+                  {t('Пропущено с подозрительными именами: {n} — удалите вручную, разобравшись.', { n: skipped })}
                 </div>
               )}
-              <div className="agent-advice-cmd">
-                <pre>{script}</pre>
-                <button className="ghost" onClick={() => {
-                  navigator.clipboard?.writeText(script)
-                  setCopied(true); window.setTimeout(() => setCopied(false), 1500)
-                }}>{copied ? t('Скопировано') : t('Копировать')}</button>
-              </div>
-              <div className="muted small">
-                {t('Скрипт спросит подтверждение числом. Панель ничего не удаляет — это защита на случай её взлома.')}
-              </div>
+              {!safeBackupDataDir(dataDir) && <UnknownBackupDataDir />}
+              {script && <>
+                <FixCmd cmd={script} />
+                <div className="muted small">
+                  {t('Скрипт спросит подтверждение числом. Панель ничего не удаляет — это защита на случай её взлома.')}
+                </div>
+              </>}
             </>
           )}
         </>
@@ -3362,8 +3390,6 @@ const DEFAULT_EXCLUDES = [
 ]
 
 // Состояние helper'а и список разделов приходят в очередном отчёте агента.
-const DEFAULT_BSRV_STORAGE = '/app/rest-server/data'
-
 function DeployServerModal({ server: s, move, onClose, onRefresh }: {
   server: Server; move: boolean; onClose: () => void; onRefresh: () => Promise<void>
 }) {

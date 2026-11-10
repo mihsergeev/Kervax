@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.124] - 2026-11-10
+
+- Keep proxy credentials out of editor install commands and enforce server-group access for HTTPS backup changes and manual site checks.
+- Send credential-bearing checks only to an explicitly assigned agent, and hide URL secrets in new and stored probe diagnostics.
+- Restrict Linux agent 2.68 to same-origin redirects for authenticated panel requests and reject non-loopback HTTP lookalikes.
+- Restore PostgreSQL ID sequences transactionally so records can be created after an import.
+- Retry undelivered maintenance checks and avoid recording a backup timeout after the agent has finished.
+- Quote backup and systemd commands safely and report clipboard errors.
+- Keep browser tabs in sync on logout and account changes, isolate search history, and ignore stale search responses.
+- Use the configured backup volume for repository cleanup and lock removal, with checks that stop commands if storage has changed or is unavailable.
+
 ## [1.8.123] - 2026-11-10
 
 - Allow one login attempt at a time from the same source and accept each two-factor code once.

@@ -8,6 +8,7 @@ from sqlalchemy import case, delete as sa_delete, func, select
 from app import audit, checks, collector, open_ports, settings_store
 from app.deps import AdminUser, CurrentUser, SessionDep
 from app.models import Check, CheckSample, Location, LocationResult, LocationSample
+from app.secret_masks import mask_target
 from app.schemas import (
     LocationCreate,
     LocationOut,
@@ -37,18 +38,6 @@ async def test_location_proxy(body: LocationTest, _: AdminUser) -> ProxyTestResu
     return ProxyTestResult(ok=ok, message=message, latency_ms=latency, exit_ip=ip, exit_country=cc)
 
 
-def _mask_proxy(url: str) -> str:
-    """Прячет user:pass в адресе прокси: http://user:pass@host → http://***@host.
-
-    Сам адрес оставляем — по нему в UI видно, идёт монитор напрямую или через
-    точку проверки; а вот пара логин/пароль в списке, доступном всем, лишняя."""
-    if "@" not in url:
-        return url
-    scheme, _, rest = url.partition("://")
-    creds, _, host = rest.rpartition("@")
-    return f"{scheme}://***@{host}" if creds else url
-
-
 async def _get_or_404(location_id: int, session: SessionDep) -> Location:
     loc = await session.get(Location, location_id)
     if loc is None:
@@ -63,7 +52,7 @@ async def list_locations(user: CurrentUser, session: SessionDep) -> list[Locatio
         return rows  # админ правит локации — ему нужен адрес целиком
     session.expunge_all()  # иначе маскировка уедет в базу при flush
     for loc in rows:
-        loc.url = _mask_proxy(loc.url)
+        loc.url = mask_target(loc.url)
     return rows
 
 

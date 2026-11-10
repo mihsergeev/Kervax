@@ -133,9 +133,12 @@ logged.
 it reports facts, while thresholds, retries and incidents stay in the panel,
 under the same rules as any other monitor.
 
-The honest flip side: the probe task carries this monitor's custom headers and
-basic-auth password, if set. That is the same data the site on that node already
-uses, but it is worth knowing.
+To give an agent custom headers, basic-auth credentials, or a URL with query
+parameters, select a trusted server in the monitor's dependencies. Its agent
+must report the domain in its inventory. Until a server is selected, the panel
+runs the check. Save the monitor and select the server before trying a probe
+from inside with those settings. Automatic inside diagnostics after an
+external failure only run for monitors without these details.
 
 ## 4. Updates rely on a signature, not on trusting the panel
 

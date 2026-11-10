@@ -2,8 +2,9 @@ import re
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_serializer, field_validator
 
+from app.secret_masks import mask_probe_urls
 from app.security import MIN_PASSWORD_LEN
 
 
@@ -37,6 +38,7 @@ def _clean_paths(v: list[str] | None) -> list[str] | None:
 
 
 CheckType = Literal["http", "tcp_port", "cert", "push", "dns"]
+ProbeMessage = Annotated[str, PlainSerializer(mask_probe_urls)]
 
 
 class LoginRequest(BaseModel):
@@ -287,6 +289,7 @@ class TryLocation(TryResult):
 
 
 class TryInside(TryResult):
+    message: ProbeMessage = ""
     server_id: int | None = None
     server_name: str = ""
     web: str = ""  # какой веб-сервер держит домен: nginx, caddy, ingress...
@@ -576,7 +579,7 @@ class LocalProbeSuggestion(BaseModel):
     check_id: int
     name: str
     host: str
-    message: str  # чем именно закончилась внешняя проверка
+    message: ProbeMessage  # чем именно закончилась внешняя проверка
     kind: str = "local"
     code: int = 0  # для kind="code": какой код предлагаем считать нормой
     server_id: int = 0
@@ -773,7 +776,7 @@ class CheckOut(BaseModel):
     check_locations: bool
     location_ids: list[int] | None
     last_status: str
-    last_message: str
+    last_message: ProbeMessage
     last_ip_results: list | None = None
     extra_paths: list[str] = []
     last_path_results: list | None = None
@@ -794,6 +797,15 @@ class CheckOut(BaseModel):
     flaky_since: datetime | None = None
     alert_mutes: list[str] | None = None  # заглушённые типы алертов монитора
 
+    @field_serializer("last_ip_results", "last_path_results", "last_inside")
+    def mask_probe_messages(self, value):
+        def mask(result):
+            if isinstance(result, dict) and isinstance(result.get("message"), str):
+                return {**result, "message": mask_probe_urls(result["message"])}
+            return result
+
+        return [mask(result) for result in value] if isinstance(value, list) else mask(value)
+
 
 class CheckRunOut(CheckOut):
     """Монитор после «Проверить сейчас» + итог именно этой проверки.
@@ -806,7 +818,7 @@ class CheckRunOut(CheckOut):
     run_pending: int | None = None  # номер запроса к агенту: ответ ещё в пути
     run_fast: bool = False  # агент отвечает быстрым путём (секунды, а не отчёт)
     run_status: str = ""  # up | degraded | down — когда готово
-    run_message: str = ""
+    run_message: ProbeMessage = ""
     run_latency_ms: int | None = None
     run_at: datetime | None = None
     run_source: str = "panel"  # panel — из панели, agent — с сервера изнутри
@@ -821,7 +833,7 @@ class CheckSampleOut(BaseModel):
     status: str
     latency_ms: int | None
     value: float | None
-    message: str
+    message: ProbeMessage
     # фазы запроса, мс (среднее по точкам бакета); None - у точек фаз нет
     ph_dns: int | None = None
     ph_connect: int | None = None
@@ -882,7 +894,7 @@ class CheckIncidentOut(BaseModel):
     status: str
     started_at: datetime
     ended_at: datetime | None
-    last_message: str
+    last_message: ProbeMessage
     # ушёл ли по инциденту алерт. False — сбой был короче порога «N проверок подряд»:
     # самый частый вопрос «сайт лежал, а алерта нет», и ответ на него должен быть
     # виден прямо в карточке, а не выясняться по базе
@@ -1189,7 +1201,7 @@ class LocationStat(BaseModel):
 
 class LocSiteCell(BaseModel):
     status: str
-    message: str = ""
+    message: ProbeMessage = ""
     fails: int = 0
 
 

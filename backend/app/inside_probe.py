@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import checks as checks_exec
 from app import parents as parents_mod
+from app import probe_scope
 from app.models import Check, ProbeRequest, Server
 
 KIND = "inside"
@@ -50,7 +51,7 @@ async def request(session: AsyncSession, check: Check, now: datetime) -> bool:
     from app.collector import seen_online  # collector импортирует этот модуль
     from app.manual_probe import fast_agent
 
-    if check.type != "http" or check.probe_local:
+    if check.type != "http" or check.probe_local or probe_scope.requires_trusted_server(check):
         return False
     if _port(check.target) not in (None, 80, 443):
         # монитор из панели на нестандартный порт завел кто угодно, а изнутри это был бы запрос

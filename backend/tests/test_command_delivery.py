@@ -1,12 +1,14 @@
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import Update, select
 
 from app import backup_command_result, collector
 from app.api import servers
-from app.models import BackupCommand, DockerCommand, KubeCommand
+from app.models import BackupCommand, DockerCommand, KubeCommand, PanelError
 
 from test_api_access import _server, _user
 
@@ -126,3 +128,40 @@ async def test_cleanup_scrubs_legacy_and_abandoned_command_secrets(client, auth_
         assert (await session.get(BackupCommand, expired.id)).result == ""
         assert (await session.get(BackupCommand, fresh.id)).result == fresh.result
         assert (await session.get(BackupCommand, stuck.id)).payload is None
+
+
+async def test_timeout_logs_only_commands_it_closed(client, auth_headers):
+    server_id, agent_headers = await _server(client, auth_headers, "node-a")
+    factory = client._transport.app.state.session_factory
+    old = datetime.now(timezone.utc) - timedelta(minutes=15)
+    async with factory() as session:
+        replied = BackupCommand(server_id=server_id, action="set_schedule", status="running",
+                                created_at=old, created_by="admin")
+        stuck = BackupCommand(server_id=server_id, action="set_schedule", status="running",
+                               created_at=old, created_by="admin")
+        session.add_all([replied, stuck])
+        await session.commit()
+
+    @asynccontextmanager
+    async def scheduler_session():
+        async with factory() as session:
+            execute = session.execute
+
+            async def execute_with_reply(statement, *args, **kwargs):
+                if isinstance(statement, Update) and statement.table.name == BackupCommand.__tablename__:
+                    session.execute = execute
+                    response = await client.post("/api/agent/backup-result", headers=agent_headers,
+                                                 json={"id": replied.id, "ok": True, "output": "done"})
+                    assert response.status_code == 200
+                return await execute(statement, *args, **kwargs)
+
+            session.execute = execute_with_reply
+            yield session
+
+    await collector._expire_commands(scheduler_session)
+
+    async with factory() as session:
+        assert (await session.get(BackupCommand, replied.id)).status == "done"
+        assert (await session.get(BackupCommand, stuck.id)).status == "error"
+        errors = await session.scalars(select(PanelError).where(PanelError.kind == "command"))
+        assert [error.extra["cmd_id"] for error in errors] == [stuck.id]

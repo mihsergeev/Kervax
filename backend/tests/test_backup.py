@@ -53,6 +53,29 @@ async def test_backup_export_restore_roundtrip(
     assert any(c["name"] == "m1" for c in ov["checks"])
 
 
+async def test_backup_restore_advances_ids_after_restoring_rows(client, auth_headers):
+    for n in range(2):
+        response = await client.post(
+            "/api/checks",
+            json={"name": f"site-{n}", "type": "http", "target": f"https://site-{n}.example.com"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+
+    sealed = (await client.get("/api/backup/export", headers=auth_headers)).json()
+    restored_ids = {row["id"] for row in _open(sealed)["tables"]["checks"]}
+    for n in range(2):
+        response = await client.post("/api/backup/restore", json=sealed, headers=auth_headers)
+        assert response.status_code == 200
+        response = await client.post(
+            "/api/checks",
+            json={"name": f"new-{n}", "type": "http", "target": f"https://new-{n}.example.com"},
+            headers=auth_headers,
+        )
+        assert response.status_code == 201
+        assert response.json()["id"] > max(restored_ids)
+
+
 async def test_backup_keeps_links_windows_hidden_domains_and_old_files_do_not_wipe_them(
     client: httpx.AsyncClient, auth_headers
 ):

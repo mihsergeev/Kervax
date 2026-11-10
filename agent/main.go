@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.67"
+const version = "2.68"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -6611,7 +6611,7 @@ func demuxDockerLogs(b []byte) string {
 // Тело ответа крошечное (обычно пусто) — на нагрузку панели влияет незначительно.
 func commandLoop(panelURL, token string) {
 	tr := panelTransport(true)
-	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr}
+	cl := &http.Client{Timeout: 10 * time.Second, Transport: tr, CheckRedirect: panelRedirect}
 	endpoint := strings.TrimRight(panelURL, "/") + "/api/agent/commands"
 	// Соединение переиспользуем (опрос ежесекундный, рукопожатие на каждый — дорого),
 	// но принудительно роняем раз в _pollRecycle запросов. Иначе за минуту в одном
@@ -9644,7 +9644,7 @@ func panelURLOK(raw string) error {
 		return nil
 	case "http":
 		h := u.Hostname()
-		if h == "localhost" || h == "::1" || strings.HasPrefix(h, "127.") {
+		if strings.EqualFold(h, "localhost") || net.ParseIP(h).IsLoopback() {
 			return nil
 		}
 		return fmt.Errorf("адрес панели %s по http: токен ушел бы открытым текстом, нужен https://", raw)
@@ -9761,7 +9761,7 @@ func send(url, token string, r report) (config, error) {
 //     Прежний комментарий винил ECMP — это была неверная догадка, замеры её не подтвердили.
 var (
 	reportTransport = panelTransport(false)
-	reportClient    = &http.Client{Timeout: 15 * time.Second, Transport: reportTransport}
+	reportClient    = &http.Client{Timeout: 15 * time.Second, Transport: reportTransport, CheckRedirect: panelRedirect}
 )
 
 // Прокси до панели. Нужен ноде, чей адрес режут на пути к панели (IP в списке блокировок
@@ -9815,7 +9815,21 @@ func proxyLabel(panelURL string) string {
 
 // panelClient - короткий запрос в панель тем же путем, что и отчет (прокси, без keep-alive)
 func panelClient(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout, Transport: panelTransport(false)}
+	return &http.Client{Timeout: timeout, Transport: panelTransport(false), CheckRedirect: panelRedirect}
+}
+
+// Authenticated requests can contain private reports or command results.
+// Keep both the bearer token and the request body at the configured origin.
+func panelRedirect(req *http.Request, via []*http.Request) error {
+	first := via[0]
+	if first.Header.Get("Authorization") != "" &&
+		(req.URL.Scheme != first.URL.Scheme || !strings.EqualFold(req.URL.Host, first.URL.Host)) {
+		return http.ErrUseLastResponse
+	}
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	return nil
 }
 
 // Штатная остановка. При перезагрузке и выключении systemd шлет агенту SIGTERM раньше, чем

@@ -23,9 +23,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import checks as checks_exec
-from app import expiry_snooze, inside_probe
+from app import expiry_snooze, inside_probe, probe_scope
 from app.collector import _aware, record_outcome
 from app.models import AgentPathProbe, AgentProbe, Check, DomainProbe, ProbeRequest, Server
+from app.secret_masks import mask_probe_urls
 
 # С этой версии агент забирает ручную проверку опросом команд и отвечает сразу.
 FAST_AGENT = (2, 7)
@@ -187,14 +188,33 @@ async def _open(session: AsyncSession, server: Server, now: datetime) -> list[tu
     for req, chk in rows:
         if req.check_id == 0 and req.url:
             chk = request_check(req)
-        elif req.url and chk is not None:
-            # a path of the monitor: the request keeps the path, the rest comes from the monitor
-            chk = checks_exec.path_view(chk, req.url)
-        if chk is None:
-            continue  # монитор удалили, пока запрос ждал агента
+            if not await _standalone_task_allowed(session, chk, req, server.id):
+                continue
+        else:
+            if not _monitor_task_allowed(chk, req, server.id):
+                continue  # настройки могли измениться после постановки запроса в очередь
+            if req.url:
+                chk = checks_exec.path_view(chk, req.url)
         if (now - _aware(req.created_at)).total_seconds() <= deadline_seconds(chk):
             out.append((req, chk))
     return out
+
+
+async def _standalone_task_allowed(session, check, req: ProbeRequest, server_id: int) -> bool:
+    if not probe_scope.requires_trusted_server(check):
+        return True
+    cid = (req.spec or {}).get("trusted_check_id")
+    trusted = await session.get(Check, cid) if cid else None
+    return (trusted is not None and probe_scope.trusted_server(trusted) == server_id
+            and probe_scope.target_host(trusted.target) == probe_scope.target_host(req.url))
+
+
+def _monitor_task_allowed(check: Check | None, req: ProbeRequest, server_id: int) -> bool:
+    if check is None or not check.enabled or check.type != "http":
+        return False
+    if req.kind == inside_probe.KIND:
+        return not check.probe_local and not probe_scope.requires_trusted_server(check)
+    return check.probe_local and check.probe_server_id == server_id and probe_scope.server_allowed(check, server_id)
 
 
 async def take_fast_tasks(session: AsyncSession, server: Server, now: datetime) -> list[dict]:
@@ -242,11 +262,14 @@ async def ingest(
         req = await session.get(ProbeRequest, rid)
         if req is None or req.server_id != server_id or req.ts is not None:
             continue  # чужая, повтор уже учтённого ответа или давно вычищенная
+        if req.check_id == 0 and req.url and not await _standalone_task_allowed(
+                session, request_check(req), req, server_id):
+            continue
         req.ts = now
         req.code = int(r.get("code") or 0)
         lat = r.get("latency_ms")
         req.latency_ms = int(lat) if isinstance(lat, (int, float)) else None
-        req.error = str(r.get("error") or "")[:512]
+        req.error = mask_probe_urls(str(r.get("error") or ""))[:512]
         req.kw_up_found = bool(r.get("kw_up_found", True))
         req.kw_down_found = bool(r.get("kw_down_found", False))
         try:
@@ -259,7 +282,7 @@ async def ingest(
         if req.kind == inside_probe.KIND:
             # сайт из панели упал, спрашивали сервер сайта: ответ - в монитор, статус не трогаем
             check = await session.get(Check, req.check_id)
-            if check is not None:
+            if _monitor_task_allowed(check, req, server_id):
                 inside_probe.store(check, req, server_id, now)
             continue
         if req.kind == "dpath":
@@ -279,7 +302,7 @@ async def ingest(
                     or check is None or alert_recheck.identity(check) != job.spec["identity"]
                     or alert_recheck.digest(alert_recheck.check_snapshot(check, "status")) != job.spec["baseline"]):
                 continue
-        if check is None or not check.probe_local or check.probe_server_id != server_id:
+        if not _monitor_task_allowed(check, req, server_id):
             # пока ждали, монитор удалили, перевели на проверку из панели или сайт
             # переехал — ответ этой ноды про него больше ничего не значит
             continue

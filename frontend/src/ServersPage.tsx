@@ -88,6 +88,7 @@ import { toastError } from './toast'
 import { useUrlCard, useUrlParam } from './deeplink'
 import { CardNav, FreshChip, markMuted, OvAreas, OvRows, secInfoOf, type SecDef, type SecInfo, type SecItem } from './cardLayout'
 import { fmtBytes, fmtDur, rateUnits, timeUnits } from './units'
+import { systemdUnitArg } from './shell'
 import {
   MuteChip,
   SNOOZE_KINDS,
@@ -729,9 +730,9 @@ function ClockFix({ server: s, clock, skew, canManage }: {
       setBusy(false)
     }
   }
-  const svc = (clock.service || '').toLowerCase()
-  const main = svc.includes('chrony')
-    ? `sudo systemctl enable --now ${clock.service} && sudo chronyc makestep`
+  const svc = clock.service
+  const main = svc === 'chrony' || svc === 'chronyd'
+    ? `sudo systemctl enable --now -- ${svc} && sudo chronyc makestep`
     : 'sudo timedatectl set-ntp true'
   const httpFix =
     `sudo date -s "$(curl -sI ${window.location.origin}/ | grep -i '^date:' | cut -d' ' -f2- | tr -d '\\r')"`
@@ -3573,6 +3574,7 @@ const CLEANUP = 'ansible-playbook playbooks/units_cleanup.yml -l kervax'
 function unitHint(u: FailedUnit, all: FailedUnit[], t: TFn): UnitHint | null {
   const log = (u.log ?? []).join('\n')
   const n = u.unit
+  const arg = systemdUnitArg(n)
   const again = t('Перезапуск не поможет: юнит упадет снова.')
   const fleet = (text: string): UnitStep => ({ id: 'fleet', alt: true, text, cmd: CLEANUP })
   // у давно упавшего mdmonitor.service лог уже ротирован, причину видно у mdmonitor-oneshot
@@ -3581,11 +3583,14 @@ function unitHint(u: FailedUnit, all: FailedUnit[], t: TFn): UnitHint | null {
     // как в units_cleanup.yml: таймер oneshot выключить, mdmonitor.service замаскировать (его
     // запускает еще и правило udev), отметку сбросить у тех, что упали. Таймер трогаем, только
     // если oneshot есть на ноде: на RHEL его нет, и disable оборвал бы всю цепочку
-    const md = all.filter((x) => x.unit.startsWith('mdmonitor')).map((x) => x.unit)
+    const md = all.flatMap((x) => {
+      const unit = x.unit.startsWith('mdmonitor') && systemdUnitArg(x.unit)
+      return unit ? [unit] : []
+    })
     const cmd = [
       ...(md.includes('mdmonitor-oneshot.service') ? ['sudo systemctl disable --now mdmonitor-oneshot.timer'] : []),
       'sudo systemctl mask --now mdmonitor.service',
-      `sudo systemctl reset-failed ${md.join(' ')}`,
+      ...(md.length ? [`sudo systemctl reset-failed -- ${md.join(' ')}`] : []),
     ].join(' && ')
     return {
       what: t('mdadm некуда слать письма (в mdadm.conf нет MAILADDR): за RAID он не следит и падает при каждом запуске'),
@@ -3620,7 +3625,7 @@ function unitHint(u: FailedUnit, all: FailedUnit[], t: TFn): UnitHint | null {
   if (n.endsWith('.socket') && u.result === 'resources')
     return {
       what: t('Сокет не смог занять порт: его уже держит сам сервис (например, sshd со своим портом)'),
-      steps: [{ id: 'off', text: t('Выключить лишний сокет'), cmd: `sudo systemctl disable --now ${n} && sudo systemctl reset-failed ${n}` }],
+      steps: [{ id: 'off', text: t('Выключить лишний сокет'), cmd: arg ? `sudo systemctl disable --now -- ${arg} && sudo systemctl reset-failed -- ${arg}` : undefined }],
       foot: t('Перезапуск не поможет: порт занят. Сервис при этом работает.'),
       noRestart: true,
     }
@@ -3628,7 +3633,7 @@ function unitHint(u: FailedUnit, all: FailedUnit[], t: TFn): UnitHint | null {
     return {
       what: t('restic не смог прочитать часть файлов (код 3): снапшот есть, но неполный'),
       steps: [
-        { id: 'find', text: t('Найти в журнале, какие файлы'), cmd: `sudo journalctl -u ${n} --since "2 days ago" --no-pager | grep -i -E "error|denied|no such"` },
+        { id: 'find', text: t('Найти в журнале, какие файлы'), cmd: arg ? `sudo journalctl --unit=${arg} --since "2 days ago" --no-pager | grep -i -E "error|denied|no such"` : undefined },
         { id: 'fix', text: t('Исключить их из бэкапа или выдать доступ') },
       ],
     }
@@ -4026,6 +4031,10 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
   // журнал учетке только для просмотра - с галкой "может читать логи", без нее кнопка приглушена
   const hasJournal = !journalBlocker(s)
   const canJournal = canLogs && hasJournal
+  const journalCmd = (unit: string) => {
+    const arg = systemdUnitArg(unit)
+    return arg ? `sudo journalctl --unit=${arg} -n 50 --no-pager` : undefined
+  }
   const mute = async (unit: string) => {
     if (!window.confirm(t('Не алертить по {u}? Юнит перестанет алертить и как упавший, и как перезапускающийся.', { u: unit }))) return
     setBusy(true)
@@ -4051,7 +4060,7 @@ function LoopingUnits({ server: s, onChanged }: { server: Server; onChanged: () 
             {sinceShort(p.since, t) && <span className="muted small">{sinceShort(p.since, t)}</span>}
           </div>
           {(p.log?.length ?? 0) > 0 && <pre className="unit-log mono">{p.log!.join('\n')}</pre>}
-          <FixSteps steps={[{ id: 'log', cmd: `sudo journalctl -u ${p.unit} -n 50 --no-pager` }]}
+          <FixSteps steps={[{ id: 'log', cmd: journalCmd(p.unit ?? '') }]}
             text={() => t('Найти причину в логе')}
             foot={t('systemd поднимает сервис сам, поэтому среди упавших его нет.')} />
           {(!isViewer || hasJournal) && (
@@ -4753,8 +4762,11 @@ function NoBootUnits({ server: s, onChanged }: { server: Server; onChanged: () =
   const fixed = useFixDone(s.online ? s.noboot?.units : null, (u) => u.unit, (u) =>
     t('{unit} включен, поднимется после перезагрузки, замечание закрыто', { unit: u.unit }), { live: (u) => !u.muted })
   if (units.length === 0 && !fixed.done.length) return null
-  const live = units.filter((u) => !u.muted)
-  const cmd = `sudo systemctl enable ${live.map((u) => u.unit).join(' ')}`
+  const live = units.flatMap((u) => {
+    const arg = !u.muted && systemdUnitArg(u.unit)
+    return arg ? [arg] : []
+  })
+  const cmd = `sudo systemctl enable -- ${live.join(' ')}`
   return (
     <div className="chart-card net-card" id="mcard-noboot">
       <div className="net-head">

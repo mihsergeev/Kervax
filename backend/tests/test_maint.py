@@ -2,6 +2,8 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import httpx
+
 from app import collector, maint
 from app.alerts import full_text
 from app.config import Settings
@@ -261,6 +263,36 @@ async def test_verify_after_window(tmp_path, monkeypatch):
     await collector.maintenance_tick(factory, settings, now + timedelta(minutes=1))
     assert len(sent) == 2
     await engine.dispose()
+
+
+async def test_verify_retries_only_undelivered_windows(client, monkeypatch):
+    factory = client._transport.app.state.session_factory  # noqa: SLF001
+    now = datetime.now(timezone.utc)
+    async with factory() as session:
+        session.add_all([
+            MaintenanceWindow(title="first", starts_at=now - timedelta(hours=1),
+                              ends_at=now - timedelta(minutes=6)),
+            MaintenanceWindow(title="second", starts_at=now - timedelta(hours=1),
+                              ends_at=now - timedelta(minutes=6)),
+        ])
+        await session.commit()
+
+    attempts = []
+
+    async def post(_self, url, *, json):
+        attempts.append(json["text"])
+        if len(attempts) == 2:
+            raise httpx.ConnectError("test connection failure")
+        return httpx.Response(200, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    settings = Settings(alert_webhook="http://hook.example.com")
+    for n in range(3):
+        await collector.maintenance_tick(factory, settings, now + timedelta(minutes=n))
+
+    assert len(attempts) == 3
+    assert "first" in attempts[0] and "second" in attempts[1]
+    assert attempts[2] == attempts[1]
 
 
 async def test_bot_status_shows_window(client):

@@ -214,7 +214,7 @@ func TestPanelURL(t *testing.T) {
 			t.Fatalf("%s: %v", u, err)
 		}
 	}
-	for _, u := range []string{"http://panel.example.com", "http://203.0.113.9:8000", "ftp://panel.example.com", "panel.example.com"} {
+	for _, u := range []string{"http://panel.example.com", "http://127.panel.example.com", "http://203.0.113.9:8000", "ftp://panel.example.com", "panel.example.com"} {
 		if panelURLOK(u) == nil {
 			t.Fatalf("accepted %s", u)
 		}

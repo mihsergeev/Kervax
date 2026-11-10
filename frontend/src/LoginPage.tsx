@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react'
-import { api, ApiError, setToken, type Branding } from './api'
+import { api, ApiError, getToken, setToken, type Branding } from './api'
+import { isCurrentSession } from './sessionToken'
 import { BrandLogo } from './BrandLogo'
 import { useI18n } from './i18n'
 
@@ -19,6 +20,8 @@ export function LoginPage({ onLogin, branding }: Props) {
 
   async function submit(e: FormEvent) {
     e.preventDefault()
+    if (busy) return
+    const token = getToken()
     setBusy(true)
     setError(null)
     try {
@@ -33,6 +36,7 @@ export function LoginPage({ onLogin, branding }: Props) {
           }),
         },
       )
+      if (!isCurrentSession(token)) return
       setToken(access_token)
       onLogin()
     } catch (err) {

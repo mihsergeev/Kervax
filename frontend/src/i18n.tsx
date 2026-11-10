@@ -602,6 +602,8 @@ const EN: Record<string, string> = {
   'Заглушить:': 'Snooze:',
   'Копировать': 'Copy',
   'Скопировано': 'Copied',
+  'Не удалось скопировать': 'Could not copy',
+  'Сеанс изменился. Повторите действие.': 'The session changed. Try again.',
   'На что ушло место': 'Where the disk space went',
   'Место на дисках': 'Disk space',
   '{u} из {s}': '{u} of {s}',
@@ -3171,6 +3173,10 @@ const EN: Record<string, string> = {
 
   'Имя репозитория выглядит небезопасно — команда не показана, разберитесь на сервере вручную.':
     'The repository name looks unsafe — no command shown, sort it out on the server by hand.',
+  'Каталог бэкапов не распознан. Проверьте путь на сервере.':
+    'Unrecognized backup directory. Check the path on the server.',
+  'Хранилище бэкапов изменилось или недоступно. Обновите отчет и проверьте каталог на сервере.':
+    'Backup storage changed or is unavailable. Refresh the report and check the directory on the server.',
   '🧹 массовая зачистка': '🧹 bulk cleanup',
   'не обновлялись дольше': 'not updated for more than',
   'приглушённые вручную': 'muted manually',

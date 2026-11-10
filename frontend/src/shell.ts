@@ -9,6 +9,14 @@ export function shq(v: string): string {
   return v !== '' && SAFE.test(v) ? v : `'${v.replace(/'/g, `'\\''`)}'`
 }
 
+// В systemctl/journalctl само приложение понимает glob: одного shell quoting недостаточно.
+// Имя - это литерал (в том числе \\xNN и -.mount), а не путь, шаблон или параметр.
+export function systemdUnitArg(unit: string): string | null {
+  return unit.length <= 255 && /^[-A-Za-z0-9@._:\\]+\.(service|socket|timer|mount|automount|swap|path|target|device|slice|scope|busname|snapshot)$/.test(unit)
+    ? shq(unit)
+    : null
+}
+
 // для строки-комментария в скрипте: перевод строки вывел бы остаток из комментария в команду
 export function oneLine(v: string): string {
   return v.replace(/[\r\n]+/g, ' ')

@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
-from app import alert_recheck as recheck, audit
+from app import alert_recheck as recheck, audit, probe_scope
 from app.collector import _aware
 from app.deps import CurrentUser, SessionDep, group_allowed, user_sections
 from app.models import AlertRecheck, Check, ProbeRequest, Server, User
@@ -99,11 +99,12 @@ async def start(body: RecheckIn, user: CurrentUser, session: SessionDep, request
         if other:
             return recheck.public(other)
         raise
-    if job.status == "checking" and isinstance(obj, Check) and obj.probe_local:
+    if job.status == "checking" and isinstance(obj, Check) and probe_scope.uses_agent(obj):
         from app import checks as checks_exec
         from app.collector import seen_online
         srv = await session.get(Server, obj.probe_server_id) if obj.probe_server_id else None
-        if srv and seen_online(srv, now) and obj.type == "http":
+        if (srv and group_allowed(user, srv.group_name) and seen_online(srv, now) and obj.type == "http"
+                and probe_scope.server_allowed(obj, srv.id)):
             main = ProbeRequest(check_id=obj.id, server_id=srv.id, created_at=now, kind="home",
                                 spec={"recheck": job.id})
             session.add(main)
@@ -117,7 +118,7 @@ async def start(body: RecheckIn, user: CurrentUser, session: SessionDep, request
             recheck.finish(job, "unavailable", "Не удалось проверить: агент не получил задание", now)
     await session.commit()
     await audit.record(session, user.username, "alert_recheck", obj.name, body.kind)
-    if job.status == "checking" and body.object_type == "check" and not obj.probe_local:
+    if job.status == "checking" and body.object_type == "check" and not probe_scope.uses_agent(obj):
         background.add_task(recheck.panel_work, request.app.state.session_factory, job.id)
     return recheck.public(job)
 

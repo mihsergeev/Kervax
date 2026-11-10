@@ -1,30 +1,19 @@
 import { currentLang, tr } from './i18n'
 import { trBackend, trBody } from './backendText'
 import { noteApiFailure, uiHeaders } from './errorLog'
+import { getToken, isCurrentSession, setToken } from './sessionToken'
 
 // Должна совпадать с MIN_PASSWORD_LEN в backend/app/security.py: интерфейс не
 // даёт ввести короче, бэкенд не принимает. Расхождение ловит ops/selfcheck.py —
 // иначе форма молча отправляла бы то, что API отвергнет.
 export const MIN_PASSWORD_LEN = 12
 
-const TOKEN_KEY = 'kervax_token'
-
-export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
-}
-
-export function setToken(token: string | null) {
-  if (token) {
-    localStorage.setItem(TOKEN_KEY, token)
-  } else {
-    localStorage.removeItem(TOKEN_KEY)
-  }
-}
+export { getToken, setToken } from './sessionToken'
 
 // Вход админа под чужой учеткой (backend/app/impersonate.py): токен админа на это время лежит
 // отдельно, а в TOKEN_KEY - токен входа, поэтому все запросы идут с правами пользователя.
 // "Вернуться к себе" возвращает токен админа на место - без повторного входа
-export const IMP_ADMIN_KEY = 'kervax_admin_token'
+const IMP_ADMIN_KEY = 'kervax_admin_token'
 const IMP_ID_KEY = 'kervax_imp_id'
 
 export function impersonating(): boolean {
@@ -34,9 +23,10 @@ export function impersonating(): boolean {
 export type ImpersonateOut = { access_token: string; imp_id: number; username: string; expires_at: string }
 
 export async function startImpersonation(userId: number): Promise<ImpersonateOut> {
-  const out = await api<ImpersonateOut>(`/api/users/${userId}/impersonate`, { method: 'POST' })
   const own = getToken()
-  if (own) localStorage.setItem(IMP_ADMIN_KEY, own)
+  const out = await api<ImpersonateOut>(`/api/users/${userId}/impersonate`, { method: 'POST' })
+  if (!own || !isCurrentSession(own) || impersonating()) throw sessionChanged('POST')
+  localStorage.setItem(IMP_ADMIN_KEY, own)
   localStorage.setItem(IMP_ID_KEY, String(out.imp_id))
   setToken(out.access_token)
   return out
@@ -52,7 +42,9 @@ export async function stopImpersonation(): Promise<void> {
   setToken(own)
   setReadOnly(false) // дальше запросы с токеном админа, даже если смотрели глазами наблюдателя
   if (own && id) {
-    await api(`/api/users/impersonation/${id}/stop`, { method: 'POST' }).catch(() => undefined)
+    await api(`/api/users/impersonation/${id}/stop`, {
+      method: 'POST', signal: AbortSignal.timeout(5000),
+    }).catch(() => undefined)
   }
 }
 
@@ -108,6 +100,10 @@ export class ApiError extends Error {
     this.fields = fields
     this.method = method
   }
+}
+
+function sessionChanged(method: string): ApiError {
+  return new ApiError(tr('Сеанс изменился. Повторите действие.'), 409, [], method)
 }
 
 // 422 от FastAPI несет в detail список {loc, type, msg, ctx}. Раньше вместо него
@@ -210,8 +206,9 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     ...(options.headers as Record<string, string> | undefined),
   }
   const token = getToken()
-  if (token) headers['Authorization'] = `Bearer ${token}`
   const method = (options.method || 'GET').toUpperCase()
+  if (!isCurrentSession(token)) throw sessionChanged(method)
+  if (token) headers['Authorization'] = `Bearer ${token}`
   if (writeBlocked(method, path, options.body)) {
     throw new ApiError(impUser ? tr(IMP_READ_ONLY, { user: impUser }) : tr(VIEWER_READ_ONLY), 403)
   }
@@ -220,16 +217,20 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   try {
     res = await fetch(path, { ...options, headers })
   } catch (e) {
+    if (!isCurrentSession(token)) throw sessionChanged(method)
     // сеть или панель недоступна: вместо "Failed to fetch" (у каждого браузера свой текст) - по-человечески
     noteApiFailure(method, path, 0, e instanceof Error ? e.message : String(e))
     throw new ApiError(tr('Нет связи с панелью'), 0, [], method)
   }
+  if (!isCurrentSession(token)) throw sessionChanged(method)
   if (res.status === 204) return undefined as T
 
   // Тело читаем текстом и разбираем сами. Раньше json().catch(() => null) превращал ответ 200,
   // который не JSON (страница прокси, оборванный на деплое ответ), в null: список окон
   // обслуживания приходил null, и главная падала в отрисовке на .filter
   const text = await res.text().catch(() => null)
+  // Запоздалый ответ от прежнего JWT не должен менять новый сеанс или его журнал.
+  if (!isCurrentSession(token)) throw sessionChanged(method)
   let body = null
   let broken = text === null
   if (text) {
@@ -454,10 +455,12 @@ export async function changePassword(
   current_password: string,
   new_password: string,
 ): Promise<void> {
+  const token = getToken()
   const r = await api<{ access_token: string }>('/api/auth/password', {
     method: 'POST',
     body: JSON.stringify({ current_password, new_password }),
   })
+  if (!isCurrentSession(token)) throw sessionChanged('POST')
   setToken(r.access_token)
 }
 

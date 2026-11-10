@@ -5,6 +5,7 @@ from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 
 _SECRET_PARAM = re.compile(r"(?i)(token|key|secret|pass|pwd|auth|sig|signature|session|sid|code|hash|jwt)")
+_PROBE_URL = re.compile(r"https?://[^\s\"'<>]+", re.IGNORECASE)
 
 
 def mask_target(target: str) -> str:
@@ -27,3 +28,13 @@ def mask_target(target: str) -> str:
         return t
     out = urlunsplit(parts._replace(netloc=netloc, query=query))
     return out if "://" in t else out.removeprefix("//")
+
+
+def mask_probe_urls(message: str) -> str:
+    """Keep the host and path of a request error without its credentials or query."""
+    def redact(match: re.Match) -> str:
+        target = match.group().split("#", 1)[0]
+        address, query, _ = target.partition("?")
+        return mask_target(address) + ("?***" if query else "")
+
+    return _PROBE_URL.sub(redact, message)

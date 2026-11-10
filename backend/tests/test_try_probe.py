@@ -156,12 +156,26 @@ async def test_dns_shows_the_answer_before_saving(client, auth_headers, monkeypa
     assert r.status_code == 400
 
 
+async def _trust_for_trial(client, server_id):
+    async with _factory(client)() as s:
+        check = Check(name="private-monitor", type="http", target=FORM["target"],
+                      parent_mode="server", parent_server_id=server_id)
+        s.add(check)
+        await s.commit()
+        return check.id
+
+
 async def test_inside_goes_to_the_agent_with_the_form_settings(client, auth_headers):
     """Сайт за белым списком: панель видит 403, а агент сервера сайта проверяет его на
     localhost с теми же кодом, заголовком и входом, что заведут в монитор."""
     sid, ah = await _node(client, auth_headers)
     body = dict(FORM, part="inside", expected_status="200-399,401", auth_method="basic",
                 auth_user="ops", auth_pass="secret-1", http_headers='{"X-Token": "t-1"}')
+    response = await client.post("/api/checks/try", headers=auth_headers, json=body)
+    assert response.json()["inside"]["kind"] == "no_trusted_server"
+    assert (await client.get("/api/agent/commands", headers=ah)).json()["site_probes"] == []
+    cid = await _trust_for_trial(client, sid)
+    body["check_id"] = cid
     r = await client.post("/api/checks/try", headers=auth_headers, json=body)
     assert r.status_code == 200, r.text
     inside = r.json()["inside"]
@@ -192,7 +206,23 @@ async def test_inside_goes_to_the_agent_with_the_form_settings(client, auth_head
         # пароль и заголовок не лежат в базе после ответа
         assert "auth_pass" not in req.spec and "http_headers" not in req.spec
         assert req.spec["expected_status"] == "200-399,401"
-        assert await s.scalar(select(func.count()).select_from(Check)) == 0
+        assert await s.scalar(select(func.count()).select_from(Check)) == 1
+
+    response = await client.post("/api/checks/try", headers=auth_headers, json=body)
+    assert response.json()["inside"]["status"] == "pending"
+    revoked = response.json()["inside"]["request_id"]
+    async with _factory(client)() as s:
+        check = await s.get(Check, cid)
+        check.parent_mode = "auto"
+        check.parent_server_id = None
+        await s.commit()
+    assert (await client.get("/api/agent/commands", headers=ah)).json()["site_probes"] == []
+    response = await client.post("/api/agent/site-probe-result", headers=ah, json={
+        "site_probes": [{"id": -revoked, "code": 200}],
+    })
+    assert response.status_code == 200, response.text
+    response = await client.get(f"/api/checks/try/{revoked}", headers=auth_headers)
+    assert response.json()["inside"]["status"] == "pending"
 
 
 async def test_inside_without_a_serving_server_or_answer(client, auth_headers):
@@ -201,8 +231,9 @@ async def test_inside_without_a_serving_server_or_answer(client, auth_headers):
                           json={"type": "http", "target": "other.example.com", "part": "inside"})
     assert r.json()["inside"] == {**r.json()["inside"], "status": "none", "kind": "no_server"}
 
+    cid = await _trust_for_trial(client, sid)
     r = await client.post("/api/checks/try", headers=auth_headers,
-                          json=dict(FORM, part="inside", auth_method="basic", auth_pass="p"))
+                          json=dict(FORM, part="inside", auth_method="basic", auth_pass="p", check_id=cid))
     rid = r.json()["inside"]["request_id"]
     async with _factory(client)() as s:
         req = await s.get(ProbeRequest, rid)

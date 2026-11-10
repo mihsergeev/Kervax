@@ -170,6 +170,43 @@ async def test_bulk_to_https_goes_one_by_one(client, auth_headers, monkeypatch):
     assert r.status_code == 400 and "бэкап идет не на" in r.json()["detail"]
 
 
+async def test_to_https_requires_access_to_both_servers(client, auth_headers, monkeypatch):
+    from app.api import servers as srv_api
+    from app.models import BackupSetupJob, Server
+    from tests.test_api_access import _user
+
+    a, b = await _pair(client, auth_headers, 14, tls_front=False)
+    async with _app(client).state.session_factory() as session:
+        (await session.get(Server, a)).group_name = "clients"
+        (await session.get(Server, b)).group_name = "backup"
+        await session.commit()
+    scoped = await _user(client, auth_headers, "client-editor", server_groups=["clients"])
+    authorized = await _user(client, auth_headers, "backup-editor", server_groups=["clients", "backup"])
+    started = []
+
+    async def fake_orchestrate(_factory, job_id, params):
+        started.append(params["bs_id"])
+
+    monkeypatch.setattr(srv_api, "_orchestrate_to_https", fake_orchestrate)
+    path = f"/api/servers/{a}/backup/to-https"
+    response = await client.post(path, headers=scoped)
+    assert response.status_code == 404, response.text
+    assert started == []
+    listing = (await client.get("/api/servers", headers=scoped)).json()
+    assert listing[0]["backup_https"]["bs_id"] is None
+
+    response = await client.post(path, headers=authorized)
+    assert response.status_code == 200, response.text
+    assert started == [b]
+    job_id = response.json()["id"]
+    async with _app(client).state.session_factory() as session:
+        job = await session.get(BackupSetupJob, job_id)
+        assert (job.server_id, job.backup_server_id) == (a, b)
+    status = f"/api/servers/{a}/backup/setup/{job_id}"
+    assert (await client.get(status, headers=scoped)).status_code == 404
+    assert (await client.get(status, headers=authorized)).status_code == 200
+
+
 async def test_to_https_orchestration_steps(client, auth_headers, monkeypatch):
     from app.api import servers as srv_api
     from app.models import BackupSetupJob

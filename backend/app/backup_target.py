@@ -164,12 +164,14 @@ def find_backup_server(client, servers):
     return hits[0] if hits else None
 
 
-def https_view(client, servers) -> dict | None:
+def https_view(client, servers, *, visible_ids: set[int] | None = None) -> dict | None:
     """Для бэкапа по http: на какой сервер бэкапов переводить и что мешает ({bs_id, blockers})."""
     t = view(client.last_report or {})
     if not t or t["kind"] != "rest" or t["proto"] != "http":
         return None
     bs = find_backup_server(client, servers)
+    if bs is not None and visible_ids is not None and bs.id not in visible_ids:
+        bs = None
     return {"bs_id": bs.id if bs else None, "blockers": https_blockers(client, bs)}
 
 

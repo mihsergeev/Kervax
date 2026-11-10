@@ -59,6 +59,7 @@ from app import kube_expiry
 from app import dev_mode
 from app import onboard
 from app import parents as parents_mod
+from app import probe_scope
 from app import boot_warmup
 from app import timeline as timeline_mod
 from app import packages as packages_mod
@@ -163,6 +164,7 @@ from app.schemas import (
     ServerUpdate,
     SnoozeIn,
 )
+from app.secret_masks import mask_probe_urls
 from app.security import generate_agent_token, hash_agent_token
 from app.agent_auth import require_agent_source
 
@@ -696,6 +698,7 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
     # чужой группы, все равно под присмотром. Без нарезки по группам это тот же список.
     # список, а не результат запроса: его обходят три раза, а результат запроса отдается один раз
     every = servers if not (user.server_groups or []) else list(await session.scalars(select(Server)))
+    visible_ids = {s.id for s in servers}
     index = kube_coverage.build_index(every)
     names = pod_uid_names(every)
     panel = panel_server_names(every)
@@ -721,7 +724,7 @@ async def list_servers(user: CurrentUser, session: SessionDep) -> list[ServerOut
         # главной, а она берет этот список
         o.home_mutes = home_mute.keys(s, now, index)
         # бэкап по http: на какой сервер бэкапов переводить на https и что мешает (кнопка в окне)
-        o.backup_https = backup_target.https_view(s, every)
+        o.backup_https = backup_target.https_view(s, every, visible_ids=visible_ids)
         bs = (s.last_report or {}).get("backup_server") or {}
         if bs.get("present"):
             arch = s.backup_repo_archive or {}
@@ -3552,6 +3555,8 @@ async def _orchestrate_to_https(session_factory, job_id: int, params: dict) -> N
 
 async def _to_https_job(session, user, client: Server, bs: Server | None) -> tuple[BackupSetupJob, dict]:
     """Проверки и задача перевода одного клиента; 400 с причиной, если сейчас нельзя."""
+    if bs is not None and not group_allowed(user, bs.group_name):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Сервер бэкапов не найден")
     why = backup_target.https_blockers(client, bs)
     if why:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"{client.name}: " + "; ".join(why))
@@ -3636,6 +3641,10 @@ async def backup_setup_status(
     job = await session.get(BackupSetupJob, job_id)
     if job is None or job.server_id != server_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Задача не найдена")
+    if user.server_groups and job.backup_server_id != server_id:
+        bs = await session.get(Server, job.backup_server_id)
+        if bs is None or not group_allowed(user, bs.group_name):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Задача не найдена")
     out = BackupSetupJobOut.model_validate(job)
     if user.role == "viewer" and not user.can_read_logs:
         # detail и сообщения ошибок содержат stdout/stderr helper'ов: это те же логи,
@@ -4299,13 +4308,16 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> lis
     if not ids:
         return pending
     mine = set(
-        await session.scalars(
-            select(Check.id).where(
+        check.id for check in await session.scalars(
+            select(Check).where(
                 Check.id.in_(ids),
                 Check.probe_server_id == server_id,
                 Check.probe_local.is_(True),
+                Check.enabled.is_(True),
+                Check.type == "http",
             )
         )
+        if probe_scope.server_allowed(check, server_id)
     )
     for r in results:
         cid = _id(r)
@@ -4327,7 +4339,7 @@ async def _store_site_probes(session, server_id: int, results: list, now) -> lis
         row.code = int(r.get("code") or 0)
         lat = r.get("latency_ms")
         row.latency_ms = int(lat) if isinstance(lat, (int, float)) else None
-        row.error = str(r.get("error") or "")[:512]
+        row.error = mask_probe_urls(str(r.get("error") or ""))[:512]
         row.kw_up_found = bool(r.get("kw_up_found", True))
         row.kw_down_found = bool(r.get("kw_down_found", False))
         try:
@@ -4360,9 +4372,13 @@ async def _store_path_probes(session, server_id: int, results: list, now) -> Non
             Check.id.in_(list(by_check)),
             Check.probe_server_id == server_id,
             Check.probe_local.is_(True),
+            Check.enabled.is_(True),
+            Check.type == "http",
         )
     )
     for check in checks:
+        if not probe_scope.server_allowed(check, server_id):
+            continue
         paths = {tid: path for path, tid in manual_probe.path_task_ids(check).items()}
         for tid, r in by_check.get(check.id, []):
             path = paths.get(tid)
@@ -4380,7 +4396,7 @@ async def _store_path_probes(session, server_id: int, results: list, now) -> Non
             row.code = int(r.get("code") or 0)
             lat = r.get("latency_ms")
             row.latency_ms = int(lat) if isinstance(lat, (int, float)) else None
-            row.error = str(r.get("error") or "")[:512]
+            row.error = mask_probe_urls(str(r.get("error") or ""))[:512]
             row.via = str(r.get("via") or "")[:128]
 
 
@@ -4403,7 +4419,7 @@ async def _site_probe_tasks(session, server_id: int) -> list[dict]:
             )
         )
     )
-    return [task for c in rows for task in manual_probe.planned_tasks(c)]
+    return [task for c in rows if probe_scope.server_allowed(c, server_id) for task in manual_probe.planned_tasks(c)]
 
 
 @agent_router.get("/commands")

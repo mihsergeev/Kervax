@@ -15,6 +15,7 @@ from app.deps import CurrentUser, SessionDep
 from app.models import Location, Server
 from app.schemas import (GreInstallOut, InstallStatusOut, InstallViaIn, InstallViaOut, RelayUpdate, ServerOut,
                          agent_ip_valid)
+from app.secret_masks import mask_target
 from app.security import hash_agent_token
 from app.agent_auth import require_agent_source
 
@@ -86,6 +87,8 @@ async def install_via(server_id: int, body: InstallViaIn, user: CurrentUser, ses
         if loc is None or not loc.enabled or not loc.url.strip():
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "Выберите локацию с адресом прокси")
         proxy = loc.url.strip()
+        if user.role != "admin" and proxy != mask_target(proxy):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Прокси локации с учетными данными может использовать только администратор")
     elif body.mode == "gre":
         # адрес из окна главнее названного helper'ом раньше: ставят заново, и человек знает лучше
         if ip:

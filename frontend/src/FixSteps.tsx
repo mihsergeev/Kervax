@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useI18n } from './i18n'
+import { toastError } from './toast'
 
 // Готовые шаги "как исправить": текст словами и команда с кнопкой "Копировать". Команды собирает
 // бэкенд под ноду, тексты - у вызывающего по id шага (обновления ОС, версии ПО, SSH и доступы,
@@ -45,9 +46,15 @@ export function FixCmd({ cmd, onCopy, className = '' }: { cmd: string; onCopy?: 
   return (
     <div className={`agent-advice-cmd ${className}`.trim()}>
       <pre>{text}</pre>
-      <button type="button" className="ghost" onClick={(e) => {
+      <button type="button" className="ghost" onClick={async (e) => {
         e.stopPropagation()
-        navigator.clipboard?.writeText(text)
+        try {
+          if (!navigator.clipboard) throw new Error()
+          await navigator.clipboard.writeText(text)
+        } catch {
+          toastError(t('Не удалось скопировать'))
+          return
+        }
         onCopy?.()
         setCopied(true)
         window.setTimeout(() => setCopied(false), 1500)
