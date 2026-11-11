@@ -6,7 +6,7 @@ import { chromium } from 'playwright-core'
 const base = new URL(process.env.KERVAX_TEST_BASE_URL || 'http://127.0.0.1:5334')
 assert(['127.0.0.1', 'localhost', '[::1]'].includes(base.hostname))
 const browser = await chromium.launch({ executablePath: process.env.PW_CHROME, headless: true })
-let commands
+let command
 try {
   const page = await browser.newPage()
   await page.route('**/*', (route) => {
@@ -15,15 +15,18 @@ try {
     return url.pathname.startsWith('/api/') ? route.fulfill({ json: {} }) : route.continue()
   })
   await page.goto(base.href)
-  commands = await page.evaluate(async () => {
+  command = await page.evaluate(async () => {
     const { helperCmd } = await import('/src/FleetUpdate.tsx')
-    for (const hosts of [[], [''], ['all'], ['*'], ['kervax_outdated'], ['node-a,node-b'],
-      ['node-a:node-b'], ['!node-a'], ['node-a[0]'], ['@selection'], ['-v'], ['node-a\n']]) {
-      if (helperCmd(hosts) !== null) throw new Error(`Unsafe aliases accepted: ${JSON.stringify(hosts)}`)
+    const expected = 'ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated'
+    if (helperCmd([]) !== null) throw new Error('Empty rollout has a command')
+    for (const hosts of [['node-a', 'node.b'], ['single_alias'], ['absent-node'], ['all'],
+      ['*'], ['kervax_outdated'], ['node-a:node-b'], ['@selection'], ['-v'], ['node-a\n'],
+      ['node-a; touch injected']]) {
+      if (helperCmd(hosts) !== expected) throw new Error('Reported names changed the fixed command')
     }
-    return [helperCmd(['node-a', 'node.b']), helperCmd(['fixture_group']), helperCmd(['absent-node'])]
+    return helperCmd(['single_alias', 'node.b'])
   })
-  assert(commands.every(Boolean))
+  assert(command)
 } finally {
   await browser.close()
 }
@@ -41,6 +44,13 @@ cat >hosts <<'EOF'
 node-a
 node.b
 unrelated-node
+
+[single_alias]
+node-a
+
+[kervax_outdated]
+node-a
+node.b
 EOF
 mkdir playbooks
 cat >playbooks/kervax_helpers.yml <<'EOF'
@@ -48,12 +58,19 @@ cat >playbooks/kervax_helpers.yml <<'EOF'
   gather_facts: false
   tasks: []
 EOF
-legacy=$(ansible-playbook playbooks/kervax_helpers.yml --limit=fixture_group --list-hosts)
-[[ $legacy == *unrelated-node* ]]
-actual=$(${commands[0]} --list-hosts)
+actual=$(${command} --list-hosts)
 [[ $actual == *node-a* && $actual == *node.b* && $actual != *unrelated-node* ]]
-if ${commands[1]} --list-hosts; then exit 11; fi
-if ${commands[2]} --list-hosts; then exit 12; fi
+# The controller, rather than a stale copied host list, chooses the next targets.
+cat >hosts <<'EOF'
+[kervax_outdated]
+unrelated-node
+
+[current]
+node-a
+node.b
+EOF
+actual=$(${command} --list-hosts)
+[[ $actual == *unrelated-node* && $actual != *node-a* && $actual != *node.b* ]]
 `
 const windows = process.platform === 'win32'
 const result = spawnSync(windows ? 'wsl' : 'bash', windows ? ['--cd', '/', '--', 'bash', '-s'] : ['-s'], {
@@ -61,4 +78,4 @@ const result = spawnSync(windows ? 'wsl' : 'bash', windows ? ['--cd', '/', '--',
 })
 assert.ifError(result.error)
 assert.equal(result.status, 0, result.stdout + result.stderr)
-console.log('PASS Ansible selects exactly the named hosts and refuses groups, patterns, and absent aliases')
+console.log('PASS Fixed helper command uses current inventory targets and never interpolates reported names')

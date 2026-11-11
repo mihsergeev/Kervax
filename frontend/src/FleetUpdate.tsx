@@ -5,7 +5,7 @@ import {
 } from './api'
 import { useI18n } from './i18n'
 import { fmtSetupVersion, shortList } from './serverUtils'
-import { HOST_RE, shq } from './shell'
+import { HELPER_UPDATE_CMD, HOST_RE } from './shell'
 import { toastError } from './toast'
 
 // Обновление парка из блока "Обновления" главной и баннера "Серверов": агент - OTA через
@@ -363,21 +363,10 @@ export function AgentUpdRow({ servers, avail, fleet, canUpd, canary, onOpen, onO
   )
 }
 
-// Ansible interprets --limit after the shell has removed quotes. Accept only host aliases,
-// and keep the inventory-wide group command in the Ansible settings screen.
+// Resolve targets when the command runs, including single-host inventory aliases.
+// The local host list is used only to track this panel's rollout progress.
 export function helperCmd(hosts: string[]): string | null {
-  if (!hosts.length || hosts.some((h) =>
-    h.trim() !== h || !HOST_RE.test(h) || h.startsWith('-') ||
-    /^(?:all|ungrouped|localhost|127\.0\.0\.1|kervax(?:_.*)?)$/i.test(h)
-  )) return null
-  const aliases = shq(hosts.join(','))
-  // An ordinary name also selects an inventory group when the host is absent. Check the
-  // controller's inventory before running the playbook and refuse aliases shared with groups.
-  const check = 'import json,sys; inventory=json.load(sys.stdin); wanted=set(sys.argv[1].split(",")); ' +
-    'hosts={h for name,group in inventory.items() if name!="_meta" for h in group.get("hosts",[])}; ' +
-    'sys.exit("Ansible limit must contain only existing host aliases, not groups.") ' +
-    'if wanted.intersection(inventory) or not wanted.issubset(hosts) else None'
-  return `ansible-inventory --playbook-dir playbooks --list | python3 -c ${shq(check)} ${aliases} && ansible-playbook playbooks/kervax_helpers.yml --limit=${aliases}`
+  return hosts.length ? HELPER_UPDATE_CMD : null
 }
 
 async function copy(s: string): Promise<boolean> {

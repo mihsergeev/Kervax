@@ -13,6 +13,7 @@ import { useI18n } from './i18n'
 import { useEscape } from './useEscape'
 import { NetTile } from './NetLinks'
 import { fmtSetupVersion, sinceShort } from './serverUtils'
+import { HELPER_UPDATE_CMD } from './shell'
 
 type Props = {
   onClose: () => void
@@ -37,7 +38,7 @@ const GROUPS: Group[] = [
     label: 'Что обновит плейбук',
     nav: 'Helper-скрипты',
     lead: 'Ноды на связи, где устарел helper или не включен сторож агента. Плейбук ставит только устаревшее, остальное пропускает.',
-    cmd: 'ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated',
+    cmd: HELPER_UPDATE_CMD,
     level: 1,
     has: (n) => n.rollout,
   },

@@ -25,6 +25,10 @@ export function oneLine(v: string): string {
 // имя хоста или ноды: то, что ansible и ssh примут как есть
 export const HOST_RE = /^[A-Za-z0-9._-]{1,253}$/
 
+// The controller inventory resolves current rollout targets across connected panels.
+// Keep the group fixed so reported hostnames cannot become Ansible patterns.
+export const HELPER_UPDATE_CMD = 'ansible-playbook playbooks/kervax_helpers.yml -l kervax_outdated'
+
 // имя объекта Kubernetes (namespace, секрет): DNS-метка или поддомен
 export const KUBE_NAME_RE = /^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$/
 

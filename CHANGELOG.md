@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.128] - 2026-11-12
+
+- Restore the compact helper update command using the dynamic kervax_outdated inventory group across connected panels. Inventory aliases work again, targets refresh when the command runs, and reported hostnames cannot alter the command.
+- Use the same helper command on the dashboard and in Ansible settings, including when copying a command again during an existing rollout.
+
 ## [1.8.127] - 2026-11-10
 
 - Prevent editors from repurposing approved internal HTTP checks, including through bulk edits or concurrent changes. Enforce the configured access policy for custom DNS resolvers.
