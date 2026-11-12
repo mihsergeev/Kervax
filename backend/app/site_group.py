@@ -12,8 +12,8 @@
 Как работает:
 - сбой нескольких мониторов одного места в одном тике - одно сообщение "N мониторов отвечают
   через раз" со списком: адрес ссылкой на монитор и коротко, что не так;
-- одиночный сбой уходит как обычно, но открывает группу места. Следующий монитор того же места
-  в пределах JOIN от прошлого не шлет нового сообщения: отправленное правится (Telegram умеет
+- одиночный сбой уходит как обычно, но открывает группу места. Пока он не разрешился, следующий
+  монитор того же места не шлет нового сообщения даже после JOIN: отправленное правится (Telegram умеет
   editMessageText), монитор дописывается строкой, в историю алертов - своя строка;
 - отбои членов группы молчат, пока в норму не придут все: тогда одно "снова отвечают". Если
   часть давно в норме (PARTIAL), а остальные нет - отбой поднявшимся, остальные ждут дальше;
@@ -44,7 +44,7 @@ from app import parents as parents_mod, settings_store, tg_fmt
 log = logging.getLogger("kervax.site_group")
 
 STATE_KEY = "site_groups"
-JOIN = timedelta(minutes=30)      # новый сбой места не позже стольких от прошлого - в ту же группу
+JOIN = timedelta(minutes=30)      # окно для затихшей группы; активная открыта до реального отбоя
 PARTIAL = timedelta(hours=1)      # часть в норме столько, остальные нет - отбой поднявшимся
 LIST_MAX = 8                      # строк мониторов в сообщении, остальное "и еще N"
 
@@ -270,14 +270,16 @@ def ts(raw) -> datetime | None:
     return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
 
 
-def open_for(groups: dict, key: str, lvl: str, group: str, now: datetime) -> dict | None:
-    """Группа, в которую можно дописать новый сбой места: прошлый сбой не раньше JOIN."""
+def open_for(groups: dict, key: str, lvl: str, group: str, now: datetime,
+             active: set[int] | None = None) -> dict | None:
+    """К открытому сбою дописываем и после JOIN; окно нужно только для уже затихшего сбоя."""
     best = None
     for g in groups.values():
         if g.get("key") != key or g.get("lvl") != lvl or (g.get("grp") or "") != group:
             continue
         last = ts(g.get("last"))
-        if last is None or now - last > JOIN:
+        if last is None or (now - last > JOIN and not any(
+                int(cid) in (active or set()) for cid in g.get("members") or {})):
             continue
         if best is None or (ts(best.get("last")) or now) < last:
             best = g
@@ -300,13 +302,14 @@ def ok_since(g: dict, cid: str, ok: bool, now: datetime) -> datetime | None:
     return ts(oks[cid]) or now
 
 
-def stale(g: dict, now: datetime) -> bool:
+def stale(g: dict, now: datetime, active: set[int] | None = None) -> bool:
     """Группа больше не нужна: пустая, или в ней одно сообщение одного монитора (его отбой
     обычный), а дописать в нее уже нельзя."""
     last = ts(g.get("last")) or now
     if not g.get("members"):
         return True
-    return bool(g.get("solo")) and now - last > JOIN
+    return bool(g.get("solo")) and now - last > JOIN and not any(
+        int(cid) in (active or set()) for cid in g.get("members") or {})
 
 
 async def load(session) -> dict:

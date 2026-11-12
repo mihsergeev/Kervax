@@ -68,6 +68,8 @@ def runs(hist: Hist, since: datetime) -> int:
     for ts, st in hist:
         if _aware(ts) < since:
             continue
+        if st == "unknown":
+            continue
         if st != "up":
             n += 0 if inside else 1
             inside = True
@@ -87,5 +89,5 @@ def stable(hist: Hist, now: datetime) -> bool:
     tail = [st for _, st in hist[-STABLE_N:]]
     if len(tail) < STABLE_N or any(st != "up" for st in tail):
         return False
-    last = max((_aware(ts) for ts, st in hist if st == "down"), default=None)
+    last = max((_aware(ts) for ts, st in hist if st in ("down", "unknown")), default=None)
     return last is None or now - last >= STABLE

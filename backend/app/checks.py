@@ -36,7 +36,7 @@ _USER_AGENT = (
 
 @dataclass
 class CheckOutcome:
-    status: str  # up | degraded | down
+    status: str  # up | degraded | down | unknown (no observation)
     latency_ms: int | None = None
     value: float | None = None  # напр. дней до истечения сертификата
     message: str = ""
@@ -597,12 +597,16 @@ def combine_paths(main: CheckOutcome, items: list) -> CheckOutcome:
     status, message = main.status, main.message
     if main.status != "down":
         bad = [r for r in results if r["status"] == "down"]
+        missing = [r for r in results if r["status"] == "unknown"]
         slow = [r for r in results if r["status"] == "degraded"]
         if bad:
             status = "down"
             message = f"{bad[0]['path']}: {bad[0]['message']}"
             if len(bad) > 1:
                 message += f" (и ещё путей: {len(bad) - 1})"
+        elif missing:
+            status = "unknown"
+            message = f"{missing[0]['path']}: {missing[0]['message']}"
         elif slow and main.status == "up":
             status = "degraded"
             message = f"{slow[0]['path']}: {slow[0]['message']}"
@@ -685,18 +689,17 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
         # нодой, и путать их значит отправить человека искать не там.
         if not getattr(check, "probe_server_id", None):
             return CheckOutcome(
-                "down",
-                message="проверять локально некому: ни один сервер парка не "
-                        "обслуживает этот домен",
+                "unknown",
+                message="не найден сервер для локальной проверки",
             )
-        return CheckOutcome("down", message="агент ещё не присылал результат проверки")
+        return CheckOutcome("unknown", message="ждем результат локальной проверки от агента")
     ts = probe.ts if probe.ts.tzinfo else probe.ts.replace(tzinfo=timezone.utc)
     age = (now - ts).total_seconds()
     limit = max(check.interval_seconds, 30) * AGENT_PROBE_STALE_INTERVALS
     if age > limit:
         mins = int(age // 60)
         return CheckOutcome(
-            "down",
+            "unknown",
             message=f"агент не присылает результат {mins} мин — проверка с сервера не идёт",
         )
     via = getattr(probe, "via", "") or ""

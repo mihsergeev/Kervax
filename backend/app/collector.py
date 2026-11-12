@@ -636,16 +636,6 @@ def _apply_expiry(row: Check, info, now: datetime, pending: list, doms: DomainAl
                 row.domain_alerted_days = bucket  # о домене уже сказано по другому монитору
 
 
-# Сколько домен может отсутствовать в списке ноды, прежде чем монитор от неё отвяжут.
-# Список собирается раз в 15 минут, и один неполный сбор — деплой, пересоздание
-# контейнера, упавший helper — не повод считать, что сайт с ноды ушёл: два полных цикла.
-# Переезд на ДРУГУЮ ноду при этом срабатывает сразу — там домен виден, ждать нечего.
-_UNBIND_GRACE = 30 * 60
-# check_id → когда домен последний раз был виден на привязанной ноде. В памяти
-# планировщика: после его рестарта в худшем случае повторится ровно старое поведение.
-_bound_seen: dict[int, datetime] = {}
-
-
 def _probe_node(cands: list[int], current: int | None, group_of: dict[int, str]) -> int | None:
     """Нода для монитора среди серверов, у которых домен в web_services (по имени сервера).
 
@@ -672,18 +662,28 @@ async def rebind_local_probes(session_factory) -> int:
     потому что сайт переезжает с ноды на ноду, а галочка остаётся — при жёсткой
     привязке монитор молча ушёл бы проверяться туда, где сайта уже нет.
 
-    Ноду не находим — probe_server_id остаётся пустым, и монитор честно скажет, что
-    проверять его некому: это лучше, чем зелёный статус ни от кого."""
+    Остановка контейнера убирает домен из отчета, но прежний сервер остается местом
+    проверки. Привязку меняем при подтвержденном переезде или отзыве доступа."""
     async with session_factory() as session:
         checks = list(
             await session.scalars(
                 select(Check).where(Check.enabled.is_(True), Check.probe_local.is_(True))
+                .order_by(Check.id).with_for_update()
             )
         )
         if not checks:
             return 0
         servers = sorted(await session.scalars(select(Server).where(Server.enabled.is_(True))), key=lambda x: x.name)
         servers_by_id = {srv.id: srv for srv in servers}
+        previous = {cid: (sid, ts) for cid, sid, ts in (await session.execute(
+            select(AgentProbe.check_id, AgentProbe.server_id, AgentProbe.ts)
+            .where(AgentProbe.check_id.in_([c.id for c in checks]))
+        )).all()}
+        edited = dict((await session.execute(
+            select(AuditLog.target, func.max(AuditLog.ts))
+            .where(AuditLog.action == "check_update", AuditLog.target.in_([c.name for c in checks]))
+            .group_by(AuditLog.target)
+        )).all())
         group_of = {srv.id: srv.group_name or "" for srv in servers}
         claims: dict[str, list[int]] = {}
         for srv in servers:
@@ -694,7 +694,6 @@ async def rebind_local_probes(session_factory) -> int:
                         claims[host].append(srv.id)
         changed = 0
         now = datetime.now(timezone.utc)
-        online = {srv.id for srv in servers if seen_online(srv, now)}
         for c in checks:
             candidates = claims.get(probe_scope.target_host(c.target), [])
             if probe_scope.requires_trusted_server(c):
@@ -703,24 +702,25 @@ async def rebind_local_probes(session_factory) -> int:
                     c, servers_by_id[trusted]
                 ) else []
             want = _probe_node(candidates, c.probe_server_id, group_of)
-            if want is not None and want == c.probe_server_id:
-                _bound_seen[c.id] = now
-            # Домен пропал из списка, а нода, которая его держала, на связи: скорее всего
-            # это неполный сбор на деплое, а не переезд сайта. Держим привязку, пока не
-            # выйдет _UNBIND_GRACE, — агент продолжает проверять, ложного алерта нет.
-            if (want is None and c.probe_server_id in online
-                    and probe_scope.server_allowed(c, servers_by_id[c.probe_server_id])):
-                seen = _bound_seen.setdefault(c.id, now)
-                if (now - seen).total_seconds() < _UNBIND_GRACE:
-                    continue
+            if want is None:
+                # Older releases kept results after retargeting. A later user edit makes
+                # that cache unsuitable for reconstructing a missing binding.
+                prior_id = c.probe_server_id
+                old_probe = previous.get(c.id)
+                if not prior_id and old_probe is not None:
+                    touched = edited.get(c.name)
+                    if touched is None or _aware(touched) <= _aware(old_probe[1]):
+                        prior_id = old_probe[0]
+                prior = servers_by_id.get(prior_id)
+                if (prior is not None and probe_scope.server_allowed(c, prior)
+                        and probe_scope.site_group_allowed(prior.token_site_groups, c)):
+                    want = prior.id
             # Отметку ставим и при первом взгляде на монитор, и при смене ноды: в
             # обоих случаях результата от агента ещё нет, и это не падение сайта.
             if c.probe_server_id != want or c.probe_bound_at is None:
                 c.probe_server_id = want
                 c.probe_bound_at = now
                 changed += 1
-                if want is not None:
-                    _bound_seen[c.id] = now
         if changed:
             await session.commit()
         return changed
@@ -778,6 +778,9 @@ async def record_outcome(
     нажатия за пять секунд — это не три минуты простоя, и дежурный чат не должен
     узнавать о сайте от того, кто на него сейчас и так смотрит. Успех же закрывает
     инцидент по-настоящему — с отбоем, если о падении уже написали."""
+    # Serialize with retirement before changing incident state. An in-flight result may
+    # finish after the user disabled the monitor; retain that sample without reopening it.
+    enabled = await session.scalar(select(Check.enabled).where(Check.id == row.id).with_for_update())
     msg = outcome.message[:512]
     session.add(
         CheckSample(
@@ -790,7 +793,22 @@ async def record_outcome(
             **_sample_phases(outcome.phases),
         )
     )
+    if not enabled:
+        return
     new_status = outcome.status
+    if new_status == "unknown":
+        # No observation opens or resolves an incident. Keep any existing failure episode
+        # until a real answer arrives, and do not bridge a failure streak across the gap.
+        row.consecutive_fails = 0
+        row.last_status = new_status
+        row.last_message = msg
+        row.last_latency_ms = None
+        row.last_value = None
+        row.last_checked_at = now
+        row.last_path_results = outcome.path_results
+        row.last_ip_results = outcome.ip_results
+        row.last_phases = outcome.phases
+        return
     if new_status == "up":
         row.consecutive_fails = 0
     elif not manual:
@@ -803,10 +821,7 @@ async def record_outcome(
         except Exception:
             log.warning("не попросил проверку изнутри для %s", row.name, exc_info=True)
 
-    # Планировщик и "Проверить сейчас" (другие процессы) пишут один монитор: строка монитора под
-    # блокировкой до конца транзакции, иначе оба видели "открытого инцидента нет" и открывали по
-    # своему (два инцидента, два алерта). В SQLite FOR UPDATE нет, там один писатель и так
-    await session.execute(select(Check.id).where(Check.id == row.id).with_for_update())
+    # The monitor row remains locked through commit, including manual and scheduler writes.
     open_inc = await session.scalar(
         select(CheckIncident).where(
             CheckIncident.check_id == row.id,
@@ -951,6 +966,11 @@ async def _flaky_step(
         )
     ).all()
     hist = [(st, m) for st, m in reversed(prev)] + [(new_status, msg)]
+    missing = next((i for i in range(len(hist) - 1, -1, -1) if hist[i][0] == "unknown"), None)
+    if missing is not None:
+        hist = hist[missing + 1:]
+        if row.flaky_notified and len(hist) < flaky.WINDOW:
+            return  # An observation gap cannot confirm recovery of an announced episode.
     statuses = [st for st, _ in hist]
     was = row.flaky_since is not None
     now_flaky = flaky.is_flaky(statuses, thr, was)
@@ -1203,6 +1223,8 @@ async def _site_recoveries(session: AsyncSession, now: datetime) -> tuple[list[P
         recovery = state["recovery"]
         kind, msg = recovery.get("kind"), recovery.get("msg")
         at = site_flap.cutoff(state)
+        if enabled and status == "unknown" and at is not None and now - at < _REC_RETRY_MAX:
+            continue  # Hold an undelivered recovery until a real successful observation.
         if (enabled and status == "up" and at is not None and now - at < _REC_RETRY_MAX
                 and kind in _RECOVERY_KINDS and isinstance(msg, str)):
             pending.append(Pending(kind, name, "up", msg, None, cid, ("flap_state", state)))
@@ -1284,7 +1306,7 @@ async def _send_site_batch(session_factory, settings: Settings, pending, now: da
                     Check.target, Check.type, Check.port, Check.snooze_until, Check.known_issue,
                     Check.probe_local, Check.probe_server_id, Check.parent_mode, Check.parent_server_id,
                     Check.last_inside, Check.domain_days, Check.expiry_snooze,
-                ).where(Check.id.in_(ids))
+                ).where(Check.id.in_(ids), Check.enabled.is_(True))
             )
             lite: list[SimpleNamespace] = []
             for i, g, m, tgt, typ, prt, snz, kn, pl, ps, pm, pp, li, days, expiry in rows.all():
@@ -1374,6 +1396,8 @@ async def _send_site_batch(session_factory, settings: Settings, pending, now: da
     for kind, name, status, msg, inc_id, check_id, flag, icon in map(_as_pending, pending):
         if kind in _RECOVERY_KINDS:
             flag = None  # сохраненное состояние отбоя сравним отдельно перед очисткой
+        if check_id is not None and check_id not in meta:
+            continue  # Retired or deleted after the result was recorded.
         rk = _SITE_RULE_KIND.get(kind)
         rule = rules.get(rk) if rk else None
         grp = groups.get(check_id) or ""
@@ -1583,7 +1607,7 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
     """Мониторы одного сервера или адреса (app/site_group.py).
 
     Сбои одного места в этом тике - одно сообщение. Сбой места, о котором уже написали (группа
-    открыта, прошлый сбой не раньше JOIN), - не сообщение, а строка в отправленном: его правим
+    открыта и еще не разрешена), - не сообщение, а строка в отправленном: его правим
     после доставки, а в историю - своя строка. Отбои членов группы молчат, пока в норму не придут
     все, тогда одно сообщение. Возвращает (что слать, что сделать после доставки)."""
     async with session_factory() as session:
@@ -1607,11 +1631,26 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
         want.add(cid)
         want.update(c for c, _ in fold.get(i, []))
     db: dict[int, tuple] = {}
+    active: set[int] = set()
     if want:
         async with session_factory() as session:
-            db = {i: (en, fs, fn, grp or "") for i, en, fs, fn, grp in (await session.execute(
-                select(Check.id, Check.enabled, Check.flap_state, Check.flaky_notified, Check.group_name)
+            db = {i: (en, fs, fn, grp or "", status) for i, en, fs, fn, grp, status in (await session.execute(
+                select(Check.id, Check.enabled, Check.flap_state, Check.flaky_notified,
+                       Check.group_name, Check.last_status)
                 .where(Check.id.in_(want)))).all()}
+            active = set(await session.scalars(select(CheckIncident.check_id).where(
+                CheckIncident.check_id.in_(want), CheckIncident.ended_at.is_(None),
+                CheckIncident.notified.is_(True))))
+        active.update(i for i, row in db.items() if site_flap.level(row[1]) is not None or row[2])
+        active = {i for i in active if i in db and db[i][0]}
+    # Retirement is not recovery. Remove disabled/deleted members silently, retaining history.
+    for gid, g in list(groups.items()):
+        for cid in list(g.get("members") or {}):
+            if int(cid) not in db or not db[int(cid)][0]:
+                g["members"].pop(cid, None)
+                g.get("ok", {}).pop(cid, None)
+        if not g.get("members"):
+            groups.pop(gid)
     # Группы старых версий могли смешивать разные маршруты. Их нельзя дописывать или отправлять
     # повторно. Это же относится к мониторам, перемещённым в другую группу после отправки.
     for gid, g in list(groups.items()):
@@ -1639,7 +1678,7 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
             log.warning("не прочитал тревоги серверов для группы мониторов", exc_info=True)
 
     for (key, lvl, grp), idxs in by_place.items():
-        g = site_group.open_for(groups, key, lvl, grp, now)
+        g = site_group.open_for(groups, key, lvl, grp, now, active)
         new = g is None
         if new:
             _k, label, srv = places[src[idxs[0]][1]]
@@ -1692,8 +1731,7 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
         if c in recs:
             return True
         row = db.get(c)
-        # монитор удален или выключен - ждать от него нечего
-        return row is None or not row[0] or (site_flap.level(row[1]) is None and not row[2])
+        return bool(row and row[0] and row[4] == "up" and c not in active)
 
     backs: dict[str, alerts.Msg] = {}
     for gid, g in list(groups.items()):
@@ -1725,7 +1763,7 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
             groups.pop(gid)
         backs[gid] = m
 
-    for gid in [k for k, g in groups.items() if site_group.stale(g, now)]:
+    for gid in [k for k, g in groups.items() if site_group.stale(g, now, active)]:
         groups.pop(gid)
 
     direct = {i: swap.get(i, m) for i, m in enumerate(texts) if i not in drop}

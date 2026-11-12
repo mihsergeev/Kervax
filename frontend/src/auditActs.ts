@@ -88,6 +88,7 @@ export const ACT: Record<string, string> = {
   check_snooze: 'заглушил монитор',
   checks_import: 'импорт мониторов',
   checks_bulk: 'изменил мониторы пачкой',
+  checks_retire: 'выключил мониторы приложения',
   checks_bulk_delete: 'удалил мониторы',
   checks_adopt: 'добавил найденные сайты',
   checks_reorder: 'поменял порядок мониторов',

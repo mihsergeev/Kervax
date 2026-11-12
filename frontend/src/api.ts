@@ -692,6 +692,16 @@ export function bulkUpdateChecks(
   return api('/api/checks/bulk', { method: 'PATCH', body: JSON.stringify(body) })
 }
 
+export type RetirementCandidate = { id: number; name: string; enabled: boolean }
+
+export function retirementCandidates(id: number): Promise<{ checks: RetirementCandidate[] }> {
+  return api(`/api/checks/${id}/retirement-candidates`)
+}
+
+export function retireApplication(id: number, ids: number[]): Promise<{ updated: number }> {
+  return api(`/api/checks/${id}/retire`, { method: 'POST', body: JSON.stringify({ ids }) })
+}
+
 // Массовое создание мониторов из списка.
 export function importChecks(items: CheckForm[]): Promise<{ updated: number }> {
   return api('/api/checks/import', { method: 'POST', body: JSON.stringify({ items }) })

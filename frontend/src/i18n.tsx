@@ -11,6 +11,12 @@ export type Lang = 'ru' | 'en'
 // Ключ = русская строка (дефолт). Значение = английский перевод.
 // Отсутствующий ключ → возвращается русский (мягкий фолбэк).
 const EN: Record<string, string> = {
+  'Приложение больше не используется': 'Application is no longer in use',
+  'Отметьте адреса этого приложения.': 'Select this application’s addresses.',
+  'Мониторы будут выключены. История сохранится. Открытые инциденты закроются.': 'The monitors will be disabled. History will remain. Open incidents will close.',
+  'Выбраны: {list}': 'Selected: {list}',
+  'Выключить выбранные мониторы': 'Disable selected monitors',
+  'выключил мониторы приложения': 'disabled application monitors',
   'Фильтр по разделам': 'Filter by section',
   'Активные проблемы': 'Active issues',
   'Активных проблем: {n}': 'Active issues: {n}',

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from sqlalchemy import case, delete as sa_delete, func, select, true, update as sa_update
 
-from app import allowlist_hint, audit, domain_probe, expiry_snooze, known, manual_probe, net_guard, probe_scope, try_probe
+from app import allowlist_hint, audit, domain_probe, expiry_snooze, known, manual_probe, net_guard, probe_scope, site_group, try_probe
 from app import parents as parents_mod
 from app.checks import status_matches
 from app import checks as checks_exec
@@ -451,6 +451,7 @@ async def bulk_update(
         q = q.where(Check.id.in_(ids))
     checks = list(await session.scalars(q))
     request_edits = {}
+    clear_probe_ids = []
     for check in checks:
         old_local = (check.probe_local, check.target, check.method)
         old_request = _request_config(check)
@@ -465,7 +466,11 @@ async def bulk_update(
             await _check_existing_agent_scope(check, session)
         if "probe_local" in fields or "check_locations" in fields:
             _one_probe_source(check)
+        if old_local[0] and not check.probe_local:
+            clear_probe_ids.append(check.id)
     await _guard_request_edits(session, request_edits)
+    for check_id in clear_probe_ids:
+        await _clear_agent_probe_cache(session, check_id)
     if "enabled" in fields:
         await _close_if_disabled(session, checks)
     await session.commit()
@@ -474,6 +479,63 @@ async def bulk_update(
         session, user.username, "checks_bulk", str(len(checks)), f"{scope}: {','.join(fields)}"
     )
     return BulkResult(updated=len(checks))
+
+
+async def _retirement_candidates(session, user, anchor: Check) -> list[Check]:
+    """Общее место лишь предлагает кандидатов; приложение определяет человек."""
+    checks = list(await session.scalars(
+        scope_query(user, select(Check), Check, "sites").where(
+            Check.group_name == anchor.group_name, Check.enabled.is_(True))
+        .order_by(Check.name, Check.id)
+    ))
+    if anchor not in checks:
+        checks.append(anchor)
+    idx, _groups, _silent = await _parents_index(session, checks)
+    source = site_group.place(anchor, idx)
+    if source is None:
+        return [anchor]
+    return [c for c in checks if c.id == anchor.id or
+            ((place := site_group.place(c, idx)) is not None and place[0] == source[0])]
+
+
+@router.get("/{check_id}/retirement-candidates")
+async def retirement_candidates(check_id: int, user: CurrentUser, session: SessionDep) -> dict:
+    anchor = await _get_or_404(check_id, session, user)
+    checks = await _retirement_candidates(session, user, anchor)
+    return {"checks": [{"id": c.id, "name": c.name, "enabled": c.enabled}
+                       for c in checks]}
+
+
+@router.post("/{check_id}/retire", response_model=BulkResult)
+async def retire_application(
+    check_id: int, body: CheckIdList, user: CurrentUser, session: SessionDep,
+) -> BulkResult:
+    """Отключить ровно выбранные мониторы, закрыв их открытые инциденты без удаления истории."""
+    ids = set(body.ids)
+    if check_id not in ids or len(ids) != len(body.ids):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Выберите монитор и укажите каждый ID один раз")
+    # Блокировка не дает двум одновременным действиям разойтись по итоговому набору.
+    checks = list(await session.scalars(
+        scope_query(user, select(Check), Check, "sites")
+        .where(Check.id.in_(ids)).order_by(Check.id).with_for_update()
+    ))
+    if {c.id for c in checks} != ids:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Монитор не найден")
+    anchor = next(c for c in checks if c.id == check_id)
+    permitted = {c.id for c in await _retirement_candidates(session, user, anchor)}
+    # У уже выключенных разрешаем повтор того же запроса, но не чужие группы.
+    if any(c.id not in permitted and c.enabled for c in checks) or any(
+        c.group_name != anchor.group_name for c in checks
+    ):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Связи мониторов изменились. Обновите список и повторите выбор")
+    changed = [c for c in checks if c.enabled]
+    for check in changed:
+        check.enabled = False
+    await _close_if_disabled(session, checks)
+    await session.commit()
+    await audit.record(session, user.username, "checks_retire", str(len(changed)),
+                       "ids=" + ",".join(str(c.id) for c in checks))
+    return BulkResult(updated=len(changed))
 
 
 @router.post("/bulk-delete", response_model=BulkResult)
@@ -1481,6 +1543,12 @@ def _one_probe_source(check: Check) -> None:
         check.probe_bound_at = None
 
 
+async def _clear_agent_probe_cache(session, check_id: int) -> None:
+    """Старый ответ агента нельзя использовать для новой цели или источника проверки."""
+    await session.execute(sa_delete(AgentProbe).where(AgentProbe.check_id == check_id))
+    await session.execute(sa_delete(AgentPathProbe).where(AgentPathProbe.check_id == check_id))
+
+
 async def _close_if_disabled(session, checks: list[Check]) -> None:
     """Выключенный монитор не проверяется, и открытый инцидент закрыть было бы
     некому: он висел вечно — «идёт сейчас» в карточке и «N откр. инцидентов» на
@@ -1510,6 +1578,7 @@ async def update_check(
     check_id: int, body: CheckUpdate, user: CurrentUser, session: SessionDep
 ) -> Check:
     check = await _get_or_404(check_id, session, user)
+    old_type = check.type
     old_paths = list(check.extra_paths or [])
     old_dns = (check.target, check.dns_type, check.dns_server)
     old_local = (check.probe_local, check.target, check.method)
@@ -1555,7 +1624,15 @@ async def update_check(
             ))
         if not new_paths:
             check.last_path_results = None
-    if check.probe_local and old_local[0] and _host_of(check) != _host_of_raw(old_local[1]):
+    if old_type != check.type or _host_of(check) != _host_of_raw(old_local[1]) or (
+        old_local[0] and not check.probe_local
+    ):
+        await _clear_agent_probe_cache(session, check.id)
+        check.last_inside = None
+        check.last_path_results = None
+    if check.probe_local and old_local[0] and (
+        old_type != check.type or _host_of(check) != _host_of_raw(old_local[1])
+    ):
         # другой хост - привязку к ноде ищем заново, старая нода этот домен могла и не держать
         check.probe_server_id = None
         check.probe_bound_at = None

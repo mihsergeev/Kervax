@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.69"
+const version = "2.70"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -1653,6 +1653,127 @@ func probeKeywords(p siteProbe, resp *http.Response, res *siteProbeResult) {
 	}
 }
 
+// redirectOnlyStatus сохраняет мониторы, которые намеренно проверяют сам 3xx.
+// Обычный 200-399 требует ответа приложения после перенаправления.
+func redirectOnlyStatus(spec string) bool {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return false
+	}
+	hasRedirect := false
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		bounds := strings.Split(part, "-")
+		if len(bounds) < 1 || len(bounds) > 2 {
+			return false
+		}
+		lo, err := strconv.Atoi(strings.TrimSpace(bounds[0]))
+		if err != nil {
+			return false
+		}
+		hi := lo
+		if len(bounds) == 2 {
+			hi, err = strconv.Atoi(strings.TrimSpace(bounds[1]))
+			if err != nil {
+				return false
+			}
+		}
+		if lo < 300 || hi > 399 || lo > hi {
+			return false
+		}
+		hasRedirect = true
+	}
+	return hasRedirect
+}
+
+func probeURLPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if u.Scheme == "https" {
+		return "443"
+	}
+	return "80"
+}
+
+// DNS-имена сравниваем без учёта только ASCII-регистра. Unicode EqualFold
+// считает, например, латинские s и ſ равными, хотя это разные virtual hosts.
+func sameProbeHostname(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		x, y := a[i], b[i]
+		if x >= 'A' && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if y >= 'A' && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
+}
+
+// probeRedirect привязывает каждый переход к уже выбранному маршруту. backend == nil:
+// соединение остаётся на localhost/своём IP; иначе это тот же сервис кластера или
+// бэкенд прокси. Присланный сервером Location не может выбрать новый upstream.
+func probeRedirect(p siteProbe, public, backend *url.URL) func(*http.Request, []*http.Request) error {
+	return func(req *http.Request, via []*http.Request) error {
+		if redirectOnlyStatus(p.ExpectedStatus) {
+			return http.ErrUseLastResponse
+		}
+		if len(via) >= 10 {
+			return errors.New("слишком много перенаправлений")
+		}
+		if req.URL.User != nil || (req.URL.Scheme != "http" && req.URL.Scheme != "https") {
+			return errors.New("недопустимый адрес перенаправления")
+		}
+		if backend == nil {
+			if !sameProbeHostname(req.URL.Hostname(), public.Hostname()) || !localProbePorts[probeURLPort(req.URL)] {
+				return errors.New("перенаправление за пределы локального сайта")
+			}
+		} else if sameProbeHostname(req.URL.Hostname(), public.Hostname()) && localProbePorts[probeURLPort(req.URL)] {
+			// Абсолютный URL сайта всё равно ведём через тот же выбранный backend.
+			if req.URL.Scheme != public.Scheme || probeURLPort(req.URL) != probeURLPort(public) {
+				return errors.New("перенаправление сменило origin: шлюз для конечного адреса не проверен")
+			}
+			req.URL.Scheme, req.URL.Host = backend.Scheme, backend.Host
+			req.Host = public.Host
+			// Go убирает Authorization/Cookie при смене URL-хоста с backend на
+			// публичное имя. После проверки origin возвращаем исходные заголовки:
+			// сетевое соединение всё равно останется на том же backend.
+			req.Header = via[0].Header.Clone()
+			return nil
+		} else if !sameProbeHostname(req.URL.Hostname(), backend.Hostname()) || req.URL.Port() != backend.Port() || req.URL.Scheme != backend.Scheme {
+			return errors.New("перенаправление за пределы выбранного сервиса")
+		}
+		if backend == nil {
+			if via[len(via)-1].URL.Scheme == "https" && req.URL.Scheme != "https" {
+				return errors.New("перенаправление с HTTPS на HTTP")
+			}
+			if (p.AuthUser != "" || p.Headers != "" || public.User != nil) &&
+				(req.URL.Scheme != public.Scheme || probeURLPort(req.URL) != probeURLPort(public)) {
+				return errors.New("перенаправление с учётными данными на другой origin")
+			}
+		} else {
+			req.Host = public.Host
+		}
+		return nil
+	}
+}
+
+func probeFinalResponse(p siteProbe, resp *http.Response, res *siteProbeResult) {
+	res.Code = resp.StatusCode
+	if res.Code >= 300 && res.Code <= 399 && !redirectOnlyStatus(p.ExpectedStatus) {
+		res.Error = "перенаправление без конечного ответа приложения"
+		return
+	}
+	probeKeywords(p, resp, res)
+}
+
 func probeSiteLocal(p siteProbe) siteProbeResult {
 	return probeSiteAt(p, "")
 }
@@ -1667,13 +1788,9 @@ func probeSiteAt(p siteProbe, own string) siteProbeResult {
 		return res
 	}
 	client := &http.Client{
-		Timeout:   timeout,
-		Transport: localDialer(timeout, p.IgnoreTLS, own),
-		// Редирект наружу пошёл бы уже мимо localhost и упёрся бы в тот самый белый
-		// список: считаем ответом сам редирект, как это делает панель.
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+		Timeout:       timeout,
+		Transport:     localDialer(timeout, p.IgnoreTLS, own),
+		CheckRedirect: probeRedirect(p, req.URL, nil),
 	}
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -1683,7 +1800,7 @@ func probeSiteAt(p siteProbe, own string) siteProbeResult {
 		return res
 	}
 	defer resp.Body.Close()
-	res.Code = resp.StatusCode
+	probeFinalResponse(p, resp, &res)
 	// Сертификат берём из состояния уже установленного соединения: отдельного
 	// рукопожатия не делаем, и на сайт по HTTP это просто не сработает — там TLS нет.
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
@@ -1691,7 +1808,6 @@ func probeSiteAt(p siteProbe, own string) siteProbeResult {
 		res.CertExpires = leaf.NotAfter.Unix()
 		res.CertIssuer = leaf.Issuer.CommonName
 	}
-	probeKeywords(p, resp, &res)
 	return res
 }
 
@@ -2005,8 +2121,7 @@ func probeSiteCluster(p siteProbe) (siteProbeResult, bool) {
 			DisableKeepAlives: true,
 			Proxy:             nil,
 		},
-		// как и через localhost: ответом считаем сам редирект
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		CheckRedirect: probeRedirect(p, u, req.URL),
 	}
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -2016,8 +2131,7 @@ func probeSiteCluster(p siteProbe) (siteProbeResult, bool) {
 		return res, true
 	}
 	defer resp.Body.Close()
-	res.Code = resp.StatusCode
-	probeKeywords(p, resp, &res)
+	probeFinalResponse(p, resp, &res)
 	// Сертификат — у шлюза: приложение за ним отвечает по HTTP. Шлюз не отвечает вовсе — сайт
 	// недоступен и посетителям, даже если приложение живо.
 	if addr, ok := hostLookup(rt.tls, u.Hostname()); ok && u.Scheme == "https" {
@@ -2869,7 +2983,7 @@ func probeSiteProxy(p siteProbe, front string) (siteProbeResult, bool) {
 			DisableKeepAlives: true,
 			Proxy:             nil,
 		},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		CheckRedirect: probeRedirect(p, u, req.URL),
 	}
 	start := time.Now()
 	resp, err := client.Do(req)
@@ -2879,8 +2993,7 @@ func probeSiteProxy(p siteProbe, front string) (siteProbeResult, bool) {
 		return res, true
 	}
 	defer resp.Body.Close()
-	res.Code = resp.StatusCode
-	probeKeywords(p, resp, &res)
+	probeFinalResponse(p, resp, &res)
 	if u.Scheme != "https" {
 		return res, true
 	}

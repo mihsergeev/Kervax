@@ -677,22 +677,22 @@ async def test_agent_probe_outcome():
     assert "443" in out.message and "localhost" in out.message
     probe.latency_ms = 12
 
-    # молчащий агент — это отказ проверки, а не «сайт работает»
+    # Нет свежего измерения: неизвестно, отвечает ли сайт.
     probe.error = ""
     stale = SimpleNamespace(ts=now - timedelta(minutes=30), code=200, latency_ms=10,
                             error="", kw_up_found=True, kw_down_found=False)
     out = checks_exec.outcome_from_agent(check, stale, now, 2000)
-    assert out.status == "down" and "не присылает" in out.message
+    assert out.status == "unknown" and "не присылает" in out.message
 
     # результата ещё не было — тоже не «up»
     check.probe_server_id = 7
-    assert checks_exec.outcome_from_agent(check, None, now, 2000).status == "down"
+    assert checks_exec.outcome_from_agent(check, None, now, 2000).status == "unknown"
 
     # проверять некому (домена нет ни на одной ноде) — это ДРУГАЯ беда, и лечится
     # она не на ноде, а установкой агента или снятием галочки
     check.probe_server_id = None
     out = checks_exec.outcome_from_agent(check, None, now, 2000)
-    assert out.status == "down" and "некому" in out.message
+    assert out.status == "unknown" and "не найден сервер" in out.message
 
     # ключевое слово ищет агент, панель верит флагу
     check.keyword_up = "Добро пожаловать"
@@ -749,14 +749,14 @@ async def test_local_probe_rebinding(tmp_path):
     async with factory() as s:
         assert (await s.scalars(select(Check))).one().probe_server_id == b_id
 
-    # домена нет нигде — привязки нет, и монитор честно скажет, что проверять некому
+    # Остановка приложения сохраняет прежний сервер проверки.
     async with factory() as s:
         b = (await s.scalars(select(Server).where(Server.name == "node-b"))).one()
         b.last_report = {}
         await s.commit()
-    assert await collector.rebind_local_probes(factory) == 1
+    assert await collector.rebind_local_probes(factory) == 0
     async with factory() as s:
-        assert (await s.scalars(select(Check))).one().probe_server_id is None
+        assert (await s.scalars(select(Check))).one().probe_server_id == b_id
     await engine.dispose()
 
 
@@ -766,7 +766,7 @@ async def test_local_probe_binding_survives_a_partial_domain_scan(tmp_path):
     Список доменов ноды собирается раз в 15 минут. Попал сбор в секунды, когда новый
     контейнер создан, но не запущен, — домен выпадал из списка, монитор терял ноду, и
     на живой сайт приходил алерт «агент не присылает результат». Отвязывать надо
-    только когда домен пропал надолго; переезд на другую ноду — сразу.
+    при удалении сервера или отзыве доступа; подтвержденный переезд — сразу.
     """
     from datetime import datetime, timedelta, timezone
 
@@ -775,7 +775,6 @@ async def test_local_probe_binding_survives_a_partial_domain_scan(tmp_path):
     from app.models import Base, Check, Server
     from sqlalchemy import select
 
-    collector._bound_seen.clear()
     db = (tmp_path / "sticky.db").as_posix()
     engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{db}")
     async with engine.begin() as conn:
@@ -806,11 +805,16 @@ async def test_local_probe_binding_survives_a_partial_domain_scan(tmp_path):
     async with factory() as s:
         assert (await s.scalars(select(Check))).one().probe_server_id == a_id
 
-    # домена нет дольше льготного окна — тогда это уже не деплой, отвязываем
-    collector._bound_seen[cid] = now - timedelta(minutes=31)
-    assert await collector.rebind_local_probes(factory) == 1
+    # Привязка не зависит от длительности остановки или памяти планировщика.
     async with factory() as s:
-        assert (await s.scalars(select(Check))).one().probe_server_id is None
+        chk = await s.get(Check, cid)
+        chk.probe_bound_at = now - timedelta(days=2)
+        a = await s.get(Server, a_id)
+        a.last_seen = now - timedelta(hours=2)
+        await s.commit()
+    assert await collector.rebind_local_probes(factory) == 0
+    async with factory() as s:
+        assert (await s.scalars(select(Check))).one().probe_server_id == a_id
 
     # переезд на другую ноду — сразу, ждать тут нечего: домен там виден
     async with factory() as s:
@@ -819,11 +823,9 @@ async def test_local_probe_binding_survives_a_partial_domain_scan(tmp_path):
         b = await s.get(Server, b_id)
         b.last_report = site
         await s.commit()
-    collector._bound_seen[cid] = now
     await collector.rebind_local_probes(factory)
     async with factory() as s:
         assert (await s.scalars(select(Check))).one().probe_server_id == b_id
-    collector._bound_seen.clear()
     await engine.dispose()
 
 
@@ -861,7 +863,7 @@ async def test_local_probe_warmup_is_not_an_outage(tmp_path):
     async with factory() as s:
         assert (await s.scalars(select(CheckSample))).all() == [], "записан ложный сбой"
 
-    # прогрев вышел, результата от агента так и нет → это уже настоящая проблема
+    # Прогрев вышел, но отсутствие измерения не подтверждает падение сайта.
     async with factory() as s:
         chk = (await s.scalars(select(Check))).one()
         chk.probe_bound_at = datetime.now(timezone.utc) - timedelta(minutes=30)
@@ -870,7 +872,7 @@ async def test_local_probe_warmup_is_not_an_outage(tmp_path):
     assert await collector.run_due_checks(factory, settings) == 1
     async with factory() as s:
         rows = (await s.scalars(select(CheckSample))).all()
-        assert len(rows) == 1 and rows[0].status == "down"
+        assert len(rows) == 1 and rows[0].status == "unknown"
         assert "агент" in rows[0].message
     await engine.dispose()
 

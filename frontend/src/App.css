@@ -3610,6 +3610,38 @@ tr.mt-off button.mt-what-btn { color: var(--text-muted); text-decoration: line-t
   flex-direction: column;
   gap: 0.75rem;
 }
+.retire-action-row {
+  display: flex;
+  justify-content: flex-end;
+}
+.retire-dialog {
+  width: 560px;
+  box-sizing: border-box;
+  max-width: calc(100vw - 2rem);
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.retire-list {
+  max-height: 35vh;
+  overflow-y: auto;
+}
+.retire-candidate {
+  flex-direction: row;
+  justify-content: flex-start;
+  align-items: center;
+  cursor: pointer;
+}
+.retire-candidate input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  padding: 0;
+  margin: 0;
+  flex: 0 0 auto;
+  accent-color: var(--accent);
+}
+.retire-candidate small {
+  margin-left: auto;
+}
 .detail-head {
   display: flex;
   align-items: center;

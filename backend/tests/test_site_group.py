@@ -82,7 +82,9 @@ def _down(name, cid, now, err=REFUSED):
 async def _recover(factory, cid, now):
     """Монитор пришел в норму: эпизод закрыт (как в record_outcome), отбой в очереди."""
     async with factory() as s:
-        (await s.get(Check, cid)).flap_state = site_flap.closed(now)
+        row = await s.get(Check, cid)
+        row.flap_state = site_flap.closed(now)
+        row.last_status = "up"
         await s.commit()
 
 
@@ -182,8 +184,9 @@ async def test_neighbours_join_the_sent_message_and_recover_together(tmp_path, m
     assert {k for k, _t in back} == {"flaky"}
     async with f() as s:
         left = await site_group.load(s)
-    # одиночное про x.example.edu старше получаса: дописывать в него нечего, группа забыта
-    assert left == {}
+    # Still unresolved: a later failure at the same place must join this message.
+    assert len(left) == 1
+    assert set(next(iter(left.values()))["members"]) == {str(x)}
     await engine.dispose()
 
 
@@ -197,14 +200,69 @@ async def test_same_tick_on_one_address_is_one_message(tmp_path, monkeypatch):
     await engine.dispose()
 
 
-async def test_join_window_is_half_an_hour(tmp_path, monkeypatch):
+async def test_unresolved_episode_keeps_one_message_after_join_window(tmp_path, monkeypatch):
     names = ["a.example.com", "api.example.org"]
     engine, f, ids, sent, edits = await _panel(tmp_path, monkeypatch, names)
     await collector._send_alerts(f, SET, [_flaky("a.example.com", ids["a.example.com"], T0)], T0)
     late = T0 + site_group.JOIN + timedelta(minutes=1)
     await collector._send_alerts(f, SET, [_flaky("api.example.org", ids["api.example.org"], late)], late)
-    assert len(sent) == 2 and not edits
+    assert len(sent) == 1 and len(edits) == 1
+    recovered = late + timedelta(minutes=2)
+    for name in names:
+        await _recover(f, ids[name], recovered)
+    await collector._send_alerts(f, SET, [_back(n, ids[n]) for n in names], recovered)
+    assert len(sent) == 2 and "(2 монитора)" in sent[1]
     await engine.dispose()
+
+
+async def test_unknown_keeps_group_open_and_cannot_confirm_recovery(tmp_path, monkeypatch):
+    names = ["a.example.com", "api.example.org"]
+    engine, factory, ids, sent, edits = await _panel(tmp_path, monkeypatch, names)
+    await collector._send_alerts(factory, SET, [_down(names[0], ids[names[0]], T0)], T0)
+    async with factory() as session:
+        (await session.get(Check, ids[names[0]])).last_status = "unknown"
+        await session.commit()
+    late = T0 + timedelta(minutes=38)
+    await collector._send_alerts(factory, SET, [_down(names[1], ids[names[1]], late)], late)
+    assert len(sent) == 1 and len(edits) == 1
+    await _recover(factory, ids[names[1]], late)
+    await collector._send_alerts(factory, SET, [collector.Pending(
+        "recstable", names[1], "up", "снова отвечает", None, ids[names[1]], None)], late)
+    assert len(sent) == 1
+    await _recover(factory, ids[names[0]], late + timedelta(minutes=1))
+    await collector._send_alerts(factory, SET, [collector.Pending(
+        "recstable", names[0], "up", "снова отвечает", None, ids[names[0]], None)], late + timedelta(minutes=1))
+    assert len(sent) == 2 and "(2 монитора)" in sent[1]
+    await engine.dispose()
+
+
+async def test_retired_members_do_not_send_queued_failures_or_fake_recoveries(tmp_path, monkeypatch):
+    names = ["a.example.com", "api.example.org"]
+    engine, factory, ids, sent, _ = await _panel(tmp_path, monkeypatch, names)
+    await collector._send_alerts(factory, SET, [_down(n, ids[n], T0) for n in names], T0)
+    async with factory() as session:
+        for cid in ids.values():
+            (await session.get(Check, cid)).enabled = False
+        await session.commit()
+    await collector._send_alerts(factory, SET, [_down(n, ids[n], T0) for n in names], T0)
+    assert len(sent) == 1
+    async with factory() as session:
+        assert await site_group.load(session) == {}
+    assert not [event for event in await _history(factory) if event[2]]
+    await engine.dispose()
+
+
+def test_unresolved_group_accepts_late_member_and_survives_unknown():
+    now = T0 + timedelta(minutes=38)
+    group = site_group.new_group("srv:1", "down", "node", 1, T0)
+    group.update(grp="visible", members={"10": {"name": "first"}}, solo=True)
+    groups = {group["id"]: group}
+    # Неполученное измерение не закрывает уже объявленный down-эпизод.
+    active = {10}
+    assert site_group.open_for(groups, "srv:1", "down", "visible", now, active) is group
+    assert not site_group.stale(group, now, active)
+    assert site_group.open_for(groups, "srv:1", "down", "visible", now, set()) is None
+    assert site_group.stale(group, now, set())
 
 
 async def test_www_of_the_same_site_keeps_the_domain_fold(tmp_path, monkeypatch):

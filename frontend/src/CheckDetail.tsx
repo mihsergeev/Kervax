@@ -14,6 +14,8 @@ import {
   setCheckNote,
   runCheck,
   runCheckResult,
+  retirementCandidates,
+  retireApplication,
   snoozeCheck,
   updateCheck,
   type Check,
@@ -24,6 +26,7 @@ import {
   type Incident,
   type LocationResult,
   type Uptime,
+  type RetirementCandidate,
 } from './api'
 import { AddMonitor } from './AddMonitor'
 import { CertEdit } from './CheckEdit'
@@ -223,8 +226,9 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
 
   // редактирование прямо в модалке: там же заметка и удаление, как у сервера
   const [editing, setEditing] = useState(false)
+  const [retireOpen, setRetireOpen] = useState(false)
   // Esc закрывает окно, но не во время правки: там он стер бы набранное
-  useEscape(onClose, !editing)
+  useEscape(onClose, !editing && !retireOpen)
   const [snoozing, setSnoozing] = useState(false)
   const [form, setForm] = useState<CheckForm | null>(null)
   const [saving, setSaving] = useState(false)
@@ -757,6 +761,13 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
           )}
           {!check.enabled && <span className="srv-meta-item t-degraded">{t('выключен')}</span>}
         </div>
+        {!editing && !isViewer && check.enabled && (
+          <div className="retire-action-row">
+            <button className="ghost small" onClick={() => setRetireOpen(true)}>
+              {t('Приложение больше не используется')}
+            </button>
+          </div>
+        )}
         {!editing && <MaintBanner kind="check" id={check.id} />}
 
         {err && <p className="form-error">{err}</p>}
@@ -1229,6 +1240,14 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
         }}
       />
     )}
+    {retireOpen && (
+      <RetireApplicationDialog
+        check={check}
+        onClose={() => setRetireOpen(false)}
+        onSaved={() => { setRetireOpen(false); onSaved?.() }}
+        onUnauthorized={onUnauthorized}
+      />
+    )}
     {run && <RunVerdict run={run} onClose={closeRun} />}
     {zoomOpen && (
       <CheckChartModal
@@ -1243,6 +1262,76 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
       />
     )}
     </>
+  )
+}
+
+function RetireApplicationDialog({ check, onClose, onSaved, onUnauthorized }: {
+  check: Check
+  onClose: () => void
+  onSaved: () => void
+  onUnauthorized: () => void
+}) {
+  const { t } = useI18n()
+  const [candidates, setCandidates] = useState<RetirementCandidate[] | null>(null)
+  const [selected, setSelected] = useState<number[]>([check.id])
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEscape(onClose, !busy)
+
+  useEffect(() => {
+    let live = true
+    retirementCandidates(check.id).then((data) => {
+      if (live) setCandidates(data.checks)
+    }).catch((e: unknown) => {
+      if (!live) return
+      if (e instanceof ApiError && e.status === 401) onUnauthorized()
+      else setError(e instanceof Error ? e.message : t('Ошибка'))
+    })
+    return () => { live = false }
+  }, [check.id, onUnauthorized, t])
+
+  const chosen = (candidates ?? []).filter((c) => selected.includes(c.id))
+  const submit = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      await retireApplication(check.id, chosen.map((c) => c.id))
+      onSaved()
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) onUnauthorized()
+      else setError(e instanceof Error ? e.message : t('Ошибка'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <div className="card detail hs-modal retire-dialog" role="dialog" aria-modal="true" aria-label={t('Приложение больше не используется')}>
+        <div className="detail-head">
+          <h3>{t('Приложение больше не используется')}</h3>
+          <button className="ghost icon-btn" onClick={onClose} disabled={busy} title={t('Закрыть')}>✕</button>
+        </div>
+        <p>{t('Отметьте адреса этого приложения.')}</p>
+        {candidates === null && !error && <p>{t('загрузка…')}</p>}
+        <div className="retire-list">{candidates?.map((c) => (
+          <label className="kv-row retire-candidate" key={c.id}>
+            <input type="checkbox" checked={selected.includes(c.id)} disabled={busy || c.id === check.id}
+              onChange={(e) => setSelected((prev) => e.target.checked ? [...prev, c.id] : prev.filter((id) => id !== c.id))} />
+            <span>{c.name}</span><small className="muted">ID {c.id}</small>
+          </label>
+        ))}</div>
+        <p>{t('Мониторы будут выключены. История сохранится. Открытые инциденты закроются.')}</p>
+        <strong>{t('Выбраны: {list}', { list: chosen.map((c) => c.name).join(', ') || '—' })}</strong>
+        {error && <p className="form-error" role="alert">{error}</p>}
+        <div className="detail-head-actions">
+          <button className="ghost" onClick={onClose} disabled={busy}>{t('Отмена')}</button>
+          <button onClick={submit} disabled={busy || !candidates || chosen.length === 0}>
+            {t('Выключить выбранные мониторы')}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
