@@ -586,9 +586,9 @@ def _owner_fact(o: dict, containers: dict[str, str] | None, pod_names: dict[str,
 
 def episode_short(e: dict, tz, failed_now: set[str], containers: dict[str, str] | None = None,
                   pod_names: dict[str, str] | None = None, late: bool = False) -> tuple[str, list[str]]:
-    """(что случилось, конкретика) по эпизоду. late - сообщение опоздало: время эпизода в первой
-    строке, без объяснений почему."""
-    at = f" в {hhmm(e['start'], tz)}" if late else ""
+    """(что случилось, конкретика) по эпизоду. У отложенного сообщения пометка и время события
+    стоят первыми: даже после сокращения оно не должно читаться как новый OOM."""
+    notice = f"Отложенное уведомление: событие в {hhmm(e['start'], tz)} - " if late else ""
     if e["kind"] == "memcg":
         # уперлись в лимит своей cgroup: убитые и чей лимит одной строкой, "Убит" - в заголовке
         own = [k for k in e["kills"] if k["kind"] == "memcg"] or e["kills"]
@@ -601,8 +601,8 @@ def episode_short(e: dict, tz, failed_now: set[str], containers: dict[str, str] 
             whose = f"{label if label == 'Cgroup' else label.lower()} {name} {'уперлась' if label in _SHE else 'уперся'}"
         else:
             whose = "процесс уперся"
-        return WHAT_LIMIT[len(ks) > 1] + at, [tg_fmt.fact("", f"{who} - {whose} {cap}")]
-    what = ("Не хватает памяти (systemd-oomd)" if e["kind"] == "oomd" else WHAT_HOST) + at
+        return notice + WHAT_LIMIT[len(ks) > 1], [tg_fmt.fact("", f"{who} - {whose} {cap}")]
+    what = notice + ("Не хватает памяти (systemd-oomd)" if e["kind"] == "oomd" else WHAT_HOST)
     facts: list[str] = []
     ks = _main_kills(e["kills"])
     facts.append(tg_fmt.fact("Убит" if len(ks) == 1 else "Убиты",
@@ -955,11 +955,11 @@ def alert_step(s: Server, st: dict, rep: dict, now: datetime, tz,
             late = late_text(last, now_ts, held=True)
             text = episode_text(last, tz, failed, week, conts, more=len(held) - 1, late=late)
             link = {"oom_ep": last["id"], "oom_short": episode_short(last, tz, failed, conts, pod_names,
-                                                                     late=bool(late))}
+                                                                     late=True)}
         else:
             lvl = 1
             text = f"нехватка памяти (OOM) повторялась: с прошлого сообщения еще {len(held)} раз"
-            link = {"oom_short": (WHAT, [])}
+            link = {"oom_short": ("Отложенное уведомление: повторы OOM", ["Время событий неизвестно"])}
         return (lvl, text), {"oom_held": [], "oom_sent": now_ts, "oom_sent_lvl": lvl, **link}, now_apply
     if total > seen and not fresh:
         wait = _f(st.get("oom_wait"))

@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.131] - 2026-11-13
+
+- Mark delayed OOM notifications with the actual event time, including queued repeats. If event details are no longer available, explicitly say the time is unknown. Fresh failures and escalations, repeat suppression, full history and compact notification limits are unchanged.
+
 ## [1.8.130] - 2026-11-13
 
 - Prevent kernel OOM log collection from waiting for new messages. Bound reads, handle interrupts and overwritten records, and retain the latest victim found. Includes Linux agent 2.71.

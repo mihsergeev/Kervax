@@ -99,7 +99,9 @@ def test_oom_late_and_counter_only():
     late = NOW + timedelta(hours=2)
     rep_late = dict(rep, clock_unix=late.timestamp(), extras={"oom": dict(HOST_BLOCK, ts=late.timestamp() - 20)})
     _fire, done, _ = oom.alert_step(s, {"oom_end": 0.0}, rep_late, late, timezone.utc, set())
-    assert done["oom_short"][0] == "Кончилась память на сервере (OOM) в " + datetime.fromtimestamp(TS - 300, timezone.utc).strftime("%H:%M")
+    assert done["oom_short"][0] == ("Отложенное уведомление: событие в "
+                                    + datetime.fromtimestamp(TS - 300, timezone.utc).strftime("%H:%M")
+                                    + " - Кончилась память на сервере (OOM)")
     # helper'а нет: по счетчику ядра, жертва без pid
     bare = {"clock_unix": TS}
     s = SimpleNamespace(oom_total=2, oom_victim="java (pid 7)", last_report=bare, alert_mutes=[])
