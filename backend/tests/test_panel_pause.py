@@ -136,12 +136,13 @@ async def test_stale_agent_probe_after_pause_is_not_an_outage(tmp_path, monkeypa
         assert (await s.scalars(select(CheckSample))).all() == []
         assert (await s.scalars(select(CheckIncident))).all() == []
 
-    # льгота вышла, свежего результата так и нет - это уже настоящая проблема
+    # После льготы записываем отсутствие измерения, а не недоступность сайта.
     monkeypatch.setattr(collector, "_PANEL_STARTED", now - timedelta(hours=1))
     assert await collector.run_due_checks(factory, settings) == 1
     async with factory() as s:
         rows = (await s.scalars(select(CheckSample))).all()
-        assert len(rows) == 1 and rows[0].status == "down" and "агент" in rows[0].message
+        assert len(rows) == 1 and rows[0].status == "unknown" and "агент" in rows[0].message
+        assert (await s.scalars(select(CheckIncident))).all() == []
     await engine.dispose()
 
 
