@@ -65,6 +65,19 @@ def status_matches(code: int, spec: str) -> bool:
     return False
 
 
+def redirect_only_status(spec: str) -> bool:
+    """Mirror the agent's intentional redirect-only monitor semantics."""
+    parts = (spec or "").strip().split(",")
+    for part in parts:
+        match = re.fullmatch(r"([0-9]{3})(?:\s*-\s*([0-9]{3}))?", part.strip())
+        if not match:
+            return False
+        lo, hi = int(match[1]), int(match[2] or match[1])
+        if not 300 <= lo <= hi <= 399:
+            return False
+    return True
+
+
 def _cert_days_left(not_after: str) -> float:
     """Дней до истечения из notAfter (формат OpenSSL 'Jun  1 12:00:00 2026 GMT')."""
     expires = ssl.cert_time_to_seconds(not_after)
@@ -702,6 +715,11 @@ def outcome_from_agent(check, probe, now, degraded_ms: int) -> CheckOutcome:
             "unknown",
             message=f"агент не присылает результат {mins} мин — проверка с сервера не идёт",
         )
+    if (not probe.error and 300 <= probe.code <= 399
+            and not redirect_only_status(check.expected_status)):
+        # Agents before 2.70 reported the redirect without reaching the application.
+        # During rollout that incomplete result must not resolve an existing outage.
+        return CheckOutcome("unknown", message=f"HTTP {probe.code}: нет конечного ответа приложения, обновите агент до 2.70")
     via = getattr(probe, "via", "") or ""
     if via.startswith("cluster:"):
         return _outcome_via_cluster(check, probe, degraded_ms, via[len("cluster:"):])

@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format is based on
 ## [1.8.129] - 2026-11-12
 
 - Keep local monitors bound to their permitted server when a domain disappears from discovery. Missing or stale agent observations now mean unknown and neither open nor resolve incidents.
-- Follow safe local HTTP redirects to the final application response instead of treating a redirect as healthy. Preserve intentional redirect-only checks and enforce host, credential and upstream boundaries. Includes Linux agent 2.70.
+- Follow safe local HTTP redirects to the final application response instead of treating a redirect as healthy. Preserve intentional redirect-only checks and enforce host, credential and upstream boundaries. Raw redirects from older agents cannot confirm recovery. Includes Linux agent 2.70.
 - Keep related monitors in an unresolved incident together beyond 30 minutes, updating the existing notification. Missing observations cannot confirm group recovery, and disabled monitors leave the group without a recovery alert.
 - Add an Application is no longer in use action to monitor cards. Review and select related monitors to disable, close their incidents without recovery notifications, and retain history.
 

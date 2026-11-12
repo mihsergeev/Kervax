@@ -1,5 +1,6 @@
 """Missing local observations retain incident state and durable server identity."""
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
@@ -106,3 +107,15 @@ async def test_undelivered_recovery_waits_for_real_success_after_unknown(client)
         await session.commit()
         pending, stale = await collector._site_recoveries(session, now + timedelta(minutes=2))
         assert len(pending) == 1 and not stale
+
+
+@pytest.mark.parametrize("via", ["", "addr:203.0.113.10", "proxy:caddy container app:80", "cluster:default/app:80"])
+@pytest.mark.parametrize("spec,expected", [("200-399", "unknown"), ("200", "unknown"),
+                                          ("", "unknown"), ("308", "up"), ("300-399", "up")])
+def test_older_agent_redirect_cannot_confirm_application_recovery(via, spec, expected):
+    now = datetime.now(timezone.utc)
+    check = SimpleNamespace(interval_seconds=60, expected_status=spec, keyword_up="",
+                            keyword_down="", probe_server_id=1, target="http://app.example.test")
+    probe = SimpleNamespace(ts=now, code=308, latency_ms=10, error="", via=via,
+                            kw_up_found=True, kw_down_found=False)
+    assert checks.outcome_from_agent(check, probe, now, 2000).status == expected
