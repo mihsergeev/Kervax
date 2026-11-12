@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.130] - 2026-11-13
+
+- Keep kernel OOM log reads nonblocking and bounded so agent reports continue after an OOM kill. Preserve the latest victim found and resume reading after interrupted reads or overwritten records. Includes Linux agent 2.71.
+
 ## [1.8.129] - 2026-11-12
 
 - Keep local monitors bound to their permitted server when a domain disappears from discovery. Missing or stale agent observations now mean unknown and neither open nor resolve incidents.

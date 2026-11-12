@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.70"
+const version = "2.71"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -3376,16 +3376,35 @@ func readVmstat() (swpin, swpout, majflt, oom uint64, oomOK bool) {
 // (/dev/kmsg). Best-effort: без CAP_SYSLOG при dmesg_restrict=1 вернёт "" — тогда
 // панель покажет алерт без имени. Юнит агента даёт AmbientCapabilities=CAP_SYSLOG.
 func readOOMVictim() string {
-	f, err := os.OpenFile("/dev/kmsg", os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	return readOOMVictimPath("/dev/kmsg")
+}
+
+func readOOMVictimPath(path string) string {
+	// os.File.Read скрывает EAGAIN ожиданием в runtime netpoll даже с O_NONBLOCK.
+	// Прямой syscall сохраняет неблокирующее чтение и не ждет новых сообщений.
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer syscall.Close(fd)
+	return readOOMVictimRecords(func(buf []byte) (int, error) { return syscall.Read(fd, buf) })
+}
+
+const oomVictimMaxReads = 65536
+
+func readOOMVictimRecords(read func([]byte) (int, error)) string {
 	buf := make([]byte, 8192)
 	victim := ""
-	for {
-		n, err := f.Read(buf)
-		if err != nil { // EAGAIN (буфер вычитан) / EOF
+	// Поток printk может пополняться быстрее чтения; ограничиваем и ошибки,
+	// и успешные записи. При лимите возвращаем последнюю уже найденную жертву.
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for reads := 0; reads < oomVictimMaxReads && time.Now().Before(deadline); reads++ {
+		n, err := read(buf)
+		if err == syscall.EINTR || err == syscall.EPIPE {
+			// EPIPE: кольцо перезаписано, ядро уже передвинуло курсор к доступной записи.
+			continue
+		}
+		if err != nil || n == 0 { // EAGAIN (буфер вычитан), EOF или недоступный журнал
 			break
 		}
 		line := string(buf[:n])
