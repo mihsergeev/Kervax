@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [1.8.130] - 2026-11-13
 
-- Keep kernel OOM log reads nonblocking and bounded so agent reports continue after an OOM kill. Preserve the latest victim found and resume reading after interrupted reads or overwritten records. Includes Linux agent 2.71.
+- Prevent kernel OOM log collection from waiting for new messages. Bound reads, handle interrupts and overwritten records, and retain the latest victim found. Includes Linux agent 2.71.
 
 ## [1.8.129] - 2026-11-12
 
