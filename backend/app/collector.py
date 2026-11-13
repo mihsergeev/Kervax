@@ -6388,7 +6388,8 @@ async def _fill_swing(session_factory, s: Server, st: dict, key: str,
 
 
 def _flap_metric(s: Server, st: dict, now: datetime, apply, note: list, url: str,
-                 key: str, title: str, swing: tuple[float, float] | None = None) -> bool:
+                 key: str, title: str, swing: tuple[float, float] | None = None,
+                 ctx: dict | None = None) -> bool:
     """True, если про это срабатывание писать НЕ нужно: метрика ходит вокруг порога.
     Устроено как гаситель мигания у обрывов связи, но окно длиннее: с выдержкой в
     15 минут один и тот же порог чаще раза в пару часов не пересечь. Пока серия заглушена,
@@ -6419,11 +6420,13 @@ def _flap_metric(s: Server, st: dict, now: datetime, apply, note: list, url: str
     else:
         text = (f"{title} ходит вокруг порога: {cnt} срабатывания за "
                 f"{_FLAP_METRIC_WINDOW // 3600} ч - дальше молчу, пока не устаканится")
-    # в чат: что скачет и что дальше тишина; почему (временные файлы) - в полном тексте
+    # В чат - текущий раздел и порог; подробности подавления повторов - в историю.
     rng = (f", {round(swing[0])}-{round(swing[1])}%" if key in ("disk", "inode") and swing
            and round(swing[1]) > round(swing[0]) else "")
     short = (f"{'Диск' if key == 'disk' else 'Inode' if key == 'inode' else title} скачет около порога{rng}",
              ["молчу, пока не утихнет"])
+    if key == "disk" and ctx is not None:
+        short = (f"Раздел {ctx.get('mount') or '?'}: занято {ctx['value']}%, порог {ctx['threshold']}%", [])
     note.append(_server_alert_text(key, s.name, text, url, group=s.group_name or "", short=short))
     return True
 
@@ -8420,6 +8423,7 @@ async def evaluate_servers(
                     s, st, now, apply, fires, srv_url(s, key), key,
                     settings_store.SERVER_ALERT_KINDS[key][0],
                     await _fill_swing(session_factory, s, st, key, now) if key in ("disk", "inode") else None,
+                    ctx=ctx,
                 ):
                     fire_apply.append((s.id, key, level))
                     continue

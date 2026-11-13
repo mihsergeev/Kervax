@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.132] - 2026-11-13
+
+- Repeated disk-space warnings now show one factual line with the partition, current usage and configured threshold. This is the default on every panel. Duplicate suppression, critical alerts and full history are unchanged.
+
 ## [1.8.131] - 2026-11-13
 
 - Mark delayed OOM notifications with the actual event time, including queued repeats. If event details are no longer available, explicitly say the time is unknown. Fresh failures and escalations, repeat suppression, full history and compact notification limits are unchanged.

@@ -101,16 +101,16 @@ def _sender(monkeypatch) -> list[str]:
     return sent
 
 
-async def _tick(factory, at: datetime, pct: float) -> None:
+async def _tick(factory, at: datetime, pct: float, mount: str = "/") -> None:
     """Отчет агента: худший раздел pct, точка истории - как пишет ingest."""
     async with factory() as s:
         srv = await s.scalar(select(Server))
         srv.last_seen = at
         total = 100_000
         srv.last_report = {"uptime_seconds": 100000,
-                           "disks": [{"mount": "/", "used": round(pct / 100 * total), "total": total}]}
+                           "disks": [{"mount": mount, "used": round(pct / 100 * total), "total": total}]}
         s.add(ServerMetric(server_id=srv.id, ts=at, disk_percent=pct,
-                           disks=[{"mount": "/", "pct": pct}]))
+                           disks=[{"mount": mount, "pct": pct}]))
         await s.commit()
     await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), at)
 
@@ -172,15 +172,45 @@ async def test_disk_swinging_twice_is_one_message_and_one_recovery(tmp_path, mon
     assert len(first) == 1 and "заполнен на 88%" in first[0]
     rec = await run(35, 61)
     assert len(rec) == 1 and "снова в норме" in rec[0]
-    swing = await run(35, 88)
-    assert len(swing) == 1 and "<b>Диск скачет около порога, 61-88%</b>" in swing[0]
-    assert "молчу, пока не утихнет" in swing[0] and "заход" not in swing[0]
+    swing = await run(35, 85.8)
+    assert len(swing) == 1 and "<b>Раздел /: занято 86%, порог 85%</b>" in swing[0]
+    assert len(str(swing[0]).splitlines()) == 2  # сервер и одна строка состояния
+    assert "молчу" not in swing[0] and "заход" not in swing[0]
     assert "диск скачет 61-88%: 2-й заход за порог за 6 ч" in full_text(swing[0])
     assert await run(35, 61) == []
     # затихло: шесть часов без заходов - один отбой
     calm = await run(6 * 60, 61)
     assert len(calm) == 1 and "снова в норме" in calm[0]
     await engine.dispose()
+
+
+async def test_disk_repeat_uses_actual_mount_and_configured_threshold(tmp_path, monkeypatch):
+    engine, factory = await _panel(tmp_path, alert_state={"flap_disk_count": 1,
+                                                        "flap_disk_since": NOW.isoformat()})
+    async with factory() as session:
+        srv = await session.scalar(select(Server))
+        srv.disk_warn_percent = 80
+        await session.commit()
+    sent = _sender(monkeypatch)
+    for minute in range(35):
+        await _tick(factory, NOW + timedelta(minutes=minute), 81.2, "/data")
+    assert len(sent) == 1
+    assert "<b>Раздел /data: занято 81%, порог 80%</b>" in sent[0]
+    assert len(str(sent[0]).splitlines()) == 2
+    await engine.dispose()
+
+
+def test_disk_repeat_escapes_mount_and_preserves_delivery_metadata():
+    srv = Server(id=1, name="node", token_hash="x", group_name="test")
+    notes = []
+    assert collector._flap_metric(srv, {"flap_disk_count": 1}, NOW, lambda *a: None, notes,
+                                  "https://panel.example/?server=1&sec=disk", "disk", "Диск",
+                                  ctx={"mount": "/data<&>", "value": 86, "threshold": 85})
+    msg = notes[0]
+    assert "Раздел /data&lt;&amp;&gt;: занято 86%, порог 85%" in msg
+    assert msg.kind == "disk" and msg.target == "node" and msg.group == "test"
+    assert "?server=1&amp;sec=disk" in msg
+    assert "2-й заход за порог" in full_text(msg)
 
 
 async def test_crit_comes_even_while_swinging_is_quiet(tmp_path, monkeypatch):
