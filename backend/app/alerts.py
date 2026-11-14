@@ -78,6 +78,8 @@ class Msg(str):
             out.parts = self.parts
         if getattr(self, "listen_episodes", None):
             out.listen_episodes = self.listen_episodes
+        if getattr(self, "notice", None):
+            out.notice = self.notice
         # куда ушло сообщение (app/site_group.py его потом правит): список общий с исходным
         if getattr(self, "sent_to", None) is not None:
             out.sent_to = self.sent_to
@@ -374,6 +376,14 @@ class TgDown(Exception):
     повтор на следующем тике."""
 
 
+class TgRetry(Exception):
+    """Explicit API backoff. No message has been accepted for this response."""
+
+    def __init__(self, retry_after=30):
+        super().__init__("HTTP 429: Telegram requested backoff")
+        self.retry_after = max(1, min(int(retry_after), 86400))
+
+
 def _u16(s: str) -> int:
     """Длина так, как ее считает Telegram: в UTF-16 (эмодзи - два)."""
     return len(s.encode("utf-16-le")) // 2
@@ -503,6 +513,12 @@ async def tg_send(
         code = _status(r)
     if 400 <= code < 500 and code != 429:
         raise TgRejected(_tg_error(r, code, str(chat)))
+    if code == 429:
+        try:
+            delay = r.json().get("parameters", {}).get("retry_after", 30)
+        except Exception:
+            delay = 30
+        raise TgRetry(delay)
     if code >= 400:
         raise RuntimeError(f"HTTP {code}: {_tg_why(r)}")
     r.raise_for_status()
@@ -614,6 +630,11 @@ class SendErrors(list):
     rejected: int = 0
     uncertain: bool = False
 
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.receipts = []
+        self.retry_after = None
+
 
 def _tg_uncertain(exc: Exception) -> bool:
     # POST мог дойти до Telegram, даже если ответ не пришел. Ошибка
@@ -636,6 +657,8 @@ async def send_alert(cfg: dict, text: str, parse_mode: str | None = None,
             try:
                 mid = await link.tg(cfg.get("telegram_api", ""), token, chat, text, parse_mode,
                                     reply_markup)
+                if mid is not None:
+                    errors.receipts.append({"chat": str(chat), "id": mid})
                 if sent is not None and mid is not None:
                     sent.append({"chat": str(chat), "id": mid})
             except TgRejected as exc:
@@ -644,6 +667,7 @@ async def send_alert(cfg: dict, text: str, parse_mode: str | None = None,
                 log.warning("Telegram отказал в алерте: %s", exc)
             except Exception as exc:  # noqa: BLE001 — алерт не должен ронять цикл
                 errors.uncertain = _tg_uncertain(exc)
+                errors.retry_after = getattr(exc, "retry_after", None)
                 detail = str(exc) or type(exc).__name__
                 errors.append(f"Telegram: {detail}")
                 log.warning("Telegram-алерт не подтвержден: %s", detail)
@@ -822,7 +846,7 @@ async def _send_personal(link: "_Link", api: str, common: str, users: list, mess
                 break  # чат недоступен — остальные сообщения этому же адресату тоже
 
 
-async def dispatch(
+async def _dispatch_legacy(
     cfg: dict,
     can_send: bool,
     messages: list[str],
@@ -937,6 +961,25 @@ async def dispatch(
     if finished is not None:
         finished.update(original for i, indices in enumerate(origins) if i not in again for original in indices)
     return not again and not stale
+
+
+async def dispatch(cfg, can_send, messages, threshold, parse_mode=None, session_factory=None,
+                   *, oom_finished=None, finished=None, accepted=None, on_accept=None, now=None):
+    """Persist notification ownership before sending; confirmation stays separate.
+
+    accepted contains original message indices owned by the durable queue. A
+    collector may commit its observed transition through on_accept in the SAME
+    transaction. finished and the return value never call ambiguity delivered.
+    The no-database seam remains for one-shot calls and transport unit tests.
+    """
+    if session_factory is None:
+        return await _dispatch_legacy(cfg, can_send, messages, threshold, parse_mode,
+                                      oom_finished=oom_finished, finished=finished)
+    from app import alert_delivery
+    messages = await with_notes(session_factory, messages) if messages else []
+    return await alert_delivery.dispatch(cfg, can_send, messages, threshold, parse_mode,
+                                         session_factory, accepted=accepted, finished=finished,
+                                         on_accept=on_accept, now=now)
 
 
 async def _note_passed(session_factory, cfg: dict, messages: list, on_main: list[bool], got: set[int]) -> None:

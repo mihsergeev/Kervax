@@ -21,10 +21,14 @@ import { CardNav, type SecDef, type SecInfo } from './cardLayout'
 import { AlertRulesList, ScopedNote, scopedKinds, unscopeRules } from './ServerAlertRules'
 import { useI18n } from './i18n'
 import { useEscape } from './useEscape'
+import { AlertDeliveryStatus } from './AlertDeliveryStatus'
 
 type Props = {
   onClose: () => void
   onUnauthorized: () => void
+  initialSection?: 'delivery'
+  deliveryCount?: number
+  onDeliveryCount?: (count: number) => void
 }
 
 // Настройки алертов как карточка сервера: меню разделов слева, на экране один раздел, а
@@ -63,11 +67,13 @@ const SECS: SecDef[] = [
   { id: 'hook', label: 'Webhook', group: 'Куда слать' },
   { id: 'buttons', label: 'Кнопки и эскалация', group: 'Как слать' },
   { id: 'flood', label: 'Антифлуд и пауза', group: 'Как слать' },
+  { id: 'delivery', label: 'Доставка', group: 'Как слать' },
   { id: 'srv', label: 'Алерты серверов', group: 'Что слать' },
   { id: 'site', label: 'Алерты сайтов', group: 'Что слать' },
 ]
 
 const LEAD: Record<string, string> = {
+  delivery: 'Подтверждения и проблемы доставки уведомлений.',
   where: 'Куда уходят алерты каждой группы. Основной чат получает все или только то, что не забрали чаты групп.',
   bot: 'Токен выдает @BotFather. Один бот шлет во все чаты: основной, чаты групп и эскалацию.',
   hook: 'Для своих систем: каждый алерт уходит POST-запросом, текст в поле text JSON. Webhook получает все алерты, без деления по группам.',
@@ -79,7 +85,7 @@ const LEAD: Record<string, string> = {
 
 const key = (x: unknown) => JSON.stringify(x)
 
-export function AlertsModal({ onClose, onUnauthorized }: Props) {
+export function AlertsModal({ onClose, onUnauthorized, initialSection, deliveryCount, onDeliveryCount }: Props) {
   const { t } = useI18n()
   // последний конфиг с сервера: то, что не правится (опрос бота, группы, сбои чатов)
   const [cfg, setCfg] = useState<AlertConfig | null>(null)
@@ -88,7 +94,13 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
   const [site, setSite] = useState<Rules | null>(null)
   // как сейчас сохранено: с этим сравниваем, есть ли несохраненное
   const [saved, setSaved] = useState({ f: '', srv: '', site: '' })
-  const [sec, setSec] = useState('where')
+  const [sec, setSec] = useState(initialSection || 'where')
+  const initialSectionRef = useRef(initialSection)
+  const [deliveryBad, setDeliveryBad] = useState(0)
+  const deliveryLoaded = useCallback((count: number) => {
+    setDeliveryBad(count)
+    onDeliveryCount?.(count)
+  }, [onDeliveryCount])
   const mainRef = useRef<HTMLDivElement>(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<string | null>(null)
@@ -113,7 +125,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
       .then((c) => {
         loaded(c)
         // ничего не настроено - начинаем с бота
-        if (!c.telegram_token && !c.webhook) setSec('bot')
+        if (!initialSectionRef.current && !c.telegram_token && !c.webhook) setSec('bot')
       })
       // 502 на деплое или сеть - не выход из панели: выходом лечится только 401 (fail)
       .catch(fail)
@@ -255,6 +267,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
   }
   info.srv = mark(scopedSrv, 1)
   info.site = mark(scopedSite, 1)
+  info.delivery = mark(deliveryCount ?? deliveryBad, 2)
 
   const cur = SECS.find((s) => s.id === sec) ?? SECS[0]
   const state = !cfg
@@ -298,6 +311,7 @@ export function AlertsModal({ onClose, onUnauthorized }: Props) {
               err ? <p className="form-error small">{err}</p> : <p className="muted small">{t('загрузка…')}</p>
             ) : (
               <div className="srv-sec">
+                {cur.id === 'delivery' && <AlertDeliveryStatus onUnauthorized={onUnauthorized} onCount={deliveryLoaded} />}
                 {cur.id === 'where' && (
                   <>
                     {!f.telegram_token.trim() && (

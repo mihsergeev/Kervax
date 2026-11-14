@@ -20,11 +20,13 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    ForeignKey,
     Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -455,6 +457,8 @@ class CheckIncident(Base):
     )  # None = инцидент открыт
     last_message: Mapped[str] = mapped_column(String(512), default="")
     notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Durable queue ownership is separate from actual notification confirmation.
+    notice_queued: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
 
 class Location(Base):
@@ -1361,6 +1365,82 @@ class TgAlert(Base):
     esc_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # пришел отбой: эскалировать нечего, кнопки глушения больше не нужны
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class NotificationStream(Base):
+    """Observed notification transitions, independent of delivery confirmation."""
+
+    __tablename__ = "notification_streams"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    seq: Mapped[int] = mapped_column(Integer, default=0)
+    episode: Mapped[int] = mapped_column(Integer, default=0)
+    phase: Mapped[str] = mapped_column(String(32), default="")
+    members: Mapped[list] = mapped_column(JSON, default=list)
+    level: Mapped[int] = mapped_column(Integer, default=0)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_event_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class NotificationEvent(Base):
+    """Durably admitted event. Admission never implies a successful POST."""
+
+    __tablename__ = "notification_events"
+    __table_args__ = (
+        UniqueConstraint("stream_key", "seq", name="uq_notification_event_seq"),
+        UniqueConstraint("stream_key", "occurrence", name="uq_notification_event_occurrence"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    stream_key: Mapped[str] = mapped_column(ForeignKey("notification_streams.key"), index=True)
+    seq: Mapped[int] = mapped_column(Integer)
+    episode: Mapped[int] = mapped_column(Integer)
+    phase: Mapped[str] = mapped_column(String(32))
+    level: Mapped[int] = mapped_column(Integer, default=0)
+    members: Mapped[list] = mapped_column(JSON, default=list)
+    occurrence: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    history_recorded: Mapped[bool] = mapped_column(Boolean, default=False)
+    tg_alert_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class NotificationDelivery(Base):
+    """One recipient's delivery attempt and lease; credentials stay in settings."""
+
+    __tablename__ = "notification_deliveries"
+    __table_args__ = (
+        UniqueConstraint("event_id", "recipient_key", name="uq_notification_delivery_recipient"),
+        Index("ix_notification_delivery_due", "status", "next_attempt_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("notification_events.id"), index=True)
+    recipient_key: Mapped[str] = mapped_column(String(64))
+    target: Mapped[dict] = mapped_column(JSON, default=dict)
+    transport_key: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    uncertain_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lease_owner: Mapped[str] = mapped_column(String(128), default="")
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    message_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    last_error: Mapped[str] = mapped_column(String(100), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class NotificationTransport(Base):
+    """Persistent circuit and exclusive POST lease shared by a transport."""
+
+    __tablename__ = "notification_transports"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    failures: Mapped[int] = mapped_column(Integer, default=0)
+    blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[str] = mapped_column(String(128), default="")
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MaintenanceWindow(Base):

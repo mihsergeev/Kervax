@@ -165,7 +165,8 @@ async def test_fire_gets_buttons_recovery_does_not(client, tg):
     fire = collector._server_alert_text("disk", "web-a", "занят на 92%", ref=f"srv:{sid}")
     rec = collector._server_alert_text("disk", "web-a", "снова в норме", recovery=True,
                                        ref=f"srv:{sid}")
-    assert await alerts.dispatch(CFG, True, [fire, rec], 6, parse_mode="HTML", session_factory=f)
+    assert await alerts.dispatch(CFG, True, [fire], 6, parse_mode="HTML", session_factory=f)
+    assert await alerts.dispatch(CFG, True, [rec], 6, parse_mode="HTML", session_factory=f)
     sends = tg.of("sendMessage")
     assert len(sends) == 2
     kb = sends[0]["reply_markup"]["inline_keyboard"]
@@ -708,11 +709,13 @@ async def test_storm_one_message_buttons_cover_all(client, tg):
             (await s.get(Server, i)).alert_state = {"units": 0}
         (await s.get(Server, ids[2])).alert_state = {"units": 2}
         await s.commit()
-    rec = collector._server_alert_text("units", "web-a", "упавших юнитов больше нет", recovery=True)
-    await alerts.dispatch(CFG, True, [rec], 6, session_factory=f)
+    rec = [collector._server_alert_text("units", f"web-{c}", "упавших юнитов больше нет",
+                                       recovery=True, ref=f"srv:{sid}") for c, sid in zip("ab", ids[:2])]
+    await alerts.dispatch(CFG, True, rec, 6, session_factory=f)
     async with f() as s:
         assert (await s.get(TgAlert, row.id)).resolved_at is None
-    rec = collector._server_alert_text("units", "web-c", "упавших юнитов больше нет", recovery=True)
+    rec = collector._server_alert_text("units", "web-c", "упавших юнитов больше нет", recovery=True,
+                                       ref=f"srv:{ids[2]}")
     await alerts.dispatch(CFG, True, [rec], 6, session_factory=f)
     async with f() as s:
         assert (await s.get(TgAlert, row.id)).resolved_at is not None

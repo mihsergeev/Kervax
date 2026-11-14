@@ -264,16 +264,19 @@ async def test_dispatch_retirement_orders_alert_history(client, auth_headers, mo
     msg.listen_episodes = {"tcp:8080": miss}
     sent = []
 
-    async def send_common(cfg, idx, messages, *args):
-        sent.extend(messages)
+    async def send_common(cfg, message, *args):
+        sent.append(message)
         response = await _retire(client, auth_headers, sid, miss)
         assert response.status_code == 200, response.text
-        return set(idx), set()
+        result = alerts.SendErrors()
+        result.receipts.append({"chat": "-100", "id": 1})
+        return result
 
-    monkeypatch.setattr(alerts, "_send_common", send_common)
+    monkeypatch.setattr(alerts, "send_alert", send_common)
     if not retire_during_send:
         assert (await _retire(client, auth_headers, sid, miss)).status_code == 200
-    assert await alerts.dispatch({}, True, [msg], 0, session_factory=factory) == retire_during_send
+    cfg = {"telegram_token": "fixture-token", "telegram_chat": "-100"}
+    assert await alerts.dispatch(cfg, True, [msg], 0, session_factory=factory) == retire_during_send
     assert sent == ([msg] if retire_during_send else [])
     async with factory() as session:
         srv = await session.get(Server, sid)
@@ -301,7 +304,7 @@ async def test_telegram_preserves_remaining_ports_and_closes_retired_episode(cli
 
     sent = []
 
-    async def send(_api, _token, _chat, text, *_):
+    async def send(_api, _token, _chat, text, *_, **kwargs):
         sent.append(text)
         return 2
 

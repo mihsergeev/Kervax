@@ -33,7 +33,7 @@ from sqlalchemy import select
 from zoneinfo import ZoneInfo
 
 from app import alerts, geoip, settings_store, tg_fmt
-from app.models import AutobanBan, BackupCommand, Location, Server
+from app.models import AppSetting, AutobanBan, BackupCommand, Location, Server
 
 STALE = 900  # helper пишет раз в минуту: блок старше 15 минут - helper не работает
 MUTE_PREFIX = "autoban:"
@@ -522,10 +522,23 @@ async def send_digest(session_factory, settings, now: datetime) -> bool:
         threshold = int(cfg.get("flood_threshold", 6))
         can = bool(groups) and not muted and alerts.alerts_enabled(cfg)
         ids = [r.id for r in rows]
+    message = alerts.Msg(text, "servers", "", kind="autoban_digest", full=full, line=text.split('\n')[0])
+    local = now.astimezone(tz)
+    period = local.strftime("%Y-%m-%dT%H%z") if mode == "hour" else local.date().isoformat()
+    message.notice = {"stream": "panel:autoban_digest", "phase": "event", "level": 1,
+                      "members": [f"ban:{bid}" for bid in sorted(ids)],
+                      "observed_at": now.astimezone(timezone.utc).isoformat(), "occurrence": f"{mode}:{period}"}
+    accepted: set[int] = set()
+
+    async def admitted(session):
+        for row in await session.scalars(select(AutobanBan).where(AutobanBan.id.in_(ids))):
+            row.digested = True
+        await session.merge(AppSetting(key=DIGEST_KEY, value=json.dumps({"last": now.isoformat()})))
+
     delivered = can and await alerts.dispatch(
-        cfg, True, [alerts.Msg(text, "servers", "", kind="autoban_digest", full=full, line=text.split('\n')[0])], threshold,
-        parse_mode="HTML", session_factory=session_factory)
-    if delivered or not groups:
+        cfg, True, [message], threshold,
+        parse_mode="HTML", session_factory=session_factory, accepted=accepted, on_accept=admitted, now=now)
+    if (delivered or not groups) and not accepted:
         async with session_factory() as s:
             for r in await s.scalars(select(AutobanBan).where(AutobanBan.id.in_(ids))):
                 r.digested = True

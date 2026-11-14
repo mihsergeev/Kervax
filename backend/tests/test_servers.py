@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 
 async def test_server_enroll_report_flow(client: httpx.AsyncClient, auth_headers):
@@ -768,7 +769,8 @@ async def test_server_conntrack_disktemp_conditions():
     assert "conntrack" not in cond and "disktemp" not in cond
 
 
-async def test_server_alert_flood_digest(tmp_path, monkeypatch):
+@pytest.mark.parametrize("threshold", [0, 6])
+async def test_server_alert_flood_digest(tmp_path, monkeypatch, threshold):
     from datetime import datetime, timedelta, timezone
 
     from app import collector
@@ -804,7 +806,7 @@ async def test_server_alert_flood_digest(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     # 8 одинаковых "недоступен" - одно сообщение со списком серверов (alerts.merge_storm)
-    settings = Settings(alert_webhook="http://hook", alert_flood_threshold=6)
+    settings = Settings(alert_webhook="http://hook", alert_flood_threshold=threshold)
     from app.alerts import full_text
 
     await collector.evaluate_servers(factory, settings, now)
@@ -814,15 +816,11 @@ async def test_server_alert_flood_digest(tmp_path, monkeypatch):
     assert len(sent[0].splitlines()) <= 4
     assert all(f"node{i}" in full_text(sent[0]) for i in range(8))
 
-    # порог дайджеста 0 = выкл: склейка от него не зависит, все равно одно сообщение
-    async with factory() as s:
-        for srv in await s.scalars(__import__("sqlalchemy").select(Server)):
-            srv.alert_state = None
-        await s.commit()
+    # Re-observation and even resetting detector state cannot replay a confirmed
+    # event: durable delivery ownership survives both operations.
     sent.clear()
-    settings = Settings(alert_webhook="http://hook", alert_flood_threshold=0)
     await collector.evaluate_servers(factory, settings, now)
-    assert len(sent) == 1 and "8 серверов" in sent[0]
+    assert sent == []
     await engine.dispose()
 
 

@@ -4,6 +4,7 @@
 type T = (s: string, p?: Record<string, string | number>) => string
 
 export const ACT: Record<string, string> = {
+  alert_delivery_retry: 'поставил повтор доставки в очередь',
   login_ok: 'вход',
   login_fail: 'неверный пароль',
   login_2fa_fail: 'неверный код 2FA',

@@ -1,14 +1,16 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
+from pydantic import BaseModel, ConfigDict, Field
 
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 
-from app import alerts, audit, collector, settings_store, tg_bot
+from app import alerts, audit, collector, notification_store, panel_errors, settings_store, tg_bot
 from app.config import get_settings
 from app.deps import AdminUser, SessionDep
-from app.models import Check, Server, User
+from app.models import AuditLog, Check, NotificationDelivery, NotificationEvent, Server, User
 from app.schemas import (
     MuteWarning,
     AlertCoverageOut,
@@ -25,6 +27,80 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/alerts", tags=["alerts"])
+
+_DELIVERY_PROBLEMS = ("attention", "rejected", "uncertain")
+_DELIVERY_STATUSES = ("pending", "sending", "confirmed", "uncertain", "rejected", "superseded", "attention")
+_RETRY_WARNING = "Предыдущая доставка не подтверждена, повтор может прислать копию"
+
+
+class DeliveryRetryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ids: list[Annotated[int, Field(strict=True, gt=0, le=9223372036854775807)]] = Field(min_length=1, max_length=50)
+    acknowledge_uncertain: bool = False
+
+
+def _delivery_time(value):
+    return value.replace(tzinfo=timezone.utc) if value is not None and value.tzinfo is None else value
+
+
+@router.get("/deliveries")
+async def get_deliveries(_: AdminUser, session: SessionDep,
+                         state: Literal["problems", "all"] = "problems", summary: bool = False) -> dict:
+    """Admin-only safe metadata; no payloads, recipient addresses or credentials."""
+    counts = dict.fromkeys(_DELIVERY_STATUSES, 0)
+    counts.update({name: int(number) for name, number in (await session.execute(
+        select(NotificationDelivery.status, func.count()).group_by(NotificationDelivery.status))).all()})
+    query = select(NotificationDelivery, NotificationEvent).join(
+        NotificationEvent, NotificationEvent.id == NotificationDelivery.event_id)
+    if state == "problems":
+        query = query.where(NotificationDelivery.status.in_(_DELIVERY_PROBLEMS))
+    rows = [] if summary else (await session.execute(
+        query.order_by(NotificationDelivery.id.desc()).limit(51))).all()
+    items = []
+    for delivery, event in rows[:50]:
+        message = (event.payload or {}).get("message") or {}
+        items.append({
+            "id": delivery.id, "event_id": event.id,
+            "kind": panel_errors.mask_text(message.get("kind") or "", 40),
+            "target": panel_errors.mask_text(message.get("target") or "", 255),
+            "phase": event.phase, "status": delivery.status,
+            "attempts": delivery.attempts, "uncertain_count": delivery.uncertain_count,
+            "created_at": _delivery_time(delivery.created_at),
+            "occurred_at": _delivery_time(event.occurred_at),
+            "next_attempt_at": _delivery_time(delivery.next_attempt_at),
+            "lease_until": _delivery_time(delivery.lease_until),
+            "can_retry": delivery.status in _DELIVERY_PROBLEMS,
+            "needs_confirmation": delivery.uncertain_count > 0 or delivery.status == "uncertain",
+        })
+    return {"counts": counts, "bad_count": sum(counts.get(name, 0) for name in _DELIVERY_PROBLEMS),
+            "items": items, "more": len(rows) > 50}
+
+
+@router.post("/deliveries/retry")
+async def retry_deliveries(body: DeliveryRetryIn, user: AdminUser, session: SessionDep,
+                           request: Request) -> dict:
+    """Only enqueue an explicit retry; the normal worker owns every HTTP POST."""
+    now = datetime.now(timezone.utc)
+    ids = sorted(set(body.ids))
+    # Persisted per-account limit survives restarts and is serialized on PostgreSQL.
+    await session.execute(update(User).where(User.id == user.id).values(token_version=User.token_version))
+    recent = await session.scalar(select(func.count()).select_from(AuditLog).where(
+        AuditLog.username == user.username, AuditLog.action == "alert_delivery_retry",
+        AuditLog.ts >= now - timedelta(minutes=1)))
+    if recent >= 5:
+        raise HTTPException(429, "Слишком много повторов доставки, повторите через минуту",
+                            headers={"Retry-After": "60"})
+    rows = list(await session.scalars(select(NotificationDelivery).where(NotificationDelivery.id.in_(ids))))
+    uncertain = [row.id for row in rows if row.status in _DELIVERY_PROBLEMS and (
+        row.uncertain_count > 0 or row.status == "uncertain")]
+    if uncertain and not body.acknowledge_uncertain:
+        raise HTTPException(409, _RETRY_WARNING)
+    # Record the explicit request before releasing the account's rate-limit lock.
+    await audit.record(session, user.username, "alert_delivery_retry", "", ",".join(map(str, ids)))
+    queued = await notification_store.retry(request.app.state.session_factory, ids, now,
+                                            acknowledge_uncertain=body.acknowledge_uncertain)
+    return {"queued_ids": queued, "skipped_ids": [item for item in ids if item not in queued],
+            "delivery_confirmed": False}
 
 
 async def _current(session, settings) -> AlertConfigOut:

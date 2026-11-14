@@ -4,6 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.134] - 2026-11-15
+
+- Alerts retain their incident identity and per-recipient results across restarts. Refreshed counters and durations do not resend the same incident.
+- Telegram timeouts use persistent backoff and a bounded retry budget. Ambiguous responses remain unconfirmed; exhausted attempts require administrator action.
+- Administrators can review delivery problems and request a retry, with an explicit warning when the previous attempt may already have reached Telegram.
+- Recovery during a delivery outage produces a completed-incident summary, while a later new failure stays separate. Site-group edits, escalations and delayed main-chat copies use the same durable queue.
+- Confirmed recipients are not replayed after partial failure. Telegram rate-limit delays are honored, and a permanently rejected group route falls back once to the current main chat.
+- Atomic observer state, fenced POST leases and confirmation repair protect delivery history, original buttons and group membership from overlapping workers and crashes.
+
+Agent 2.71 and helper payloads are unchanged. Database migration 0149 adds the durable notification journal.
+
 ## [1.8.133] - 2026-11-14
 
 - Flux failures require an hour of continuous confirmation on the same resource; chart repository warnings keep their two-hour hold. Dependent resources do not repeat the root failure, and generic Git errors no longer assume an expired token.

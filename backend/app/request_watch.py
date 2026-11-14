@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 
 from app import alerts, client_ip, settings_store, tg_fmt
-from app.models import RequestStat, Server
+from app.models import AppSetting, RequestStat, Server
 
 log = logging.getLogger(__name__)
 
@@ -352,17 +352,33 @@ async def check(session_factory, settings, now: datetime) -> None:
     can_send = bool(rule.get("enabled", True)) and not muted and alerts.alerts_enabled(cfg)
     msgs = [alerts.Msg(t, "servers", "", kind=KIND, target=tg, recovery=False, full=f) for _k, t, tg, f in fires]
     msgs += [alerts.Msg(t, "servers", "", kind=KIND, target=tg, recovery=True) for _k, t, tg in recs]
+    for (key, _text, _target, _full), message in zip(fires, msgs):
+        message.notice = {"stream": f"request:{key}:{KIND}", "phase": "fire", "members": [], "level": 1,
+                          "observed_at": _aware(now).astimezone(timezone.utc).isoformat(),
+                          "since": new[key]["since"]}
+    for (key, _text, _target), message in zip(recs, msgs[len(fires):]):
+        message.notice = {"stream": f"request:{key}:{KIND}", "phase": "recovery", "members": [], "level": 0,
+                          "observed_at": _aware(now).astimezone(timezone.utc).isoformat(),
+                          "since": state[key]["since"]}
+    accepted: set[int] = set()
+
+    async def admitted(session):
+        queued = {key: dict(value) for key, value in new.items()}
+        for key, _text, _target, _full in fires:
+            queued[key]["notified"] = True
+        await session.merge(AppSetting(key=STATE_KEY, value=json.dumps(queued, ensure_ascii=False)))
+
     delivered = bool(msgs) and can_send and await alerts.dispatch(
         cfg, True, msgs, int(cfg.get("flood_threshold", 6)), parse_mode="HTML",
-        session_factory=session_factory,
+        session_factory=session_factory, accepted=accepted, on_accept=admitted, now=now,
     )
-    if delivered:
+    if delivered or len(accepted) == len(msgs) and msgs:
         for key, _t, _tg, _f in fires:
             new[key]["notified"] = True
     else:
         for key, _t, _tg in recs:  # отбой не дошел - попробуем на следующем тике
             new[key] = state[key]
-    if new != state:
+    if new != state and not accepted:
         async with session_factory() as s:
             await settings_store.set_raw(s, STATE_KEY, json.dumps(new, ensure_ascii=False))
 

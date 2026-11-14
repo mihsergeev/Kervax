@@ -6,10 +6,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from app import alerts, collector, parents, settings_store, site_flap, site_group
+from app import alert_delivery, alerts, collector, parents, settings_store, site_flap, site_group
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
-from app.models import AlertEvent, Check, Server
+from app.models import AlertEvent, Check, NotificationDelivery, NotificationEvent, Server, TgAlert
 
 T0 = datetime(2026, 10, 25, 18, 47, tzinfo=timezone.utc)
 TLS = "соединение есть, но TLS-рукопожатие висит: 10 с без ответа"
@@ -44,15 +44,36 @@ async def _panel(tmp_path, monkeypatch, names, servers=()):
 
     async def fake_send(cfg, text, parse_mode=None, reply_markup=None, out=None):
         sent.append(text)
+        result = alerts.SendErrors()
+        result.receipts.append({"chat": str(cfg["telegram_chat"]), "id": len(sent)})
         if out is not None:
-            out.append({"chat": "100", "id": len(sent)})
-        return []
+            out.extend(result.receipts)
+        return result
 
-    async def fake_edit(cfg, chat, message_id, text, reply_markup):
-        edits.append((message_id, text))
+    class HTTP:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, json=None):
+            assert url.endswith("/editMessageText")
+            edits.append((json["message_id"], json["text"]))
+
+            class Response:
+                status_code = 200
+
+                def json(self):
+                    return {"ok": True, "result": {"message_id": json["message_id"]}}
+
+            return Response()
 
     monkeypatch.setattr(alerts, "send_alert", fake_send)
-    monkeypatch.setattr(alerts, "tg_edit", fake_edit)
+    monkeypatch.setattr(alerts.httpx, "AsyncClient", HTTP)
     return engine, factory, ids, sent, edits
 
 
@@ -113,25 +134,49 @@ async def test_partial_delivery_retries_only_the_undelivered_recovery(tmp_path, 
 
     async def fail_one(cfg, message, *args):
         if failed_target in message:
-            return ["Telegram: temporarily unavailable"]
+            return alerts.SendErrors(["Telegram: temporarily unavailable"])
         return await original_send(cfg, message, *args)
 
     sent.clear()
     monkeypatch.setattr(alerts, "send_alert", fail_one)
     await collector._send_alerts(factory, SET, [], now)
-    assert len(sent) == 1
-    assert failed_target not in sent[0]
+    # A transport failure can pause the remaining jobs for this chat. Jobs that
+    # already succeeded must never be retried, whichever group was attempted first.
+    assert len(sent) <= 1
+    assert all(failed_target not in message for message in sent)
+    confirmed_messages = list(sent)
 
     async with factory() as session:
         queued, _ = await collector._site_recoveries(session, now)
+        jobs = list(await session.scalars(select(NotificationDelivery).join(NotificationEvent).where(
+            NotificationEvent.phase == "recovery")))
+        events = {event.id: event for event in await session.scalars(select(NotificationEvent))}
     expected = names[:2] if failed_target == names[0] else names[2:]
-    assert sorted(p.name for p in queued) == sorted(expected)
+    assert queued == []  # Durable ownership already closed the producer retry queue.
+    pending = [job for job in jobs if job.status == "pending"]
+    target = {job.id: alert_delivery.unpack(events[job.event_id].payload["message"]).target for job in jobs}
+    assert set(expected) <= {target[job.id] for job in pending}
+    assert {target[job.id] for job in jobs if job.status == "confirmed"} == {
+        name for name in names if any(name in message for message in confirmed_messages)}
+    assert all(job.attempts == (1 if target[job.id] in expected else 0) for job in pending)
+    assert all(collector._aware(job.next_attempt_at) > now for job in pending if job.attempts)
 
     monkeypatch.setattr(alerts, "send_alert", original_send)
-    await collector._send_alerts(factory, SET, [], now + timedelta(minutes=1))
-    await collector._send_alerts(factory, SET, [], now + timedelta(minutes=2))
+    async with factory() as session:
+        cfg = await settings_store.get_alert_config(session, SET)
+    await alert_delivery.drain(factory, cfg, now + timedelta(seconds=1))
+    assert sent == confirmed_messages  # Ownership does not bypass transport backoff.
+    retry_at = max(collector._aware(job.next_attempt_at) for job in pending)
+    await alert_delivery.drain(factory, cfg, retry_at + timedelta(seconds=1))
+    await alert_delivery.drain(factory, cfg, retry_at + timedelta(minutes=1))
     assert len(sent) == 2
-    assert failed_target in sent[1]
+    assert sum(failed_target in message for message in sent) == 1
+    assert all(sum(name in message for message in sent) == 1 for name in names)
+    async with factory() as session:
+        jobs = list(await session.scalars(select(NotificationDelivery).join(NotificationEvent).where(
+            NotificationEvent.phase == "recovery")))
+        assert all(job.status == "confirmed" for job in jobs)
+        assert all(job.attempts == (2 if target[job.id] in expected else 1) for job in jobs)
     assert sorted(target for _, target, recovery in await _history(factory) if recovery) == sorted(names)
     await engine.dispose()
 
@@ -158,7 +203,7 @@ async def test_neighbours_join_the_sent_message_and_recover_together(tmp_path, m
         "TLS висит 10 с; Не ответил за 10 с", "a.example.com, api.example.org, shop.example.net"]
     assert "https://panel.example/?check=" in text
     # у каждого монитора своя строка в истории
-    assert [t for _k, t, _r in await _history(f)] == ["a.example.com", "api.example.org", "shop.example.net"]
+    assert sorted(t for _k, t, _r in await _history(f)) == ["a.example.com", "api.example.org", "shop.example.net"]
 
     # другой адрес - свое сообщение
     t2 = T0 + timedelta(minutes=10)
@@ -342,7 +387,10 @@ async def test_old_group_does_not_repeat_another_groups_monitor(tmp_path, monkey
         await _recover(f, ids[name], t1)
     await collector._send_alerts(f, SET, [_back(n, ids[n]) for n in names], t1)
     assert len(sent) == 3
-    assert names[1] not in sent[1] and names[0] not in sent[2]
+    # Recipient queues may deliver different routes in either order. Neither
+    # recovery may include a monitor from the other route.
+    assert sorted(m.target for m in sent[1:]) == sorted(names)
+    assert all(other not in message for message in sent[1:] for other in names if other != message.target)
     await engine.dispose()
 
 
@@ -452,6 +500,64 @@ async def test_edit_regroups_by_reason(tmp_path, monkeypatch):
     assert _plain(edits[0][1]).split("\n")[1:] == [
         "3 монитора не отвечают", "Сервер не принимает соединение: 10 с без ответа; TLS висит 10 с",
         "a.example.com, api.example.org, shop.example.net"]
+    await engine.dispose()
+
+
+async def test_group_edit_reuses_buttons_and_persists_current_members(tmp_path, monkeypatch):
+    names = ["a.example.com", "api.example.org"]
+    engine, factory, ids, sent, edits = await _panel(tmp_path, monkeypatch, names)
+    async with factory() as session:
+        await settings_store.set_alert_config(session, SET.alert_telegram_token, "100", "", tg_buttons=True)
+    await collector._send_alerts(factory, SET, [_down(names[0], ids[names[0]], T0)], T0)
+    async with factory() as session:
+        original = await session.scalar(select(TgAlert))
+        aid = original.id
+        assert original.messages == [{"chat": "100", "id": 1}]
+    now = T0 + timedelta(minutes=1)
+    await collector._send_alerts(factory, SET, [_down(names[1], ids[names[1]], now)], now)
+    assert len(sent) == len(edits) == 1
+    assert edits[0][0] == 1
+    async with factory() as session:
+        rows = list(await session.scalars(select(TgAlert)))
+        assert len(rows) == 1 and rows[0].id == aid
+        assert all(name in rows[0].text for name in names)
+        assert rows[0].ref == f"chk:{ids[names[0]]},{ids[names[1]]}"
+        assert rows[0].messages == [{"chat": "100", "id": 1}]
+        assert set(await session.scalars(select(NotificationEvent.tg_alert_id))) == {aid}
+    await engine.dispose()
+
+
+async def test_restart_repairs_confirmed_group_edit_without_posting_again(tmp_path, monkeypatch):
+    names = ["a.example.com", "api.example.org"]
+    engine, factory, ids, sent, edits = await _panel(tmp_path, monkeypatch, names)
+    async with factory() as session:
+        await settings_store.set_alert_config(session, SET.alert_telegram_token, "100", "", tg_buttons=True)
+    await collector._send_alerts(factory, SET, [_down(names[0], ids[names[0]], T0)], T0)
+    original_save = alert_delivery._save_buttons
+
+    async def crash_after_confirmation(*_args):
+        raise RuntimeError("fixture stopped after confirmed edit")
+
+    monkeypatch.setattr(alert_delivery, "_save_buttons", crash_after_confirmation)
+    now = T0 + timedelta(minutes=1)
+    with pytest.raises(RuntimeError, match="fixture stopped after confirmed edit"):
+        await collector._send_alerts(factory, SET, [_down(names[1], ids[names[1]], now)], now)
+    assert len(sent) == len(edits) == 1
+    async with factory() as session:
+        assert all(job.status == "confirmed" for job in await session.scalars(select(NotificationDelivery)))
+        original = await session.scalar(select(TgAlert))
+        aid = original.id
+        assert names[1] not in original.text
+        cfg = await settings_store.get_alert_config(session, SET)
+    monkeypatch.setattr(alert_delivery, "_save_buttons", original_save)
+    await alert_delivery.drain(factory, cfg, now + timedelta(seconds=1))
+    assert len(sent) == len(edits) == 1
+    async with factory() as session:
+        rows = list(await session.scalars(select(TgAlert)))
+        assert len(rows) == 1 and rows[0].id == aid
+        assert all(name in rows[0].text for name in names)
+        assert rows[0].ref == f"chk:{ids[names[0]]},{ids[names[1]]}"
+        assert rows[0].messages == [{"chat": "100", "id": 1}]
     await engine.dispose()
 
 

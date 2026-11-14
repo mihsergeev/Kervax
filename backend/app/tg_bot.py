@@ -432,6 +432,7 @@ async def escalate(session_factory, settings: Settings, now: datetime | None = N
     """Повтор алертов, на которые никто не нажал "взял": через N минут - в чат эскалации и
     выбранным учеткам, и так до заданного числа повторов. Возвращает, сколько повторено."""
     now = now or datetime.now(timezone.utc)
+    pending = []
     async with session_factory() as session:
         cfg = await settings_store.get_alert_config(session, settings)
         esc = await settings_store.get_escalation(session)
@@ -456,10 +457,9 @@ async def escalate(session_factory, settings: Settings, now: datetime | None = N
         tz = cfg.get("tz") or "UTC"
         done = 0
         for row in rows:
-            if row.kind == "listen_gone":
-                await session.refresh(row)
-                if row.resolved_at or row.acked_by or not row.messages:
-                    continue
+            await session.refresh(row)
+            if row.resolved_at or row.acked_by or not row.messages:
+                continue
             start = _aware(row.esc_at) or _aware(row.ts) or now
             if now - start < after or "mute" in (row.undo or {}):
                 continue
@@ -472,22 +472,15 @@ async def escalate(session_factory, settings: Settings, now: datetime | None = N
                 continue
             mins = int((now - _aware(row.ts)).total_seconds() // 60) if row.ts else esc["after_min"]
             text = f"⏰ Никто не взял за {mins} мин\n\n" + tg_buttons.row_text(row, tz, now)
-            text = alerts.short_message(text, 'HTML')
-            sent = []
-            for chat in chats:
-                try:
-                    mid = await alerts.tg_send(cfg.get("telegram_api", ""), cfg["telegram_token"], chat,
-                                               text, "HTML", tg_buttons.row_keyboard(row))
-                    if mid is not None:
-                        sent.append({"chat": str(chat), "id": mid})
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("эскалация в %s не отправлена: %s", chat, exc)
-            if not sent:
-                continue  # никуда не ушло - попробуем на следующем заходе
-            row.messages = list(row.messages or []) + sent
-            row.esc_level, row.esc_at = row.esc_level + 1, now
-            done += 1
+            message = alerts.Msg(text, row.section, row.grp, row.kind, row.target,
+                                 ref=row.ref, mutes=list((row.undo or {}).get("keys") or []))
+            pending.append((row.id, row.esc_level + 1, alerts.short_message(message, 'HTML')))
         await session.commit()
+    from app import alert_delivery, alert_delivery_actions
+    for row_id, level, message in pending:
+        done += int(await alert_delivery_actions.enqueue(session_factory, cfg, row_id, "escalation", level,
+                                                        chats, message, now))
+    await alert_delivery.drain(session_factory, cfg, now)
     return done
 
 
@@ -495,7 +488,7 @@ async def dup_catchup(session_factory, settings: Settings, now: datetime | None 
     """Критичное, которое пауза копий придержала (alerts.dup_held): в группе за DUP_HOLD_MIN
     никто не нажал "взял", а беда не прошла - отдать в основной чат. Возвращает, сколько отдано."""
     now = now or datetime.now(timezone.utc)
-    add: list[list[str]] = []
+    pending = []
     done = 0
     async with session_factory() as session:
         cfg = await settings_store.get_alert_config(session, settings)
@@ -507,10 +500,9 @@ async def dup_catchup(session_factory, settings: Settings, now: datetime | None 
         tz = cfg.get("tz") or "UTC"
         after = timedelta(minutes=alerts.DUP_HOLD_MIN)
         for row in rows:
-            if row.kind == "listen_gone":
-                await session.refresh(row)
-                if row.resolved_at or not (row.undo or {}).get("held"):
-                    continue
+            await session.refresh(row)
+            if row.resolved_at or not row.messages or not (row.undo or {}).get("held"):
+                continue
             undo = dict(row.undo or {})
             chat = str(undo.pop("held"))
             if row.acked_by or "mute" in undo:
@@ -527,22 +519,15 @@ async def dup_catchup(session_factory, settings: Settings, now: datetime | None 
                 continue
             mins = int((now - _aware(row.ts)).total_seconds() // 60)
             text = f"⏰ В чате группы никто не взял за {mins} мин\n\n" + tg_buttons.row_text(row, tz, now)
-            text = alerts.short_message(text, 'HTML')
-            try:
-                mid = await alerts.tg_send(cfg.get("telegram_api", ""), cfg["telegram_token"], chat,
-                                           text, "HTML", tg_buttons.row_keyboard(row))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("придержанный алерт в %s не отправлен: %s", chat, exc)
-                continue  # попробуем на следующем заходе
-            if mid is not None:
-                row.messages = list(row.messages or []) + [{"chat": chat, "id": mid}]
-            row.undo = undo
-            # у шторма в target имена через запятую, а отбой приходит по каждому серверу
-            add += [[row.kind, t.strip()] for t in (row.target or "").split(", ") if t.strip()]
-            done += 1
+            message = alerts.Msg(text, row.section, row.grp, row.kind, row.target,
+                                 ref=row.ref, mutes=list((row.undo or {}).get("keys") or []))
+            pending.append((row.id, chat, alerts.short_message(message, 'HTML')))
         await session.commit()
-    if add:
-        await alerts.note_passed(session_factory, add)
+    from app import alert_delivery, alert_delivery_actions
+    for row_id, chat, message in pending:
+        done += int(await alert_delivery_actions.enqueue(session_factory, cfg, row_id, "held", 0,
+                                                        [chat], message, now))
+    await alert_delivery.drain(session_factory, cfg, now)
     return done
 
 

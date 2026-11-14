@@ -116,6 +116,7 @@ from app.models import (
     LocationSample,
     OomEvent,
     AlertEvent,
+    AppSetting,
     LinkSample,
     ProbeRequest,
     RequestStat,
@@ -124,7 +125,6 @@ from app.models import (
     ServerMetric,
     ServerTraffic,
     ServerUsage,
-    TgAlert,
     WebErrorSample,
 )
 
@@ -134,6 +134,7 @@ log = logging.getLogger("kervax.collector")
 _REC_RETRY_MAX = timedelta(days=1)
 _RECOVERY_KINDS = ("recovery", "recstable")
 _site_alert_locks: WeakKeyDictionary[async_sessionmaker, asyncio.Lock] = WeakKeyDictionary()
+_server_alert_locks: WeakKeyDictionary[async_sessionmaker, asyncio.Lock] = WeakKeyDictionary()
 
 
 class Pending(NamedTuple):
@@ -851,18 +852,20 @@ async def record_outcome(
             else row.alert_after_failures,
             1,
         )
-        if not manual and not open_inc.notified and row.consecutive_fails >= threshold:
+        if not manual and not (open_inc.notified or getattr(open_inc, "notice_queued", False)) \
+                and row.consecutive_fails >= threshold:
             if ep == "down":
                 # снова упал, а отбоя мигавшему сайту еще не было: тот же эпизод, молчим
-                open_inc.notified = True
+                open_inc.notice_queued = True
             elif ep == "flaky" and now - _aware(open_inc.started_at) < site_flap.WORSE:
                 pass  # отвечал через раз, теперь лежит: пишем, если падение продержится
             else:
                 pending.append(Pending("bad", row.name, new_status, msg, open_inc.id, row.id,
-                                       ("flap_state", site_flap.opened("down", now)), ""))
+                                       ("flap_state", {**site_flap.opened("down", now),
+                                                       "incident_id": open_inc.id}), ""))
     elif open_inc is not None:
         open_inc.ended_at = now
-        if open_inc.notified:
+        if open_inc.notified or getattr(open_inc, "notice_queued", False):
             if row.flaky_since is not None or site_flap.flapping(await _flap_hist(session, row, now, new_status), now):
                 # мигает: отбой, когда продержится (ниже, на следующих проверках)
                 if ep != "down":
@@ -870,7 +873,8 @@ async def record_outcome(
             else:
                 # несём up-сообщение («HTTP 200 · N мс» / «порт открыт …») —
                 # чтобы в восстановлении был виден код/латентность, а не пусто
-                _queue_site_recovery(row, pending, "recovery", msg, now)
+                _queue_site_recovery(row, pending, "recovery", msg, now,
+                                     (row.flap_state or {}).get("incident_id") or open_inc.id)
     elif ep == "down" and site_flap.stable(await _flap_hist(session, row, now, new_status), now):
         _queue_site_recovery(row, pending, "recstable", f"снова отвечает стабильно: {msg}", now)
         # "через раз" этого эпизода закрыт тем же отбоем
@@ -886,7 +890,8 @@ async def record_outcome(
             session.add(AuditLog(username="авто", action="known_" + what, target=row.name[:255], detail=""))
         if what == "remind" and new_k is not None:
             pending.append(Pending("known", row.name, new_status,
-                                   known_mod.remind_text(msg or new_status, new_k, now), None, row.id, None, "📌"))
+                                   known_mod.remind_text(msg or new_status, new_k, now), None, row.id,
+                                   ("known_issue", new_k), "📌"))
 
     if row.type == "dns" and outcome.answers is not None:
         # последний ответ - для кнопки "принять"; первый удачный без ожидаемого - запоминаем
@@ -921,11 +926,16 @@ async def record_outcome(
             ))
 
 
-def _queue_site_recovery(row: Check, pending: list, kind: str, msg: str, now: datetime) -> None:
+def _queue_site_recovery(row: Check, pending: list, kind: str, msg: str, now: datetime,
+                         incident_id: int | None = None) -> None:
     # Инцидент закрывается в этой же транзакции. Отбой должен пережить падение
     # канала, паузу и перезапуск, даже если результат записал веб-воркер.
-    row.flap_state = {**site_flap.closed(now), "recovery": {"kind": kind, "msg": msg}}
-    pending.append(Pending(kind, row.name, "up", msg, None, row.id, ("flap_state", row.flap_state)))
+    incident_id = incident_id or (row.flap_state or {}).get("incident_id")
+    recovery = {"kind": kind, "msg": msg}
+    if incident_id is not None:
+        recovery["incident_id"] = incident_id
+    row.flap_state = {**site_flap.closed(now), "recovery": recovery}
+    pending.append(Pending(kind, row.name, "up", msg, incident_id, row.id, ("flap_state", row.flap_state)))
 
 
 async def _flap_hist(session: AsyncSession, row: Check, now: datetime, status: str) -> site_flap.Hist:
@@ -1198,6 +1208,38 @@ def _as_pending(item) -> Pending:
     return item if isinstance(item, Pending) else Pending(*item)
 
 
+def _site_notice(item: Pending, now: datetime) -> dict:
+    """Identity comes from the observed source, never from rendered text or counters."""
+    kind = _SITE_HISTORY_KIND.get(item.kind, _SITE_RULE_KIND.get(item.kind, item.kind))
+    phase = "recovery" if item.kind in _SITE_RECOVERY or (
+        item.kind in ("ssl", "domain") and item.icon == "✅"
+    ) else "fire"
+    facts = []
+    flags = dict(item.flag if isinstance(item.flag, list) else [item.flag] if item.flag else [])
+    if item.kind == "locpart":
+        facts = [f"location:{lid}" for lid in flags.get("loc_notified") or []]
+    elif item.kind == "tamper":
+        facts = [str(x) for x in flags.get("tamper_sent") or []]
+    elif item.kind == "bad":
+        facts = [item.status]
+    level = 0 if phase == "recovery" else 2 if item.kind == "bad" and item.status == "down" else 1
+    if item.kind in ("ssl", "domain") and phase == "fire":
+        bucket = flags.get(f"{item.kind}_alerted_days")
+        facts = [f"threshold:{bucket}"] if bucket is not None else []
+    notice = {"stream": f"check:{item.check_id}:{kind}", "phase": phase,
+              "observed_at": _aware(now).astimezone(timezone.utc).isoformat(),
+              "members": sorted(facts), "level": level, "check_id": item.check_id}
+    if kind == "down" and item.inc_id is not None:
+        notice["occurrence"] = f"incident:{item.inc_id}:{phase}"
+        notice["incident_id"] = item.inc_id
+    if item.kind == "known":
+        reminder = flags.get("known_issue") or {}
+        notice["phase"] = "event"
+        if at := reminder.get("reminded_at"):
+            notice["occurrence"] = str(at)
+    return notice
+
+
 async def _with_before(session_factory, msg: "alerts.Msg", s, end: datetime,
                        exclude: frozenset = frozenset()) -> "alerts.Msg":
     """Дописывает к алерту, что менялось на сервере за час до сбоя (app/timeline.py)."""
@@ -1228,7 +1270,8 @@ async def _site_recoveries(session: AsyncSession, now: datetime) -> tuple[list[P
             continue  # Hold an undelivered recovery until a real successful observation.
         if (enabled and status == "up" and at is not None and now - at < _REC_RETRY_MAX
                 and kind in _RECOVERY_KINDS and isinstance(msg, str)):
-            pending.append(Pending(kind, name, "up", msg, None, cid, ("flap_state", state)))
+            pending.append(Pending(kind, name, "up", msg, recovery.get("incident_id"), cid,
+                                   ("flap_state", state)))
         else:
             stale[cid] = state
     return pending, stale
@@ -1370,6 +1413,7 @@ async def _send_site_batch(session_factory, settings: Settings, pending, now: da
     threshold = int(cfg.get("flood_threshold", 6))
     # Собираем сообщения тика + отложенные отметки, затем шлём с антифлудом.
     texts: list[alerts.Msg] = []
+    primary_notices: dict[int, dict] = {}
     commits: list[tuple] = []  # (text index, kind, inc_id, check_id, flag)
     # Домен продлевают целиком, поэтому истекает ОДНО имя, а мониторов на его
     # поддоменах бывает много: без свёртки в чат прилетало пять одинаковых
@@ -1388,6 +1432,7 @@ async def _send_site_batch(session_factory, settings: Settings, pending, now: da
     # их имена - в историю алертов строкой на каждый: иначе у свернутого в истории была тревога
     # без отбоя или отбой без тревоги
     more_names: dict[int, list[str]] = {}
+    more_notices: dict[int, list[dict]] = {}
     # сбои, которые можно свернуть с соседями по серверу или адресу: индекс в texts -> (группа,
     # монитор, строка для списка); grp_fold - мониторы, уже свернутые в это сообщение по домену
     grp_src: dict[int, tuple[str, int, dict]] = {}
@@ -1417,6 +1462,8 @@ async def _send_site_batch(session_factory, settings: Settings, pending, now: da
             texts.append(alerts.Msg(tg_fmt.render(icon or "📌", f"<b>{html.escape(name)}</b>", k_what, k_facts),
                                     "sites", grp or "", kind="known", target=name,
                                     full=f"{icon or '📌'} <b>{html.escape(name)}</b> — {html.escape(msg)}"))
+            texts[-1].notice = _site_notice(Pending(kind, name, status, msg, inc_id, check_id, flag, icon), now)
+            primary_notices[len(texts) - 1] = texts[-1].notice
             continue
         if check_id in quiet_failures and kind in ("bad", "flaky", "locpart"):
             continue
@@ -1440,6 +1487,8 @@ async def _send_site_batch(session_factory, settings: Settings, pending, now: da
                 if check_id is not None:
                     more_ids.setdefault(dom_at[domain_key], []).append(check_id)
                 more_names.setdefault(dom_at[domain_key], []).append(name)
+                more_notices.setdefault(dom_at[domain_key], []).append(
+                    _site_notice(Pending(kind, name, status, msg, inc_id, check_id, flag, icon), now))
                 commits.append((dom_at[domain_key], kind, inc_id, check_id, flag))
                 continue
         same = None
@@ -1455,6 +1504,8 @@ async def _send_site_batch(session_factory, settings: Settings, pending, now: da
                     grp_fold.setdefault(same_at[same], []).append(
                         (check_id, _grp_member(name, host, link_url, _site_why(kind, status, msg))))
                 more_names.setdefault(same_at[same], []).append(name)
+                more_notices.setdefault(same_at[same], []).append(
+                    _site_notice(Pending(kind, name, status, msg, inc_id, check_id, flag, icon), now))
                 commits.append((same_at[same], kind, inc_id, check_id, flag))
                 continue
         if rule is not None:
@@ -1514,6 +1565,8 @@ async def _send_site_batch(session_factory, settings: Settings, pending, now: da
                                 target=name, recovery=kind in _SITE_RECOVERY,
                                 ref=f"chk:{check_id}" if check_id is not None and rk else "",
                                 full=full, line=line))
+        texts[-1].notice = _site_notice(Pending(kind, name, status, msg, inc_id, check_id, flag, icon), now)
+        primary_notices[len(texts) - 1] = texts[-1].notice
         commits.append((len(texts) - 1, kind, inc_id, check_id, flag))
         if is_default and check_id in places and (g_lvl := site_group.lvl_of(kind, status)):
             grp_src[len(texts) - 1] = (g_lvl, check_id, _grp_member(name, host, link_url, _site_why(kind, status, msg)))
@@ -1539,12 +1592,21 @@ async def _send_site_batch(session_factory, settings: Settings, pending, now: da
                 recovery=old.recovery, ref=old.ref + "".join(f",{i}" for i in ids),
                 full=old.full, line=old.line,
             )
+    for idx, notice in primary_notices.items():
+        texts[idx].notice = notice
     for idx, names in more_names.items():
         old = texts[idx]
         # история (record_history) и снятие кнопок по отбою (tg_resolve) идут по частям
-        texts[idx].parts = [old] + [alerts.Msg(str(old), old.section, old.group, kind=old.kind, target=n,
-                                               recovery=old.recovery, full=old.full, line=old.line)
-                                    for n in names if n != old.target]
+        first = alerts.Msg(str(old))
+        first.__dict__.update(old.__dict__)
+        first.__dict__.pop("parts", None)
+        parts = [first]
+        for name, notice in zip(names, more_notices[idx]):
+            part = alerts.Msg(str(old), old.section, old.group, kind=old.kind, target=name,
+                              recovery=old.recovery, full=old.full, line=old.line)
+            part.notice = notice
+            parts.append(part)
+        texts[idx].parts = parts
 
     # мониторы одного сервера или адреса - одним сообщением, отбой - когда в норме все
     grp_after = None
@@ -1555,36 +1617,46 @@ async def _send_site_batch(session_factory, settings: Settings, pending, now: da
         log.warning("не свернул мониторы по серверу и адресу", exc_info=True)
 
     # parse_mode=HTML: имя монитора идёт ссылкой <a href>. Весь контент экранирован.
+    accepted: set[int] = set()
     finished: set[int] = set()
-    delivered = await alerts.dispatch(cfg, True, texts, threshold, parse_mode="HTML",
-                                     session_factory=session_factory, finished=finished)
-    if delivered:
-        finished.update(range(len(texts)))
-    if grp_after is not None:
-        try:
-            finished = await grp_after(finished)
-        except Exception:  # noqa: BLE001 - сообщения уже ушли, группы поправятся на следующем тике
-            log.warning("группы мониторов не записаны", exc_info=True)
-            if not delivered:
-                return  # индексы сообщений после свертки уже отличаются
-    if not delivered:
-        commits = [c for c in commits if c[0] in finished]
-        confirmed = {cid for _, kind, _, cid, _ in commits if kind in _RECOVERY_KINDS}
-        recoveries = [p for p in recoveries if p.check_id in confirmed]
-    async with session_factory() as session:
-        await _clear_site_recoveries(session, {p.check_id: p.flag[1] for p in recoveries})
-        for _, kind, inc_id, check_id, flag in commits:
+    patched: set[int] = set()
+    callback_called = False
+
+    async def admitted(session, owned_indices=None):
+        nonlocal callback_called
+        callback_called = True
+        owned = set(range(len(texts))) if owned_indices is None else set(owned_indices)
+        if grp_after is not None:
+            owned = await grp_after(owned, session=session)
+        fresh = owned - patched
+        closed = {p.check_id: p.flag[1] for p in recoveries
+                  if any(index in fresh and cid == p.check_id and kind in _RECOVERY_KINDS
+                         for index, kind, _iid, cid, _flag in commits)}
+        await _clear_site_recoveries(session, closed)
+        for index, kind, inc_id, check_id, flag in commits:
+            if index not in fresh:
+                continue
             if kind == "bad" and inc_id is not None:
-                inc = await session.get(CheckIncident, inc_id)
-                if inc is not None:
-                    inc.notified = True
+                incident = await session.get(CheckIncident, inc_id, with_for_update=True)
+                if incident is not None:
+                    incident.notice_queued = True
             if flag and check_id is not None:
-                # ("ssl_alerted_days", 7) или список таких пар
-                row = await session.get(Check, check_id)
+                row = await session.get(Check, check_id, with_for_update=True)
                 if row is not None:
                     for attr, value in flag if isinstance(flag, list) else [flag]:
                         setattr(row, attr, value)
-        await session.commit()
+        patched.update(fresh)
+
+    delivered = await alerts.dispatch(cfg, True, texts, threshold, parse_mode="HTML",
+                                     session_factory=session_factory, finished=finished, accepted=accepted,
+                                     on_accept=admitted, now=now)
+    # Compatibility with dispatcher adapters that confirm without invoking the
+    # admission hook. The real queue always owns observer patches before POST.
+    if not callback_called:
+        owned = accepted | finished | (set(range(len(texts))) if delivered else set())
+        async with session_factory() as session:
+            await admitted(session, owned)
+            await session.commit()
 
 
 def _site_why(kind: str, status: str, msg: str) -> str:
@@ -1607,25 +1679,46 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
                        pending: list, now: datetime, base: str):
     """Мониторы одного сервера или адреса (app/site_group.py).
 
-    Сбои одного места в этом тике - одно сообщение. Сбой места, о котором уже написали (группа
-    открыта и еще не разрешена), - не сообщение, а строка в отправленном: его правим
-    после доставки, а в историю - своя строка. Отбои членов группы молчат, пока в норму не придут
-    все, тогда одно сообщение. Возвращает (что слать, что сделать после доставки)."""
+    Сбои одного места в этом тике - одно сообщение. Новый сбой открытой группы передается
+    в очередь со снимком полного текста: worker правит известное сообщение, а историю
+    пишет после подтверждения. Отбои членов группы молчат, пока в норму не придут все,
+    тогда одно сообщение. Возвращает сообщения и атомарную запись состояния при admission."""
     async with session_factory() as session:
         state = await site_group.load(session)
     if not src and not state:
         return texts, None
     groups = json.loads(json.dumps(state))
     p_all = list(map(_as_pending, pending))
+    notice_by_check = {(p.check_id, _SITE_HISTORY_KIND.get(p.kind, _SITE_RULE_KIND.get(p.kind, p.kind))):
+                       _site_notice(p, now) for p in p_all}
     fails = {p.check_id for p in p_all if p.check_id is not None and p.kind in ("bad", "flaky")}
     recs = {p.check_id for p in p_all if p.check_id is not None and p.kind in _GROUP_REC}
     drop: set[int] = set()
     swap: dict[int, alerts.Msg] = {}
-    quiet: dict[str, list[alerts.Msg]] = {}  # дописанные в отправленное: только в историю
+    quiet: dict[str, list[alerts.Msg]] = {}  # новые участники: durable update отправленного сообщения
     fresh: dict[str, alerts.Msg] = {}  # группы, чье сообщение уходит сейчас: запомнить, куда ушло
     grouped: dict[int, set[str]] = {}  # какие группы подтверждают каждый исходный алерт
     # править отправленное умеет только Telegram: без него id сообщений не нужны
     track = bool(cfg.get("telegram_token"))
+
+    def envelope(message, gid, *, edit=False):
+        receipts = list((state.get(gid) or {}).get("msgs") or [])
+        message.notice = {**getattr(message, "notice", {}), "site_group": gid, "group_messages": receipts}
+        if edit:
+            message.notice["edit_group"] = gid
+
+        def mark(part):
+            children = getattr(part, "parts", None)
+            if children:
+                for child in children:
+                    mark(child)
+                return
+            part.notice = {**getattr(part, "notice", {}), "site_group": gid}
+            if edit:
+                part.notice["edit_group"] = gid
+
+        mark(message)
+        return message
 
     want = {int(c) for g in groups.values() for c in g.get("members") or {}}
     for i, (_lvl, cid, _member) in src.items():
@@ -1641,7 +1734,7 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
                 .where(Check.id.in_(want)))).all()}
             active = set(await session.scalars(select(CheckIncident.check_id).where(
                 CheckIncident.check_id.in_(want), CheckIncident.ended_at.is_(None),
-                CheckIncident.notified.is_(True))))
+                (CheckIncident.notified.is_(True) | CheckIncident.notice_queued.is_(True)))))
         active.update(i for i, row in db.items() if site_flap.level(row[1]) is not None or row[2])
         active = {i for i in active if i in db and db[i][0]}
     # Retirement is not recovery. Remove disabled/deleted members silently, retaining history.
@@ -1690,12 +1783,15 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
         for i in idxs:
             _lvl, cid, mem = src[i]
             for c, mm in [(cid, mem)] + fold.get(i, []):
-                g["members"].setdefault(str(c), mm)
+                member = g["members"].setdefault(str(c), dict(mm))
+                if notice := notice_by_check.get((c, g["kind"])):
+                    member["notice"] = notice
         g["last"] = now.isoformat()
         for i in idxs:
             grouped[i] = {g["id"]}
         if not new:
-            # о месте уже написали: этот сбой - строкой в том сообщении
+            # Новые участники владеют отдельными переходами. Рабочий процесс
+            # поправит известный message_id, либо пошлет envelope после сбоя.
             drop.update(idxs)
             quiet.setdefault(g["id"], []).extend(texts[i] for i in idxs)
             g["solo"] = False
@@ -1714,6 +1810,18 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
             if track:
                 texts[idxs[0]].sent_to = []
             fresh[g["id"]] = texts[idxs[0]]
+
+    updates: dict[str, alerts.Msg] = {}
+    for gid, messages in quiet.items():
+        g = groups[gid]
+        text, full, line = site_group.alert_text(g, base, cause.get(g.get("srv")))
+        message = alerts.Msg(text, "sites", g.get("grp", ""), kind=g.get("kind", ""),
+                             target=g.get("first", ""), ref="chk:" + ",".join(g.get("members") or {}),
+                             full=full, line=line)
+        message.parts = [part for item in messages for part in getattr(item, "parts", None) or [item]]
+        updates[gid] = envelope(message, gid, edit=True)
+    for gid, message in fresh.items():
+        envelope(message, gid)
 
     # отбои членов объявленной группы молчат: придет один на всех
     for i, m in enumerate(texts):
@@ -1754,6 +1862,15 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
         back = site_group.verb(1, site_group.LVL_BACK.get(g.get("lvl"), "снова отвечают"))
         m.parts = [alerts.Msg(tg_fmt.recovery(html.escape(mem[c]["host"]), back), "sites", g.get("grp", ""),
                               kind=g.get("kind", ""), target=mem[c]["name"], recovery=True) for c in ready]
+        for c, part in zip(ready, m.parts):
+            notice = notice_by_check.get((int(c), g.get("kind", ""))) or mem[c].get("notice")
+            part.notice = {**(notice or _site_notice(Pending("recovery", mem[c]["name"], "up", "", None,
+                                                           int(c), None), now)),
+                           "phase": "recovery", "level": 0, "members": [],
+                           "stream": f"check:{c}:{g.get('kind', '')}",
+                           "observed_at": _aware(now).astimezone(timezone.utc).isoformat()}
+            if incident_id := part.notice.get("incident_id"):
+                part.notice["occurrence"] = f"incident:{incident_id}:recovery"
         if left:
             m.resolves = []  # сообщение группы еще не решено: часть лежит
             for c in ready:
@@ -1762,65 +1879,60 @@ async def _site_groups(session_factory, cfg: dict, texts: list, src: dict, fold:
         else:
             m.resolves = [(g.get("kind", ""), g.get("first", ""))] + [(p.kind, p.target) for p in m.parts]
             groups.pop(gid)
-        backs[gid] = m
+        backs[gid] = envelope(m, gid)
 
     for gid in [k for k, g in groups.items() if site_group.stale(g, now, active)]:
         groups.pop(gid)
 
     direct = {i: swap.get(i, m) for i, m in enumerate(texts) if i not in drop}
-    out = list(direct.values()) + list(backs.values())
+    out = list(direct.values()) + list(updates.values()) + list(backs.values())
     indices = {id(m): i for i, m in enumerate(out)}
 
-    async def after(finished: set[int]) -> set[int]:
-        failed = {gid for batch in (fresh, backs) for gid, m in batch.items() if indices[id(m)] not in finished}
+    planned = json.loads(json.dumps(groups))
+
+    async def after(finished: set[int], session=None) -> set[int]:
+        staged = json.loads(json.dumps(planned))
+        failed = {gid for batch in (fresh, updates, backs) for gid, m in batch.items()
+                  if indices[id(m)] not in finished}
         for gid in failed:
             if gid in state:
-                groups[gid] = state[gid]
+                staged[gid] = json.loads(json.dumps(state[gid]))
             else:
-                groups.pop(gid, None)
+                staged.pop(gid, None)
         for gid, m in fresh.items():
-            if gid not in failed and gid in groups:
-                groups[gid]["msgs"] = list(getattr(m, "sent_to", None) or [])
-        if groups != state:
-            async with session_factory() as session:
-                await site_group.save(session, groups)
-        for gid, messages in quiet.items():
-            if gid in failed:
-                continue
-            await alerts.record_history(session_factory, messages)
-            if gid in groups:
-                await _site_group_edit(session_factory, cfg, groups[gid], base, cause.get(groups[gid].get("srv")))
+            if gid not in failed and gid in staged:
+                sent = list(getattr(m, "sent_to", None) or [])
+                if sent:
+                    staged[gid]["msgs"] = sent
+
+        async def save(target_session):
+            setting = await target_session.get(AppSetting, site_group.STATE_KEY, with_for_update=True)
+            current = await site_group.load(target_session)
+            # An earlier HTTP result may have populated receipts after this
+            # observation snapshot. Ownership must never erase those IDs.
+            for gid, group in staged.items():
+                receipts = list(group.get("msgs") or [])
+                for receipt in (current.get(gid) or {}).get("msgs") or []:
+                    if receipt not in receipts:
+                        receipts.append(receipt)
+                if receipts:
+                    group["msgs"] = receipts
+            value = json.dumps(staged, ensure_ascii=False) if staged else ""
+            if setting is None:
+                target_session.add(AppSetting(key=site_group.STATE_KEY, value=value))
+            else:
+                setting.value = value
+
+        if session is not None:
+            await save(session)
+        elif staged != state:
+            async with session_factory() as own_session:
+                await save(own_session)
+                await own_session.commit()
         return ({i for i, m in direct.items() if indices[id(m)] in finished and i not in grouped}
                 | {i for i, gids in grouped.items() if not gids & failed})
 
     return out, after
-
-
-async def _site_group_edit(session_factory, cfg: dict, g: dict, base: str, cause: list[str] | None) -> None:
-    """Дописать в отправленное сообщение группы новый монитор: правка в Telegram. Если под
-    сообщением кнопки - текст правится и в их записи, чтобы "взял" и мьют его не откатили."""
-    msgs = g.get("msgs") or []
-    if not msgs or not cfg.get("telegram_token"):
-        return
-    text = site_group.alert_text(g, base, cause)[0]
-    markup = None
-    if alerts.buttons_on(cfg):
-        where = {(str(x.get("chat")), x.get("id")) for x in msgs}
-        since = (site_group.ts(g.get("at")) or datetime.now(timezone.utc)) - timedelta(minutes=5)
-        async with session_factory() as session:
-            row = None
-            for r in (await session.scalars(select(TgAlert).where(
-                    TgAlert.kind == g.get("kind", ""), TgAlert.ts >= since))).all():
-                if any((str(x.get("chat")), x.get("id")) in where for x in r.messages or []):
-                    row = r
-            if row is not None:
-                row.text = text
-                row.ref = ("chk:" + ",".join(g.get("members") or {}))[:255]
-                await session.commit()
-                tz = cfg.get("tz") or "UTC"
-                text, markup = tg_buttons.row_text(row, tz), tg_buttons.row_keyboard(row)
-    for x in msgs:
-        await alerts.tg_edit(cfg, x.get("chat"), x.get("id"), text, markup)
 
 
 async def tamper_alerts(session_factory, settings: Settings, now: datetime) -> None:
@@ -2194,17 +2306,33 @@ async def _proxy_alerts(
             for k, t, f in fires]
     msgs += [alerts.Msg(t, "sites", "", kind="locpart", target=names.get(int(k), ""), recovery=True)
              for k, t in recs]
+    for (key, _text, _full), message in zip(fires, msgs):
+        message.notice = {"stream": f"location:{key}:proxy", "phase": "fire", "members": [], "level": 2,
+                          "observed_at": _aware(now).astimezone(timezone.utc).isoformat(),
+                          "since": new[key]["since"]}
+    for (key, _text), message in zip(recs, msgs[len(fires):]):
+        message.notice = {"stream": f"location:{key}:proxy", "phase": "recovery", "members": [], "level": 0,
+                          "observed_at": _aware(now).astimezone(timezone.utc).isoformat(),
+                          "since": state[key]["since"]}
+    accepted: set[int] = set()
+
+    async def admitted(session):
+        queued = {key: dict(value) for key, value in new.items()}
+        for key, _text, _full in fires:
+            queued[key]["notified"] = True
+        await session.merge(AppSetting(key=settings_store.LOC_BROKEN_KEY, value=json.dumps(queued)))
+
     delivered = bool(msgs) and can_send and await alerts.dispatch(
         cfg, True, msgs, int(cfg.get("flood_threshold", 6)), parse_mode="HTML",
-        session_factory=session_factory,
+        session_factory=session_factory, accepted=accepted, on_accept=admitted, now=now,
     )
-    if delivered:
+    if delivered or len(accepted) == len(msgs) and msgs:
         for key, _t, _f in fires:
             new[key]["notified"] = True
     else:
         for key, _t in recs:  # отбой не дошел - попробуем на следующем тике
             new[key] = state[key]
-    if new != state:
+    if new != state and not accepted:
         async with session_factory() as session:
             await settings_store.set_raw(session, settings_store.LOC_BROKEN_KEY, json.dumps(new))
 
@@ -7583,7 +7711,20 @@ def mute_watch_label(k: str) -> str:
     return settings_store.SERVER_ALERT_KINDS.get(base, (base,))[0] + (" (нижние уровни)" if "@" in k else "")
 
 
-async def evaluate_servers(
+async def evaluate_servers(session_factory, settings: Settings, now: datetime) -> None:
+    """Serialize observation and durable admission across scheduler processes."""
+    lock = _server_alert_locks.get(session_factory)
+    if lock is None:
+        lock = _server_alert_locks[session_factory] = asyncio.Lock()
+    async with lock:
+        async with session_factory() as lock_session:
+            if lock_session.get_bind().dialect.name == "postgresql":
+                await lock_session.execute(select(func.pg_advisory_xact_lock(
+                    func.hashtextextended("kervax/server_alerts", 0))))
+            await _evaluate_servers_serial(session_factory, settings, now)
+
+
+async def _evaluate_servers_serial(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings, now: datetime
 ) -> None:
     """Оффлайн-детект и пороговые алерты серверов (по одному алерту на условие,
@@ -7745,6 +7886,13 @@ async def evaluate_servers(
                                     level=int(ctx.get('level') or ctx.get('_lvl') or 1))
         # кнопка "заглушить" глушит вещи этого алерта, а не вид целиком (tg_buttons.ITEM_MUTE)
         out.mutes = tg_mute_keys(key, ctx)
+        level = int(ctx.get("_notice_level") or ctx.get("level") or ctx.get("_lvl") or 1)
+        members = ctx.get("_notice_sig") or ctx.get("sig") or out.mutes or []
+        out.notice = {"stream": f"server:{s.id}:{key}", "phase": "fire",
+                      "observed_at": now.isoformat(), "source_id": s.id,
+                      "members": [f"{member}|level:{level}" for member in members], "level": level}
+        if key == "oom":
+            out.notice.update(phase="event", occurrence=ctx.get("_occurrence") or "oom:" + tail)
         if key == "listen_gone":
             fresh = ctx.get("fresh")
             out.listen_episodes = {item["key"]: item["miss"] for item in ctx.get("items") or []
@@ -7753,7 +7901,8 @@ async def evaluate_servers(
 
     # Сначала СОБИРАЕМ все переходы за тик (не шлём внутри цикла), чтобы при
     # массовых событиях схлопнуть их в один дайджест. Молчаливые де-эскалации
-    # фиксируем всегда, остальные переходы — после подтверждения доставки.
+    # фиксируем всегда; остальные передаем durable queue в одной транзакции
+    # с наблюдаемым состоянием. Это не подтверждение получения человеком.
     before_by_id = {s.id: s.alert_state or {} for s in servers}
     cur_by_id = {sid: dict(state) for sid, state in before_by_id.items()}
     changed_ids: set[int] = set()
@@ -8744,7 +8893,9 @@ async def evaluate_servers(
         o_short = o_done.pop("oom_short", None)  # короткий текст (app/oom.py), не в alert_state
         if o_fire is not None and "oom" not in mutes and om and om["enabled"] and _rule_scope_ok(om, s):
             fires.append(srv_fire(s, "oom", om, {"detail": o_fire[1], "level": o_fire[0], "value": 1, "victim": "",
-                                                 "url_tail": f"&oom={o_ep}" if o_ep else "", "items": o_short}))
+                                                 "url_tail": f"&oom={o_ep}" if o_ep else "", "items": o_short,
+                                                 "_occurrence": f"oom:{o_ep}" if o_ep else
+                                                     f"oom-total:{s.oom_total}:{o_done.get('oom_seen', '')}"}))
             for k, v in o_done.items():
                 fire_apply.append((s.id, k, v))
 
@@ -9275,6 +9426,17 @@ async def evaluate_servers(
     }
     state_suffixes = ("_told_lvl", "_sig", "_told", "_calm", "_hush", "_said", "_was", "_who", "_val", "_at")
 
+    for collection in (fires, recoveries):
+        for message in collection:
+            sid = message_owners.get(id(message))
+            if not getattr(message, "notice", None):
+                message.notice = {"stream": f"server:{sid}:{message.kind}" if sid is not None else
+                                             f"panel:{message.kind}",
+                                  "phase": "recovery" if message.recovery else "fire",
+                                  "observed_at": now.isoformat(), "source_id": sid,
+                                  "members": list(message.mutes or []),
+                                  "level": 0 if message.recovery else 1}
+
     def acknowledged(messages: list[alerts.Msg], finished: set[int]):
         sent: dict[int, set[str]] = {}
         pending: dict[int, set[str]] = {}
@@ -9303,10 +9465,28 @@ async def evaluate_servers(
 
     oom_finished: set[int] = set()
     fire_finished: set[int] = set()
+    fire_accepted: set[int] = set()
+    rec_accepted: set[int] = set()
+
+    def admission_patch(messages, patches):
+        async def commit(session, admitted):
+            owned = acknowledged(messages, admitted)
+            grouped = {}
+            for sid, key, value in patches:
+                if owned(sid, key):
+                    grouped.setdefault(sid, {})[key] = value
+            for sid in sorted(grouped):
+                row = await session.get(Server, sid, with_for_update=True)
+                if row is not None:
+                    row.alert_state = {**(row.alert_state or {}), **grouped[sid]}
+        return commit
+
     delivery = {"oom_finished": oom_finished} if any(getattr(m, "kind", "") == "oom" for m in fires) else {}
     fire_ok = await alerts.dispatch(cfg, can_send, fires, threshold, parse_mode="HTML",
-                                    session_factory=session_factory, finished=fire_finished, **delivery)
-    fire_ack = acknowledged(fires, fire_finished)
+                                    session_factory=session_factory, finished=fire_finished,
+                                    accepted=fire_accepted, on_accept=admission_patch(fires, fire_apply),
+                                    now=now, **delivery)
+    fire_ack = acknowledged(fires, fire_finished | fire_accepted)
     for sid, key, value in fire_apply:
         if fire_ok or fire_ack(sid, key) or (sid in oom_finished and key.startswith("oom_")):
             apply(sid, key, value)
@@ -9314,8 +9494,9 @@ async def evaluate_servers(
 
     rec_finished: set[int] = set()
     rec_ok = await alerts.dispatch(cfg, can_send, recoveries, threshold, parse_mode="HTML",
-                                   session_factory=session_factory, finished=rec_finished)
-    rec_ack = acknowledged(recoveries, rec_finished)
+                                   session_factory=session_factory, finished=rec_finished,
+                                   accepted=rec_accepted, on_accept=admission_patch(recoveries, rec_apply), now=now)
+    rec_ack = acknowledged(recoveries, rec_finished | rec_accepted)
     for sid, key, value in rec_apply:
         if rec_ok or rec_ack(sid, key):
             apply(sid, key, value)
@@ -9460,13 +9641,29 @@ async def maintenance_tick(
             msgs.append(alerts.Msg(
                 tg_fmt.render("⚠️🚧" if bad else "🚧", f"<b>{html.escape(w.title)}</b>", m_what, m_facts),
                 "servers", "", kind="maint", full=("⚠️ " if bad else "🚧 ") + html.escape(text)))
+            msgs[-1].notice = {"stream": f"maintenance:{w.id}:verify", "phase": "event", "members": [],
+                               "level": 1 if bad else 0,
+                               "observed_at": _aware(now).astimezone(timezone.utc).isoformat(),
+                               "occurrence": _aware(occ[1]).astimezone(timezone.utc).isoformat()}
             pending.append((w, occ[1]))
         await session.commit()
     if not msgs:
         return
     finished: set[int] = set()
+    accepted: set[int] = set()
+
+    async def admitted(session):
+        for snapshot, end in pending:
+            window = await session.get(MaintenanceWindow, snapshot.id, with_for_update=True)
+            if window is not None and all(getattr(window, key) == getattr(snapshot, key) for key in (
+                "created_at", "title", "server_ids", "check_ids", "starts_at", "ends_at",
+                "repeat", "weekdays", "verify", "verified_end",
+            )):
+                window.verified_end = end
+
     if await alerts.dispatch(cfg, True, msgs, int(cfg.get("flood_threshold", 6)), parse_mode="HTML",
-                             session_factory=session_factory, finished=finished):
+                             session_factory=session_factory, finished=finished, accepted=accepted,
+                             on_accept=admitted, now=now):
         finished.update(range(len(msgs)))
     if finished:
         async with session_factory() as session:
@@ -9743,6 +9940,7 @@ async def send_autofix_note(session_factory: async_sessionmaker[AsyncSession],
         name, group, rep = s.name, s.group_name or "", s.last_report or {}
         action = str((c.payload or {}).get("name") or "")
         ok, result = bool(c.ok), c.result or ""
+        done_at = _aware(c.done_at or c.created_at).astimezone(timezone.utc).isoformat()
     if action == "analyze":
         return  # разбор раздела по прогнозу ничего не удаляет
     label = _AUTOFIX_LABEL.get(action, action or "?")
@@ -9763,6 +9961,8 @@ async def send_autofix_note(session_factory: async_sessionmaker[AsyncSession],
     base = settings.panel_url.rstrip("/")
     url = f"{base}/?server={server_id}&sec=diskfill" if base else ""
     msg = _server_alert_text("disk", name, detail, url, icon=icon, group=group, short=short)
+    msg.notice = {"stream": f"server:{server_id}:autofix", "phase": "event", "members": [],
+                  "level": 0 if ok else 1, "observed_at": done_at, "occurrence": f"command:{cmd_id}"}
     await alerts.dispatch(cfg, True, [msg], int(cfg.get("flood_threshold", 6)),
                           parse_mode="HTML", session_factory=session_factory)
 
@@ -9833,6 +10033,15 @@ async def _prune(
             )
         )
         await session.commit()
+
+
+async def _deliver_pending(session_factory, settings: Settings) -> None:
+    from app import alert_delivery
+    async with session_factory() as session:
+        cfg = await settings_store.get_alert_config(session, settings)
+        if await settings_store.get_muted(session) or not alerts.alerts_enabled(cfg):
+            return
+    await alert_delivery.drain(session_factory, cfg)
 
 
 async def _maybe_auto_backup(
@@ -10063,8 +10272,17 @@ async def _daily_uncovered(session_factory, settings: Settings) -> None:
     # A custom template must not reintroduce full commands/host lists into notifications.
     text = alerts.Msg(short, "servers", "", kind="uncovered", full=full,
                       line=" - ".join(short.split("\n")[:2]))
+    day = now.astimezone(tg_buttons.zone(cfg.get("tz") or "Europe/Moscow")).date().isoformat()
+    text.notice = {"stream": "panel:uncovered", "phase": "event", "level": 1,
+                   "members": sorted(f"server:{srv.id}:{key}" for srv, keys in rows for key in keys),
+                   "observed_at": now.isoformat(), "occurrence": day}
+    accepted: set[int] = set()
+
+    async def admitted(session):
+        await session.merge(AppSetting(key=settings_store.UNCOVERED_KEY, value=str(int(now.timestamp()))))
+
     if await alerts.dispatch(cfg, True, [text], threshold, parse_mode="HTML",
-                             session_factory=session_factory):
+                             session_factory=session_factory, accepted=accepted, on_accept=admitted, now=now):
         async with session_factory() as session:
             await settings_store.set_uncovered_sent(session, now.timestamp())
             await session.commit()
@@ -10207,6 +10425,7 @@ async def collector_loop(
                 session_factory, datetime.now(timezone.utc)))
             await stage("сводка непокрытого", _daily_uncovered(session_factory, settings))
             await stage("автобэкап", _maybe_auto_backup(session_factory, settings))
+            await stage("доставка уведомлений", _deliver_pending(session_factory, settings))
             if stop is not None and stop.is_set():
                 # SIGTERM (выкладка): тик доделан и состояние записано, выходим. Убитый между
                 # отправкой алерта и записью состояния процесс слал после старта тот же алерт

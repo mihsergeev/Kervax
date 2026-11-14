@@ -1215,6 +1215,42 @@ export function getAlerts(): Promise<AlertConfig> {
   return api<AlertConfig>('/api/alerts')
 }
 
+export type AlertDeliveryState = 'pending' | 'sending' | 'confirmed' | 'uncertain' | 'rejected' | 'superseded' | 'attention'
+export type AlertDeliveryItem = {
+  id: number
+  event_id: number
+  kind: string
+  target: string
+  phase: string
+  status: AlertDeliveryState
+  attempts: number
+  uncertain_count: number
+  created_at: string
+  occurred_at: string
+  next_attempt_at: string
+  lease_until: string | null
+  can_retry: boolean
+  needs_confirmation: boolean
+}
+export type AlertDeliveryOverview = {
+  counts: Record<AlertDeliveryState, number>
+  bad_count: number
+  items: AlertDeliveryItem[]
+  more: boolean
+}
+
+export function getAlertDeliveries(state: 'problems' | 'all' = 'problems', summary = false): Promise<AlertDeliveryOverview> {
+  return api(`/api/alerts/deliveries?state=${state}&summary=${summary}`)
+}
+
+export function retryAlertDeliveries(ids: number[], acknowledgeUncertain = false): Promise<{
+  queued_ids: number[]; skipped_ids: number[]; delivery_confirmed: false
+}> {
+  return api('/api/alerts/deliveries/retry', {
+    method: 'POST', body: JSON.stringify({ ids, acknowledge_uncertain: acknowledgeUncertain }),
+  })
+}
+
 export function putAlerts(body: {
   telegram_token: string
   telegram_chat: string

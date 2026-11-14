@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, getPanelErrorCount, getToken, impersonating, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
+import { ApiError, getAlertDeliveries, getPanelErrorCount, getToken, impersonating, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
 import { isCurrentSession, TOKEN_KEY } from './sessionToken'
 import { AuthProvider } from './auth'
 import { useI18n, type Lang } from './i18n'
@@ -243,6 +243,8 @@ export default function App() {
   }, [authed])
   // неразобранные ошибки панели: админу числом у шестеренки, без алертов
   const [errOpen, setErrOpen] = useState(0)
+  const [deliveryBad, setDeliveryBad] = useState(0)
+  const deliveryCount = authed && role === 'admin' ? deliveryBad : 0
   const errCount = authed && role === 'admin' ? errOpen : 0
   const loadErrCount = useCallback(() => {
     getPanelErrorCount()
@@ -255,6 +257,19 @@ export default function App() {
     const id = window.setInterval(loadErrCount, 5 * 60_000)
     return () => window.clearInterval(id)
   }, [authed, role, loadErrCount])
+  useEffect(() => {
+    if (!authed || role !== 'admin') return
+    let active = true
+    const load = () => {
+      const token = getToken()
+      getAlertDeliveries('problems', true).then(result => {
+        if (active && isCurrentSession(token)) setDeliveryBad(result.bad_count)
+      }).catch(() => undefined)
+    }
+    load()
+    const id = window.setInterval(load, 30_000)
+    return () => { active = false; window.clearInterval(id) }
+  }, [authed, role, userId, modal])
   const [theme, setThemeState] = useState<'dark' | 'light'>(
     () => (localStorage.getItem('kervax_theme') as 'dark' | 'light') || 'dark',
   )
@@ -489,9 +504,9 @@ export default function App() {
               aria-label={t('Меню')}
             >
               <span className="menu-gear">⚙</span>
-              {errCount > 0 && (
-                <span className="pe-gear-n" title={t('Неразобранных ошибок панели: {n}', { n: errCount })}>
-                  {errCount > 99 ? '99+' : errCount}
+              {errCount + deliveryCount > 0 && (
+                <span className="pe-gear-n" title={deliveryCount ? t('Ошибки панели и проблемы доставки: {n}', { n: errCount + deliveryCount }) : t('Неразобранных ошибок панели: {n}', { n: errCount })}>
+                  {errCount + deliveryCount > 99 ? '99+' : errCount + deliveryCount}
                 </span>
               )}
             </button>
@@ -520,6 +535,7 @@ export default function App() {
                         }}
                       >
                         {t('Алерты')}
+                        {deliveryCount > 0 && <span className="pe-menu-n">{deliveryCount}</span>}
                       </button>
                       <button
                         className="menu-item"
@@ -665,6 +681,13 @@ export default function App() {
       {authed === null ? (
         <p className="muted">{t('загрузка…')}</p>
       ) : authed ? (
+        <>
+        {section === 'home' && role === 'admin' && deliveryCount > 0 && (
+          <div className="al-note al-note-warn" role="status">
+            <span>{t('Проблемы доставки уведомлений: {n}', { n: deliveryCount })}</span>
+            <button className="ghost small" onClick={() => setModal('alerts')}>{t('Открыть доставку')}</button>
+          </div>
+        )}
         <ErrorBoundary resetKey={section} onReport={() => setModal('problem')}>
         {section === 'home' ? (
           <HomePage onNavigate={setSection} onOpen={openTarget} onUnauthorized={logout} />
@@ -740,6 +763,7 @@ export default function App() {
           />
         )}
         </ErrorBoundary>
+        </>
       ) : (
         <LoginPage onLogin={loadMe} branding={branding} />
       )}
@@ -800,7 +824,7 @@ export default function App() {
         />
       )}
       {modal === 'alerts' && (
-        <AlertsModal onClose={() => setModal(null)} onUnauthorized={logout} />
+        <AlertsModal initialSection={deliveryCount > 0 ? 'delivery' : undefined} deliveryCount={deliveryCount} onDeliveryCount={setDeliveryBad} onClose={() => setModal(null)} onUnauthorized={logout} />
       )}
       {modal === 'maint' && (
         <MaintModal
