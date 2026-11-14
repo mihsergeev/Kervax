@@ -123,6 +123,31 @@ async def test_imminent_forecast_and_critical_fullness_do_not_wait_six_hours(tmp
     await engine.dispose()
 
 
+async def test_legacy_incidents_do_not_repeat_after_upgrade_but_new_members_alert(tmp_path, monkeypatch):
+    for key in ("flux_down", "disk_forecast"):
+        folder = tmp_path / key
+        folder.mkdir()
+        engine, factory, sent = await _panel(folder, monkeypatch)
+        async with factory() as session:
+            srv = await session.scalar(select(Server))
+            srv.alert_state = {key: 1 if key == "flux_down" else 2}
+            await session.commit()
+        if key == "flux_down":
+            for minute in range(61):
+                await _tick(factory, minute, flux=_flux())
+            assert sent == []
+            for minute in range(61, 122):
+                await _tick(factory, minute, flux=_flux() + _flux("flux-system/new"))
+            assert len(sent) == 1 and "flux-system/new" in sent[0]
+        else:
+            for minute in range(4):
+                await _tick(factory, minute, forecast=True, eta=5)
+            assert sent == []
+            await _tick(factory, 4, forecast=True, eta=5, mount="/new")
+            assert len(sent) == 1 and "Диск /new" in sent[0]
+        await engine.dispose()
+
+
 async def test_new_warning_keeps_its_severity_and_delivery_state(tmp_path, monkeypatch):
     engine, factory, sent = await _panel(tmp_path, monkeypatch)
     state = None

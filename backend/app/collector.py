@@ -7919,6 +7919,18 @@ async def evaluate_servers(
         fc_notice = conds.get("disk_forecast", (0, {}))[1].get("notice")
         if fc_notice != st.get(forecast_notice.STATE):
             apply(s.id, forecast_notice.STATE, fc_notice)
+        # До пообъектного учета открытые алерты не сохраняли sig/told. Первый
+        # наблюдаемый набор уже объявлен: обновление панели не новая проблема.
+        # Запоминаем его до выдержки, чтобы новый объект затем не потерялся.
+        for nk in ("flux_down", "flux_stale", "disk_forecast"):
+            cx = conds.get(nk, (0, {}))[1]
+            if st.get(nk) and f"{nk}_sig" not in st and f"{nk}_told" not in st:
+                members = (set(cx.get("eps") or {}) if nk != "disk_forecast" else {
+                    key for key, entry in (cx.get("notice") or {}).get("members", {}).items()
+                    if entry.get("active")})
+                if members or cx.get("_complete", False):
+                    apply(s.id, f"{nk}_sig", sorted(members))
+                    apply(s.id, f"{nk}_told", sorted(members))
         if talking and report_fresh and transfer.get("_complete") and transfer["sample"] != st.get(backup_transfer.STATE):
             apply(s.id, backup_transfer.STATE, transfer["sample"])
         for fk in flap_back:
