@@ -91,6 +91,7 @@ from app import netlinks
 from app import traffic as traffic_mod
 from app import usage as usage_mod
 from app import disk_forecast as dfc
+from app import flux_notice, forecast_notice
 from app import tg_buttons
 from app import tg_fmt
 from app import srv_short
@@ -2497,8 +2498,8 @@ _FLUX_TRANSIENT = frozenset({"Progressing", "Reconciling", "ProgressingWithRetry
 # мало что даёт: «InstallFailed» не говорит, чинить чарт, кластер или права. Пары
 # (что случилось, где смотреть) собраны по тому, что реально прилетало с парка.
 _FLUX_REASON = {
-    "GitOperationFailed": ("не может сходить в Git — обычно истёк или отозван токен",
-                           "проверьте секрет с доступом у источника"),
+    "GitOperationFailed": ("не удается получить изменения из Git",
+                           "проверьте доступность Git и ошибку источника"),
     "AuthenticationFailed": ("отказ в доступе к источнику",
                              "проверьте секрет с доступом у источника"),
     "InstallFailed": ("Helm не смог поставить релиз", "kubectl -n {ns} get pods"),
@@ -5159,6 +5160,16 @@ def _news_first(ctx: dict, fresh: set[str]) -> dict:
     уже объявленное: пять сообщений за 40 минут начинались одинаково и выглядели повтором без отбоя, а
     новое было ниже или вовсе пряталось в "и еще N". ctx["parts"] - (ключ из sig, текст) по порядку"""
     ctx = {**ctx, "fresh": fresh}  # короткому тексту: новое - первым (app/srv_short.py)
+    if ctx.get("_flux_notice"):
+        items = [item for item in ctx.get("items") or [] if flux_notice.identity(item) in fresh]
+        fx = flux_state({"flux": items})
+        if fx:
+            return {**ctx, **fx[1]}
+    if ctx.get("_forecast_notice"):
+        items = [item for item in ctx.get("items") or []
+                 if item.get("kind", "space") + ":" + item["mount"] in set(ctx.get("_notice_sig") or fresh)]
+        if items:
+            return {**ctx, "items": items, "detail": dfc.forecast_text(items, _FORECAST_WARN_H)}
     parts = ctx.get("parts") or []
     new = [t for k, t in parts if k in fresh]
     old = len(parts) - len(new)
@@ -6654,7 +6665,8 @@ def _server_conditions(s: Server, now: datetime,
                        pod_names: dict[str, str] | None = None,
                        fill_hist: dict[str, list[tuple[float, float]]] | None = None,
                        metric_hist: list[tuple[float, dict[str, float]]] | None = None, *,
-                       report_epoch: bool = False) -> dict[str, tuple[int, dict]]:
+                       report_epoch: bool = False, report_fresh: bool = True,
+                       notice_observed: bool = True) -> dict[str, tuple[int, dict]]:
     """Пороги сервера: ключ → (уровень, контекст для шаблона текста). Уровень 0 =
     норма; для диска 1=предупреждение(≥warn), 2=проблема(≥alert), 3=критично(≥crit).
     fill_hist - заполнение худшего раздела за последние минуты ({"disk"|"inode": [(unix, %)]},
@@ -6880,21 +6892,39 @@ def _server_conditions(s: Server, now: datetime,
         else:
             sustain("kube_expiry", False, {})
 
-    # Flux уже сломан. Второй половиной той же беды: срок можно проспать, а токен —
-    # ещё и отозвать руками, и тогда предупреждать не о чем, доставка встала сразу.
-    # Читаем Ready у ресурсов Flux; «в процессе» не считаем поломкой, а дебаунс
-    # (те же 15 минут по умолчанию) гасит обычную реконсиляцию.
-    if rep.get("flux") is not None:
-        fx = flux_state(rep)
-        if fx is not None and fx[0] == "flux_stale":
-            sustain("flux_stale", True, fx[1], hold_s=_FLUX_STALE_HOLD)
-            sustain("flux_down", False, {})
-        elif fx is not None:
-            sustain("flux_down", True, fx[1])
-            sustain("flux_stale", False, {})
-        else:
-            sustain("flux_down", False, {})
-            sustain("flux_stale", False, {})
+    # В чат попадает устойчивый отказ конкретного ресурса, а не короткий retry.
+    # Unknown прерывает pending, но не доказывает восстановление объявленного.
+    flux_items = rep.get("flux")
+    if flux_items is not None or state.get("flux_down") or state.get("flux_stale") \
+            or state.get("flux_down_eps") or state.get("flux_stale_eps"):
+        for key, helm_only, hold in (("flux_down", False, flux_notice.DOWN_HOLD),
+                                     ("flux_stale", True, flux_notice.STALE_HOLD)):
+            inventory = ([f for f in flux_items if not isinstance(f, dict)
+                          or (f.get("kind") == "HelmRepository") == helm_only]
+                         if isinstance(flux_items, list) else None)
+            cx = flux_notice.step(state.get(f"{key}_eps"), inventory, now, hold_seconds=max(hold, sustain_s),
+                                  observed=online and report_fresh and notice_observed, reset=report_epoch,
+                                  sample_at=rep.get("flux_ts"))
+            roots = [f for f in inventory or [] if isinstance(f, dict) and f.get("ready") is False
+                     and (f.get("reason") is None or isinstance(f.get("reason"), str))
+                     and f.get("reason") not in flux_notice.TRANSIENT | {"DependencyNotReady"}]
+            if roots:
+                cx["items"] = [f for f in cx["items"] if f.get("reason") != "DependencyNotReady"]
+                cx["sig"] = [flux_notice.identity(f) for f in cx["items"]]
+                cx["_complete"] = cx["_complete"] and bool(cx["items"])
+            display = list(cx["items"] or inventory or [])
+            if cx["items"]:
+                display += [f for f in inventory or [] if isinstance(f, dict)
+                            and f.get("reason") == "DependencyNotReady" and f not in display]
+            display = [f for f in display if isinstance(f, dict)
+                       and isinstance(f.get("kind"), str) and isinstance(f.get("where"), str)
+                       and type(f.get("ready")) is bool]
+            fx = flux_state({"flux": [{**f, "reason": str(f.get("reason") or ""),
+                                       "message": str(f.get("message") or "")} for f in display]})
+            out[key] = (int(bool(cx["items"])), {**(fx[1] if fx else {}), **cx, "_flux_notice": True})
+        if out["flux_down"][1]["raw"]:
+            # Пока Git/выкат сломан, сбой репозитория чартов не отдельная новость.
+            out["flux_stale"] = (0, {**out["flux_stale"][1], "_complete": False})
 
     # Пошли ошибки 5xx. Выдержка тут - само окно в 15 минут, поэтому уровень ставим сразу,
     # без sustain: иначе к окну добавились бы ещё 15 минут ожидания.
@@ -6993,21 +7023,20 @@ def _server_conditions(s: Server, now: datetime,
     # насколько полно сейчас, прогноз - сколько осталось. Гистерезис по часам: прогноз
     # дышит вместе с ростом, и без запаса алерт мигал бы на границе. Протухший прогноз
     # ключа не дает: молчание - не повод объявлять, что рост прекратился.
-    fitems = dfc.fresh_items(s.disk_forecast, now) if online else None
-    if fitems is not None:
-        prev_fc = int(state.get("disk_forecast", 0))
-        eta = float(fitems[0]["eta_h"]) if fitems else None
-        if eta is not None and (eta <= _FORECAST_CRIT_H
-                                or (prev_fc >= 2 and eta <= _FORECAST_CRIT_H * 1.25)):
-            f_lvl = 2
-        elif eta is not None and (eta <= _FORECAST_WARN_H
-                                  or (prev_fc and eta <= _FORECAST_WARN_H * 4 / 3)):
-            f_lvl = 1
-        else:
-            f_lvl = 0
+    forecast = s.disk_forecast if isinstance(s.disk_forecast, dict) else {}
+    fitems = forecast.get("items") if online and report_fresh and notice_observed else None
+    observed = {(d["mount"], "space") for d in disks}
+    observed.update((d["mount"], "inode") for d in disks if d.get("inodes"))
+    decision = forecast_notice.evaluate(state.get(forecast_notice.STATE), fitems,
+        forecast.get("ts"), now,
+        announced_level=int(state.get("disk_forecast", 0)), observed=observed, restart=report_epoch)
+    if fitems is not None or state.get(forecast_notice.STATE) or state.get("disk_forecast"):
+        f_lvl = decision.level if decision.level is not None else int(state.get("disk_forecast", 0))
         out["disk_forecast"] = (f_lvl, {
-            "detail": dfc.forecast_text(fitems, _FORECAST_WARN_H) if f_lvl else "", "items": fitems,
-            "level": f_lvl,
+            "detail": dfc.forecast_text(decision.items, _FORECAST_WARN_H), "items": decision.items,
+            "level": f_lvl, "_complete": decision.complete, "_forecast_notice": True,
+            "sig": [item.get("kind", "space") + ":" + item["mount"] for item in decision.items],
+            "notice": decision.state,
         })
 
     # Упавшие юниты systemd (helper units-setup). certbot, упавший на продлении, молчит до
@@ -7701,7 +7730,7 @@ async def evaluate_servers(
         if rule["text"] == default or rule["text"] in settings_store.LEGACY_SERVER_DEFAULTS:
             # Уровень - первым эмодзи (у диска три уровня, у юнитов и OOM - свои). Истекший срок
             # в кластере - уже поломка, а не напоминание: красным
-            level = int(ctx.get("level") or ctx.get("_lvl") or 1)
+            level = int(ctx.get("_notice_level") or ctx.get("level") or ctx.get("_lvl") or 1)
             if key == "kube_expiry" and ctx.get("expired"):
                 level = max(level, 2)
             detail = _fmt_rule(default, s, ctx)
@@ -7873,11 +7902,23 @@ async def evaluate_servers(
             s.alert_state = {**(original_state or {}), **reset}
         try:
             conds = _server_conditions(s, now, web_err.get(s.id), pod_names, fill_hist.get(s.id),
-                                       metric_hist.get(s.id, []), report_epoch=report_epoch)
+                                       metric_hist.get(s.id, []), report_epoch=report_epoch, report_fresh=report_fresh,
+                                       notice_observed=not quiet_srv)
         finally:
             if reset:
                 s.alert_state = original_state
         transfer = conds.get("backup_transfer", (0, {}))[1]
+        # Эти pending-состояния должны обновляться даже при unknown/нулевом уровне:
+        # иначе первый час не накопится, а пропуск источника одолжит старую выдержку.
+        for fk in ("flux_down", "flux_stale"):
+            cx = conds.get(fk, (0, {}))[1]
+            eps = None if quiet_srv else cx.get("eps")
+            if f"{fk}_eps" in st or "eps" in cx:
+                if st.get(f"{fk}_eps") != (eps or None):
+                    apply(s.id, f"{fk}_eps", eps or None)
+        fc_notice = conds.get("disk_forecast", (0, {}))[1].get("notice")
+        if fc_notice != st.get(forecast_notice.STATE):
+            apply(s.id, forecast_notice.STATE, fc_notice)
         if talking and report_fresh and transfer.get("_complete") and transfer["sample"] != st.get(backup_transfer.STATE):
             apply(s.id, backup_transfer.STATE, transfer["sample"])
         for fk in flap_back:
@@ -7982,7 +8023,7 @@ async def evaluate_servers(
                 apply(s.id, f"{k}_hold", cx["hold"] or None)
             # эпизоды упавших юнитов до алерта: с какого момента лежит и сколько раз упал подряд
             if "eps" in cx and (st.get(f"{k}_eps") or {}) != cx["eps"]:
-                apply(s.id, f"{k}_eps", cx["eps"] or None)
+                apply(s.id, f"{k}_eps", None if quiet_srv and k in ("flux_down", "flux_stale") else cx["eps"] or None)
             # с какого момента проблема видна - для "Что сломано" ("sda изношен - 2 дня");
             # ведем для любого вида и до проверки мьютов: заглушенное тоже остается проблемой
             frm = st.get(f"{k}_from")
@@ -8236,11 +8277,22 @@ async def evaluate_servers(
                     # повтор держится часами: это уже не волна, говорим как о новой тревоге
                     prev = 0
                     ctx["_note"] = f"после отбоя вернулось и держится уже {tg_fmt.dur((now - hush).total_seconds())}"
-            if key in _DAYTIME_KINDS and level > 0 and (key != "disk_forecast" or level < 2)                     and not _daytime(now, cfg.get("tz") or "Europe/Moscow"):
+            notice_level = level
+            if key == "disk_forecast" and level:
+                members = (ctx.get("notice") or {}).get("members", {})
+                changes = {member: int(entry.get("ready") or 0) for member, entry in members.items()
+                           if int(entry.get("ready") or 0) > int(entry.get("active") or 0)}
+                if changes:
+                    notice_level = max(changes.values())
+                    ctx["_notice_sig"] = list(changes)
+                    ctx["_notice_level"] = notice_level
+            if key in _DAYTIME_KINDS and level > 0 and (key != "disk_forecast" or notice_level < 2) \
+                    and not _daytime(now, cfg.get("tz") or "Europe/Moscow"):
                 # Медленный признак (память растет день за днем, диск заполнится через дни): ждать
                 # он может до утра, в 3 ночи его не шлем. Состояние не трогаем - утром придет как есть
                 continue
             tracks_members = key in ("windows_service", "disk_health", "units", "docker_restarts", "kube_restarts", "mem_leak", "mem_limit", "db_health",
+                       "flux_down", "flux_stale", "disk_forecast",
                        "web_config", "web_cert", "webfiles", "listen_gone", "docker_risk", "access_risk", "link", "gpu",
                        "cf_realip",
                        "queue_stuck", "queue_failed", "workers", "cron_stuck", "log_errors", "fpm", "gitlab", "autoban",
@@ -8301,8 +8353,11 @@ async def evaluate_servers(
                             apply(s.id, sk, sorted(new_sig))
                             apply(s.id, tk, sorted(told | new_sig))
                         else:
-                            ctx["_lvl"] = level
+                            ctx["_lvl"] = ctx.get("_notice_level", level)
                             fires.append(srv_fire(s, key, rule, _news_first(ctx, fresh)))
+                            if key == "disk_forecast":
+                                fire_apply.append((s.id, forecast_notice.STATE,
+                                                   forecast_notice.mark_announced(ctx["notice"])))
                             if st.get(f"{key}_hush"):
                                 fire_apply.append((s.id, f"{key}_hush", None))  # сказали - уже не тихий повтор
                             fire_apply.append((s.id, sk, sorted(new_sig)))
@@ -8463,7 +8518,7 @@ async def evaluate_servers(
                             ctx["where_raw"] = w_raw
                     except Exception:
                         log.warning("не собрал, где ошибки 5xx на %s", s.name, exc_info=True)
-                ctx["_lvl"] = level
+                ctx["_lvl"] = ctx.get("_notice_level", level)
                 fmsg = srv_fire(s, key, rule, ctx)
                 if ctx.get("_note"):
                     fmsg = fmsg.tail("\n↳ " + html.escape(str(ctx["_note"])))
@@ -8503,6 +8558,8 @@ async def evaluate_servers(
                                               _aware(s.last_seen) if key == "offline" and s.last_seen else now)
                 fires.append(fmsg)
                 fire_apply.append((s.id, key, level))
+                if key == "disk_forecast":
+                    fire_apply.append((s.id, forecast_notice.STATE, forecast_notice.mark_announced(ctx["notice"])))
                 if growth_run is not None:
                     fire_apply.append((s.id, "backup_growth_at", growth_run))
                 if not tracks_members:

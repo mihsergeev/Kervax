@@ -1733,14 +1733,16 @@ async def test_server_flux_down_conditions():
     cond = collector._server_conditions(s, now)
     assert cond["flux_down"][1]["where"] == "flux-system/flux-system"
     # причина по-русски, а сырой код Flux — в скобках: по нему гуглят
-    assert "истёк или отозван токен" in cond["flux_down"][1]["reason"]
+    assert "получить изменения из Git" in cond["flux_down"][1]["reason"]
+    assert "токен" in cond["flux_down"][1]["hint"]
     assert "GitOperationFailed" in cond["flux_down"][1]["reason"]
     # преамбула Flux вырезана, суть осталась
     assert "Access denied" in cond["flux_down"][1]["message"]
     assert "failed to checkout" not in cond["flux_down"][1]["message"]
     assert cond["flux_down"][0] == 0  # первый интервал — дебаунс
 
-    s.alert_state = {"flux_down_since": (now - timedelta(minutes=20)).isoformat()}
+    s.alert_state = {"flux_down_eps": {"GitRepository|flux-system/flux-system": {
+        "since": (now - timedelta(minutes=61)).isoformat(), "last": (now - timedelta(minutes=1)).isoformat()}}}
     assert collector._server_conditions(s, now)["flux_down"][0] == 1
 
     # реконсиляция — не поломка: иначе алерт срабатывал бы на каждой выкатке
@@ -1750,9 +1752,10 @@ async def test_server_flux_down_conditions():
     cond = collector._server_conditions(s, now)
     assert cond["flux_down"][0] == 0
 
-    # Flux в кластере нет вовсе → условия нет (не «всё хорошо», а «нечего проверять»)
+    # Источник пропал: pending очищается, но это не подтверждение восстановления.
     s.last_report = {"kube_expiry": []}
-    assert "flux_down" not in collector._server_conditions(s, now)
+    missing = collector._server_conditions(s, now)["flux_down"][1]
+    assert missing["eps"] == {} and missing["_complete"] is False
 
     # Flux читался и всё зелено → условие есть с уровнем 0, чтобы алерт закрылся
     s.last_report = {"flux": []}
@@ -1778,7 +1781,8 @@ async def test_flux_chart_repo_down_is_a_warning_with_a_hint():
     # развернутое работает: про недоступный репозиторий чартов - только после двух часов
     s.alert_state = {"flux_stale_since": (now - timedelta(minutes=20)).isoformat()}
     assert collector._server_conditions(s, now)["flux_stale"][0] == 0
-    s.alert_state = {"flux_stale_since": (now - timedelta(hours=2, minutes=1)).isoformat()}
+    s.alert_state = {"flux_stale_eps": {"HelmRepository|default/cert-manager": {
+        "since": (now - timedelta(hours=2, minutes=1)).isoformat(), "last": (now - timedelta(minutes=1)).isoformat()}}}
     cond = collector._server_conditions(s, now)
     assert cond["flux_down"][0] == 0
     assert cond["flux_stale"][0] == 1
@@ -1792,7 +1796,8 @@ async def test_flux_chart_repo_down_is_a_warning_with_a_hint():
          "message": "failed to checkout and determine revision: unable to clone 'https://git.example/x': "
                     "dial tcp: lookup git.example on 10.96.0.10:53: no such host"},
     ]}
-    s.alert_state = {"flux_down_since": (now - timedelta(minutes=20)).isoformat()}
+    s.alert_state = {"flux_down_eps": {"GitRepository|flux-system/flux-system": {
+        "since": (now - timedelta(minutes=61)).isoformat(), "last": (now - timedelta(minutes=1)).isoformat()}}}
     cond = collector._server_conditions(s, now)
     assert cond["flux_down"][0] == 1 and cond["flux_stale"][0] == 0
     assert "DNS" in cond["flux_down"][1]["hint"]
@@ -1824,10 +1829,15 @@ async def test_flux_alert_points_at_the_root_of_the_cascade():
          "ready": False, "reason": "DependencyNotReady",
          "message": "dependency 'flux-system/demo-cluster-prod-migrations' is not ready"},
     ]})
-    s.alert_state = {"flux_down_since": (now - timedelta(minutes=20)).isoformat()}
+    s.alert_state = {"flux_down_eps": {"Kustomization|flux-system/demo-cluster-prod-migrations": {
+        "since": (now - timedelta(minutes=61)).isoformat(), "last": (now - timedelta(minutes=1)).isoformat()}}}
+    for name in ("demo-cluster-prod-backend", "demo-cluster-prod-processing"):
+        s.alert_state["flux_down_eps"]["Kustomization|flux-system/" + name] = {
+            "since": (now - timedelta(minutes=61)).isoformat(), "last": (now - timedelta(minutes=1)).isoformat()}
     lvl, ctx = collector._server_conditions(s, now)["flux_down"]
     assert lvl == 1
     assert ctx["where"] == "flux-system/demo-cluster-prod-migrations", "показали следствие вместо причины"
+    assert ctx["sig"] == ["Kustomization|flux-system/demo-cluster-prod-migrations"]
     # ждущие посчитаны отдельно: масштаб виден, но список не раздут
     assert "2 ждут этого" in ctx["more"]
     # объект, который не поднялся, назван по-человечески

@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.133] - 2026-11-14
+
+- Flux failures require an hour of continuous confirmation on the same resource; chart repository warnings keep their two-hour hold. Dependent resources do not repeat the root failure, and generic Git errors no longer assume an expired token.
+- Disk forecasts require six hours of measured continuing growth, or one hour when exhaustion is predicted within a day. Flat usage, one-off spikes and cleanup cycles stay silent. Forecasts within six hours, critical disk usage and fast filling retain immediate handling.
+- Missing observations restart pending confirmation without declaring recovery. New affected resources keep their own severity and delivery state; a warning does not inherit an older critical incident's nighttime priority.
+
+Agent 2.71, helper payloads and database migration 0148 are unchanged.
+
 ## [1.8.132] - 2026-11-13
 
 - Repeated disk-space warnings now show one factual line with the partition, current usage and configured threshold. This is the default on every panel. Duplicate suppression, critical alerts and full history are unchanged.
@@ -6035,7 +6043,7 @@ logerr-setup 0.3 (ставит плейбук helper'ов).
   контейнер <id приложения>-<время деплоя>, например
   s12dfgno3a84p74gufgmnaca-093440651095: в панели это ни о чем не говорило и менялось с
   каждым деплоем, а вместе с именем - полоса графика и заглушенный лог. Теперь подпись
-  берется из метки coolify.resourceName: viola, form, routes.
+  берется из метки coolify.resourceName: service-a, service-b, service-c.
 - Полосы графика запросов складываются по подписи: поды одного деплоймента - одна полоса,
   два контейнера одного приложения - тоже. Имя пода меняется с каждым выкатом, и полоса
   менялась вместе с ним.

@@ -176,6 +176,7 @@ async def test_forecast_alert_levels_and_recovery(tmp_path, monkeypatch):
     rep = {"clock_unix": 0, "uptime_seconds": 100000,
            "disks": [{"mount": "/hdd", "used": 80, "total": 100}]}
     engine, factory, now = await _setup(tmp_path, "fc", last_report=rep)
+    origin = now
     sent = _capture(monkeypatch)
     cfg = Settings(alert_webhook="http://hook")
 
@@ -186,7 +187,8 @@ async def test_forecast_alert_levels_and_recovery(tmp_path, monkeypatch):
             srv = (await s.execute(select(Server))).scalars().one()
             srv.last_seen = now
             items = [] if eta_h is None else [
-                {"mount": "/hdd", "kind": "space", "pct": 80.0, "rate": 3.0, "eta_h": eta_h}]
+                {"mount": "/hdd", "kind": "space", "pct": 80 + (now-origin).total_seconds()/3600*0.2,
+                 "rate": 3.0, "eta_h": eta_h}]
             srv.disk_forecast = {"ts": int(now.timestamp()), "items": items}
             await s.commit()
         await collector.evaluate_servers(factory, cfg, now)
@@ -194,16 +196,22 @@ async def test_forecast_alert_levels_and_recovery(tmp_path, monkeypatch):
     await tick(200)  # неделя - не повод
     assert sent == []
     await tick(60)
+    assert sent == []  # один прогноз еще не подтверждает продолжающийся рост
+    for _ in range(180):
+        await tick(60)
     from app.alerts import full_text
 
     # в чате - какой диск и когда заполнится, сколько сейчас; скорость роста - в полном тексте
     assert len(sent) == 1 and sent[0].startswith("⚠️💽 ")
-    assert "<b>Диск /hdd заполнится через 2 дня</b>" in sent[0] and "сейчас 80%" in sent[0]
+    assert "<b>Диск /hdd заполнится через 2 дня</b>" in sent[0] and "сейчас 81%" in sent[0]
     assert "растет" not in sent[0]
-    assert "диск /hdd заполнится примерно через 2 дн: сейчас 80%, растет на ~3% в сутки" in full_text(sent[0])
+    assert "диск /hdd заполнится примерно через 2 дн: сейчас 81%, растет на ~3% в сутки" in full_text(sent[0])
     await tick(80)  # гистерезис: в пределах запаса алерт держится
     assert len(sent) == 1
     await tick(20)
+    assert len(sent) == 1  # новый критичный прогноз тоже должен подтвердиться
+    for _ in range(30):
+        await tick(20)
     assert len(sent) == 2 and sent[1].startswith("🔴💽 ") and "заполнится через 20 ч" in sent[1]
     await tick(28)  # запас и у второго уровня
     assert len(sent) == 2
@@ -222,6 +230,7 @@ async def test_forecast_alert_comes_five_days_ahead(tmp_path, monkeypatch):
 
     rep = {"clock_unix": 0, "uptime_seconds": 100000, "disks": [{"mount": "/hdd", "used": 80, "total": 100}]}
     engine, factory, now = await _setup(tmp_path, "fc5", last_report=rep)
+    origin = now
     sent = _capture(monkeypatch)
     cfg = Settings(alert_webhook="http://hook")
 
@@ -232,13 +241,17 @@ async def test_forecast_alert_comes_five_days_ahead(tmp_path, monkeypatch):
             srv = (await s.execute(select(Server))).scalars().one()
             srv.last_seen = now
             srv.disk_forecast = {"ts": int(now.timestamp()), "items": [
-                {"mount": "/hdd", "kind": "space", "pct": 80.0, "rate": 3.0, "eta_h": eta_h}]}
+                {"mount": "/hdd", "kind": "space", "pct": 80 + (now-origin).total_seconds()/3600*0.2,
+                 "rate": 3.0, "eta_h": eta_h}]}
             await s.commit()
         await collector.evaluate_servers(factory, cfg, now)
 
     await tick(130)  # больше пяти суток - рано
     assert sent == []
     await tick(115)
+    assert sent == []
+    for _ in range(180):
+        await tick(115)
     assert len(sent) == 1 and sent[0].startswith("⚠️💽 ") and "заполнится через 5 дней" in sent[0]
     await tick(150)  # запас гистерезиса
     assert len(sent) == 1
