@@ -8,9 +8,9 @@ from types import SimpleNamespace
 
 from sqlalchemy import select
 
-from app import collector, heartbeat, home_mute, kube_cron, mem_trend, panel_errors, tg_bot, tg_buttons
+from app import alert_delivery, collector, heartbeat, home_mute, kube_cron, mem_trend, panel_errors, tg_bot, tg_buttons
 from app.alerts import full_text
-from app.models import AlertEvent, Check, CheckIncident, PanelError, Server, TgAlert, User
+from app.models import AlertEvent, Check, CheckIncident, NotificationDelivery, NotificationEvent, PanelError, Server, TgAlert, User
 
 
 def _factory(path):
@@ -250,12 +250,24 @@ async def test_monitor_recovery_survives_snooze_and_failed_delivery(tmp_path, mo
     assert await collector.run_due_checks(factory, st) == 0
     assert sent == []
     async with factory() as s:
-        assert "recovery" in (await s.get(Check, cid)).flap_state
+        # The observer patch is committed with durable ownership, not delivery.
+        assert (await s.get(Check, cid)).flap_state == site_flap.closed(now)
+        job = (await s.scalars(select(NotificationDelivery))).one()
+        event = await s.get(NotificationEvent, job.event_id)
+        assert job.status == "pending" and job.attempts == 1 and event.phase == "recovery"
+        assert not event.history_recorded
+        cfg = await settings_store.get_alert_config(s, st)
     ok["v"] = True
     assert await collector.run_due_checks(factory, st) == 0
+    assert sent == []  # a new tick cannot bypass the persisted transport backoff
+    await engine.dispose()
+    engine, factory = _factory(tmp_path / "m.db")
+    await alert_delivery.drain(factory, cfg, now + timedelta(minutes=1))
     assert len(sent) == 1 and "example.com" in full_text(sent[0])
     async with factory() as s:
         assert (await s.get(Check, cid)).flap_state == site_flap.closed(now)
+        assert (await s.scalars(select(NotificationDelivery))).one().status == "confirmed"
+        assert len(list(await s.scalars(select(AlertEvent).where(AlertEvent.recovery.is_(True))))) == 1
     await collector._send_alerts(factory, st, pending, now)
     assert len(sent) == 1
     # а падение под снузом по-прежнему молчит

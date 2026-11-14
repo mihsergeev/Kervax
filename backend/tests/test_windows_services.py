@@ -4,10 +4,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from app import collector, windows_services
+from app import alert_delivery, collector, settings_store, windows_services
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
-from app.models import AlertEvent, Server
+from app.models import AlertEvent, NotificationDelivery, Server
 
 
 def service(name="Spooler", state="Stopped", **kw):
@@ -50,6 +50,10 @@ async def env(tmp_path, monkeypatch):
             await session.commit()
         await collector.evaluate_servers(factory, cfg, at)
         async with factory() as session:
+            delivery_cfg = await settings_store.get_alert_config(session, cfg)
+        await alert_delivery.drain(factory, delivery_cfg, at)
+        async with factory() as session:
+            tick.deliveries = list(await session.scalars(select(NotificationDelivery)))
             srv = await session.scalar(select(Server))
             events = list(await session.scalars(select(AlertEvent).where(AlertEvent.kind == "windows_service").order_by(AlertEvent.id)))
             return dict(srv.alert_state or {}), events
@@ -64,7 +68,8 @@ async def test_one_alert_and_one_confirmed_recovery_without_text_resends(env):
     at = datetime.now(timezone.utc) + timedelta(days=1)
     fail.append(True)
     state, events = await tick(at)
-    assert not state.get("windows_service") and not events
+    assert state["windows_service"] == 2 and not events
+    assert [d.status for d in tick.deliveries] == ["pending"] and tick.deliveries[0].attempts == 1
     fail.clear()
     at += timedelta(minutes=1)
     state, events = await tick(at)
@@ -80,6 +85,9 @@ async def test_one_alert_and_one_confirmed_recovery_without_text_resends(env):
             fail.append(True)
         state, events = await tick(current, report(current, [service(state="Running")]))
         assert len(events) == 1
+    assert state["windows_service"] == 0
+    assert [d.status for d in tick.deliveries] == ["confirmed", "pending"]
+    assert tick.deliveries[-1].attempts == 1
     fail.clear()
     at += timedelta(minutes=16)
     state, events = await tick(at, report(at, [service(state="Running")]))

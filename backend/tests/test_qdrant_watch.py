@@ -4,10 +4,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from app import collector, qdrant_watch
+from app import alert_delivery, collector, qdrant_watch, settings_store
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
-from app.models import AlertEvent, Server, TgAlert
+from app.models import AlertEvent, NotificationDelivery, Server, TgAlert
 
 
 def service(state="ok", *, source="контейнер vector-a", status="green", optimizer="ok", **kw):
@@ -76,8 +76,13 @@ async def env(tmp_path, monkeypatch):
             srv.last_report = dict(srv.last_report) if frozen else report
             srv.qdrant_monitor_enabled = enabled
             await session.commit()
-        await collector.evaluate_servers(factory, Settings(alert_webhook="http://hook"), at)
+        settings = Settings(alert_webhook="http://hook")
+        await collector.evaluate_servers(factory, settings, at)
         async with factory() as session:
+            delivery_cfg = await settings_store.get_alert_config(session, settings)
+        await alert_delivery.drain(factory, delivery_cfg, at)
+        async with factory() as session:
+            tick.deliveries = list(await session.scalars(select(NotificationDelivery)))
             srv = await session.scalar(select(Server))
             events = list(await session.scalars(select(AlertEvent).where(AlertEvent.kind == "qdrant")
                                                 .order_by(AlertEvent.id)))
@@ -96,7 +101,8 @@ async def test_opt_in_delivery_retry_no_repeats_and_one_recovery(env):
     assert not events and not sent
     failures.append(True)
     state, events = await tick(at + timedelta(minutes=1), bad)
-    assert not events and not state.get("qdrant")
+    assert not events and state["qdrant"] == 2
+    assert [d.status for d in tick.deliveries] == ["pending"] and tick.deliveries[0].attempts == 1
     failures.clear()
     at += timedelta(minutes=2)
     state, events = await tick(at, bad)
@@ -112,7 +118,9 @@ async def test_opt_in_delivery_retry_no_repeats_and_one_recovery(env):
         assert state["qdrant"] == 2 and len(events) == 1
     failures.append(True)
     state, events = await tick(at + timedelta(minutes=15), [service()])
-    assert state["qdrant"] == 2 and len(events) == 1
+    assert state["qdrant"] == 0 and len(events) == 1
+    assert [d.status for d in tick.deliveries] == ["confirmed", "pending"]
+    assert tick.deliveries[-1].attempts == 1
     failures.clear()
     state, events = await tick(at + timedelta(minutes=16), [service()])
     assert state["qdrant"] == 0 and [e.recovery for e in events] == [False, True]

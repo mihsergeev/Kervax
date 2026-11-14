@@ -9,6 +9,52 @@ from app.models import AlertEvent, NotificationDelivery, NotificationEvent, TgAl
 from tests.test_alert_delivery import NOW, configuration, database, dispatch, http, message, rows
 
 
+def test_verification_copy_keeps_critical_priority_inside_the_notification_budget():
+    original = alerts.Msg("🚨 node\n" + ("Подробности " * 30 + "\n") * 6,
+                          "servers", kind="disk", target="node", ref="srv:1",
+                          full="Complete incident details", line="🚨 node: раздел заполнен")
+    original.notice = {"stream": "server:1:disk", "level": 3}
+    copy = alert_delivery._delivery_note(original, {
+        "target": {}, "uncertain_count": 1, "occurred_at": NOW,
+        "payload": {"parse_mode": "HTML"}}, NOW)
+    assert alerts.critical(original) and alerts.critical(copy)
+    assert len(str(copy).splitlines()) <= 4
+    assert "доставка не подтверждена" in str(copy).splitlines()[0]
+    assert "доставка не подтверждена" in alerts._digest([copy, message(2)])
+    assert copy.ref == original.ref and copy.notice == original.notice
+    assert "Complete incident details" in alerts.full_text(copy)
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+@pytest.mark.parametrize("threshold", [1, 6])
+async def test_display_envelope_counts_once_and_keeps_retry_warning(database, http, uncertain, threshold):
+    from tests.test_alert_delivery import lost_response
+
+    factory, _ = database
+    group = alerts.Msg("⚠️ <b>example.org</b>\n<b>Домен истекает через 4 дня</b>",
+                       "services", "fixture", kind="queue_stuck", target="example.org",
+                       full="Domain expiry; monitors: 5")
+    group.parts = [message(source) for source in range(1, 6)]
+    other = message(6)
+    other.kind = "disk"
+    if uncertain:
+        http.answer = lost_response
+    await dispatch(factory, [group, other], threshold=threshold)
+    # Six journal events still represent two separate displayed notifications.
+    # A display group must not trigger the six-message flood digest by itself.
+    copies = 1 if threshold == 1 else 2
+    assert len(http.sent()) == (1 if uncertain else copies)
+    assert "<b>example.org</b>" in http.sent()[0]["text"]
+    if uncertain:
+        http.answer = None
+        await alert_delivery.drain(factory, configuration(), NOW + timedelta(minutes=15, seconds=1))
+        assert len(http.sent()) == 1 + copies
+        grouped = next(item["text"] for item in http.sent()[1:] if "example.org" in item["text"])
+        assert "Повтор: предыдущая доставка не подтверждена" in grouped
+        assert len(grouped.splitlines()) <= 4
+    assert len(await rows(factory, AlertEvent)) == 6
+
+
 async def test_restart_repairs_history_and_original_buttons_without_another_post(database, http, monkeypatch):
     factory, _ = database
     cfg = configuration(tg_buttons=True)

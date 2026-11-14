@@ -7729,10 +7729,31 @@ async def _evaluate_servers_serial(
 ) -> None:
     """Оффлайн-детект и пороговые алерты серверов (по одному алерту на условие,
     recovery при возврате в норму). Каналы/тихие часы — как у остальных алертов."""
+    from app.models import NotificationEvent, NotificationStream
+
     async with session_factory() as session:
         servers = list(
             await session.scalars(select(Server).where(Server.enabled.is_(True)))
         )
+        # These observers keep counters separately from admission. Their durable
+        # stream owns the announced phase even if the process died before the
+        # trailing alert_state commit (including after a recovery).
+        instance_phases, gap_phase = {}, None
+        payload = NotificationEvent.payload["message"]
+        owned = await session.execute(select(NotificationStream.phase, NotificationEvent.payload).join(
+            NotificationEvent, NotificationEvent.id == NotificationStream.last_event_id).where(
+                ((payload["notice"]["source_id"].as_integer().in_([s.id for s in servers])) &
+                 (payload["kind"].as_string().in_(("docker_down", "docker_loop", "unit_loop", "queue")))) |
+                (payload["notice"]["stream"].as_string() == "panel:ingest_gap")))
+        for phase, stored in owned:
+            message = stored.get("message") or {}
+            notice = message.get("notice") or {}
+            if notice.get("stream") == "panel:ingest_gap":
+                gap_phase = phase == "fire"
+            instance = notice.get("instance")
+            sid, kind = notice.get("source_id"), message.get("kind")
+            if isinstance(instance, str) and notice.get("stream") == f"server:{sid}:{kind}:{instance}":
+                instance_phases[sid, kind, instance] = phase == "fire"
         cfg = await settings_store.get_alert_config(session, settings)
         muted = await settings_store.get_muted(session)
         rules = await settings_store.get_server_alert_rules(session)
@@ -7887,17 +7908,33 @@ async def _evaluate_servers_serial(
         # кнопка "заглушить" глушит вещи этого алерта, а не вид целиком (tg_buttons.ITEM_MUTE)
         out.mutes = tg_mute_keys(key, ctx)
         level = int(ctx.get("_notice_level") or ctx.get("level") or ctx.get("_lvl") or 1)
-        members = ctx.get("_notice_sig") or ctx.get("sig") or out.mutes or []
-        out.notice = {"stream": f"server:{s.id}:{key}", "phase": "fire",
+        members = ctx.get("_notice_sig") or ctx.get("sig") or ctx.get("names") or out.mutes or []
+        instance = ctx.get("_instance")
+        out.notice = {"stream": f"server:{s.id}:{key}" + (f":{instance}" if instance is not None else ""), "phase": "fire",
                       "observed_at": now.isoformat(), "source_id": s.id,
                       "members": [f"{member}|level:{level}" for member in members], "level": level}
-        if key == "oom":
+        if instance is not None:
+            out.notice["instance"] = instance
+        if key == "pressure":
+            out.notice["members"] = sorted({f"{cause}|level:{own_level}" for own_level, cause, _detail
+                                             in ctx.get("items") or []})
+        if key == "backup_growth" and (ctx.get("items") or {}).get("ts") is not None:
+            out.notice.update(phase="event", occurrence=f"backup-run:{ctx['items']['ts']}")
+        if key in ("oom", "reboot", "port_new", "access_change", "kube_job"):
             out.notice.update(phase="event", occurrence=ctx.get("_occurrence") or "oom:" + tail)
         if key == "listen_gone":
             fresh = ctx.get("fresh")
             out.listen_episodes = {item["key"]: item["miss"] for item in ctx.get("items") or []
                                    if not fresh or item["key"] in fresh}
         return out
+
+    def instance_back(s: Server, key: str, instance: str, detail: str) -> alerts.Msg:
+        message = _server_alert_text(key, s.name, detail, srv_url(s, key), recovery=True,
+                                     group=s.group_name or "", ref=f"srv:{s.id}")
+        message.notice = {"stream": f"server:{s.id}:{key}:{instance}", "instance": instance,
+                          "phase": "recovery", "observed_at": now.isoformat(),
+                          "source_id": s.id, "members": [], "level": 0}
+        return message
 
     # Сначала СОБИРАЕМ все переходы за тик (не шлём внутри цикла), чтобы при
     # массовых событиях схлопнуть их в один дайджест. Молчаливые де-эскалации
@@ -8317,6 +8354,16 @@ async def _evaluate_servers_serial(
             fires.append(_server_alert_text(
                 "known", s.name, lines[0] if len(lines) == 1 else "; ".join(lines),
                 srv_url(s, reminds[0][0]), icon="📌", group=s.group_name or "", short=(k_what, k_facts)))
+            scheduled = []
+            for kk, entry in reminds:
+                previous = (s.known_issues or {}).get(kk) or {}
+                last = _parse_iso(previous.get("reminded_at") or previous.get("at") or "")
+                scheduled.append((kk, entry.get("at"),
+                                  (last + timedelta(seconds=known_mod.REMIND_S)).isoformat() if last else entry.get("at")))
+            fires[-1].notice = {"stream": f"server:{s.id}:known", "phase": "event", "source_id": s.id,
+                                "observed_at": now.isoformat(), "level": 1,
+                                "members": sorted(f"{kk}:{entry.get('at')}" for kk, entry in reminds),
+                                "occurrence": "known-due:" + json.dumps(sorted(scheduled))}
         # Подключение закрыто (человеком или само): что все еще сломано и не объявлялось,
         # становится известной проблемой. Алерт придет, если станет хуже или сломается новое
         if not onb and st.get("onboard") and talking:
@@ -8383,6 +8430,8 @@ async def _evaluate_servers_serial(
                 continue
             prev = int(st.get(key, 0))
             growth_run = (ctx.get("items") or {}).get("ts") if key == "backup_growth" and level else None
+            if growth_run is not None and prev and growth_run != st.get("backup_growth_at"):
+                prev = 0  # A different real backup run owns a separate jump event.
             if growth_run is not None and prev and s.backup_growth_ack_ts is not None:
                 # The next report can arrive before a tick closes the acknowledged alert.
                 if growth_run > s.backup_growth_ack_ts >= (st.get("backup_growth_at") or 0):
@@ -8814,7 +8863,7 @@ async def _evaluate_servers_serial(
                 if os_support.planned_reboot(s.last_report or {}, s.rebooted_at):
                     apply(s.id, "reboot_at", stamp)
                 else:
-                    fires.append(srv_fire(s, "reboot", rb, {}))
+                    fires.append(srv_fire(s, "reboot", rb, {"_occurrence": "reboot:" + stamp}))
                     fire_apply.append((s.id, "reboot_at", stamp))
         # Новый порт открылся в интернет - событие на каждую проверку, нашедшую новые (new_ts).
         # Заглушенный или выключенный алерт отметку тоже двигает: иначе после снятия мьюта
@@ -8824,7 +8873,8 @@ async def _evaluate_servers_serial(
             pn, fresh = rules.get("port_new"), open_ports.new_ports(s, now)
             if fresh and "port_new" not in mutes and pn and pn["enabled"] and _rule_scope_ok(pn, s):
                 fires.append(srv_fire(s, "port_new", pn, {
-                    "detail": "в интернет открылся новый порт: " + open_ports.new_text(fresh), "items": fresh}))
+                    "detail": "в интернет открылся новый порт: " + open_ports.new_text(fresh), "items": fresh,
+                    "_occurrence": "port-new:" + pstamp}))
                 fire_apply.append((s.id, "port_new_at", pstamp))
             else:
                 apply(s.id, "port_new_at", pstamp)
@@ -8838,7 +8888,8 @@ async def _evaluate_servers_serial(
             ac = rules.get("access_change")
             if fresh_ev and "access_change" not in mutes and ac and ac["enabled"] and _rule_scope_ok(ac, s):
                 fires.append(srv_fire(s, "access_change", ac, {
-                    "detail": "изменился доступ: " + srv_changes.events_text(fresh_ev, 6), "items": fresh_ev}))
+                    "detail": "изменился доступ: " + srv_changes.events_text(fresh_ev, 6), "items": fresh_ev,
+                    "_occurrence": "access-change:" + astamp}))
                 fire_apply.append((s.id, "access_change_at", astamp))
             else:
                 apply(s.id, "access_change_at", astamp)
@@ -8866,7 +8917,8 @@ async def _evaluate_servers_serial(
                     if logs is not None:
                         fires.append(job_logs.attach(srv_fire(s, "kube_job", kj, {
                             "detail": ("упал Job: " if len(fresh) == 1 else "упали Job: ")
-                            + failed_jobs_text(fresh, 5), "items": fresh}), logs))
+                            + failed_jobs_text(fresh, 5), "items": fresh,
+                            "_occurrence": "kube-jobs:" + json.dumps(sorted(job_logs.job_key(j) for j in fresh))}), logs))
                         fire_apply.append((s.id, "kube_jobs_seen", keys))
                 else:
                     apply(s.id, "kube_jobs_seen", keys)
@@ -8919,6 +8971,12 @@ async def _evaluate_servers_serial(
                     continue
                 seen_names.add(name)
                 cs = dict(dstate.get(name) or {})
+                for kind, flag in (("docker_down", "alerted_down"), ("docker_loop", "alerted_loop")):
+                    canonical = instance_phases.get((s.id, kind, name))
+                    if canonical is not None:
+                        if kind == "docker_down" and not canonical and cs.get(flag):
+                            cs["down_since"] = None
+                        cs[flag] = canonical
                 rc = int(c.get("restarts") or 0)
                 state = (c.get("state") or "").lower()
                 policy = (c.get("policy") or "").lower()
@@ -8946,17 +9004,17 @@ async def _evaluate_servers_serial(
                            and name not in dm_loop)
                 if looping and not was_loop and loop_ok:
                     ctx = {"container": name, "restarts": len(loops),
-                           "window": round(_DOCKER_LOOP_WINDOW / 60), "policy": policy or "no", "state": state}
+                           "window": round(_DOCKER_LOOP_WINDOW / 60), "policy": policy or "no", "state": state,
+                           "_instance": name}
                     fires.append(srv_fire(s, "docker_loop", r_loop, ctx))
                     cs["alerted_loop"] = True
                 elif was_loop and not loops:  # рестарты прекратились
                     # Отметку снимаем всегда, отбой шлем только по живому правилу: иначе контейнер,
                     # заглушенный посреди алерта, навсегда оставался "в цикле" на главной.
                     if loop_ok:
-                        recoveries.append(_server_alert_text(
-                            "docker_loop", s.name, fixed_mod.recovery_text("docker_loop", fix_now["docker_loop"])
-                            if "docker_loop" in fix_now else f"{name} больше не перезапускается",
-                            srv_url(s, "docker_loop"), recovery=True, group=s.group_name or ""))
+                        recoveries.append(instance_back(s, "docker_loop", name,
+                            fixed_mod.recovery_text("docker_loop", fix_now["docker_loop"])
+                            if "docker_loop" in fix_now else f"{name} больше не перезапускается"))
                     cs["alerted_loop"] = False
                 # «упал»: не работает и это авария (docker_down_why: не остановлен руками),
                 # держится ≥ sustain
@@ -8975,7 +9033,7 @@ async def _evaluate_servers_serial(
                         # перед этим - без событий самого контейнера: что он упал, и так понятно
                         fires.append(await _with_before(session_factory, srv_fire(
                             s, "docker_down", r_down,
-                            {"container": name, "state": state, "policy": policy or "no", "why": why},
+                            {"container": name, "state": state, "policy": policy or "no", "why": why, "_instance": name},
                         ), s, started or now, frozenset({name})))
                         cs["alerted_down"] = True
                 else:
@@ -8986,8 +9044,7 @@ async def _evaluate_servers_serial(
                             # не поднялся, но это уже не авария: остановили руками, сняли policy
                             back = (f"контейнер {name} снова работает" if state == "running"
                                     else f"контейнер {name} остановлен штатно, тревога снята")
-                            recoveries.append(_server_alert_text(
-                                "docker_down", s.name, back, srv_url(s, "docker_down"), recovery=True, group=s.group_name or ""))
+                            recoveries.append(instance_back(s, "docker_down", name, back))
                         cs["alerted_down"] = False
                 dstate[name] = cs
             # контейнеры, пропавшие из списка (удалены/пересозданы) — чистим состояние
@@ -9005,6 +9062,9 @@ async def _evaluate_servers_serial(
             ul_ok = bool(ul_rule and ul_rule["enabled"] and "unit_loop" not in mutes and _rule_scope_ok(ul_rule, s))
             muted_u = units_muted(s, now)
             ustate = dict(st.get("unit_loops") or {})
+            for (sid, kind, name), phase in instance_phases.items():
+                if sid == s.id and kind == "unit_loop" and (phase or name in ustate):
+                    ustate[name] = {**(ustate.get(name) or {}), "alerted": phase}
             seen_u: set[str] = set()
             for u in rs:
                 name = str(u["unit"])
@@ -9018,24 +9078,22 @@ async def _evaluate_servers_serial(
                 if len(hits) >= _UNIT_LOOP_MIN and not cs["alerted"] and not quiet:
                     count, why = unit_loop_text(u, hits)
                     fires.append(srv_fire(s, "unit_loop", ul_rule, {
-                        "unit": name, "count": count, "window": _UNIT_LOOP_WINDOW // 60, "why": why, "_lvl": 2}))
+                        "unit": name, "count": count, "window": _UNIT_LOOP_WINDOW // 60, "why": why, "_lvl": 2,
+                        "_instance": name}))
                     cs["alerted"] = True
                 elif cs["alerted"] and not hits:
                     # отметку снимаем всегда, отбой шлем только по живому правилу
                     if not quiet:
-                        recoveries.append(_server_alert_text(
-                            "unit_loop", s.name, fixed_mod.recovery_text("unit_loop", fix_now["unit_loop"])
-                            if "unit_loop" in fix_now else f"{name} больше не перезапускается",
-                            srv_url(s, "unit_loop"), recovery=True, group=s.group_name or ""))
+                        recoveries.append(instance_back(s, "unit_loop", name,
+                            fixed_mod.recovery_text("unit_loop", fix_now["unit_loop"])
+                            if "unit_loop" in fix_now else f"{name} больше не перезапускается"))
                     cs["alerted"] = False
                 ustate[name] = cs
             # юнит пропал из списка: счетчик обнулили ручным restart, юнит убрали, перезагрузка
             for gone in [n for n in ustate if n not in seen_u]:
                 cs = ustate.pop(gone)
                 if cs.get("alerted") and ul_ok and gone not in muted_u:
-                    recoveries.append(_server_alert_text(
-                        "unit_loop", s.name, f"{gone} больше не перезапускается",
-                        srv_url(s, "unit_loop"), recovery=True, group=s.group_name or ""))
+                    recoveries.append(instance_back(s, "unit_loop", gone, f"{gone} больше не перезапускается"))
             if ustate != (st.get("unit_loops") or {}):
                 apply(s.id, "unit_loops", ustate)
 
@@ -9124,6 +9182,12 @@ async def _evaluate_servers_serial(
                         continue
                     depth = queue_depth(q)
                     was = bool(qstate.get(key))
+                    canonical = instance_phases.get((s.id, "queue", key))
+                    if canonical is not None:
+                        if not canonical and was:
+                            qsince.pop(key, None)
+                        was = canonical
+                        qstate[key] = was
                     if depth >= thr:
                         qsince.setdefault(key, now.isoformat())
                     elif not was or depth < thr * _QUEUE_CLEAR:
@@ -9133,15 +9197,13 @@ async def _evaluate_servers_serial(
                     if depth >= thr and held and not was and not warm:
                         # на прогреве потребители еще встают: переросла и не разобралась - после
                         ctx = {"queue": q.get("name") or "?", "source": src or "rabbitmq",
-                               "value": depth, "threshold": thr}
+                               "value": depth, "threshold": thr, "_instance": key}
                         fires.append(srv_fire(s, "queue", qr, ctx))
                         qstate[key] = True
                     elif depth < thr * _QUEUE_CLEAR and was:
                         # отбой - ниже линии снятия, а не просто ниже порога
-                        recoveries.append(_server_alert_text(
-                            "queue", s.name,
-                            f"очередь {q.get('name') or '?'} снова в норме, {depth}",
-                            srv_url(s, "queue"), recovery=True, group=s.group_name or ""))
+                        recoveries.append(instance_back(s, "queue", key,
+                            f"очередь {q.get('name') or '?'} снова в норме, {depth}"))
                         qstate[key] = False
             # очередь удалили/переименовали — состояние по ней больше не нужно
             for gone in [k for k in qstate if k not in seen_q]:
@@ -9372,7 +9434,8 @@ async def _evaluate_servers_serial(
         heartbeat.stage_partial("серверные алерты", ", ".join(failed[:5]) + (f" и еще {len(failed) - 5}"
                                                                             if len(failed) > 5 else ""))
 
-    if gap_n and not _gap_said.get("at"):
+    gap_was_announced = gap_phase if gap_phase is not None else bool(_gap_said.get("at"))
+    if gap_n and not gap_was_announced:
         full = (f"🔴📡 Панель не получает отчеты\nЗамолчали разом {gap_n} из {gap_total} серверов. "
                 "Похоже на сбой приема на стороне панели (backend, прокси, сеть панели), а не на серверах: "
                 "недоступен по каждому не шлем")
@@ -9380,7 +9443,7 @@ async def _evaluate_servers_serial(
             f"🔴📡 <b>Панель не получает отчеты</b>\nЗамолчали разом {gap_n} из {gap_total} серверов. "
             "Проверьте прием отчетов в панели", "servers", "", kind="ingest_gap", target="панель", full=full))
         _gap_said["at"] = now
-    elif not gap_n and _gap_said.get("at"):
+    elif not gap_n and gap_was_announced:
         recoveries.append(alerts.Msg("✅📡 Панель снова получает отчеты серверов", "servers", "",
                                      kind="ingest_gap", target="панель", recovery=True))
         _gap_said.pop("at", None)

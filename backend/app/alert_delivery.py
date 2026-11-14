@@ -316,10 +316,25 @@ async def _render(factory, row, now):
             for key in ("notice", "resolves", "listen_episodes"):
                 if hasattr(prior_message, key):
                     setattr(message, key, getattr(prior_message, key))
+    return _delivery_note(message, row, now)
+
+
+def _delivery_note(message, row, now):
+    from app import alerts
+    if row["target"].get("covered_events"):
+        pass  # The completed-incident summary already explains the delay.
     elif row.get("uncertain_count"):
         # This is explicitly a delayed verification copy, never a new incident.
-        message = message.tail("\nПредыдущая попытка доставки не подтверждена.",
-                               "\nПовтор: предыдущая доставка не подтверждена")
+        prior = message
+        label = "Повтор: предыдущая доставка не подтверждена"
+        severity = next((icon for icon in ("🚨", "🔴", "🔥", "⚠️", "✅")
+                         if str(prior).startswith(icon)), "")
+        message = alerts.Msg((severity + " " if severity else "") + label + "\n" + str(prior))
+        message.__dict__.update(prior.__dict__)
+        message.full = alerts.full_text(prior) + "\nПредыдущая попытка доставки не подтверждена."
+        # Put the warning first, including in digests and four-line copies.
+        # A tail can disappear when the notification budget is already full.
+        message.line = (severity + " " if severity else "") + label + " · " + alerts._digest_line(prior)
     elif now - _utc(row["occurred_at"]) > timedelta(minutes=10):
         at = _utc(row["occurred_at"]).strftime("%H:%M UTC")
         message = message.tail("\nОтправлено после восстановления доставки.",
@@ -413,7 +428,7 @@ async def _resolve_buttons(factory, cfg, allowed, now):
                 await alerts.tg_edit(cfg, receipt["chat"], receipt["id"], text, tg_buttons.row_keyboard(row))
 
 
-def _messages(rows):
+def _messages(rows, now=None):
     """Retain a grouped display only when every constituent is authorized here."""
     displayed, used = [], set()
     for row, message, _ in rows:
@@ -427,6 +442,13 @@ def _messages(rows):
                 item[0]["target"].get("covered_events") for item in peers):
             parent = unpack(envelope)
             parent.parts = [item[1] for item in peers]
+            if now is not None:
+                # Display envelopes must retain delivery warnings too. Rendering
+                # only their atoms would hide an ambiguous retry's copy marker.
+                delivery = dict(row)
+                delivery["uncertain_count"] = max(item[0].get("uncertain_count", 0) for item in peers)
+                delivery["occurred_at"] = min(item[0]["occurred_at"] for item in peers)
+                parent = _delivery_note(parent, delivery, now)
             displayed.append(parent)
             used.update(item[0]["id"] for item in peers)
         else:
@@ -560,7 +582,7 @@ async def _post(factory, cfg, rows, now):
         return
     ids = [row["id"] for row, _, _ in allowed]
     event_ids = [row["event_id"] for row, _, _ in allowed]
-    texts = alerts.merge_storm(_messages(allowed))
+    texts = alerts.merge_storm(_messages(allowed, now))
     message = alerts._digest(texts) if len(texts) > 1 else texts[0]
     configuration = allowed[0][2]
     aid = await _button(factory, configuration, event_ids[0], message) if (
@@ -688,7 +710,8 @@ async def drain(factory, cfg, now=None, *, limit=100):
         groups[(row["recipient_key"], row["transport_key"], row["payload"].get("parse_mode"))].append(row)
     for rows in groups.values():
         threshold = int(rows[0]["payload"].get("threshold") or 0)
-        if threshold and len(rows) >= threshold:
+        displayed = _messages([(row, unpack(row["payload"]["message"]), None) for row in rows])
+        if threshold and len(alerts.merge_storm(displayed)) >= threshold:
             await _post(factory, cfg, rows, current_time())
         else:
             parent = list(range(len(rows)))

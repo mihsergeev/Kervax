@@ -5,7 +5,7 @@
 у срока домена текст про само имя домена, а не про адрес монитора - тоже без хвоста. Без адреса
 панели имя ведет на сайт, хвоста нет."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app import collector, tg_fmt
 from app.alerts import full_text
@@ -38,8 +38,16 @@ async def _send(tmp_path, monkeypatch, checks: list[dict], pending: list, panel_
 
     monkeypatch.setattr("app.alerts.send_alert", fake_send)
     settings = Settings(alert_webhook="http://hook", panel_url=panel_url)
-    await collector._send_alerts(factory, settings, [p[:5] + (ids[p[5]], None) for p in pending],
-                                 datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    observations = [pending]
+    if any(p[0] == "bad" for p in pending) and any(p[0] == "recovery" for p in pending):
+        # Distinct observed ticks: a closed incident queued before any POST may be
+        # represented by one recovery summary instead of a new fire/recovery pair.
+        observations = [[p for p in pending if p[0] != "recovery"],
+                        [p for p in pending if p[0] == "recovery"]]
+    for index, batch in enumerate(observations):
+        await collector._send_alerts(factory, settings, [p[:5] + (ids[p[5]], None) for p in batch],
+                                     now + timedelta(seconds=index))
     await engine.dispose()
     return sent
 

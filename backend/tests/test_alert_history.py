@@ -1,14 +1,14 @@
 """История алертов: пишется только доставленное, отдается под права учетки."""
 
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
 
-from app import alerts
+from app import alert_delivery, alerts
 from app.db import Base, create_engine_and_factory
-from app.models import AlertEvent
+from app.models import AlertEvent, NotificationDelivery
 
 CFG = {"telegram_token": "t", "telegram_chat": "c"}
 
@@ -21,12 +21,21 @@ async def _factory(tmp_path):
 
 
 async def test_only_delivered_alerts_go_to_history(tmp_path, monkeypatch):
-    """Недоставленное повторится на следующем тике и запишется тогда: писать его сейчас -
-    это два одинаковых события в истории на одно сообщение в чате."""
+    """Admission never writes history; confirmation writes each transition once."""
     engine, factory = await _factory(tmp_path)
+    now = datetime.now(timezone.utc)
+    failed = True
+    sent = []
 
     async def fake_send(cfg, text, parse_mode=None):
-        return ["Telegram: timeout"] if "web-02" in text else []
+        sent.append(text)
+        errors = alerts.SendErrors()
+        if failed and "web-02" in text:
+            errors.append("Telegram: timeout")
+            errors.uncertain = True
+        else:
+            errors.receipts.append({"chat": "c", "id": len(sent)})
+        return errors
 
     async def no_personal(*a, **kw):
         return None
@@ -39,17 +48,34 @@ async def test_only_delivered_alerts_go_to_history(tmp_path, monkeypatch):
         alerts.Msg("✅ web-02 - CPU снова в норме", "servers", "", kind="cpu", target="web-02",
                    recovery=True),
     ]
-    ok = await alerts.dispatch(CFG, True, msgs, 0, parse_mode="HTML", session_factory=factory)
-    assert ok is False  # второй не ушел - коллектор повторит
+    accepted = set()
+    ok = await alerts.dispatch(CFG, True, msgs, 0, parse_mode="HTML", session_factory=factory,
+                               accepted=accepted, now=now)
+    assert ok is False and accepted == {0, 1}
     async with factory() as s:
         rows = list(await s.scalars(select(AlertEvent)))
     assert [(r.kind, r.target, r.grp, r.recovery) for r in rows] == [("disk", "web-01", "prod", False)]
     assert rows[0].text == "🔴 web-01 - диск 91% > 90%"  # без разметки, как видит человек
-
-    # дайджестом ушло - в истории каждое сообщение по отдельности
-    ok = await alerts.dispatch(CFG, True, [msgs[0], msgs[0]], 2, session_factory=factory)
     async with factory() as s:
-        assert len(list(await s.scalars(select(AlertEvent)))) == 3
+        assert sorted(await s.scalars(select(NotificationDelivery.status))) == ["confirmed", "uncertain"]
+
+    # Reobserving the same transition never creates two extra history records.
+    assert await alerts.dispatch(CFG, True, [msgs[0], msgs[0]], 2, session_factory=factory, now=now)
+    async with factory() as s:
+        assert len(list(await s.scalars(select(AlertEvent)))) == 1
+    assert len(sent) == 2
+    failed = False
+    later = now + timedelta(minutes=16)
+    await alert_delivery.drain(factory, CFG, later)
+    async with factory() as s:
+        assert len(list(await s.scalars(select(AlertEvent)))) == 2
+    # A digest containing two genuinely new incidents still records both atoms.
+    new = [alerts.Msg(f"🔴 web-{number} - память", "servers", kind="mem", target=f"web-{number}")
+           for number in (3, 4)]
+    assert await alerts.dispatch(CFG, True, new, 2, session_factory=factory, now=later)
+    async with factory() as s:
+        assert len(list(await s.scalars(select(AlertEvent)))) == 4
+    assert len(sent) == 4
     await engine.dispose()
 
 

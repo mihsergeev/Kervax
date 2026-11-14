@@ -8,9 +8,9 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from app import alerts, collector, settings_store, tg_fmt
+from app import alert_delivery, alerts, collector, tg_fmt
 from app.config import Settings
-from app.models import AlertEvent, Server
+from app.models import AlertEvent, NotificationDelivery, NotificationEvent, Server
 
 
 class _Resp:
@@ -191,8 +191,12 @@ async def test_partial_server_batch_retries_only_failed_message(client, http, re
     async with factory() as session:
         server = (await session.scalars(select(Server))).one()
         assert server.alert_state.get("temp", 0) == int(not recovery)
-        assert server.alert_state.get("conntrack", 0) == int(recovery)
-        later = now + timedelta(seconds=30)
+        # Ownership advances the observed state even while one POST is pending.
+        assert server.alert_state.get("conntrack", 0) == int(not recovery)
+        jobs = list(await session.scalars(select(NotificationDelivery).order_by(NotificationDelivery.id)))
+        assert sorted(job.status for job in jobs) == ["confirmed", "pending"]
+        assert len(list(await session.scalars(select(AlertEvent)))) == 1
+        later = now + timedelta(minutes=1)
         server.last_seen = later
         server.last_report = {**report, "clock_unix": int(later.timestamp()), "uptime_seconds": 100030}
         await session.commit()
@@ -271,21 +275,35 @@ async def test_oom_is_checkpointed_when_the_rest_of_the_batch_retries(client, ht
     async with factory() as session:
         servers = {s.name: s for s in await session.scalars(select(Server))}
         assert servers["node-a"].alert_state["oom_seen"] == 1
-        assert not (servers["node-b"].alert_state or {}).get("oom_seen")
+        assert servers["node-b"].alert_state["oom_seen"] == 1
+        jobs = list(await session.scalars(select(NotificationDelivery).order_by(NotificationDelivery.id)))
+        assert jobs[0].status == ("uncertain" if lost_response else "confirmed")
+        assert jobs[1].status == "pending"
+        assert len(list(await session.scalars(select(AlertEvent)))) == int(not lost_response)
 
     http.answer = None
-    await collector.evaluate_servers(factory, cfg, now + timedelta(seconds=30))
+    await alert_delivery.drain(factory, _cfg(), now + timedelta(minutes=1))
     assert sum("node-a" in j["text"] for j in http.tg()) == 1
+    if lost_response:
+        # The shared bot circuit survives cycles; ambiguity is never history.
+        assert len(http.tg()) == 1
+        async with factory() as session:
+            assert list(await session.scalars(select(AlertEvent))) == []
+        await alert_delivery.drain(factory, _cfg(), now + timedelta(minutes=16))
+        copies = [j["text"] for j in http.tg() if "node-a" in j["text"]]
+        assert len(copies) == 2 and "не подтверждена" in copies[-1]
     assert "node-b" in http.tg()[-1]["text"]
     async with factory() as session:
         names = list(await session.scalars(select(AlertEvent.target).where(AlertEvent.kind == "oom")))
-        assert sorted(names) == (["node-b"] if lost_response else ["node-a", "node-b"])
+        assert sorted(names) == ["node-a", "node-b"]
+        assert len(list(await session.scalars(select(NotificationEvent).where(
+            NotificationEvent.payload["message"]["kind"].as_string() == "oom")))) == 2
         server = await session.scalar(select(Server).where(Server.name == "node-a"))
         server.oom_total = 2
         server.last_seen = now + timedelta(hours=2)
         await session.commit()
     await collector.evaluate_servers(factory, cfg, now + timedelta(hours=2))
-    assert sum("node-a" in j["text"] for j in http.tg() if "(OOM)" in j["text"]) == 2
+    assert sum("node-a" in j["text"] for j in http.tg() if "(OOM)" in j["text"]) == (3 if lost_response else 2)
 
 
 async def test_uncertain_oom_digest_checkpoints_only_oom(http):
@@ -324,6 +342,7 @@ async def test_server_error_text_has_no_token(http):
 
 async def test_dead_webhook_does_not_repeat_telegram(client, http):
     f = _factory(client)
+    now = datetime.now(timezone.utc)
 
     def answer(url, j):
         if url.startswith("https://hook.example.com"):
@@ -332,16 +351,22 @@ async def test_dead_webhook_does_not_repeat_telegram(client, http):
 
     http.answer = answer
     cfg = _cfg(webhook="https://hook.example.com/in/fake-token-example")
-    assert await alerts.dispatch(cfg, True, [_msg()], 0, parse_mode="HTML", session_factory=f)
+    assert await alerts.dispatch(cfg, True, [_msg()], 0, parse_mode="HTML", session_factory=f, now=now)
     async with f() as s:
-        state = await settings_store.get_routes_state(s)
-    err = state[alerts.WEBHOOK_STATE_KEY]["err"]
-    assert err == "HTTP 500" and "fake-token-example" not in err
-    # вебхук ожил - ошибка уходит
+        jobs = list(await s.scalars(select(NotificationDelivery).order_by(NotificationDelivery.id)))
+        hook = next(job for job in jobs if job.target["type"] == "webhook")
+        telegram = next(job for job in jobs if job.target["type"] == "telegram")
+        assert hook.status == "pending" and hook.attempts == 1 and hook.last_error
+        assert telegram.status == "confirmed" and telegram.message_id
+        assert "fake-token-example" not in repr(hook.target) + hook.last_error
+    assert len(http.tg()) == 1 and len(http.hook()) == 1
+    # Вебхук ожил: worker повторяет только его после сохраненного backoff.
     http.answer = None
-    assert await alerts.dispatch(cfg, True, [_msg()], 0, parse_mode="HTML", session_factory=f)
+    await alert_delivery.drain(f, cfg, now + timedelta(minutes=1))
     async with f() as s:
-        assert alerts.WEBHOOK_STATE_KEY not in await settings_store.get_routes_state(s)
+        jobs = list(await s.scalars(select(NotificationDelivery)))
+        assert all(job.status == "confirmed" and not job.last_error for job in jobs)
+    assert len(http.tg()) == 1 and len(http.hook()) == 2
 
 
 async def test_both_channels_down_is_retried(http):

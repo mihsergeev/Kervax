@@ -1,11 +1,11 @@
 """Чаты по группам: алерты выбранных групп серверов и сайтов идут в свои чаты."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
 
-from app import alerts, collector, settings_store, tg_bot
-from app.models import Check, Server, TgAlert
+from app import alert_delivery, alerts, collector, notification_store, settings_store, tg_bot
+from app.models import Check, NotificationDelivery, Server, TgAlert
 
 
 class _Resp:
@@ -105,20 +105,31 @@ async def test_broken_route_falls_back_to_main_without_retry(client, tg):
     """Чат по группам не принял: сообщение в основном чате с припиской, повтора нет (иначе
     основной чат получал бы его каждый цикл), а ошибка видна в настройках."""
     f = _factory(client)
+    now = datetime.now(timezone.utc)
     tg.broken = {"-200"}
     ok = await alerts.dispatch(_cfg("rest"), True, [_srv("web-a", "web")], 0, parse_mode="HTML",
-                               session_factory=f)
-    assert ok
+                               session_factory=f, now=now)
+    assert not ok and tg.to("-100") == []
+    async with f() as s:
+        jobs = list(await s.scalars(select(NotificationDelivery).order_by(NotificationDelivery.id)))
+        assert jobs[0].status == "rejected" and jobs[0].last_error
+        assert jobs[1].status == "pending" and jobs[1].target["route"] == "fallback"
+        rejected_id = jobs[0].id
+    # Permanent group rejection queues an independent main job for the next drain.
+    await alert_delivery.drain(f, _cfg("rest"), now + timedelta(seconds=1))
     main = tg.to("-100")
-    assert len(main) == 1 and "web-a" in main[0] and "не дошло в чат «CS-deploy»" in main[0]
-    async with f() as s:
-        state = await settings_store.get_routes_state(s)
-    assert "-200" in state and "HTTP 400" in state["-200"]["err"]
-    # чат снова принимает - ошибка из настроек уходит
+    assert len(main) == 1 and "web-a" in main[0] and "чат группы отклонил" in main[0]
+    assert await alerts.dispatch(_cfg("rest"), True, [_srv("web-a", "web")], 0,
+                                 session_factory=f, now=now + timedelta(seconds=2))
+    assert len(tg.to("-100")) == 1
+    # Rejected jobs remain visible and require explicit retry after route repair.
     tg.broken = set()
-    assert await alerts.dispatch(_cfg("rest"), True, [_srv("web-a", "web")], 0, session_factory=f)
+    assert await notification_store.retry(f, [rejected_id], now + timedelta(minutes=1)) == [rejected_id]
+    await alert_delivery.drain(f, _cfg("rest"), now + timedelta(minutes=1))
     async with f() as s:
-        assert await settings_store.get_routes_state(s) == {}
+        assert all(job.status == "confirmed" and not job.last_error
+                   for job in await s.scalars(select(NotificationDelivery)))
+    assert len(tg.to("-200")) == 1 and len(tg.to("-100")) == 1
 
 
 async def test_broken_route_no_second_copy_when_main_has_it(client, tg):

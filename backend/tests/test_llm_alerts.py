@@ -4,10 +4,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from app import collector
+from app import alert_delivery, collector, settings_store
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
-from app.models import AlertEvent, Server
+from app.models import AlertEvent, NotificationDelivery, Server
 from tests.test_gpu import _llm
 
 
@@ -46,6 +46,12 @@ async def env(tmp_path, monkeypatch):
             await session.commit()
         await collector.evaluate_servers(factory, cfg, at)
         async with factory() as session:
+            delivery_cfg = await settings_store.get_alert_config(session, cfg)
+        # Production drains independently of whether this observation creates
+        # another transition; a failed recovery belongs to that durable queue.
+        await alert_delivery.drain(factory, delivery_cfg, at)
+        async with factory() as session:
+            tick.deliveries = list(await session.scalars(select(NotificationDelivery)))
             srv = await session.scalar(select(Server))
             events = list(await session.scalars(select(AlertEvent).where(AlertEvent.kind == "llm")
                                                 .order_by(AlertEvent.id)))
@@ -74,11 +80,14 @@ async def test_llm_delivered_alert_recovers_once_after_confirmed_health(env, bad
     for minute in range(15):
         state, events = await tick(healthy + timedelta(minutes=minute), [_llm()])
         assert state["llm"] > 0 and [e.recovery for e in events] == [False]
-    # Неудачная доставка отбоя не закрывает алерт и не попадает в историю.
+    # Норма зафиксирована, но неудачная доставка отбоя остается в очереди
+    # и не выдается за доставленное сообщение в истории.
     failures.append(True)
     end = healthy + timedelta(seconds=collector._SETTLE_S)
     state, events = await tick(end, [_llm()])
-    assert state["llm"] > 0 and [e.recovery for e in events] == [False]
+    assert state["llm"] == 0 and [e.recovery for e in events] == [False]
+    assert [d.status for d in tick.deliveries] == ["confirmed", "pending"]
+    assert tick.deliveries[-1].attempts == 1
     failures.clear()
     state, events = await tick(end + timedelta(minutes=1), [_llm()])
     assert state["llm"] == 0 and [e.recovery for e in events] == [False, True]

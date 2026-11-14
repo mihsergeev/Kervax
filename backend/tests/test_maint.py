@@ -3,12 +3,13 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
+from sqlalchemy import select
 
-from app import collector, maint
+from app import alert_delivery, collector, maint
 from app.alerts import full_text
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
-from app.models import Check, MaintenanceWindow, Server
+from app.models import AlertEvent, Check, MaintenanceWindow, NotificationDelivery, Server
 
 TZ = "Europe/Moscow"  # UTC+3 без перехода
 
@@ -289,10 +290,18 @@ async def test_verify_retries_only_undelivered_windows(client, monkeypatch):
     settings = Settings(alert_webhook="http://hook.example.com")
     for n in range(3):
         await collector.maintenance_tick(factory, settings, now + timedelta(minutes=n))
+        # The scheduler drains accepted jobs even after verified_end is committed.
+        await alert_delivery.drain(factory, {"webhook": settings.alert_webhook}, now + timedelta(minutes=n))
 
     assert len(attempts) == 3
     assert "first" in attempts[0] and "second" in attempts[1]
     assert attempts[2] == attempts[1]
+    async with factory() as session:
+        jobs = list(await session.scalars(select(NotificationDelivery)))
+        assert len(jobs) == 2 and all(job.status == "confirmed" for job in jobs)
+        assert sorted(job.attempts for job in jobs) == [1, 2]
+        assert all(window.verified_end is not None for window in await session.scalars(select(MaintenanceWindow)))
+        assert len(list(await session.scalars(select(AlertEvent).where(AlertEvent.kind == "maint")))) == 2
 
 
 async def test_bot_status_shows_window(client):
