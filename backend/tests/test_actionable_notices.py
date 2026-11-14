@@ -1,6 +1,7 @@
 """Notification lifecycle: brief incidents stay silent, sustained ones remain actionable."""
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select
 
 from app import collector, forecast_notice
@@ -9,6 +10,7 @@ from app.db import Base, create_engine_and_factory
 from app.models import Server
 
 START = datetime(2026, 11, 14, 6, tzinfo=timezone.utc)
+pytestmark = pytest.mark.calm
 
 
 async def _panel(tmp_path, monkeypatch):

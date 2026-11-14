@@ -314,3 +314,81 @@ def test_small_intermediate_dips_do_not_disqualify_continuing_growth():
 def test_imminent_forecast_bypasses_recent_growth_confirmation():
     result, levels = measured_series(lambda hour: 78, hours=2, eta=6)
     assert set(levels) == {2} and result.level == 2
+
+
+@pytest.mark.parametrize("healthy_items", [[], [item(200)]])
+def test_same_fresh_healthy_snapshot_can_complete_shared_fifteen_minute_recovery(healthy_items):
+    first = evaluate(items=[item(5)])
+    state = notice.mark_announced(first.state)
+    healthy_at = NOW + timedelta(minutes=30)
+    calm = None
+    for minute in range(16):
+        at = healthy_at + timedelta(minutes=minute)
+        result = evaluate(state, at=at, snapshot=healthy_at, items=healthy_items, level=2)
+        state = result.state
+        assert result.level == 0 and result.complete
+        member = state["members"]["space:/"]
+        assert member["active"] == 2 and member["ready"] == 0
+        assert member["clear_ts"] == healthy_at.timestamp()
+        if calm is None:
+            calm = at
+    assert (at - calm).total_seconds() == 900
+    closed = evaluate(state, at=at + timedelta(minutes=1), snapshot=healthy_at, items=[], level=0)
+    assert closed.level == 0 and closed.state["members"] == {}
+
+
+def test_missing_mount_during_recovery_calm_breaks_confirmation_even_on_same_snapshot():
+    first = evaluate(items=[item(5)])
+    healthy_at = NOW + timedelta(minutes=30)
+    healthy = evaluate(notice.mark_announced(first.state), at=healthy_at, items=[], level=2)
+    missing = evaluate(healthy.state, at=healthy_at + timedelta(minutes=8), snapshot=healthy_at,
+                       items=[], level=2, observed=set())
+    assert missing.level is None and not missing.complete
+    assert "clear_ts" not in missing.state["members"]["space:/"]
+    returned = evaluate(missing.state, at=healthy_at + timedelta(minutes=9), snapshot=healthy_at,
+                        items=[], level=2)
+    assert returned.level is None
+    fresh = evaluate(returned.state, at=NOW + timedelta(hours=1), items=[], level=2)
+    assert fresh.level == 0 and fresh.complete
+
+
+@pytest.mark.parametrize("break_mode", ["stale", "report_epoch", "replayed"])
+def test_unknown_evidence_breaks_established_recovery_candidate(break_mode):
+    first = evaluate(items=[item(5)])
+    healthy_at = NOW + timedelta(minutes=30)
+    healthy = evaluate(notice.mark_announced(first.state), at=healthy_at, items=[], level=2)
+    at = healthy_at + timedelta(minutes=1)
+    snapshot = healthy_at
+    kwargs = {}
+    if break_mode == "stale":
+        at += timedelta(hours=3)
+    elif break_mode == "report_epoch":
+        kwargs["restart"] = True
+    else:
+        snapshot = NOW
+    broken = evaluate(healthy.state, at=at, snapshot=snapshot, items=[], level=2, **kwargs)
+    assert broken.level is None and not broken.complete
+    assert "clear_ts" not in broken.state["members"]["space:/"]
+
+
+def test_stale_empty_snapshot_cannot_first_establish_recovery():
+    first = evaluate(items=[item(5)])
+    stale = evaluate(notice.mark_announced(first.state), at=NOW + timedelta(hours=3),
+                     snapshot=NOW + timedelta(minutes=1), items=[], level=2)
+    assert stale.level is None and not stale.complete
+    assert stale.state["members"]["space:/"]["active"] == 2
+    assert "clear_ts" not in stale.state["members"]["space:/"]
+
+
+def test_legacy_recovery_binds_inventory_and_requires_it_throughout_calm():
+    first = evaluate(items=[], level=1)
+    assert first.level == 0 and first.complete
+    assert first.state["members"]["space:/"]["active"] == 1
+    repeated = evaluate(first.state, at=NOW + timedelta(minutes=15), snapshot=NOW,
+                        items=[], level=1)
+    assert repeated.level == 0 and repeated.complete
+    replaced = evaluate(repeated.state, at=NOW + timedelta(minutes=16), snapshot=NOW,
+                        items=[], level=1, observed={("/other", "space")})
+    assert replaced.level is None and not replaced.complete
+    assert replaced.state["members"]["space:/"]["active"] == 1
+    assert "space:/other" not in replaced.state["members"]

@@ -131,6 +131,18 @@ def _broken(old_state, announced_level, current):
     return state
 
 
+def _recovery_member(entry, active, observed, timestamp, newer, restart):
+    pair = (entry.get("mount"), entry.get("kind", "space"))
+    member = {"mount": pair[0], "kind": pair[1], "active": active, "ready": active}
+    healthy = (not restart and observed is not None and pair in observed
+               and (newer or _number(entry.get("clear_ts")) == timestamp))
+    if healthy:
+        # Retain delivery-confirmed identity until the collector completes its
+        # recovery hold. The same fresh forecast may sustain, but not start, it.
+        member.update(ready=0, clear_ts=timestamp)
+    return member, healthy
+
+
 def evaluate(previous, items, forecast_ts, now: datetime, *, announced_level=0,
              observed: set[tuple[str, str]] | None = None, restart=False) -> Decision:
     """Return a notice level, eligible items and JSON state to persist each tick.
@@ -141,8 +153,9 @@ def evaluate(previous, items, forecast_ts, now: datetime, *, announced_level=0,
     state before daytime/mute/delivery gates; announced_level is the successfully
     announced collector state, never the raw forecast level.
 
-    Only a newer forecast snapshot advances a hold. An announced member can
-    recover only in a newer valid snapshot while its filesystem is observed.
+    Only a newer forecast snapshot advances a warning hold or starts recovery.
+    Repeated fresh healthy evidence may sustain the collector's recovery hold
+    while the same announced filesystem remains observed.
     """
     old_state = previous if isinstance(previous, dict) else {}
     old = old_state.get("members") if isinstance(old_state.get("members"), dict) else {}
@@ -152,8 +165,8 @@ def evaluate(previous, items, forecast_ts, now: datetime, *, announced_level=0,
             or not isinstance(items, list) or not all(_valid_item(item) for item in items)
             or (last_snapshot is not None and timestamp < last_snapshot)):
         return Decision(None, [], _broken(old_state, announced_level, current), False)
-    # A repeated snapshot may retain a sent incident, but cannot prove recovery
-    # or add time to an unsent one. Keep ts across a source gap to reject replay.
+    # Repetition may sustain an established recovery candidate, but cannot
+    # establish one or add time to an unsent warning. Preserve ts across gaps.
     newer = last_snapshot is None or timestamp > last_snapshot
     reset_at = _number(old_state.get("reset_at")) or 0
     if restart:
@@ -168,10 +181,9 @@ def evaluate(previous, items, forecast_ts, now: datetime, *, announced_level=0,
         if not isinstance(entry, dict):
             continue
         active = min(announced_level, _severity(entry.get("active")))
-        pair = (entry.get("mount"), entry.get("kind", "space"))
-        if active and key not in current_items and (not newer or observed is None or pair not in observed):
-            members[key] = {"mount": pair[0], "kind": pair[1], "active": active, "ready": active}
-            unresolved = True
+        if active and key not in current_items:
+            members[key], healthy = _recovery_member(entry, active, observed, timestamp, newer, restart)
+            unresolved |= not healthy
     for key, item in current_items.items():
         prior = old.get(key) if isinstance(old.get(key), dict) else {}
         active = min(announced_level, _severity(prior.get("active")))
@@ -186,9 +198,9 @@ def evaluate(previous, items, forecast_ts, now: datetime, *, announced_level=0,
             continue
         raw = _level(item["eta_h"], active)
         if not raw:
-            if active and not newer:
-                members[key] = {**prior, "active": active, "ready": active}
-                unresolved = True
+            if active:
+                members[key], healthy = _recovery_member(prior, active, observed, timestamp, newer, restart)
+                unresolved |= not healthy
             continue
         last = _number(prior.get("last"))
         continuous = last is not None and 0 <= timestamp - last <= MAX_AGE
@@ -216,6 +228,13 @@ def evaluate(previous, items, forecast_ts, now: datetime, *, announced_level=0,
             eligible.append((ready, item))
         else:
             pending = True
+    # Legacy incidents have no recorded filesystem identity. Bind their first
+    # valid healthy inventory before starting recovery, then require these same
+    # filesystems on every repeated snapshot throughout the collector hold.
+    if announced_level and not members and not pending and observed and newer and not restart:
+        members = {kind + ":" + mount: {"mount": mount, "kind": kind, "active": announced_level,
+                                       "ready": 0, "clear_ts": timestamp}
+                   for mount, kind in observed}
     state = {"ts": timestamp, "members": members}
     if legacy and not members and not observed:
         state["legacy"] = True
@@ -226,7 +245,7 @@ def evaluate(previous, items, forecast_ts, now: datetime, *, announced_level=0,
     complete = not unresolved
     # Do not announce that exhaustion no longer threatens while another forecast
     # is still being confirmed, or while an announced mount is unobserved.
-    if announced_level and not level and (unresolved or pending or not newer or legacy and not observed):
+    if announced_level and not level and (unresolved or pending or not members):
         return Decision(None, [], state, False)
     if unresolved:
         level = max(level, announced_level)
