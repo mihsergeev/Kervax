@@ -71,8 +71,8 @@ def test_problems_text_mute_and_home():
     s = _srv(rep)
     p = fp.problems(s, NOW)
     assert [x["key"] for x in p] == ["контейнер shop-php|www"]
-    assert p[0]["text"] == ("PHP-FPM контейнер shop-php, пул www: запросы ждали свободного воркера 20 мин из последнего"
-                            " часа (воркеров 5), за час пул 80 раз уперся в pm.max_children = 5, запросов, убитых по"
+    assert p[0]["text"] == ("PHP-FPM контейнер shop-php, пул www: очередь зафиксирована в 20 минутных замерах за последний"
+                            " час (предел 5 воркеров), за час пул 80 раз уперся в pm.max_children = 5, запросов, убитых по"
                             " таймауту 30 с, за час: 25\n↳ " + ex)
     assert fp.why(_pool("container a", reached=62)) == "за час пул 62 раза уперся в pm.max_children = 5"
     assert fp.why(_pool("container a", tout=21)) == "запросов, убитых по таймауту, за час: 21"
@@ -110,7 +110,7 @@ def test_held_comes_from_the_sent_alert():
     x = _pool("container a", sat=10)
     s = _srv(_rep([x]), state={"fpm_sig": ["контейнер a|www"]})
     assert [p["level"] for p in fp.problems(s, NOW)] == [1]
-    assert fp.problems(s, NOW)[0]["why"] == "запросы ждали свободного воркера 10 мин из последнего часа (воркеров 5)"
+    assert fp.problems(s, NOW)[0]["why"] == "очередь зафиксирована в 10 минутных замерах за последний час (предел 5 воркеров)"
     assert fp.problems(_srv(_rep([x])), NOW) == []
 
 
@@ -128,7 +128,7 @@ def test_alert_condition():
     rep = _rep([_pool("container a", sat=50), _pool("container b", tout=30)])
     lv, ctx = collector._server_conditions(_srv(rep), NOW)["fpm"]
     assert lv == 2 and ctx["sig"] == ["контейнер a|www", "контейнер b|www"]
-    assert ctx["detail"].startswith("PHP-FPM контейнер a, пул www: запросы ждали свободного воркера 50 мин")
+    assert ctx["detail"].startswith("PHP-FPM контейнер a, пул www: очередь зафиксирована в 50 минутных замерах")
     assert collector._server_conditions(_srv(_rep()), NOW)["fpm"][0] == 0
 
 
@@ -283,13 +283,79 @@ def test_last_reached_in_text():
     p = fp.problems(s, NOW)
     assert p[0]["why"] == "за час пул 80 раз уперся в pm.max_children = 5, последний раз 5 мин назад"
     assert p[0]["last"] == "5 мин назад"
-    assert fp.tg_short(p)[1][0] == "Пул: www в shop-php, заняты все 5 воркеров, последний упор 5 мин назад"
+    assert fp.tg_short(p)[1] == ["Пул: www в shop-php, последний упор 5 мин назад, очередь в последнем замере: 0",
+                                "упоров в лимит: 80 за час"]
     row = fp.view(s, NOW)["pools"][0]
     assert row["reached_ts"] == TS - 300 and row["why"].endswith("последний раз 5 мин назад")
     assert fp.last_reached(_pool("a", reached_ts=TS - 6 * 86400), TS) == "6 дн назад"
     assert fp.last_reached(_pool("a", reached_ts=TS - 7200), TS) == "2 ч назад"
     # helper до 0.3 времени не пишет - текст прежний
     assert fp.why(_pool("container a", reached=62)) == "за час пул 62 раза уперся в pm.max_children = 5"
+
+
+@pytest.mark.parametrize("sat,held", [(15, False), (45, False), (8, True)])
+def test_short_sampled_queue_does_not_claim_worker_exhaustion(sat, held):
+    pool = _pool("container app-php", mx=512, sat=sat, children=32, conns=4, queue=0)
+    state = {"fpm_sig": ["контейнер app-php|www"]} if held else None
+    problems = fp.problems(_srv(_rep([pool]), state=state), NOW)
+    assert len(problems) == 1 and problems[0]["level"] == (2 if sat == 45 else 1)
+    assert problems[0]["causes"] == ["sat"]
+    what, facts = fp.tg_short(problems)
+    text = "\n".join([what, *facts])
+    assert f"очередь в {sat} минутных замерах за час" in text
+    assert "очередь в последнем замере: 0" in text
+    assert "512" not in text and "занят" not in text and "упор" not in text
+    assert "минутных замерах за последний час" in problems[0]["why"]
+    assert "предел 512 воркеров" in problems[0]["why"]
+
+
+@pytest.mark.parametrize("reached,age,queue,held", [(60, 300, 0, False), (30, 7200, 7, True)])
+def test_short_limit_hits_remain_historical_with_current_queue(reached, age, queue, held):
+    pool = _pool("container app-php", reached=reached, reached_ts=TS-age, queue=queue)
+    state = {"fpm_sig": ["контейнер app-php|www"]} if held else None
+    problems = fp.problems(_srv(_rep([pool]), state=state), NOW)
+    assert problems[0]["causes"] == ["reached"] and problems[0]["level"] == 1
+    what, facts = fp.tg_short(problems)
+    text = "\n".join([what, *facts])
+    assert f"упоров в лимит: {reached} за час" in text
+    assert f"последний упор {fp.last_reached(pool, TS)}" in text
+    assert f"очередь в последнем замере: {queue}" in text
+    assert "занят" not in text
+
+
+def test_short_does_not_promote_an_old_below_threshold_limit_hit():
+    pool = _pool("container app-php", sat=16, reached=1, reached_ts=TS-86400, queue=3)
+    problems = fp.problems(_srv(_rep([pool])), NOW)
+    what, facts = fp.tg_short(problems)
+    text = "\n".join([what, *facts])
+    assert problems[0]["causes"] == ["sat"]
+    assert "очередь в последнем замере: 3" in text and "16 минутных замерах за час" in text
+    assert "упор" not in text and "занят" not in text
+
+
+@pytest.mark.parametrize("where", ["container app-php", "container app-<php>" + "x" * 160])
+def test_short_queue_history_keeps_timeouts_and_crashes_inside_the_budget(where):
+    from app import notification_text, tg_fmt
+
+    pool = _pool(where, sat=45, reached=80, tout=25, crash=12, queue=9,
+                 reached_ts=TS-120, crash_last="child 7 exited on signal 11 (SIGSEGV)")
+    server = _srv(_rep([pool]))
+    level, context = collector._server_conditions(server, NOW)["fpm"]
+    assert level == 2 and set(context["items"][0]["causes"]) == {"sat", "reached", "tout", "crash"}
+    what, facts = fp.tg_short(context["items"])
+    text = notification_text.brief(tg_fmt.render("🔴", tg_fmt.link("node-a"), what, facts), True)
+    assert len(text.splitlines()) <= 4 and len(text) <= 480
+    for fact in ("45 минутных замерах за час", "упоров в лимит: 80", "последний упор 2 мин назад",
+                 "очередь в последнем замере: 9", "таймаутов: 25", "падений воркеров: 12", "SIGSEGV"):
+        assert fact in text
+    assert "занят" not in text
+
+
+def test_legacy_short_context_does_not_invent_zero_queue_or_sample_count():
+    what, facts = fp.tg_short([{"causes": ["sat"], "pool": "www", "max": 512}])
+    text = "\n".join([what, *facts])
+    assert "очередь в минутных замерах за час" in text
+    assert "512" not in text and "занят" not in text and "замере: 0" not in text
 
 
 # ---- helper целиком: фальшивый /proc с двумя контейнерами, у обоих один путь лога ----

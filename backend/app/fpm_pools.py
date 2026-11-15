@@ -13,7 +13,8 @@ slow", "execution timed out", по пулам, в 10-минутных корзи
 "sat", "span", "reached", "reached_d", "slow", "slow_d", "tout", "tout_d", "slowlog",
 "terminate", "status", "slow_last", "slow_ts", "tout_last", "tout_ts", "crash", "crash_d",
 "crash_last", "crash_ts", "reached_last", "reached_ts"}], "skipped", "kern": {"n", "n_d", "last", "ts"}}.
-sat - минут за последний час, когда запросы ждали свободного воркера; reached/slow/tout/crash - за час,
+sat - число минутных корзин за последний час, в выборке которых была очередь; это не длительность
+непрерывного ожидания и не число занятых воркеров. reached/slow/tout/crash - за час,
 *_d - за сутки, *_ts - время последней такой строки лога (по ее собственной метке).
 
 Позиция чтения (helper 0.3) - по контейнеру и пути: у двух контейнеров один и тот же
@@ -27,8 +28,8 @@ sat - минут за последний час, когда запросы жд�
 ядра ноды (kern), он видит и поды, у которых лог FPM не нашелся. Воркеры, падающие подряд, - так
 выглядят попытки взлома через ошибки памяти PHP (php2shell, октябрь 2026) или битое расширение.
 
-Беда - когда пул не справляется подолгу, а не всплеск на минуту: запросы ждали не меньше SAT_MIN
-минут из часа, или пул упирался в предел не меньше REACHED_MIN раз за час, или по таймауту убито
+Беда - когда пул не справляется подолгу, а не всплеск на минуту: очередь отмечена не меньше чем
+в SAT_MIN минутных корзинах из часа, или пул упирался в предел не меньше REACHED_MIN раз за час, или по таймауту убито
 не меньше TOUT_MIN запросов за час, или воркеры упали не меньше CRASH_MIN раз за час. Проблема - от
 SAT_HOT минут, TOUT_HOT убитых или CRASH_HOT падений. Медленные запросы только показываются. После
 ушедшего алерта отбой при половине порогов. Падения по журналу ядра - отдельной строкой "ядро|php"
@@ -42,12 +43,12 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from app import fixed, tg_fmt
+from app import fixed, notification_text, tg_fmt
 from app.models import Server
 from app.queue_watch import where_in, where_text
 
 MUTE_PREFIX = "fpm:"
-SAT_MIN = 15  # минут из часа запросы ждали воркера
+SAT_MIN = 15  # минутных корзин с очередью за час, не непрерывные минуты ожидания
 SAT_HOT = 45
 REACHED_MIN = 60  # раз за час пул уперся в pm.max_children
 TOUT_MIN = 20  # запросов за час убито по request_terminate_timeout
@@ -128,8 +129,9 @@ def why(p: dict, held: bool = False, ref: int = 0) -> str:
     k = 0.5 if held else 1
     mx, parts = _i(p, "max"), []
     if _i(p, "sat") >= SAT_MIN * k:
-        parts.append(f"запросы ждали свободного воркера {_i(p, 'sat')} мин из последнего часа"
-                     + (f" (воркеров {mx})" if mx else ""))
+        n = _i(p, "sat")
+        parts.append(f"очередь зафиксирована в {n} {_plural(n, 'минутном замере', 'минутных замерах', 'минутных замерах')}"
+                     " за последний час" + (f" (предел {mx} воркеров)" if mx else ""))
     n = _i(p, "reached")
     if n >= REACHED_MIN * k:
         last = last_reached(p, ref)
@@ -201,6 +203,9 @@ def problems(s: Server, now: datetime) -> list[dict]:
                     # для короткого алерта: где, пул, предел воркеров, что сработало, сигнал падения
                     "where": where_text(str(x.get("where") or "")), "pool": str(x.get("pool") or ""),
                     "max": _i(x, "max"), "causes": _causes(x, h), "sig": _signal(str(x.get("crash_last") or "")),
+                    "sat": _i(x, "sat"), "reached": _i(x, "reached"),
+                    "tout": _i(x, "tout"), "crash": _i(x, "crash"),
+                    "queue": _i(x, "queue") if "queue" in x else None,
                     "last": last_reached(x, ref)})
     # журнал ядра: падения, которые не объясняет пул (лог FPM не нашелся, падает не FPM)
     kx = kern(s.last_report or {})
@@ -257,8 +262,8 @@ def _pool_where(x: dict) -> str:
 
 
 def tg_short(fp: list[dict]) -> tuple[str, list[str]] | None:
-    """Короткий алерт по problems(): "PHP-FPM не справляется / Пул: media, заняты все 50
-    воркеров". Что - про худший пул (первый), остальные именами"""
+    """Худший пул: часовая история очереди/упоров отдельно от очереди в последнем замере.
+    Настроенный максимум не сообщает фактическое число занятых воркеров."""
     if not fp:
         return None
     x = fp[0]
@@ -267,14 +272,35 @@ def tg_short(fp: list[dict]) -> tuple[str, list[str]] | None:
         proc = x.get("proc") or ""
         what, facts = "Падает PHP на ноде", [f"{proc}, segfault" if proc else "segfault по журналу ядра"]
     elif "sat" in causes or "reached" in causes:
-        mx = int(x.get("max") or 0)
-        busy = ("занят единственный воркер" if mx == 1 else
-                f"заняты все {mx} {_plural(mx, 'воркер', 'воркера', 'воркеров')}" if mx else "заняты все воркеры")
+        history = []
+        # Keep space for measured queue, timeouts and crashes even with a long
+        # container/pod name; fact() also bounds the complete resulting line.
+        current = tg_fmt.field(_pool_where(x), 60)
+        if "sat" in causes:
+            n = _i(x, "sat")
+            history.append(f"очередь в {n} {_plural(n, 'минутном замере', 'минутных замерах', 'минутных замерах')} за час"
+                           if n else "очередь в минутных замерах за час")
+        if "reached" in causes:
+            n = _i(x, "reached")
+            history.append(f"упоров в лимит: {n} за час" if n else "были упоры в лимит за час")
         if "reached" in causes and x.get("last"):
-            busy += f", последний упор {x['last']}"
-        what, facts = "PHP-FPM не справляется", [tg_fmt.fact("Пул", f"{_pool_where(x)}, {busy}")]
+            current += f", последний упор {x['last']}"
+        if x.get("queue") is not None:
+            current += f", очередь в последнем замере: {_i(x, 'queue')}"
+        extra = []
         if "crash" in causes:
-            facts.append("воркеры еще и падают" + (f" ({x['sig']})" if x.get("sig") else ""))
+            extra.append((f"падений воркеров: {_i(x, 'crash')} за час" if x.get("crash") else "воркеры еще и падают")
+                         + (f" ({x['sig']})" if x.get("sig") else ""))
+        if "tout" in causes:
+            extra.append(f"таймаутов: {_i(x, 'tout')} за час" if x.get("tout") else "запросы обрывались по таймауту")
+        for detail in extra:
+            # The final notification budget also clips individual lines. Keep
+            # overlapping failure causes on the other line before that happens.
+            if len(tg_fmt.fact("Пул", current + ", " + detail)) <= notification_text.LINE_CHARS:
+                current += ", " + detail
+            else:
+                history.append(detail)
+        what, facts = "PHP-FPM не справляется", [tg_fmt.fact("Пул", current), "; ".join(history)]
     elif "tout" in causes:
         what, facts = "PHP-FPM обрывает запросы по таймауту", [tg_fmt.fact("Пул", _pool_where(x))]
     else:

@@ -228,7 +228,8 @@ WWW = {"where": "container shop-php", "pool": "www", "max": 5, "tout": 30}
 def test_fpm_busy_crash_timeout():
     fp = fpm_pools.problems(_srv(_fpm_rep([MEDIA, WWW])), NOW)
     assert _ok(fpm_pools.tg_short(fp)) == ("PHP-FPM не справляется",
-                                           ["Пул: media, заняты все 50 воркеров", "воркеры еще и падают (SIGSEGV)"])
+        ["Пул: media, падений воркеров: 6 за час (SIGSEGV)",
+         "очередь в 50 минутных замерах за час; упоров в лимит: 80 за час"])
     assert _ok(fpm_pools.tg_short(fp[1:])) == ("PHP-FPM обрывает запросы по таймауту", ["Пул: www в shop-php"])
     # падения - проблема (от 10 за час), пул с очередью - предупреждение: первым худший
     crash = {"where": "container shop-php", "pool": "www", "max": 5, "crash": 12, "crash_last": "child 9 exited on signal 6"}

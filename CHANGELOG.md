@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.136] - 2026-11-15
+
+- PHP-FPM alerts distinguish hourly sampled queue history and logged worker-limit hits from the queue in the latest report. The configured limit is no longer presented as the number of occupied workers.
+- Notifications preserve the sample count, last limit-hit time and overlapping timeout or crash details, including with long pod names. Alert thresholds, hysteresis, mutes and stored history are unchanged.
+
+Agent 2.71, helper payloads and database migration 0149 are unchanged.
+
 ## [1.8.135] - 2026-11-15
 
 - Queued alerts recheck the current source and recipient permissions before sending. Muted, disabled or deleted sources and obsolete group routes no longer send delayed notifications.
