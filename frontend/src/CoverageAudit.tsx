@@ -125,8 +125,9 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
     setHasSchedule(!!document.getElementById('backup-manage-schedule'))
   }, [])
   const items = s.backup_audit ?? []
-  const live = items.filter((x) => !x.muted)
-  const mutedItems = items.filter((x) => !!x.muted)
+  const pausedItems = items.filter((x) => x.kind === 'db_paused')
+  const live = items.filter((x) => !x.muted && x.kind !== 'db_paused')
+  const mutedItems = items.filter((x) => !!x.muted && x.kind !== 'db_paused')
   const gaps = live.filter((x) => x.gap)
   const allRisks = live.filter((x) => !x.gap && x.kind !== 'db_ok')
   const okItems = live.filter((x) => x.kind === 'db_ok') // дамп уже настроен — это не проблема
@@ -279,6 +280,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
   // Строка под именем базы: у дампа - когда снимался или когда снимется первый, каталог и сколько
   // хранить; у остального - короткая note с бэкенда. Полный текст находки - в подсказке.
   const rowLine = (x: BackupAudit, d: DumpStat | undefined) => {
+    if (x.kind === 'db_paused') return <>{t('Контроль свежести возобновится после запуска базы.')} {d && <>{t('Сохранено файлов: {n}', { n: d.files })} · <span className="mono">{d.dir}</span></>}</>
     if (!d) return <>{t(x.note || x.detail)}{sizeTail(x)}</>
     const head = x.kind === 'db'
       ? x.note || x.detail // дамп включен, но не снимается
@@ -318,7 +320,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
     ].filter(Boolean)
     return parts.length ? <> · {parts.join(', ')}</> : null
   }
-  const row = (x: BackupAudit, side: 'q' | 'ok', i: number) => {
+  const row = (x: BackupAudit, side: 'q' | 'ok' | 'paused', i: number) => {
     const d = findDump(x.dump_engine, x.instance)
     const cfgKey = x.instance || x.dump_engine || ''
     const canEnable = side === 'q' && canDumpHere && !!x.dump_engine && !!x.can_dump && !d &&
@@ -332,7 +334,8 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
           {sizeChip(x)}
           {side === 'q' && d && <span className="cov-tag cov-tag-bad">{t('дамп не снимается')}</span>}
           {side === 'ok' && d && !d.files && <span className="cov-tag cov-tag-wait">{t('ждет первого бэкапа')}</span>}
-          {d?.skipped && <span className="cov-tag cov-tag-bad">{t('пропущен: мало места')}</span>}
+          {side === 'paused' && <span className="type-chip">{t('Контейнер остановлен')}</span>}
+          {side !== 'paused' && d?.skipped && <span className="cov-tag cov-tag-bad">{t('пропущен: мало места')}</span>}
         </div>
         <span className="cov-act">
           {canEnable && (
@@ -341,7 +344,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
               {t(x.dump_engine === 'qdrant' ? 'Включить бэкап' : 'включить дамп')}
             </button>
           )}
-          {d && canManage && (
+          {side !== 'paused' && d && canManage && (
             <>
               <button className="ghost icon-btn cov-ib" disabled={busyAny}
                 title={t('Настройки дампа: каталог, сколько хранить, порог свободного места')}
@@ -363,7 +366,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
         {x.dump_engine === 'mongo' && (d || cfgFor === cfgKey) && (
           <div className="cov-full small muted">{t('MongoDB: replica set снимается с oplog, восстановление с --oplogReplay. Для standalone приостановите запись на время дампа. Шардированные кластеры не поддерживаются.')}</div>
         )}
-        {d?.skipped && (
+        {side !== 'paused' && d?.skipped && (
           <div className="cov-full form-error small">
             ⚠️ {t('последний прогон пропущен: на разделе было свободно {p}% (< порога) — расчистите место',
               { p: d.skip_free_pct ?? 0 })}
@@ -381,7 +384,7 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
             />
           </div>
         )}
-        {d && canManage && cfgFor === cfgKey && (
+        {side !== 'paused' && d && canManage && cfgFor === cfgKey && (
           <div className="cov-full">
             <DumpConfig
               init={{ dir: d.dir || '/backup', keep: d.keep, minfree: d.min_free_pct ?? 10 }}
@@ -562,6 +565,14 @@ export function CoverageAudit({ server: s, canManage, onChanged, onSchedule, bar
             </div>
             {mutedPlace === 'right' && mutedBlock}
           </div>
+        </div>
+      )}
+      {pausedItems.length > 0 && (
+        <div className="cov-col cov-col-mute">
+          <div className="cov-col-h">{t('Остановленные базы')} <span className="cov-n">{pausedItems.length}</span>
+            <span className="cov-col-sub">{t('Ранее созданные дампы сохранены.')}</span>
+          </div>
+          {pausedItems.map((x, i) => row(x, 'paused', i))}
         </div>
       )}
       {mutedPlace === 'wide' && mutedBlock}

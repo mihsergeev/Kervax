@@ -21,6 +21,7 @@ from sqlalchemy import delete as sa_delete, func, select, update as sa_update
 from app import windows_services
 from app import backup_command_result, backup_unit
 from app import backup_verify
+from app.dump_lifecycle import dump_paused
 from app import gre as gre_mod, relay as relay_mod
 from app import disk_wear
 from app import mute_watch
@@ -1307,6 +1308,12 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
         for d in ((rep.get("backup") or {}).get("dumps") or [])
         if d.get("engine")
     }
+    # Configured Docker targets must remain visible after they stop or disappear.
+    # Empty legacy targets still belong to the first discovered instance.
+    for (code, target), dump in panel_dumps.items():
+        eng = next((name for name, value in _DUMP_ENGINE.items() if value == code), None)
+        if eng and target and not target.startswith("k8s."):
+            where.setdefault(eng, []).append(target)
     for eng in sorted(where):
         # Кэши в памяти состояния не хранят: файлов данных у них нет, команды дампа тоже,
         # после рестарта они законно пустые. Держать их в «восстановимости под вопросом»
@@ -1355,6 +1362,20 @@ def _backup_coverage(server: Server) -> list[BackupAudit]:
         for inst in insts:
             kube = inst.startswith("k8s.")
             inst_pods = sorted(set(wls.get(inst, []))) if kube else ([] if inst else bare)
+            configured_dump = panel_dumps.get((code, inst))
+            if configured_dump and inst and not kube:
+                paused = dump_paused(rep, configured_dump)
+                running = any(c.get("name") == inst and c.get("state") == "running"
+                              for c in (rep.get("docker") or {}).get("containers") or [])
+                if paused or not running:
+                    note = ("контейнер штатно остановлен; контроль свежести возобновится после запуска"
+                            if paused else "дамп настроен, но работа контейнера не подтверждена; проверьте базу")
+                    out.append(BackupAudit(
+                        kind="db_paused" if paused else "db", subject=eng, gap=False,
+                        instance=inst, container=inst, dump_engine=code, can_dump=False,
+                        detail=f"контейнер: {inst} — {note}", note=note,
+                    ))
+                    continue
             if kube:
                 _, ns, kind, wname = inst.split(".", 3)
                 where_txt = (f"{_KUBE_KIND.get(kind, kind)} {ns}/{wname} в kubernetes"

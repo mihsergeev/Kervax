@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.138] - 2026-11-16
+
+- Configured dumps remain visible in Coverage when their Docker databases stop. Stopped databases have a separate neutral block showing retained dump files and paths.
+- Freshness and low-space checks pause only for an observed clean stop with the unless-stopped policy. Checks resume after startup; missing containers, crashes, OOM and unconfirmed stops remain monitored.
+- Existing dump alerts close with a suspension message instead of claiming that dumps are fresh. Dump settings, saved files and backup snapshots are retained.
+
+Agent 2.71, helper payloads and database migration 0149 are unchanged.
+
 ## [1.8.137] - 2026-11-15
 
 - HTTP 5xx notifications no longer present a minority upstream log entry as the cause of unrelated HTTP 503 responses. Cause summaries require consistent counts in the same alert window and nginx log.

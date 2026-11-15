@@ -11,6 +11,12 @@ export type Lang = 'ru' | 'en'
 // Ключ = русская строка (дефолт). Значение = английский перевод.
 // Отсутствующий ключ → возвращается русский (мягкий фолбэк).
 const EN: Record<string, string> = {
+  'Контроль свежести возобновится после запуска базы.': 'Freshness checks will resume when the database starts.',
+  'Сохранено файлов: {n}': 'Saved files: {n}',
+  'Контейнер остановлен': 'Container stopped',
+  'Остановленные базы': 'Stopped databases',
+  'Ранее созданные дампы сохранены.': 'Previously created dumps are retained.',
+  'остановлено баз: {n}': 'stopped databases: {n}',
   'Доставка': 'Delivery',
   'Подтверждения и проблемы доставки уведомлений.': 'Notification delivery confirmations and problems.',
   'В очереди': 'Queued',

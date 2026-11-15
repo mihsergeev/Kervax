@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import alerts, audit, backup, backup_growth, checks as checks_exec, custom_backups, docker_exposure, flaky, heartbeat, settings_store
 from app import backup_command_result, backup_state, backup_verify
+from app.dump_lifecycle import dump_paused, paused_dump_targets
 from app import report_progress
 from app import backup_transfer, bsrv_mirror
 from app import home_mute, kube_coverage, os_support
@@ -2551,6 +2552,8 @@ def _restarts_day(st: dict, key: str) -> int:
 def _recovery_short(key: str, st: dict, ctx: dict, s=None) -> str:
     """Отбой одной строкой для чата: "диск снова в норме, 82%". Полный (_recovery_detail) - про
     то же подробно, он остается для старых шаблонов."""
+    if key in ("backup_dump", "backup_dump_space") and paused_dump_targets(getattr(s, "last_report", None) or {}):
+        return "для остановленных баз контроль свежести дампов приостановлен"
     if key == "exposed" and ctx.get("own"):
         return "больше не алертим: проверка шла с адреса панели, нужна локация в другой сети"
     if key == "backup_missing" and getattr(s, "backup_not_required", False):
@@ -6774,6 +6777,9 @@ def dump_issues(rep: dict, now: datetime) -> tuple[list[str], str, list[str], in
     """Дампы СУБД так, как их видят алерты backup_dump и backup_dump_space: (сломанные, почему,
     пропущенные из-за места, % свободного). Упал сам бэкап - дампы не судим, это backup_failed."""
     bk = rep.get("backup") or {}
+    # Keep configured dumps and their saved files intact. A graceful stop suspends
+    # monitoring; a missing/crashed target and a subsequent restart do not.
+    bk = {**bk, "dumps": [d for d in bk.get("dumps") or [] if not dump_paused(rep, d)]}
     failed = sorted(_dump_label(d) for d in bk.get("dumps", []) if d.get("error_ts"))
     error_reason = "последний запуск дампа завершился ошибкой, проверьте журнал дампов"
     from_systemd = bk.get("ts_source") == "systemd"

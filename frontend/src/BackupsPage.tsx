@@ -73,6 +73,8 @@ import {
 function coverageLine(audit: BackupAudit[], selfDb: boolean, t: (k: string, p?: Record<string, string | number>) => string): string {
   const okDb = audit.filter((x) => x.kind === 'db_ok').length
   const ownDb = selfDb ? audit.filter((x) => x.kind === 'db').length : 0
+  const pausedDb = audit.filter((x) => x.kind === 'db_paused').length
+  if (!okDb && !ownDb && pausedDb && !audit.some((x) => x.kind === 'db')) return t('остановлено баз: {n}', { n: pausedDb })
   if (!okDb && !ownDb) return audit.some((x) => x.kind === 'db') ? t('баз без дампа: {n}', { n: audit.filter((x) => x.kind === 'db').length }) : t('баз не найдено')
   return [okDb && t('бэкапится баз: {n}', { n: okDb }), ownDb && t('бэкапите сами: {n}', { n: ownDb })].filter(Boolean).join(', ')
 }
