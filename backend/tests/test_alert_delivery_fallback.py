@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 
 from app import alert_delivery, alert_delivery_fallback as fallback, alerts, notification_store as store
 from app.db import Base, create_engine_and_factory
-from app.models import NotificationDelivery as Delivery, NotificationEvent as Event
+from app.models import NotificationDelivery as Delivery, NotificationEvent as Event, Server
 
 NOW = datetime(2026, 11, 15, 0, tzinfo=timezone.utc)
 CFG = {"telegram_api": "https://telegram.example.test", "telegram_token": "fixture-token",
@@ -22,6 +22,9 @@ async def db(tmp_path):
     engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'fallback.db').as_posix()}")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+    async with factory() as session:
+        session.add(Server(name="Example", token_hash="fixture-source", enabled=True, group_name="example"))
+        await session.commit()
     yield factory
     await engine.dispose()
 

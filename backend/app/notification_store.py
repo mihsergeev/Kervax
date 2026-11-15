@@ -365,6 +365,45 @@ async def finish(factory, ids: list[int], owner: str, status: str, now: datetime
         return [row.id for row in rows]
 
 
+async def defer(factory, ids: list[int], owner: str, now: datetime, until: datetime) -> list[int]:
+    """Release owned jobs without POST, preserving ambiguity and its retry budget.
+
+    Claim reserves an attempt before inspecting source policy. A snooze consumes
+    no network attempt, so undo that reservation while retaining the circuit.
+    An expired own lease is safe here: both owners/status still fence a reclaim.
+    """
+    now, until = _aware(now), _aware(until)
+    ids = sorted(set(int(value) for value in ids))
+    if not ids:
+        return []
+    async with factory() as session:
+        keys = set(await session.scalars(select(Delivery.transport_key).where(Delivery.id.in_(ids))))
+    if len(keys) != 1:
+        return []
+    transport_key = next(iter(keys))
+    async with factory() as session, session.begin():
+        locked = await session.execute(update(Transport).where(
+            Transport.key == transport_key, Transport.lease_owner == owner,
+        ).values(failures=Transport.failures))
+        if not locked.rowcount:
+            return []
+        rows = list(await session.scalars(select(Delivery).where(
+            Delivery.id.in_(ids), Delivery.status == "sending", Delivery.lease_owner == owner,
+        ).order_by(Delivery.id).with_for_update()))
+        for row in rows:
+            row.status = "uncertain" if row.uncertain_count else "pending"
+            row.attempts = max(0, row.attempts - 1)
+            row.next_attempt_at = max(_aware(row.next_attempt_at), until, now)
+            row.lease_owner, row.lease_until = "", None
+        await session.flush()
+        remaining = await session.scalar(select(exists().where(
+            Delivery.transport_key == transport_key, Delivery.status == "sending", Delivery.lease_owner == owner)))
+        if not remaining:
+            await session.execute(update(Transport).where(Transport.key == transport_key,
+                                  Transport.lease_owner == owner).values(lease_owner="", lease_until=None))
+        return [row.id for row in rows]
+
+
 async def retry(factory, ids: list[int], now: datetime, *, acknowledge_uncertain=None) -> list[int]:
     """Explicit operator retry. Confirmed, superseded and active POSTs are immutable."""
     now = _aware(now)

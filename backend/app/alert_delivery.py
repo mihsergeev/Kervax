@@ -12,6 +12,7 @@ import html
 import json
 import inspect
 import logging
+import re
 import time
 import uuid
 from collections import defaultdict
@@ -20,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, update
 
 from app import notification_store as store
-from app.models import AlertEvent, AppSetting, CheckIncident, NotificationDelivery, NotificationEvent, NotificationStream, NotificationTransport, Server, TgAlert, User
+from app.models import AlertEvent, AppSetting, Check, CheckIncident, NotificationDelivery, NotificationEvent, NotificationStream, NotificationTransport, Server, TgAlert, User
 
 log = logging.getLogger("kervax.alert_delivery")
 _monotonic = time.monotonic
@@ -182,6 +183,19 @@ async def admit(factory, cfg, messages, threshold, parse_mode, now, on_accept=No
 
 async def _configuration(factory, cfg, row, message):
     from app import alerts
+    # An admitted snapshot does not grant its old recipients access after the
+    # object moves to another group. Keep the journal text and identity intact.
+    group_changed = False
+    async with factory() as session:
+        known, source = await _source(session, message)
+        if known:
+            if source is None or not source.enabled:
+                return False
+            group_changed = (source.group_name or "") != message.group
+            current = alerts.Msg(str(message))
+            current.__dict__.update(message.__dict__)
+            current.group = source.group_name or ""
+            message = current
     target = row["target"]
     if target["type"] == "webhook":
         if not cfg.get("webhook") or _hash("webhook", cfg["webhook"]) != row["recipient_key"]:
@@ -193,8 +207,10 @@ async def _configuration(factory, cfg, row, message):
     if target.get("user_id") is not None:
         async with factory() as session:
             user = await session.get(User, target["user_id"])
-        if user is None or not user.tg_alerts or not alerts.wants(user, message):
+        if user is None or not user.tg_alerts:
             return None
+        if not alerts.wants(user, message):
+            return False if group_changed else None
         if str(user.tg_chat_id) != target["chat"]:
             return None
         token = user.tg_token or token
@@ -202,16 +218,183 @@ async def _configuration(factory, cfg, row, message):
         owned_main = target.get("recovery_owned") and target["route"] == "main" and (
             str(cfg.get("telegram_chat") or "") == target["chat"])
         if not owned_main and target["chat"] not in {str(chat) for chat in alerts.chats_for(cfg, message)}:
-            return None
+            return False if group_changed else None
     key, transport = _telegram_identity(cfg.get("telegram_api"), token, target["chat"])
     if not token or key != row["recipient_key"] or transport != row["transport_key"]:
         return None
     return {**cfg, "telegram_token": token, "telegram_chat": target["chat"], "webhook": ""}
 
 
+async def _source(session, message):
+    """Resolve only explicit producer IDs or an unambiguous legacy object ref."""
+    notice = getattr(message, "notice", None) or {}
+    for field, model in (("check_id", Check), ("source_id", Server)):
+        if notice.get(field) is not None:
+            value = notice[field]
+            try:
+                identity = int(value) if not isinstance(value, bool) else 0
+            except (TypeError, ValueError):
+                identity = 0
+            return True, await session.get(model, identity) if identity > 0 else None
+    match = re.fullmatch(r"(srv|chk):([0-9]+)", str(getattr(message, "ref", "") or ""))
+    if match:
+        return True, await session.get(Server if match[1] == "srv" else Check, int(match[2]))
+    return False, None
+
+
+def _active_until(value, now):
+    try:
+        value = datetime.fromisoformat(value) if isinstance(value, str) else value
+        value = _utc(value) if value is not None else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return value if value is not None and value > now else None
+
+
+async def _source_policy(session, row, message, now):
+    """True sends, False cancels, a timestamp defers without a POST attempt.
+
+    These are explicit operator policies, not a fresh condition evaluation:
+    queued historical incidents remain meaningful after their condition clears.
+    """
+    from app import collector
+
+    known, source = await _source(session, message)
+    if known and (source is None or not source.enabled):
+        return False
+    recovery = row["phase"] == "recovery"
+    if not recovery and row.get("uncertain_count") and row.get("tg_alert_id"):
+        button = await session.get(TgAlert, row["tg_alert_id"])
+        if button is not None and button.messages:
+            receipts = list(await session.scalars(select(NotificationDelivery).where(
+                NotificationDelivery.event_id == row["event_id"], NotificationDelivery.status == "confirmed",
+                NotificationDelivery.message_id.is_not(None))))
+            verified = any(any(str(receipt.get("chat")) == str(job.target.get("chat"))
+                               and str(receipt.get("id")) == str(job.message_id)
+                               for receipt in button.messages) for job in receipts
+                           if job.target.get("bot") == "common")
+            occurred = _utc(row["occurred_at"])
+            if verified and ((button.acked_by and button.acked_at and _utc(button.acked_at) >= occurred) or (
+                    button.resolved_at and _utc(button.resolved_at) >= occurred)):
+                return False
+            # A reused site-group button may predate a new fact. Its old mute
+            # cannot cancel that fact; current source/item policy handles it.
+            if verified and (button.undo or {}).get("mute") and _utc(button.ts) >= occurred:
+                return False
+    if source is None or recovery:
+        return True
+    kind, level = message.kind, int(row.get("level") or 0)
+    permanent = set(source.alert_mutes or [])
+    if collector._muted(kind, level, permanent):
+        return False
+    keys = set(getattr(message, "mutes", None) or [])
+    notice = getattr(message, "notice", None) or {}
+    if isinstance(source, Server) and notice.get("instance"):
+        prefix = {"unit_loop": "unit:", "queue": "qstuck:"}.get(kind)
+        if prefix:
+            keys.add(prefix + str(notice["instance"]))
+    if keys and keys.issubset(permanent):
+        return False
+    deadlines = []
+    if until := _active_until(source.snooze_until, now):
+        deadlines.append(until)
+    snoozes = (source.alert_snoozes or {}) if isinstance(source, Server) else {}
+    active = {key: until for key, value in snoozes.items() if (until := _active_until(value, now))}
+    deadlines.extend(until for key, until in active.items() if collector._muted(kind, level, {key}))
+    remaining = keys - permanent
+    if remaining and remaining.issubset(active):
+        # One unblocked fact is sufficient to keep an aggregate deliverable.
+        deadlines.append(min(active[key] for key in remaining))
+    if deadlines:
+        return max(deadlines)
+    allowed_keys = remaining - active.keys()
+    if keys and allowed_keys != keys:
+        message.delivery_replacement = _filtered_message(source, row, message, sorted(allowed_keys), now)
+    return True
+
+
+def _filtered_message(source, row, original, facts, now):
+    """A partial snapshot cannot safely reuse prose describing hidden siblings."""
+    from app import alerts, settings_store, tg_fmt
+    name = source.name if source is not None else "Объект уведомления"
+    kinds = settings_store.SITE_ALERT_KINDS if isinstance(source, Check) else settings_store.SERVER_ALERT_KINDS
+    label = kinds.get(original.kind, (original.kind, ""))[0]
+    icon = "✅" if row["phase"] == "recovery" else tg_fmt.LEVEL.get(int(row.get("level") or 0), "⚠️")
+    facts = list(dict.fromkeys(str(value) for value in facts))
+    detail = ", ".join(html.escape(value) for value in facts) or "Разрешенная часть события"
+    text = f"{icon} <b>{html.escape(name)}</b>\n<b>{html.escape(label)}</b>\n{detail}"
+    message = alerts.Msg(text, original.section, original.group, original.kind, name,
+                         row["phase"] == "recovery", original.ref, full=text,
+                         line=f"{icon} {html.escape(name)}: {html.escape(label)} - {detail}", mutes=facts)
+    message.notice = {**(getattr(original, "notice", None) or {}), "members": facts,
+                      "delivery_filtered": True}
+    if episodes := getattr(original, "listen_episodes", None):
+        message.listen_episodes = {key: value for key, value in episodes.items()
+                                   if "listen:" + key.removeprefix("tcp:") in facts}
+    return _delivery_note(message, row, now)
+
+
+async def _filter_envelopes(factory, allowed, now):
+    """Folded atoms can share their parent's prose, even after it is rejected."""
+    groups = defaultdict(list)
+    for item in allowed:
+        if key := item[0]["payload"].get("envelope_key"):
+            groups[key].append(item)
+    replace = set()
+    for peers in groups.values():
+        streams = sorted((getattr(message, "notice", None) or {}).get("stream", "")
+                         for _, message, _ in peers)
+        if streams != peers[0][0]["payload"].get("envelope_streams") or any(
+                (getattr(message, "notice", None) or {}).get("delivery_filtered") for _, message, _ in peers):
+            replace.update(row["id"] for row, _, _ in peers)
+    result = []
+    async with factory() as session:
+        for row, message, configuration in allowed:
+            if row["id"] in replace:
+                _, source = await _source(session, message)
+                facts = message.mutes or row.get("members") or []
+                message = _filtered_message(source, row, message, facts, now)
+            result.append((row, message, configuration))
+    return result
+
+
+async def _save_policy_messages(factory, allowed, owner, now):
+    """Persist the safe copy under ownership, so confirmed restart repair uses it."""
+    filtered = [(row, message) for row, message, _ in allowed
+                if (getattr(message, "notice", None) or {}).get("delivery_filtered")
+                or row["target"].get("policy_message")]
+    if not filtered:
+        return True
+    async with factory() as session, session.begin():
+        locked = await session.execute(update(NotificationTransport).where(
+            NotificationTransport.key == filtered[0][0]["transport_key"], NotificationTransport.lease_owner == owner,
+            NotificationTransport.lease_until > now,
+        ).values(failures=NotificationTransport.failures))
+        if not locked.rowcount:
+            return False
+        for row, message in sorted(filtered, key=lambda pair: pair[0]["id"]):
+            target = {**row["target"]}
+            if (getattr(message, "notice", None) or {}).get("delivery_filtered"):
+                target["policy_message"] = pack(message)
+            else:
+                target.pop("policy_message", None)
+            target = store._target(target)
+            updated = await session.execute(update(NotificationDelivery).where(
+                NotificationDelivery.id == row["id"], NotificationDelivery.status == "sending",
+                NotificationDelivery.lease_owner == owner, NotificationDelivery.lease_until > now,
+            ).values(target=target))
+            if not updated.rowcount:
+                return False
+            row["target"] = target
+    return True
+
+
 async def _wanted(factory, row, message, now):
     from app import listen_watch
     async with factory() as session:
+        policy = await _source_policy(session, row, message, now)
+        if policy is not True:
+            return policy
         if action := row["payload"].get("action"):
             from app import alert_delivery_actions
             if not await alert_delivery_actions.wanted(session, action, now):
@@ -296,7 +479,10 @@ async def _coalesce_closed(factory, now):
 
 async def _render(factory, row, now):
     from app import alerts
-    message = unpack(row["payload"]["message"])
+    # Policy is evaluated afresh against the canonical admitted facts on every
+    # attempt. The saved copy describes only a confirmed wire/history snapshot.
+    saved = row["target"].get("policy_message") if row.get("status") == "confirmed" else None
+    message = unpack(saved or row["payload"]["message"])
     message.recovery = row["phase"] == "recovery"
     covered = row["target"].get("covered_events") or []
     if covered:
@@ -439,7 +625,8 @@ def _messages(rows, now=None):
         peers = [item for item in rows if key and item[0]["payload"].get("envelope_key") == key]
         streams = sorted((item[1].notice or {}).get("stream", "") for item in peers)
         if envelope and streams == row["payload"].get("envelope_streams") and not any(
-                item[0]["target"].get("covered_events") for item in peers):
+                item[0]["target"].get("covered_events") or
+                (getattr(item[1], "notice", None) or {}).get("delivery_filtered") for item in peers):
             parent = unpack(envelope)
             parent.parts = [item[1] for item in peers]
             if now is not None:
@@ -566,19 +753,35 @@ async def _post(factory, cfg, rows, now):
     if not claimed:
         return
     allowed, rejected, obsolete = [], [], []
+    deferred = defaultdict(list)
     for row in claimed:
         message = await _render(factory, row, now)
-        if not await _wanted(factory, row, message, now):
+        wanted = await _wanted(factory, row, message, now)
+        if isinstance(wanted, datetime):
+            deferred[wanted].append(row["id"])
+            continue
+        if not wanted:
             obsolete.append(row["id"])
             continue
+        message = getattr(message, "delivery_replacement", message)
         configuration = await _configuration(factory, cfg, row, message)
+        if configuration is False:
+            obsolete.append(row["id"])
+            continue
         (allowed if configuration is not None else rejected).append((row, message, configuration))
+    checked_at = now + timedelta(seconds=max(0, _monotonic() - started))
+    for until, ids in deferred.items():
+        await store.defer(factory, ids, owner, checked_at, until)
     if rejected:
-        await store.finish(factory, [row["id"] for row, _, _ in rejected], owner, "rejected", now,
+        await store.finish(factory, [row["id"] for row, _, _ in rejected], owner, "rejected", checked_at,
                            error="destination_changed")
     if obsolete:
-        await store.finish(factory, obsolete, owner, "superseded", now)
+        await store.finish(factory, obsolete, owner, "superseded", checked_at)
     if not allowed:
+        return
+    allowed = await _filter_envelopes(factory, allowed, checked_at)
+    if not await _save_policy_messages(factory, allowed, owner,
+            now + timedelta(seconds=max(0, _monotonic() - started))):
         return
     ids = [row["id"] for row, _, _ in allowed]
     event_ids = [row["event_id"] for row, _, _ in allowed]
@@ -682,8 +885,9 @@ async def _reconcile_confirmed(factory, cfg, now):
                     async with factory() as session, session.begin():
                         original = await session.get(TgAlert, row["tg_alert_id"], with_for_update=True)
                         if original is not None:
-                            original.text = envelope["text"]
-                            original.ref = envelope.get("ref", "")[:255]
+                            filtered = (getattr(message, "notice", None) or {}).get("delivery_filtered")
+                            original.text = str(message) if filtered else envelope["text"]
+                            original.ref = (message.ref if filtered else envelope.get("ref", ""))[:255]
             await alerts._note_passed(factory, cfg, [message],
                                       [row["target"].get("route") == "main"], {0})
             await _resolve_buttons(factory, cfg, allowed, now)

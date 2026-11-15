@@ -24,7 +24,7 @@ async def setup(factory, *, messages=True, held=False, kind="offline", users=Non
         await settings_store.set_escalation(session, {"enabled": True, "after_min": 15, "repeat": 2,
                                                      "chat": "" if users else "-200", "users": users or [],
                                                      "kinds": ["offline", "down", "listen_gone"]})
-        server = Server(name="node", token_hash="fixture", enabled=True, alert_state={kind: 1})
+        server = Server(name="node", token_hash="fixture", enabled=True, group_name="fixture", alert_state={kind: 1})
         session.add(server)
         await session.flush()
         row = TgAlert(ref=f"srv:{server.id}", kind=kind, target="node", section="servers", grp="fixture",

@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from app import alert_delivery, alerts, notification_store as store
 from app.db import Base, create_engine_and_factory
-from app.models import AppSetting, AlertEvent, NotificationDelivery, NotificationEvent, NotificationStream, TgAlert, User
+from app.models import AppSetting, AlertEvent, NotificationDelivery, NotificationEvent, NotificationStream, Server, TgAlert, User
 
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc)
 
@@ -72,6 +72,12 @@ async def database(tmp_path):
         if pg:
             await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
+    # Delivery snapshots refer to real sources. Allocate normally so PostgreSQL
+    # sequences also stay valid when a scenario adds another server.
+    async with factory() as session:
+        session.add_all([Server(name=f"node-{index}", token_hash=f"fixture-{index}",
+                                enabled=True, group_name="fixture") for index in range(1, 7)])
+        await session.commit()
     try:
         yield factory, url
     finally:

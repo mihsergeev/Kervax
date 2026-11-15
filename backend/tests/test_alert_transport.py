@@ -71,8 +71,8 @@ def _cfg(**kw):
             "webhook": "", "tg_buttons": False, "flood_threshold": 6, "routes": {}, **kw}
 
 
-def _msg(name="node-a", text=""):
-    return alerts.Msg(text or f"🔴 <b>{name}</b>: диск заполнен", "servers", "", "disk", name, ref="srv:1")
+def _msg(name="node-a", text="", *, sid=1):
+    return alerts.Msg(text or f"🔴 <b>{name}</b>: диск заполнен", "servers", "", "disk", name, ref=f"srv:{sid}")
 
 
 def _factory(client):
@@ -342,6 +342,11 @@ async def test_server_error_text_has_no_token(http):
 
 async def test_dead_webhook_does_not_repeat_telegram(client, http):
     f = _factory(client)
+    async with f() as session:
+        server = Server(name="node-a", token_hash="fixture-webhook-source", enabled=True)
+        session.add(server)
+        await session.commit()
+        sid = server.id
     now = datetime.now(timezone.utc)
 
     def answer(url, j):
@@ -351,7 +356,7 @@ async def test_dead_webhook_does_not_repeat_telegram(client, http):
 
     http.answer = answer
     cfg = _cfg(webhook="https://hook.example.com/in/fake-token-example")
-    assert await alerts.dispatch(cfg, True, [_msg()], 0, parse_mode="HTML", session_factory=f, now=now)
+    assert await alerts.dispatch(cfg, True, [_msg(sid=sid)], 0, parse_mode="HTML", session_factory=f, now=now)
     async with f() as s:
         jobs = list(await s.scalars(select(NotificationDelivery).order_by(NotificationDelivery.id)))
         hook = next(job for job in jobs if job.target["type"] == "webhook")

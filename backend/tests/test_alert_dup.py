@@ -93,18 +93,24 @@ async def test_pause_critical_without_buttons_goes_to_main(client, tg):
     и его отбой - тоже, а обычный отбой группы - нет."""
     f = _factory(client)
     async with f() as s:
+        first = Server(name="web-a", token_hash="fixture-dup-a", enabled=True, group_name="web")
+        second = Server(name="web-b", token_hash="fixture-dup-b", enabled=True, group_name="web")
+        s.add_all([first, second])
         await settings_store.set_dup_pause(s, {"on": True, "until": ""})
+        await s.commit()
+        first_id, second_id = first.id, second.id
         cfg = await settings_store.get_alert_config(s, get_settings())
     cfg = {**cfg, "telegram_token": "T", "telegram_chat": "-100", "routes": {"main": "all", "chats": [ROUTE]}}
-    assert await alerts.dispatch(cfg, True, [_offline("web-a", "web"), _srv("web-b", "web")], 0,
+    assert await alerts.dispatch(cfg, True, [_offline("web-a", "web", f"srv:{first_id}"),
+                                           _srv("web-b", "web", sid=second_id)], 0,
                                  parse_mode="HTML", session_factory=f)
     assert len(tg.to("-100")) == 1 and "web-a" in tg.to("-100")[0]
     assert len(tg.to("-200")) == 2
     async with f() as s:
         cfg = {**cfg, "main_passed": await settings_store.get_main_passed(s)}
     assert cfg["main_passed"] == [["offline", "web-a"]]
-    rec = collector._server_alert_text("disk", "web-b", "ok", recovery=True, group="web")
-    assert await alerts.dispatch(cfg, True, [_offline("web-a", "web", recovery=True), rec], 0,
+    rec = collector._server_alert_text("disk", "web-b", "ok", recovery=True, group="web", ref=f"srv:{second_id}")
+    assert await alerts.dispatch(cfg, True, [_offline("web-a", "web", f"srv:{first_id}", recovery=True), rec], 0,
                                  parse_mode="HTML", session_factory=f)
     assert len(tg.to("-100")) == 2 and "web-a" in tg.to("-100")[1]
     async with f() as s:

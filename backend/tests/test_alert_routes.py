@@ -70,8 +70,8 @@ def _cfg(main="all", **kw):
             "routes": {"main": main, "chats": [ROUTE]}, **kw}
 
 
-def _srv(name, group, kind="disk"):
-    return collector._server_alert_text(kind, name, "занят на 92%", group=group, ref="srv:1")
+def _srv(name, group, kind="disk", *, sid=1):
+    return collector._server_alert_text(kind, name, "занят на 92%", group=group, ref=f"srv:{sid}")
 
 
 def _site(name, group):
@@ -105,9 +105,14 @@ async def test_broken_route_falls_back_to_main_without_retry(client, tg):
     """Чат по группам не принял: сообщение в основном чате с припиской, повтора нет (иначе
     основной чат получал бы его каждый цикл), а ошибка видна в настройках."""
     f = _factory(client)
+    async with f() as session:
+        server = Server(name="web-a", token_hash="fixture-route-source", enabled=True, group_name="web")
+        session.add(server)
+        await session.commit()
+        sid = server.id
     now = datetime.now(timezone.utc)
     tg.broken = {"-200"}
-    ok = await alerts.dispatch(_cfg("rest"), True, [_srv("web-a", "web")], 0, parse_mode="HTML",
+    ok = await alerts.dispatch(_cfg("rest"), True, [_srv("web-a", "web", sid=sid)], 0, parse_mode="HTML",
                                session_factory=f, now=now)
     assert not ok and tg.to("-100") == []
     async with f() as s:
@@ -119,7 +124,7 @@ async def test_broken_route_falls_back_to_main_without_retry(client, tg):
     await alert_delivery.drain(f, _cfg("rest"), now + timedelta(seconds=1))
     main = tg.to("-100")
     assert len(main) == 1 and "web-a" in main[0] and "чат группы отклонил" in main[0]
-    assert await alerts.dispatch(_cfg("rest"), True, [_srv("web-a", "web")], 0,
+    assert await alerts.dispatch(_cfg("rest"), True, [_srv("web-a", "web", sid=sid)], 0,
                                  session_factory=f, now=now + timedelta(seconds=2))
     assert len(tg.to("-100")) == 1
     # Rejected jobs remain visible and require explicit retry after route repair.

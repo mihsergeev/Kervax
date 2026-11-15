@@ -182,7 +182,8 @@ async def test_fire_gets_buttons_recovery_does_not(client, tg):
 
 async def test_no_buttons_when_disabled(client, tg):
     f = _factory(client)
-    fire = collector._server_alert_text("disk", "web-a", "92%", ref="srv:1")
+    sid = await _server(f)
+    fire = collector._server_alert_text("disk", "web-a", "92%", ref=f"srv:{sid}")
     await alerts.dispatch({**CFG, "tg_buttons": False}, True, [fire], 6, session_factory=f)
     assert "reply_markup" not in tg.of("sendMessage")[0]
     async with f() as s:
@@ -191,7 +192,9 @@ async def test_no_buttons_when_disabled(client, tg):
 
 async def test_digest_has_no_buttons(client, tg):
     f = _factory(client)
-    msgs = [collector._server_alert_text("disk", f"web-{i}", f"9{i}%", ref=f"srv:{i}") for i in range(3)]
+    ids = [await _server(f, name=f"web-{i}") for i in range(3)]
+    msgs = [collector._server_alert_text("disk", f"web-{i}", f"9{i}%", ref=f"srv:{sid}")
+            for i, sid in enumerate(ids)]
     await alerts.dispatch(CFG, True, msgs, 2, session_factory=f)
     assert len(tg.of("sendMessage")) == 1 and "reply_markup" not in tg.of("sendMessage")[0]
     # в пачке каждый алерт одной строкой
@@ -202,11 +205,12 @@ async def test_digest_has_no_buttons(client, tg):
 async def test_personal_copy_gets_same_buttons(client, tg):
     """Личная копия через общего бота - с теми же кнопками, и ее тоже потом поправят."""
     f = _factory(client)
+    sid = await _server(f)
     async with f() as s:
         s.add(User(username="ivan", password_hash="x", role="operator", tg_chat_id="777",
                    tg_alerts=True))
         await s.commit()
-    fire = collector._server_alert_text("disk", "web-a", "92%", ref="srv:1")
+    fire = collector._server_alert_text("disk", "web-a", "92%", ref=f"srv:{sid}")
     await alerts.dispatch(CFG, True, [fire], 6, session_factory=f)
     chats = {j["chat_id"]: j for j in tg.of("sendMessage")}
     assert "reply_markup" in chats["777"] and "reply_markup" in chats["-100"]
