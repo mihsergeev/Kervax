@@ -10,6 +10,7 @@ webserver-setup 0.26). Helper берет строки error-лога nginx пр�
 
 from __future__ import annotations
 
+import math
 import re
 
 # Вид отказа -> текст после имени upstream: "kervax-backend-1:8000 не принимает соединения"
@@ -174,14 +175,72 @@ def text(acc: dict, n: int = 2, counts: bool = True) -> str:
     return ", ".join(item_text(x) + (f" - {x['n']}" if counts else "") for x in top(acc, n))
 
 
-def block_acc(extras: dict | None, muted=frozenset(), label_key=None) -> dict:
-    """Накопитель по последнему блоку web-rate (для "Что сломано"): заглушенные логи не в счет."""
+def dominates(count: int | float, errors: int | float) -> bool:
+    """Enough matching evidence to summarize the window, not one unrelated log line.
+
+    Error-log entries are not request IDs: retries can produce more entries than
+    HTTP errors. Inconsistent totals cannot establish a cause either.
+    """
+    return (all(isinstance(x, (int, float)) and not isinstance(x, bool)
+                and (not isinstance(x, float) or math.isfinite(x)) for x in (count, errors))
+            and 0 < count <= errors and count / errors >= 0.8)
+
+
+def _count(value) -> int:
+    try:
+        return max(0, int(value)) if not isinstance(value, bool) else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def main_cause(where: dict) -> dict | None:
+    """A dominant error-log observation for the same window and displayed log.
+
+    Keep minority observations in the full counted journal. They must not turn
+    unrelated HTTP 503 responses into a claim that a backend refuses TCP.
+    """
+    logs = [x for x in where.get("logs") or [] if x[1] > 0]
+    errors = max(sum(_count(x[1]) for x in logs),
+                 sum(_count(n) for n in (where.get("codes") or {}).values()))
+    candidates = top(where.get("ups") or {}, 1)
+    if not candidates or not dominates(_count(candidates[0].get("n")), errors):
+        return None
+    candidate = candidates[0]
+    if "ups_by_log" in where:
+        # Never attach another site's upstream failure to the busiest nginx log.
+        if not logs:
+            return None
+        local = (where.get("ups_by_log") or {}).get(logs[0][0]) or {}
+        count = sum(_count(it.get("n")) for it in local.values()
+                    if (it.get("u"), it.get("k")) == (candidate.get("u"), candidate.get("k")))
+        if not dominates(count, _count(logs[0][1])):
+            return None
+    return candidate
+
+
+def block_where(extras: dict | None, muted=frozenset(), label_key=None) -> dict:
+    """Current-minute evidence, including HTTP errors without upstream log entries."""
     acc: dict = {}
+    by_log: dict = {}
+    ups_by_log: dict = {}
+    codes: dict = {}
     block = (extras or {}).get("web-rate") if isinstance(extras, dict) else None
     for x in (block or {}).get("logs") or [] if isinstance(block, dict) else []:
-        if not isinstance(x, dict) or not x.get("up"):
+        if not isinstance(x, dict):
             continue
-        if label_key is not None and label_key(x) in muted:
+        label = label_key(x) if label_key is not None else str(x.get("name") or x.get("log") or "")
+        if label in muted:
             continue
-        add(acc, clean(x.get("up")))
-    return acc
+        by_log[label] = by_log.get(label, 0) + _count(x.get("e5"))
+        for code, count in (x["c5"].items() if isinstance(x.get("c5"), dict) else ()):
+            codes[str(code)] = codes.get(str(code), 0) + _count(count)
+        items = clean(x.get("up"))
+        add(acc, items)
+        add(ups_by_log.setdefault(label, {}), items)
+    return {"logs": sorted(by_log.items(), key=lambda x: -x[1]), "codes": codes,
+            "ups": acc, "ups_by_log": ups_by_log}
+
+
+def block_acc(extras: dict | None, muted=frozenset(), label_key=None) -> dict:
+    """Накопитель по последнему блоку web-rate (для "Что сломано"): заглушенные логи не в счет."""
+    return block_where(extras, muted, label_key)["ups"]

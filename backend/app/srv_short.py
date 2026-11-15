@@ -473,17 +473,17 @@ def _short(key: str, ctx: dict, s, level: int):
         ups = w.get("ups") or {}
         if ups:
             from app import web_upstream
-            top_up = web_upstream.top(ups, 1)
+            cause = web_upstream.main_cause(w)
             # ingress-nginx сам отвечает 503: у сервиса нет живых подов дольше выдержки. Это
             # и есть сбой, "N% запросов с ошибкой 5xx" тут только путает
-            if top_up and top_up[0].get("k") == "noep":
-                it = top_up[0]
+            if cause and cause.get("k") == "noep":
+                it = cause
                 hosts = str(it.get("h") or "").split()
                 return "Нет живых подов, nginx отвечает 503", (
                     [tg_fmt.fact("Сервис", str(it.get("s") or it.get("u") or ""))]
                     + ([tg_fmt.fact("Хост", tg_fmt.names(hosts))] if hosts else []))
-            if top_up:
-                why = web_upstream.KINDS.get(str(top_up[0].get("k")), "")
+            if cause:
+                why = web_upstream.KINDS.get(str(cause.get("k")), "")
         if logs:
             label = str(logs[0][0]).split(" (")[0]
             label = label.rsplit("/", 1)[-1] if "/" in label else label

@@ -4796,10 +4796,11 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
     w5 = web_5xx_now(s, web_err, now)
     if w5 is not None and w5[0] and w5[2]:
         # почему - по последней минуте, если helper 0.26 ее назвал
-        why = web_upstream.text(web_upstream.block_acc(
-            rep.get("extras"), web_muted_keys(s, now), lambda x: web_label_key(web_log_label(x))), counts=False)
+        cause = web_upstream.main_cause(web_upstream.block_where(
+            rep.get("extras"), web_muted_keys(s, now), lambda x: web_label_key(web_log_label(x))))
+        why = web_upstream.item_text(cause) if cause else ""
         add("web_5xx", 2, f"ошибки 5xx: {w5[1] / w5[2] * 100:.1f}% запросов за 15 минут"
-            + (f" - {why}" if why else ""), "web", "web_5xx")
+            + (f" - в последнем замере: {why}" if why else ""), "web", "web_5xx")
     # Очереди выше своего порога (RabbitMQ и Redis), как у алерта queue; заглушенные не в счет
     hot = []
     qmuted = queue_watch.muted_keys(s, now)
@@ -6413,6 +6414,7 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
     paths: dict[str, int] = {}
     hosts: dict[str, int] = {}
     ups: dict = {}  # почему 502/504: до какого upstream nginx не достучался (helper 0.26)
+    ups_by_log: dict = {}
     for r in sorted(rows, key=lambda x: x.ts):
         if web_label_key(r.label or r.log) in muted:
             continue  # заглушенный лог: про него не пишем, даже если он и шумит
@@ -6434,8 +6436,10 @@ async def web_error_where(session: AsyncSession, server_id: int, now: datetime,
             if isinstance(it, dict) and it.get("h") and it.get("h") != "-":
                 hosts[str(it["h"])] = hosts.get(str(it["h"]), 0) + int(it.get("n") or 0)
         web_upstream.add(ups, getattr(r, "ups", None))
+        web_upstream.add(ups_by_log.setdefault(web_label_key(r.label or r.log), {}), getattr(r, "ups", None))
     logs = sorted(by_log.values(), key=lambda x: -x[1])
-    return {"logs": logs, "codes": codes, "paths": paths, "hosts": hosts, "ups": ups}
+    return {"logs": logs, "codes": codes, "paths": paths, "hosts": hosts, "ups": ups,
+            "ups_by_log": {label: ups_by_log[key] for key, (label, _) in by_log.items()}}
 
 
 def _where_label(label: str) -> str:
@@ -6466,7 +6470,7 @@ def web_where_text(where: dict) -> str:
     # почему 502/504 (helper 0.26): за причиной больше не надо идти в error-лог на сервер
     why = web_upstream.text(where.get("ups") or {})
     if why:
-        out.append("почему: " + why)
+        out.append(("почему: " if web_upstream.main_cause(where) else "в журнале nginx: ") + why)
     paths = sorted((where.get("paths") or {}).items(), key=lambda kv: -kv[1])
     if paths:
         out.append("чаще всего падает: " + ", ".join(f"{p} - {n}" for p, n in paths[:2]))

@@ -62,14 +62,14 @@ def test_where_text_says_why():
     assert "Почему" not in collector.web_where_text({"logs": [["a", 1]], "codes": {"500": 1}, "paths": {}, "hosts": {}})
 
 
-def test_report_line_takes_the_first_reason():
+def test_report_line_only_promotes_a_dominant_counted_reason():
     body = ("3.10% запросов за 15 минут закончились ошибкой 5xx (44 из 1400). Больше всего: app-nginx - 44. "
             "Коды: 502 - 44. Почему: app-1:8000 не принимает соединения - 44, unix:/run/php/x.sock не ответил "
             "вовремя - 3. Чаще всего падает: /api - 40")
     assert alert_what._web5xx(body, []) == [
         ("ошибки 5xx на app-nginx", "3.10% запросов, чаще /api, app-1:8000 не принимает соединения")]
     one = "1.00% запросов. Больше всего: a - 1. Почему: 10.0.0.5:9000 не ответил вовремя - 7"
-    assert alert_what._web5xx(one, [])[0][1] == "1.00% запросов, 10.0.0.5:9000 не ответил вовремя"
+    assert alert_what._web5xx(one, [])[0][1] == "1.00% запросов, в журнале nginx: 7 - 10.0.0.5:9000 не ответил вовремя"
 
 
 async def _panel(tmp_path, name):
@@ -228,7 +228,7 @@ def test_broken_summary_says_why():
     web_err = (15000.0, 600.0, 15, {"app-frontend": {1: 200.0, 2: 200.0, 3: 200.0}}, 0.0)
     probs = [p for p in collector.server_problems(s, now, web_err=web_err) if p.get("kind") == "web_5xx"]
     assert len(probs) == 1, probs
-    assert probs[0]["text"].endswith("за 15 минут - app-backend-1:8000 не принимает соединения"), probs[0]
+    assert probs[0]["text"].endswith("за 15 минут - в последнем замере: app-backend-1:8000 не принимает соединения"), probs[0]
     assert "10.0.0.9" not in probs[0]["text"]  # заглушенный лог - не причина
 
 

@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.137] - 2026-11-15
+
+- HTTP 5xx notifications no longer present a minority upstream log entry as the cause of unrelated HTTP 503 responses. Cause summaries require consistent counts in the same alert window and nginx log.
+- Minority observations remain in the detailed journal and history with their counts. Current-report explanations are labeled separately; real 5xx incidents, alert thresholds, deployment filters, mutes and recovery handling are unchanged.
+
+Agent 2.71, helper payloads and database migration 0149 are unchanged.
+
 ## [1.8.136] - 2026-11-15
 
 - PHP-FPM alerts distinguish hourly sampled queue history and logged worker-limit hits from the queue in the latest report. The configured limit is no longer presented as the number of occupied workers.

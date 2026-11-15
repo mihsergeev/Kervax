@@ -215,18 +215,28 @@ def _web5xx(body: str, extra: list[str]) -> list[tuple[str, str]] | None:
     pct = re.match(r"^([\d.]+)% запросов", body)
     site = re.search(r"Больше всего: ([^\s(]+)", body)
     path = re.search(r"Чаще всего падает: (\S+)", body)
-    # "Почему: app-1:8000 не принимает соединения - 44, ..." (helper 0.26): первая причина без
-    # числа; адрес с точками, поэтому до ", ", ". Заглавной" или конца
-    why = re.search(r"Почему: (.+?)(?: - \d+)?(?:, |\. (?=[А-ЯA-Z])|\.?$)", body)
+    # Historical messages also used "Почему" for a single minority observation.
+    # Recheck its count before treating it as the explanation of the whole window.
+    journal = re.search(r"(?:Почему|В журнале nginx): (.+?)(?:\. (?=[А-ЯA-Z])|\.?$)", body)
+    first = _split(journal.group(1))[0] if journal else ""
+    counted = re.fullmatch(r"(.+) - (\d+)", first)
+    reason, count = (counted.group(1), int(counted.group(2))) if counted else (first, 0)
+    total = re.search(r"ошибкой 5xx \((\d+) из \d+\)", body)
+    codes = re.search(r"Коды: (.+?)(?:\. |$)", body)
+    errors = max(int(total.group(1)) if total else 0,
+                 sum(int(n) for n in re.findall(r"\b5\d\d - (\d+)", codes.group(1))) if codes else 0)
+    from app import web_upstream
+    dominant = web_upstream.dominates(count, errors)
     if not pct:
         return None
     # helper 0.28: ingress-nginx отвечал 503 сам - у сервиса нет живых подов
     noep = re.search(r"Почему: нет живых подов у сервиса ([^\s,(]+)", body)
-    if noep:
+    if noep and dominant:
         return [(f"нет живых подов у сервиса {noep.group(1)}", f"{pct.group(1)}% запросов, nginx отвечает 503")]
     what = f"ошибки 5xx на {site.group(1)}" if site else "ошибки 5xx"
     return [(what, f"{pct.group(1)}% запросов" + (f", чаще {path.group(1)}" if path else "")
-             + (f", {why.group(1)}" if why else ""))]
+             + (f", {reason}" if dominant else f", в журнале nginx: {count} - {reason}" if counted
+                else f", в журнале nginx: {reason}" if reason else ""))]
 
 
 def _exposed(body: str, extra: list[str]) -> list[tuple[str, str]] | None:
