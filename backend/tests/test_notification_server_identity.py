@@ -19,6 +19,9 @@ FAMILIES = ("docker_down", "docker_loop", "unit_loop", "queue")
 
 @pytest.fixture
 async def panel(tmp_path, monkeypatch):
+    # This scenario uses a fixed observation clock. The shared wall-clock
+    # startup fixture eventually moves after NOW and silences ingest-gap alerts.
+    monkeypatch.setattr(collector, "_PANEL_STARTED", NOW - timedelta(hours=1))
     pg = os.environ.get("KERVAX_TEST_PG", "")
     engine, factory = create_engine_and_factory(pg or f"sqlite+aiosqlite:///{(tmp_path / 'identity.db').as_posix()}")
     async with engine.begin() as connection:
