@@ -9544,6 +9544,35 @@ async def _evaluate_servers_serial(
                     row.alert_state = {**(row.alert_state or {}), **grouped[sid]}
         return commit
 
+    # Source policy must be durable before the outbox inspects it. In particular,
+    # a hold released for worsening conditions must not defer its new incident
+    # using the old snooze. The CAS preserves a concurrent operator's new policy.
+    if snooze_put:
+        async with session_factory() as session:
+            for sid, mk, expect, new_u, txt in sorted(snooze_put, key=lambda change: (change[0], change[1])):
+                # Serialize the CAS with operator changes on SQLite and PostgreSQL.
+                await session.execute(update(Server).where(Server.id == sid)
+                                      .values(alert_snoozes=Server.alert_snoozes))
+                row = await session.get(Server, sid, with_for_update=True)
+                if row is None:
+                    continue
+                if mk == mute_watch.SERVER:
+                    if mute_watch._ts(row.snooze_until) != mute_watch._ts(expect):
+                        continue  # срок успели поменять руками - их решение главнее
+                    row.snooze_until = mute_watch._ts(new_u)
+                else:
+                    snz = dict(row.alert_snoozes or {})
+                    if mute_watch._ts(snz.get(mk)) != mute_watch._ts(expect):
+                        continue
+                    if new_u is None:
+                        snz.pop(mk, None)
+                    else:
+                        snz[mk] = new_u
+                    row.alert_snoozes = snz
+                if txt:
+                    session.add(AuditLog(username="авто", action="mute_lifted", target=row.name[:255], detail=txt))
+            await session.commit()
+
     delivery = {"oom_finished": oom_finished} if any(getattr(m, "kind", "") == "oom" for m in fires) else {}
     fire_ok = await alerts.dispatch(cfg, can_send, fires, threshold, parse_mode="HTML",
                                     session_factory=session_factory, finished=fire_finished,
@@ -9565,7 +9594,7 @@ async def _evaluate_servers_serial(
             apply(sid, key, value)
 
     if changed_ids or known_upd or known_add or onboard_closed or mute_lift or kexp_upd or quiet_closed or mute_swap \
-            or snooze_put or fixed_upd:
+            or fixed_upd:
         async with session_factory() as session:
             for qs, qk, why in quiet_closed:
                 if any(sid == qs.id and k == qk for sid, k, _v in rec_apply if k == qk) and int(
@@ -9609,25 +9638,6 @@ async def _evaluate_servers_serial(
                 if row is not None and mk in (row.alert_mutes or []):
                     # сняли руками раньше нас - в журнал писать нечего
                     row.alert_mutes = [m for m in row.alert_mutes if m != mk]
-                    session.add(AuditLog(username="авто", action="mute_lifted", target=row.name[:255], detail=txt))
-            for sid, mk, expect, new_u, txt in snooze_put:
-                row = await session.get(Server, sid)
-                if row is None:
-                    continue
-                if mk == mute_watch.SERVER:
-                    if mute_watch._ts(row.snooze_until) != mute_watch._ts(expect):
-                        continue  # срок успели поменять руками - их решение главнее
-                    row.snooze_until = mute_watch._ts(new_u)
-                else:
-                    snz = dict(row.alert_snoozes or {})
-                    if mute_watch._ts(snz.get(mk)) != mute_watch._ts(expect):
-                        continue
-                    if new_u is None:
-                        snz.pop(mk, None)
-                    else:
-                        snz[mk] = new_u
-                    row.alert_snoozes = snz
-                if txt:
                     session.add(AuditLog(username="авто", action="mute_lifted", target=row.name[:255], detail=txt))
             for sid, old, new in mute_swap:
                 row = await session.get(Server, sid)

@@ -1,5 +1,6 @@
 """Жизнь заглушек (app/mute_watch.py): есть ли сейчас то, что глушит заглушка, автоснятие тихих временных,
 удержание кончившихся при живой проблеме."""
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -172,8 +173,11 @@ async def _env(tmp_path, monkeypatch, **srv):
     from app.db import Base, create_engine_and_factory
     from app.models import Server
 
-    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'mw.db').as_posix()}")
+    pg = os.environ.get("KERVAX_TEST_PG", "")
+    engine, factory = create_engine_and_factory(pg or f"sqlite+aiosqlite:///{(tmp_path / 'mw.db').as_posix()}")
     async with engine.begin() as conn:
+        if pg:
+            await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     async with factory() as s:
         s.add(Server(name="node-a", token_hash="x", enabled=True, backup_not_required=True,
@@ -286,6 +290,14 @@ async def test_hold_released_when_worse(tmp_path, monkeypatch):
     srv = await _tick(factory, cfg, until + timedelta(minutes=2), 99)
     assert "disk" not in srv.alert_snoozes
     assert len(sent) == 1 and "99%" in sent[0]
+    from app.models import AlertEvent, NotificationDelivery
+    async with factory() as session:
+        job = (await session.scalars(select(NotificationDelivery))).one()
+        assert job.status == "confirmed" and job.attempts == 1 and job.uncertain_count == 0
+        assert len(list(await session.scalars(select(AlertEvent)))) == 1
+    # The admission and confirmation survive the following observation unchanged.
+    await _tick(factory, cfg, until + timedelta(minutes=3), 99)
+    assert len(sent) == 1
     assert await _audit(factory) == ["Диск: заглушка снята: стало хуже (уровень выше)"]
     await engine.dispose()
 
@@ -300,3 +312,46 @@ def test_view_hides_hold_changed_by_hand():
     assert live == {"kube_pod": {"on": 1, "t": _iso(NOW), "w": "x"}}
     # "units" продлили руками: пометка ушла сразу, не дожидаясь тика сборщика
     assert over == {"kube_pod": {"at": _iso(NOW)}}
+
+
+async def test_hold_release_cas_preserves_new_operator_snooze_before_post(tmp_path, monkeypatch):
+    from contextlib import asynccontextmanager
+    from app import collector
+    from app.models import NotificationDelivery, Server
+
+    until = NOW + timedelta(days=2)
+    engine, factory, cfg, sent = await _env(tmp_path, monkeypatch, alert_snoozes={"disk": _iso(until)})
+    await _tick(factory, cfg, NOW, 92)
+    await _tick(factory, cfg, until - timedelta(minutes=5), 92)
+    operator_until = until + timedelta(days=7)
+    release_planned = False
+    mute_life = collector.mute_life
+
+    def observe_release(*args, **kwargs):
+        nonlocal release_planned
+        result = mute_life(*args, **kwargs)
+        release_planned = any(key == "disk" and new is None for key, _old, new, _why in result[2])
+        return result
+
+    @asynccontextmanager
+    async def raced_factory():
+        nonlocal release_planned
+        if release_planned:
+            release_planned = False
+            # A separate transaction changes policy after observation, before CAS.
+            async with factory() as session:
+                row = (await session.scalars(select(Server))).one()
+                row.alert_snoozes = {"disk": _iso(operator_until)}
+                await session.commit()
+        async with factory() as session:
+            yield session
+
+    monkeypatch.setattr(collector, "mute_life", observe_release)
+    srv = await _tick(raced_factory, cfg, until + timedelta(minutes=2), 99)
+    assert srv.alert_snoozes == {"disk": _iso(operator_until)} and sent == []
+    assert await _audit(factory) == []
+    async with factory() as session:
+        job = (await session.scalars(select(NotificationDelivery))).one()
+        assert job.status == "pending" and job.attempts == job.uncertain_count == 0
+        assert mw._ts(job.next_attempt_at) == operator_until
+    await engine.dispose()

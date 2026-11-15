@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format is based on
 ## [1.8.135] - 2026-11-15
 
 - Queued alerts recheck the current source and recipient permissions before sending. Muted, disabled or deleted sources and obsolete group routes no longer send delayed notifications.
-- Temporary snoozes postpone ordinary queued alerts without spending retry attempts. Recovery notifications remain available, and new incidents keep their own delivery state.
+- Temporary snoozes postpone ordinary queued alerts without spending retry attempts. Recovery notifications remain available, and new incidents keep their own delivery state. Worsening problems remain deliverable when an automatic snooze hold is released.
 - Acknowledging a confirmed incident copy stops automatic retries of an uncertain copy of the same event, while definitely undelivered recipients remain eligible.
 
 Agent 2.71, helper payloads and database migration 0149 are unchanged.

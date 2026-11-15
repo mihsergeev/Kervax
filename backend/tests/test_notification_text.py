@@ -148,15 +148,18 @@ class Reply:
 async def test_common_route_personal_webhook_and_history_use_the_same_policy(tmp_path, monkeypatch):
     engine, factory = await _panel(tmp_path)
     async with factory() as session:
+        server = Server(name='node-a', token_hash='fixture-notification-source', enabled=True, group_name='ops')
+        session.add(server)
         session.add(User(username='operator', password_hash='unused', role='admin', tg_chat_id='personal', tg_alerts=True))
         await session.commit()
+        sid = server.id
     http = FakeHTTP()
     async def client(self):
         return http
     monkeypatch.setattr(alerts._Link, 'client', client)
     full = 'ДИАГНОСТИКА '+('detail '*300)
     msg = alerts.Msg(f'🔴 <a href="{BASE}">node-a</a>\nДиск заполнен\n'+('fact\n'*20),
-                     'servers', 'ops', 'disk', 'node-a', full=full, ref='srv:1')
+                     'servers', 'ops', 'disk', 'node-a', full=full, ref=f'srv:{sid}')
     cfg = {'telegram_token': 'fixture', 'telegram_chat': 'main', 'webhook': 'https://hook.example.test',
            'tg_buttons': False, 'routes': {'main': 'all', 'chats': [
                {'name': 'ops', 'chat': 'route', 'server_groups': ['ops'], 'site_groups': []}]}}
