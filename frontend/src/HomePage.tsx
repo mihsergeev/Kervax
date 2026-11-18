@@ -27,7 +27,6 @@ import { RecheckButton, RecheckSummary, recheckKey, recheckUnavailable, useAlert
 import { activateHomeRow } from './homeKeyboard'
 import { KnownDialog } from './KnownDialog'
 import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, collectMutes, isDecision, kindLabel, liftMute, muteDate, muteLiveText, muteQuiet, oomCulpritLabel, withLive, type MuteItem } from './mutes'
-import { MaintChip, MaintHome } from './MaintModal'
 import { useI18n } from './i18n'
 import { toastError } from './toast'
 import { expiryText, registrableDomain } from './checkUtils'
@@ -889,7 +888,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         <CountryFlag code={it.cc} /> <b>{it.name}</b>
         {sub ? (splitHead(it.text)[1] ? <span className="muted"> - {splitHead(it.text)[1]}</span> : null) : ` - ${it.text}`}
         {sinceShort(it.since, t) && <span className="muted"> · {sinceShort(it.since, t)}</span>}
-        {it.srv && it.section === 'servers' && <MaintChip kind="server" id={it.id} />}
         {it.note && (
           <span className="note-chip" title={it.note}>
             {' '}📝
@@ -1316,7 +1314,6 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
       )}
       <div className="net-cards home-blocks">
       {mutes.length > 0 && isAdmin && <MuteHint items={mutes} onOpen={onOpen} onDone={load} />}
-      <MaintHome />
       {/* Заглушка кончилась, а проблема есть: алерты придержаны, решение за человеком */}
       {overRows.length > 0 && (
         <div className="chart-card net-card net-card-wide home-block home-attention-over">

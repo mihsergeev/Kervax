@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.139] - 2026-11-18
+
+Removed the maintenance block from the home page. The Maintenance windows menu shows the schedule, and active maintenance badges appear in the server and monitor lists.
+
 ## [1.8.138] - 2026-11-16
 
 - Configured dumps remain visible in Coverage when their Docker databases stop. Stopped databases have a separate neutral block showing retained dump files and paths.

@@ -21,7 +21,20 @@ const checks = Array.from({ length: 9 }, (_, i) => check(i + 1, `web${i + 1}.${d
 }))
 checks.push(check(10, statusName, { target: 'https://status.example.test', last_status: 'down', last_message: 'HTTP 503' }))
 checks.push(check(11, sslName, { target: 'https://ssl.example.test', check_ssl: true, probe_local: true, ssl_days: 14, ssl_warn_days: [14] }))
-const maintenance = [{ id: 1, title: 'Demo maintenance', active: true, cur_end: '2030-01-01T12:00:00Z', server_ids: [], check_ids: [1] }]
+const now = Date.now()
+const hour = 3600_000
+const time = (offset) => new Date(now + offset * hour).toISOString()
+const maintenance = [
+  { id: 1, title: 'Demo maintenance', active: true, starts_at: time(-1), ends_at: time(1), cur_end: time(1), next_start: null },
+  { id: 2, title: 'Demo upcoming window', active: false, starts_at: time(2), ends_at: time(3), cur_end: null, next_start: time(2) },
+].map((window) => ({
+  server_ids: [42], check_ids: [1], finished: false, repeat: '', weekdays: [], verify: true, note: '', created_by: 'fixture',
+  ...window,
+}))
+const servers = [{
+  id: 42, name: 'Demo server', online: true, group_name: '', agent_version: '9.9.0',
+  last_seen: time(0), last_report: {}, problems: [],
+}]
 
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PW_CHROME })
 try {
@@ -51,10 +64,11 @@ try {
     }
     const data = {
       '/api/auth/me': { id: 1, username: 'fixture', role: 'admin' },
+      '/api/checks': checks,
       '/api/checks/overview': { total: checks.length, up: checks.length - 1, down: 1, open_incidents: 0, checks },
       '/api/alert-rechecks': jobs,
       '/api/maintenance': maintenance,
-      '/api/servers': [],
+      '/api/servers': servers,
       '/api/checks/discovered': { domains: [], hosts: {}, groups: [], ignored: [] },
       '/api/checks/local-probe-suggestions': { items: [] },
       '/api/alerts/coverage': { items: [] },
@@ -74,7 +88,6 @@ try {
   await grouped.getByText('доступно 1 из 9').waitFor()
   await ssl.waitFor()
   assert.equal(await recheck(ssl).count(), 0, 'Unavailable recheck button must be absent')
-  await page.locator('.maint-home-row').getByText('Demo maintenance', { exact: false }).waitFor()
   for (const width of [850, 1440, 390, 320]) {
     await page.setViewportSize({ width, height: 900 })
     await snapshot(`sites-${width}`)
@@ -110,7 +123,31 @@ try {
   await grouped.locator('.home-open').click()
   await page.waitForURL((url) => url.searchParams.get('check') === '1')
   assert.deepEqual(errors, [], 'Browser runtime errors')
+
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(base)
+  await page.getByRole('button', { name: 'Меню', exact: true }).click()
+  await page.getByRole('button', { name: 'Окна обслуживания', exact: true }).click()
+  await page.getByRole('heading', { name: 'Окна обслуживания', exact: true }).waitFor()
+  for (const { title } of maintenance) {
+    await page.getByRole('row').filter({ hasText: title }).waitFor()
+  }
+  await page.getByRole('button', { name: 'Закрыть', exact: true }).click()
+  const activeChip = page.locator('.note-chip[title*="Demo maintenance"]').filter({ hasText: '🚧' })
+  for (const section of ['Сайты', 'Серверы']) {
+    await page.locator('.topnav').getByRole('button', { name: section, exact: true }).click()
+    await activeChip.waitFor()
+    assert.equal(await page.locator('.note-chip[title*="Demo upcoming window"]').count(), 0)
+  }
+  await page.getByTitle('На главную', { exact: true }).click()
+  await card.waitFor()
+  for (const { title } of maintenance) {
+    assert.equal(await page.getByText(title, { exact: false }).count(), 0, 'Maintenance windows must stay off the home page')
+  }
+  assert.equal(await activeChip.count(), 0)
+  assert.deepEqual(errors, [], 'Browser runtime errors after opening maintenance and lists')
   console.log('PASS grouped domain, status and SSL alerts, queue layout down to 320px, recheck, snooze, restore and navigation')
+  console.log('PASS maintenance stays off home, active and upcoming windows remain in the schedule, both lists show active maintenance')
 } finally {
   await browser.close()
 }

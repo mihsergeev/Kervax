@@ -1006,9 +1006,6 @@ label.home-sel-all { display: inline-flex; flex-direction: row; align-items: cen
 .home-over-acts { display: inline-flex; flex-wrap: wrap; gap: 0.2rem 0.8rem; margin-top: 0.15rem; }
 .home-over-acts .linklike { white-space: nowrap; }
 .home-attention-mute > button { align-self: flex-start; }
-/* окна обслуживания - к сведению, строка никуда не ведет */
-.home-attention-row.maint-home-row { cursor: default; }
-.home-attention-row.maint-home-row:hover { background: transparent; }
 .sec-icon {
   width: 1.35em;
   height: 1.35em;
@@ -7310,9 +7307,6 @@ button.type-chip { cursor: pointer; border: 1px solid transparent; font-family: 
 .maint-bar {
   border-color: color-mix(in srgb, #d8a530 45%, var(--border));
   background: color-mix(in srgb, #d8a530 10%, transparent);
-}
-.maint-home-row {
-  cursor: default;
 }
 /* галка слева, подпись справа: глобальный label выстроен колонкой */
 .check-inline {
