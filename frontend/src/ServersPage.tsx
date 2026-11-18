@@ -5627,7 +5627,9 @@ export function ServersPage({ onUnauthorized, openServerId, openServerSec, onCon
       )}
 
       {/* позитивный индикатор: все агенты на актуальной ПОДПИСАННОЙ версии */}
-      {avail && behind.length === 0 && (servers?.some((s) => s.agent_can_update && s.agent_version) ?? false) && (
+      {avail && behind.length === 0 &&
+        !servers?.some((s) => s.skip_kervax_updates && s.agent_version !== avail) &&
+        servers?.some((s) => s.agent_can_update && s.agent_version) && (
         <div className="agent-update-ok">
           {t('✓ Все агенты на подписанной версии {v}', { v: avail })}
         </div>
@@ -7429,7 +7431,8 @@ function ServerDetail({
             </span>
             <span className="srv-meta-item">
               <span className="srv-meta-k">{t('агент')}</span> {s.agent_version || '—'}
-              {s.agent_can_update && !isViewer &&
+              {s.skip_kervax_updates && <span className="type-chip">{t('Обновления пропускаются')}</span>}
+              {s.agent_can_update && !s.skip_kervax_updates && !isViewer &&
                 (s.target_agent_version && s.target_agent_version !== s.agent_version ? (
                   <>
                     {' '}

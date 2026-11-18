@@ -3713,6 +3713,7 @@ const EN: Record<string, string> = {
   'После прогона всё ещё ждут': 'Still waiting after the run',
   'Смотрите вывод плейбука': 'Check the playbook output',
   'Пропускать обновления Kervax': 'Skip Kervax updates',
+  'Обновления пропускаются': 'Updates skipped',
   'Сервер не участвует в обновлении агента и helper’ов. Мониторинг продолжает работать.':
     'The server is excluded from agent and helper updates. Monitoring stays active.',
   'Точно? агент на {a} + helper\'ы на {h}': 'Sure? agent on {a} + helpers on {h}',
