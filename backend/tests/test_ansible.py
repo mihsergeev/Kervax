@@ -64,6 +64,81 @@ async def test_token_is_shown_once_and_lists_nodes_to_update(client, auth_header
     assert flags["corp-shop-ado"] is True and flags["fresh"] is False
 
 
+async def test_skip_kervax_updates_cancels_pending_work_and_can_be_reversed(client, auth_headers, monkeypatch):
+    for location in ("app.api.ansible.current_setup_versions", "app.api.servers._current_setup_versions"):
+        monkeypatch.setattr(location, lambda: {"timesync-setup": "0.3"})
+    monkeypatch.setattr("app.api.servers._available_agent_version", lambda: "2.71")
+
+    async def enroll(name):
+        response = await client.post("/api/servers", json={"name": name}, headers=auth_headers)
+        assert response.is_success
+        node = response.json()
+        await _report(client, node["token"], hostname=name, setup_versions={"timesync-setup": "0.2"},
+                      caps={"watchdog": False})
+        return node["server"]["id"], node["token"]
+
+    old, old_token = await enroll("test-legacy")
+    current, _ = await enroll("test-current")
+
+    async def settings(skip):
+        response = await client.patch(f"/api/servers/{old}", json={"skip_kervax_updates": skip}, headers=auth_headers)
+        assert response.is_success, response.text
+        return response.json()
+
+    async def update_agents():
+        response = await client.post("/api/servers/agent-update", json={"version": "2.71", "track": True},
+                                     headers=auth_headers)
+        assert response.is_success, response.text
+        return {row["id"]: row for row in response.json()}
+
+    async def track_helpers():
+        response = await client.post("/api/servers/fleet-rollout/helpers",
+                                     json={"hosts": ["test-legacy", "test-current"]}, headers=auth_headers)
+        assert response.is_success, response.text
+        return response.json()["helpers"]["hosts"]
+
+    issued = await client.post("/api/settings/ansible", headers=auth_headers)
+    inventory_auth = {"Authorization": f"Bearer {issued.json()['token']}"}
+
+    async def inventory():
+        response = await client.get("/api/ansible/servers", headers=inventory_auth)
+        assert response.is_success, response.text
+        return {row["name"]: row for row in response.json()["servers"]}
+
+    assert set(await track_helpers()) == {"test-legacy", "test-current"}
+    assert (await update_agents())[old]["target_agent_version"] == "2.71"
+    assert (await inventory())["test-legacy"]["rollout"]
+    excluded = await settings(True)
+    assert excluded["enabled"] and excluded["online"]
+    assert excluded["skip_kervax_updates"] and not excluded["helper_rollout"]
+    assert excluded["helper_advice"] == [] and excluded["target_agent_version"] == ""
+
+    progress = (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()
+    assert progress["agent"]["ids"] == [current]
+    assert progress["helpers"]["hosts"] == ["test-current"]
+    assert await track_helpers() == ["test-current"]
+    assert set(await update_agents()) == {current}
+    rows = await inventory()
+    assert rows["test-legacy"]["online"] and rows["test-legacy"]["enabled"]
+    assert not rows["test-legacy"]["rollout"] and rows["test-legacy"]["outdated"] == []
+    assert rows["test-current"]["rollout"]
+
+    response = await client.post("/api/agent/report", json={
+        "hostname": "test-legacy", "agent_version": "2.10", "mem_used": 1, "mem_total": 2,
+        "setup_versions": {"timesync-setup": "0.2"}, "caps": {"watchdog": False},
+    }, headers={"Authorization": f"Bearer {old_token}"})
+    assert response.is_success and response.json()["update"] is None
+    viewer = await _mk_viewer(client, auth_headers)
+    response = await client.patch(f"/api/servers/{old}", json={"skip_kervax_updates": False}, headers=viewer)
+    assert response.status_code == 403
+
+    restored = await settings(False)
+    assert not restored["skip_kervax_updates"] and restored["helper_rollout"]
+    assert restored["target_agent_version"] == ""
+    assert (await inventory())["test-legacy"]["rollout"]
+    assert (await update_agents())[old]["target_agent_version"] == "2.71"
+
+
 async def test_wrong_or_revoked_token_is_refused(client, auth_headers):
     r = await client.get("/api/ansible/servers")
     assert r.status_code == 401  # доступ не включен

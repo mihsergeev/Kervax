@@ -1414,6 +1414,7 @@ export type AnsibleNode = {
   rollout: boolean // в группе kervax_outdated
   outdated: HelperAdvice[]
   watchdog_off: boolean
+  skip_kervax_updates?: boolean
   issues: string[] // docker_sock / proxy_old / restic_old
   sock: { name: string; image: string; kind: string }[]
   proxy_old: { name: string; image: string; kind: string; version: string; built: number; age_days: number }[]
@@ -2500,6 +2501,7 @@ export type Server = {
   os: string
   agent_version: string
   target_agent_version: string
+  skip_kervax_updates?: boolean
   local_ip: string
   external_ip: string
   country?: string // ISO-код страны по IP (офлайн-таблица на бэкенде)
@@ -3358,6 +3360,7 @@ export function updateServer(
     qdrant_monitor_enabled?: boolean
     queue_alert_over?: Record<string, number> // порог по конкретной очереди
     disk_autofix?: boolean // авто-очистка диска (меняет только админ)
+    skip_kervax_updates?: boolean
     parent_id?: number | null // за каким сервером стоит, null - ни за кем
     traffic_limit_gb?: number // лимит трафика тарифа, ГБ (0 - без лимита)
     traffic_count?: 'out' | 'both'

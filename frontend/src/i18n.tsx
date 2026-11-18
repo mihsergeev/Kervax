@@ -3709,9 +3709,12 @@ const EN: Record<string, string> = {
   'helper\'ы: команда скопирована, запустите ее в репозитории ansible':
     'helpers: the command is copied, run it in your ansible repository',
   'helper\'ы: обновились {done} из {n}': 'helpers: {done} of {n} updated',
-  'прогона так и не было, ждут: {list}': 'no run yet, waiting: {list}',
-  'после прогона все еще старые: {list} - смотрите вывод плейбука':
-    'still outdated after the run: {list} - check the playbook output',
+  'Прогона так и не было. Ждут': 'No run yet. Waiting',
+  'После прогона всё ещё ждут': 'Still waiting after the run',
+  'Смотрите вывод плейбука': 'Check the playbook output',
+  'Пропускать обновления Kervax': 'Skip Kervax updates',
+  'Сервер не участвует в обновлении агента и helper’ов. Мониторинг продолжает работать.':
+    'The server is excluded from agent and helper updates. Monitoring stays active.',
   'Точно? агент на {a} + helper\'ы на {h}': 'Sure? agent on {a} + helpers on {h}',
   'запустил обновление helper\'ов': 'started a helper update',
   'canary - 1 нода': 'canary - 1 node',

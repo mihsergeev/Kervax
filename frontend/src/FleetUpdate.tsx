@@ -29,7 +29,7 @@ const DONE_MS = 3000
 
 // агент отстает от подписанной версии; выключенным сервером панель цель не ставит
 export function agentBehind(servers: Server[], avail: string): Server[] {
-  return servers.filter((s) => s.enabled && s.agent_can_update &&
+  return servers.filter((s) => s.enabled && !s.skip_kervax_updates && s.agent_can_update &&
     s.agent_version && avail && s.agent_version !== avail)
 }
 
@@ -391,13 +391,26 @@ async function startHelpers(fleet: Fleet, hosts: string[], copyError: string) {
 
 // Строка helper'ов: одна на все helper'ы, потому что их чинит одна команда ansible.
 // Скопировали команду -> ждем, пока хосты перестанут требовать прогона -> готово (уходит сама)
-export function HelperUpdRow({ servers, fleet, canUpd, onOpen }: {
-  servers: Server[]; fleet: Fleet; canUpd: boolean; onOpen?: () => void
+export function HelperUpdRow({ servers, fleet, canUpd, onOpen, onOpenNode }: {
+  servers: Server[]; fleet: Fleet; canUpd: boolean; onOpen?: () => void; onOpenNode?: (id: number) => void
 }) {
   const { t } = useI18n()
   const [copied, setCopied] = useState(false)
   const pending = rolloutHosts(servers)
   const pendingCmd = helperCmd(pending)
+  const hostLinks = (hosts: string[], limit: number) => {
+    if (!onOpenNode) return shortList(hosts, t, limit)
+    const byHost = new Map(servers.filter((s) => s.online && s.helper_rollout).map((s) => [hostOf(s), s.id]))
+    return <>
+      {hosts.slice(0, limit).map((host, i) => {
+        const id = byHost.get(host)
+        return <Fragment key={host}>{i > 0 && ', '}
+          {id == null ? host : <button type="button" className="linklike" onClick={() => onOpenNode(id)}>{host}</button>}
+        </Fragment>
+      })}
+      {hosts.length > limit && ', ' + t('и еще {n}', { n: hosts.length - limit })}
+    </>
+  }
   const run = fleet.helpers
   const left = run ? run.hosts.filter((h) => pending.includes(h)) : []
   const finished = !!run && left.length === 0
@@ -433,7 +446,7 @@ export function HelperUpdRow({ servers, fleet, canUpd, onOpen }: {
         <span className="home-attention-ico">🧩</span>
         <span className="home-attention-txt">
           {t('helper\'ы: обновить на {n} {nodes}', { n, nodes: nodesLoc(n, t) })}{' '}
-          <span className="muted small"><Words text={`(${shortList(pending, t, 3)})`} /></span>
+          <span className="muted small">({hostLinks(pending, 3)})</span>
           {what.length > 0 && <span className="muted small upd-notes"><Words text={what.join(' · ')} /></span>}
           {canUpd && (pendingCmd ? <UpdCmd cmd={pendingCmd} /> : <HelperHostWarning />)}
         </span>
@@ -492,9 +505,11 @@ export function HelperUpdRow({ servers, fleet, canUpd, onOpen }: {
         )}
         {stuck && (
           <div className="upd-issues muted">
-            {done === 0
-              ? t('прогона так и не было, ждут: {list}', { list: shortList(left, t, 6) })
-              : t('после прогона все еще старые: {list} - смотрите вывод плейбука', { list: shortList(left, t, 6) })}
+            <span>
+              {done === 0 ? t('Прогона так и не было. Ждут') : t('После прогона всё ещё ждут')}{': '}
+              {hostLinks(left, 6)}
+            </span>
+            {done > 0 && <span>{t('Смотрите вывод плейбука')}</span>}
           </div>
         )}
         {/* команда нужна, пока прогона нет; пошел - видно прогресс, копия - кнопкой */}

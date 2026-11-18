@@ -271,7 +271,9 @@ def _agent_advice(server: Server) -> tuple[list[str], str | None]:
     # ноды, а в панели виднелось только расхождение «цель X / версия Y». Самая
     # частая причина — панель собрана не с тем пубключом, которым подписан релиз;
     # на парке в десятки нод искать это по логам каждой ноды невозможно.
-    upd_err = agent_update_error(rep) if _agent_can_update(server.agent_version or "", rep.get("platform")) else ""
+    upd_err = ""
+    if not server.skip_kervax_updates and _agent_can_update(server.agent_version or "", rep.get("platform")):
+        upd_err = agent_update_error(rep)
     # Медленная докачка - НЕ отказ: набранное лежит на ноде, следующая попытка идёт
     # дальше с того же места. Такой текст в «Требует действий» звал чинить то, что
     # чинится само: на РФ-нодах за DPI 5.8 МБ набираются за несколько попыток по
@@ -342,7 +344,7 @@ def _out(
     report = server.last_report or {}
     platform = report.get("platform")
     o.agent_can_update = _agent_can_update(server.agent_version, platform)
-    if o.agent_can_update:
+    if o.agent_can_update and not server.skip_kervax_updates:
         o.agent_update_note = agent_update_note(report) or None
         o.agent_update_error = agent_update_error(report) or None
     else:
@@ -842,7 +844,7 @@ def helper_rollout(server: Server, advice: list[HelperAdvice]) -> bool:
     """Поменяет ли прогон kervax_helpers.yml что-то на ноде: устарел helper или агент
     говорит, что watchdog не включен (его ставит helper agent-watchdog)."""
     caps = (server.last_report or {}).get("caps") or {}
-    return bool(advice) or caps.get("watchdog") is False
+    return not server.skip_kervax_updates and (bool(advice) or caps.get("watchdog") is False)
 
 
 # Первые минуты после первого отчета установщик еще ставит helper'ы и прокси Docker: агент он
@@ -868,6 +870,8 @@ def _helper_advice(server: Server, cur: dict[str, str]) -> list[HelperAdvice]:
 
     У только что поставленной ноды отсутствующий helper не флагуем: установщик его еще ставит
     (_fresh_node). Устаревший флагуем: установщик берет helper'ы у панели, со старым не приходит."""
+    if server.skip_kervax_updates:
+        return []
     fresh = _fresh_node(server)
     rep = server.last_report or {}
     try:
@@ -1660,11 +1664,13 @@ async def agent_update(
             status.HTTP_400_BAD_REQUEST, f"Доступна к раскатке только версия {avail}"
         )
     # только серверы групп учетки: редактор группы не раскатывает агент на чужие
-    q = scope_query(user, select(Server).where(Server.enabled.is_(True)), Server)
+    q = scope_query(user, select(Server).where(
+        Server.enabled.is_(True), Server.skip_kervax_updates.is_(False),
+    ), Server)
     if body.server_ids is not None:
         q = q.where(Server.id.in_(body.server_ids))
     servers = [
-        s for s in await session.scalars(q)
+        s for s in await session.scalars(q.order_by(Server.id).with_for_update())
         if _agent_can_update(s.agent_version, (s.last_report or {}).get("platform"))
     ]
     targeted = []
@@ -1705,12 +1711,14 @@ async def agent_update_cancel(
     return [_out(s, now) for s in servers]
 
 
-async def _scoped_nodes(user, session) -> tuple[set[int], set[str], set[int]]:
+async def _scoped_nodes(user, session, *, include_skipped: bool = False) -> tuple[set[int], set[str], set[int]]:
     """ID серверов, имена для Ansible и ID агентов с поддержкой автообновления."""
     query = select(
         Server.id, Server.hostname, Server.name, Server.agent_version,
         Server.last_report["platform"].as_string().label("platform"),
     )
+    if not include_skipped:
+        query = query.where(Server.skip_kervax_updates.is_(False))
     rows = (await session.execute(scope_query(user, query, Server))).all()
     return (
         {r.id for r in rows},
@@ -1753,7 +1761,7 @@ async def close_fleet_rollout(part: str, user: CurrentUser, session: SessionDep)
     Цели агента не снимаются - для этого "стоп" (agent-update/cancel)."""
     if part not in ("agent", "helpers"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такой части")
-    ids, hosts, _ = await _scoped_nodes(user, session)
+    ids, hosts, _ = await _scoped_nodes(user, session, include_skipped=True)
     await fleet_rollout.untrack(session, part, ids=ids, hosts=hosts)
     return await get_fleet_rollout(user, session)
 
@@ -2060,8 +2068,10 @@ async def snooze_server_alert(
 async def update_server(
     server_id: int, body: ServerUpdate, user: CurrentUser, session: SessionDep
 ) -> ServerOut:
-    server = await _get_or_404(server_id, session, user)
     fields = body.model_dump(exclude_unset=True)
+    server = await _get_or_404(server_id, session, user, lock="skip_kervax_updates" in fields)
+    if fields.get("skip_kervax_updates"):
+        server.target_agent_version = ""
     if fields.get("qdrant_monitor_enabled", False) is None:
         fields.pop("qdrant_monitor_enabled")
     if fields.get("qdrant_monitor_enabled") is False and server.qdrant_monitor_enabled:
@@ -4274,7 +4284,8 @@ async def agent_report(
             and _ver_tuple(server.agent_version) >= _ver_tuple(server.target_agent_version)):
         server.target_agent_version = ""
     if (
-        server.target_agent_version
+        not server.skip_kervax_updates
+        and server.target_agent_version
         and server.target_agent_version != server.agent_version
     ):
         upd = {"version": server.target_agent_version}

@@ -1060,6 +1060,7 @@ class AnsibleNodeOut(BaseModel):
     enabled: bool
     rollout: bool                                # в группе kervax_outdated
     outdated: list["HelperAdvice"] = []
+    skip_kervax_updates: bool = False
     watchdog_off: bool = False                   # сторож агента не включен, его ставит плейбук
     issues: list[str] = []                       # docker_sock / proxy_old / restic_old
     sock: list[dict] = []                        # прокси с docker-сокетом: name, image, kind
@@ -1307,6 +1308,7 @@ class ServerCreate(BaseModel):
 
 
 class ServerUpdate(BaseModel):
+    skip_kervax_updates: bool = False
     windows_service_names: list[str] | None = Field(default=None, max_length=256)
 
     @field_validator("windows_service_names")
@@ -1611,6 +1613,7 @@ class ServerOut(BaseModel):
     os: str
     agent_version: str
     target_agent_version: str  # если задана и != agent_version — идёт обновление
+    skip_kervax_updates: bool = False
 
     @field_validator("hostname", mode="before")
     @classmethod

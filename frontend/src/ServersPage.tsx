@@ -6908,6 +6908,7 @@ function ServerDetail({
   const [editing, setEditing] = useState(false)
   const [deleteIds, setDeleteIds] = useState<number[] | null>(null)
   const [form, setForm] = useState<ServerEditForm | null>(null)
+  const skipUpdatesAtOpen = useRef(false)
   const [editSec, setEditSec] = useState('srv') // раздел, с которого открыть окно настроек
   // Esc закрывает карточку, но не во время правки: там он стер бы набранное
   useEscape(onClose, !editing)
@@ -7071,8 +7072,10 @@ function ServerDetail({
       relay_port: s.relay_port ?? 0,
       gre_enabled: !!s.gre_enabled,
       is_dev: !!s.is_dev,
+      skip_kervax_updates: !!s.skip_kervax_updates,
     })
     mutes0.current = s.alert_mutes ?? []
+    skipUpdatesAtOpen.current = !!s.skip_kervax_updates
     setSaveErr(null)
     setEditing(true)
   }
@@ -7091,6 +7094,7 @@ function ServerDetail({
       const mutes = [...new Set([...(s.alert_mutes ?? []).filter((k) => keep.has(k) || !was.has(k)), ...form.alert_mutes])]
       await updateServer(s.id, {
         name: form.name.trim(),
+        skip_kervax_updates: form.skip_kervax_updates === skipUpdatesAtOpen.current ? undefined : form.skip_kervax_updates,
         group_name: form.group_name.trim(),
         agent_ip: form.agent_ip.trim(),
         access_ip: windows && form.access_ip.trim() !== (s.access_ip ?? '') ? form.access_ip.trim() || null : undefined,

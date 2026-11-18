@@ -32,14 +32,15 @@ const maintenance = [
   ...window,
 }))
 const servers = [{
-  id: 42, name: 'Demo server', online: true, group_name: '', agent_version: '9.9.0',
+  id: 42, name: 'Demo server', hostname: 'legacy-node', online: true, enabled: true, group_name: '',
+  agent_version: '2.10', agent_can_update: true, helper_rollout: true, skip_kervax_updates: false,
   last_seen: time(0), last_report: {}, problems: [],
 }]
 
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PW_CHROME })
 try {
   const page = await browser.newPage({ viewport: { width: 850, height: 900 } })
-  const errors = [], posts = [], jobs = []
+  const errors = [], posts = [], jobs = [], changes = []
   page.on('pageerror', (error) => errors.push(error.message))
   await page.addInitScript(() => {
     localStorage.setItem('kervax_token', 'synthetic-ui-fixture')
@@ -52,6 +53,7 @@ try {
     if (request.method() === 'POST') {
       const body = request.postDataJSON()
       posts.push({ pathname, body })
+      if (pathname === '/api/panel-errors/front') errors.push(body.message)
       if (pathname === '/api/alert-rechecks') {
         const job = { ...body, id: String(jobs.length + 1), status: 'remains', message: '', created_at: '2026-01-01T00:00:00Z' }
         jobs.push(job)
@@ -62,7 +64,20 @@ try {
         return route.fulfill({ json: checks[10] })
       }
     }
+    if (pathname === '/api/servers/42' && request.method() === 'PATCH') {
+      const body = request.postDataJSON()
+      changes.push(body.skip_kervax_updates)
+      servers[0] = { ...servers[0], ...body, helper_rollout: !body.skip_kervax_updates }
+      return route.fulfill({ json: servers[0] })
+    }
     const data = {
+      '/api/servers/42': servers[0],
+      '/api/servers/42/metrics': [],
+      '/api/servers/42/timeline': { since: time(-24), until: time(0), events: [], cats: {} },
+      '/api/servers/agent-release': { version: '2.71' },
+      '/api/servers/fleet-rollout': servers[0].skip_kervax_updates ? {} : {
+        helpers: { hosts: ['legacy-node'], at: time(-1) },
+      },
       '/api/auth/me': { id: 1, username: 'fixture', role: 'admin' },
       '/api/checks': checks,
       '/api/checks/overview': { total: checks.length, up: checks.length - 1, down: 1, open_incidents: 0, checks },
@@ -148,6 +163,41 @@ try {
   assert.deepEqual(errors, [], 'Browser runtime errors after opening maintenance and lists')
   console.log('PASS grouped domain, status and SSL alerts, queue layout down to 320px, recheck, snooze, restore and navigation')
   console.log('PASS maintenance stays off home, active and upcoming windows remain in the schedule, both lists show active maintenance')
+
+  const updates = page.locator('.home-disclosure').filter({ has: page.locator('summary', { hasText: 'Обновления' }) })
+  await updates.locator('summary').click()
+  const host = updates.getByRole('button', { name: 'legacy-node', exact: true })
+  const editSettings = async () => {
+    await page.getByTitle('Изменить', { exact: true }).click()
+    await option.waitFor()
+  }
+  const option = page.getByRole('checkbox', { name: 'Пропускать обновления Kervax', exact: true })
+  const save = page.getByRole('button', { name: 'Сохранить', exact: true })
+  await host.click()
+  await editSettings()
+  assert.equal(await option.isChecked(), false)
+  await option.check()
+  await save.click()
+  await option.waitFor({ state: 'hidden' })
+  await editSettings()
+  assert.equal(await option.isChecked(), true, 'The opt-out is saved on the server')
+  await page.locator('.alerts-modal').getByRole('button', { name: 'Закрыть', exact: true }).click()
+  await page.locator('.detail-server').getByTitle('Закрыть', { exact: true }).click()
+  await page.getByTitle('На главную', { exact: true }).click()
+  await card.waitFor()
+  assert.equal(await updates.count(), 0, 'An excluded server must not keep a pending update')
+  await page.goto(new URL('/?server=42', base).href)
+  await editSettings()
+  await option.uncheck()
+  await save.click()
+  await option.waitFor({ state: 'hidden' })
+  await page.locator('.detail-server').getByTitle('Закрыть', { exact: true }).click()
+  await page.getByTitle('На главную', { exact: true }).click()
+  await updates.locator('summary').click()
+  await host.waitFor()
+  assert.deepEqual(changes, [true, false])
+  assert.deepEqual(errors, [], 'Browser runtime errors while changing update policy')
+  console.log('PASS skipped updates leave the home queue, persist across navigation, and return when enabled')
 } finally {
   await browser.close()
 }

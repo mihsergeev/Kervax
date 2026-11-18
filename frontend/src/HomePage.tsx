@@ -1298,7 +1298,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                 )}
                 {showSrv && (
                   <HelperUpdRow servers={srvList} fleet={fleetRun} canUpd={canUpd}
-                    onOpen={() => onOpen('servers')} />
+                    onOpen={() => onOpen('servers')} onOpenNode={(id) => onOpen('servers', id)} />
                 )}
                 {fleet.map(actRow)}
               </div>

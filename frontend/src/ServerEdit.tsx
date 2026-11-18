@@ -36,6 +36,7 @@ export type ServerEditForm = {
   relay_enabled: boolean // ретранслятор для агентов (app/relay.py), сохраняется отдельно (setRelay)
   relay_port: number // 0 - по умолчанию
   gre_enabled: boolean // GRE до панели (backend app/gre.py), сохраняется отдельно (setGre)
+  skip_kervax_updates: boolean
   is_dev: boolean // сервер разработки (backend app/dev_mode.py)
 }
 
@@ -399,6 +400,12 @@ export function ServerEditModal({
                 : t('Разработка: поведение приложений не будит алертами, инфраструктура - как обычно.')}
           </span>
         </div>}
+        <label className="checkbox se-check">
+          <input type="checkbox" checked={form.skip_kervax_updates}
+            onChange={(e) => set({ skip_kervax_updates: e.target.checked })} />
+          <span>{t('Пропускать обновления Kervax')}</span>
+        </label>
+        <div className="muted small">{t('Сервер не участвует в обновлении агента и helper’ов. Мониторинг продолжает работать.')}</div>
         <div className="se-note">{note}</div>
         {rows(area, { offline: thr('offline_after_seconds', t('сек'), { min: 30, max: 86400 }) }, { offline: t('молчит дольше') })}
       </>

@@ -58,7 +58,7 @@ def node_of(s: Server, cur: dict[str, str], now: datetime) -> AnsibleNodeOut | N
         ips=[ip for ip in dict.fromkeys([s.external_ip, s.agent_ip, s.local_ip]) if ip],
         online=online, enabled=bool(s.enabled),
         rollout=online and helper_rollout(s, advice),
-        outdated=advice,
+        outdated=advice, skip_kervax_updates=bool(s.skip_kervax_updates),
         watchdog_off=((rep.get("caps") or {}).get("watchdog") is False),
         issues=issues,
         sock=docker_exposure.exposed(rep) if "docker_sock" in issues else [],

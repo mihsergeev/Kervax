@@ -155,7 +155,7 @@ export function AnsibleModal({ onClose, onUnauthorized, onOpenServer }: Props) {
 
   const members = (g: Group) => (nodes ?? []).filter(g.has)
   // устарело, но нода молчит: в kervax_outdated не попадет, пока не вернется
-  const waiting = (nodes ?? []).filter((n) => !n.online && (n.outdated.length > 0 || n.watchdog_off))
+  const waiting = (nodes ?? []).filter((n) => !n.online && !n.skip_kervax_updates && (n.outdated.length > 0 || n.watchdog_off))
   const issueN = GROUPS.slice(1).reduce((a, g) => a + members(g).length, 0)
   const enabled = !!acc?.enabled
   const ago = (iso: string | null | undefined) => {

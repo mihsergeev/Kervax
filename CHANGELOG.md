@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.140] - 2026-11-18
+
+- Add a per-server option to skip Kervax agent and helper updates. Excluded servers leave update reminders, rollout progress and the Ansible update group. Monitoring stays active. Open a server directly from the helper update list.
+
 ## [1.8.139] - 2026-11-18
 
 - Removed the maintenance block from the home page. The Maintenance windows menu shows the schedule, and active maintenance badges appear in the server and monitor lists.
