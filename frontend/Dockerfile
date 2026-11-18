@@ -10,6 +10,7 @@ FROM node:26-alpine AS build
 
 WORKDIR /build
 COPY --from=deps /d/package.json /d/package-lock.json ./
+COPY scripts/restrict-build-globs.mjs ./scripts/
 RUN npm ci
 COPY . .
 RUN npm run build

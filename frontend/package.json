@@ -4,6 +4,8 @@
   "version": "1.8.139",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/restrict-build-globs.mjs",
+    "audit:build": "node scripts/restrict-build-globs.mjs --audit",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",

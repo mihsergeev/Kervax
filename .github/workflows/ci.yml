@@ -120,7 +120,7 @@ jobs:
       - name: Install
         run: npm ci
       - name: Dependency audit (npm audit)
-        run: npm audit --audit-level=high
+        run: npm run audit:build
       - name: Build
         run: npm run build
 

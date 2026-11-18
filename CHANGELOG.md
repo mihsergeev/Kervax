@@ -6,7 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [1.8.139] - 2026-11-18
 
-Removed the maintenance block from the home page. The Maintenance windows menu shows the schedule, and active maintenance badges appear in the server and monitor lists.
+- Removed the maintenance block from the home page. The Maintenance windows menu shows the schedule, and active maintenance badges appear in the server and monitor lists.
+- Restricted repeated extended glob patterns in the frontend build toolchain as a temporary mitigation for CVE-2026-112366. CI verifies the patched dependency and checks for other advisories.
 
 ## [1.8.138] - 2026-11-16
 
