@@ -1,7 +1,8 @@
 [Unit]
 Description=Kervax exact trusted agent proxy peers
+# Order after an already queued Docker start. Pulling in a masked Docker unit
+# would make systemd fail the timer itself and stop future refreshes.
 After=docker.service
-Requires=docker.service
 
 [Service]
 Type=oneshot

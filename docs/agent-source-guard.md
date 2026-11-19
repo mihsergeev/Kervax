@@ -25,9 +25,12 @@ For an existing running installation:
    rollback only when its migration safety checks allow it. Plan database-changing
    upgrades separately; health alone cannot confirm this change.
 
-The host timer refreshes the snapshot every 30 seconds. The update scripts refresh
-it before container recreation and again afterwards. Missing, ambiguous, or unhealthy
-topology replaces the peer lists with an invalid failure marker and fails the refresh.
+The host timer refreshes the snapshot every 30 seconds. It keeps attempting
+refreshes during a temporary Docker outage and resumes automatically when the
+configured topology is available again. The update scripts arm the timer before
+the immediate refresh and check the snapshot before and after container recreation.
+Missing, ambiguous, or unhealthy topology replaces the peer lists with an invalid
+failure marker and fails the refresh.
 It does not publish an empty valid topology as a fallback. Once enabled, missing or stale
 peer data denies agent requests; it never disables the guard automatically.
 

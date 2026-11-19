@@ -23,5 +23,5 @@ install -o root -g root -m 0700 "$SOURCE_DIR/agent-source-guard-enabled.py" /lib
 install -o root -g root -m 0644 "$SOURCE_DIR/kervax-agent-proxy-peers.service" /etc/systemd/system/kervax-agent-proxy-peers.service
 install -o root -g root -m 0644 "$SOURCE_DIR/kervax-agent-proxy-peers.timer" /etc/systemd/system/kervax-agent-proxy-peers.timer
 systemctl daemon-reload
-systemctl restart kervax-agent-proxy-peers.service
 systemctl enable --now kervax-agent-proxy-peers.timer
+systemctl start kervax-agent-proxy-peers.service

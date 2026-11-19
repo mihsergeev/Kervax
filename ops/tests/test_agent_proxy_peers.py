@@ -236,6 +236,11 @@ def test_timer_and_deploy_refresh_contract():
     timer = (ROOT / "ops/kervax-agent-proxy-peers.timer").read_text()
     assert "User=root" in service and "EnvironmentFile=/etc/kervax/agent-proxy-peers.env" in service
     assert "ExecStart=/usr/bin/python3 /lib65/kervax/agent-proxy-peers-sync.py" in service
+    assert "After=docker.service" in service and "Requires=docker.service" not in service
+    setup = (ROOT / "ops/agent-proxy-peers-setup.sh").read_text()
+    assert setup.index("systemctl enable --now kervax-agent-proxy-peers.timer") < setup.index(
+        "systemctl start kervax-agent-proxy-peers.service"
+    )
     assert "OnUnitActiveSec=30s" in timer and "Unit=kervax-agent-proxy-peers.service" in timer
     deploy = (ROOT / "ops/deploy-remote.sh").read_text()
     up = deploy.split("up() {", 1)[1].split("\n}", 1)[0]

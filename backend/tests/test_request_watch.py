@@ -93,6 +93,9 @@ def test_hints_name_the_source():
     assert rw.hint(push, 1).startswith("скрипт push-монитора")
     agent = agg(total=rw.FLOOD_PER_SERVER, paths={"/api/agent/report": rw.FLOOD_PER_SERVER})
     assert rw.hint(agent, 1).startswith("агент шлет")
+    denied = agg(bad=rw.BAD_LIMIT, paths={"403 /api/agent/commands": rw.BAD_LIMIT}, codes={403: rw.BAD_LIMIT})
+    assert "синхронизацию доверенных прокси" in rw.hint(denied, 1)
+    assert "токен" not in rw.hint(denied, 1)
     # самый частый адрес и так виден списком рядом
     other = agg(total=rw.FLOOD_PER_SERVER, paths={"/api/agent/x": 1, "/api/other": rw.FLOOD_PER_SERVER})
     assert rw.hint(other, 1) == ""
