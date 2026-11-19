@@ -19,7 +19,7 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
-from app import net_guard
+from app import check_dispatch, net_guard
 from app.config import get_settings
 from app.secret_masks import mask_probe_urls
 
@@ -897,13 +897,13 @@ async def _run_http_all_ips(check, url: str, timeout, degraded_ms, attempt):
         return None  # один адрес (или не зарезолвилось) → обычная проверка
     results: list[tuple[str, CheckOutcome]] = []
     for ip in ips:
-        t0 = time.perf_counter()
+        t0 = check_dispatch.probe_clock()
         try:
             r, body = await attempt(url, address=ip)
         except httpx.HTTPError as exc:
             results.append((ip, CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))))
             continue
-        latency = int((time.perf_counter() - t0) * 1000)
+        latency = int((check_dispatch.probe_clock() - t0) * 1000)
         results.append((ip, _eval_http(check, r, body, latency, False, degraded_ms)))
 
     total = len(results)
@@ -1052,14 +1052,21 @@ async def _run_http(
         hooks = [net_guard.credential_origin_hook(custom_headers)]
         if proxy:
             hooks.append(net_guard.request_hook(allow_internal=allow_internal))
-        async with httpx.AsyncClient(
-            timeout=timeout, follow_redirects=True, proxy=proxy,
-            headers=headers, auth=auth, verify=verify, transport=transport, trust_env=False,
-            event_hooks={"request": hooks},
-        ) as client:
-            resp = await client.request(method, u, extensions=extensions or {})
-            text = resp.text[:_MAX_BODY] if (check.keyword_up or check.keyword_down) else ""
-            return resp, text
+        gate = check_dispatch.request_gate()
+        if gate is not None:
+            hooks.append(gate.before_send)
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout, follow_redirects=True, proxy=proxy,
+                headers=headers, auth=auth, verify=verify, transport=transport, trust_env=False,
+                event_hooks={"request": hooks},
+            ) as client:
+                resp = await client.request(method, u, extensions=extensions or {})
+                text = resp.text[:_MAX_BODY] if (check.keyword_up or check.keyword_down) else ""
+                return resp, text
+        finally:
+            if gate is not None:
+                gate.close()
 
     # опция «проверять все адреса домена» (по умолчанию выкл.) — только для прямых
     # проверок; через прокси адреса резолвит сам прокси, пинить IP смысла нет
@@ -1081,7 +1088,7 @@ async def _run_http(
     ph = _Phases() if proxy is None else None
     if ph is not None:
         ph.dns_ms, ph.dns_ok = await _dns_time(url, timeout)
-    t0 = time.perf_counter()
+    t0 = check_dispatch.probe_clock()
     try:
         r, body = await attempt(url, extensions=ph.ext() if ph is not None else None)
         phases = ph.result() if ph is not None else None
@@ -1107,7 +1114,7 @@ async def _run_http(
             return _with_phases(await _check_paths(check, CheckOutcome(
                 "down", message=why or humanize_error(str(exc) or type(exc).__name__)
             ), base, attempt, degraded_ms), phases, one_ip)
-    latency = int((time.perf_counter() - t0) * 1000)
+    latency = int((check_dispatch.probe_clock() - t0) * 1000)
     return _with_phases(await _check_paths(
         check, _eval_http(check, r, body, latency, fell_back, degraded_ms), base, attempt, degraded_ms
     ), phases, one_ip)
@@ -1125,12 +1132,12 @@ async def _check_paths(check, main: CheckOutcome, base: str, attempt, degraded_m
         return combine_paths(main, [(x, None) for x in paths])
 
     async def one(path: str) -> CheckOutcome:
-        t0 = time.perf_counter()
+        t0 = check_dispatch.probe_clock()
         try:
             r, _ = await attempt(path_url(base, path))
         except httpx.HTTPError as exc:
             return CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))
-        lat = int((time.perf_counter() - t0) * 1000)
+        lat = int((check_dispatch.probe_clock() - t0) * 1000)
         return eval_parts(check, r.status_code, True, False, lat, degraded_ms)
 
     got = await asyncio.gather(*(one(x) for x in paths))

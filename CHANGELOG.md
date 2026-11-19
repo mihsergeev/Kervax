@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.144] - 2026-11-20
+
+- Spread scheduled HTTP probes across each batch and limit concurrent requests to the same origin or known backend server, including redirects and additional paths.
+- Exclude scheduler queue time from measured HTTP latency.
+
 ## [1.8.143] - 2026-11-20
 
 - Exclude PostgreSQL base backup connections from replica counts and replay lag. Real replicas in catch-up and streaming state still trigger lag alerts.

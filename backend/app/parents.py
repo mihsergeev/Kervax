@@ -116,7 +116,11 @@ class Index:
             if getattr(s, "parent_id", None):
                 self.parent[s.id] = s.parent_id
             for web in (getattr(s, "last_report", None) or {}).get("web_services") or []:
-                for raw in web.get("sites") or []:
+                if not isinstance(web, dict) or not isinstance(web.get("sites"), list):
+                    continue
+                for raw in web["sites"]:
+                    if not isinstance(raw, str):
+                        continue
                     d = norm_domain(raw)
                     if d and "*" not in d and not d.startswith("~"):
                         self.domains.setdefault(d, set()).add(s.id)

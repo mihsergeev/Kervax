@@ -14,6 +14,7 @@ import statistics
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from types import SimpleNamespace
 from typing import NamedTuple
 from urllib.parse import quote, urlparse
@@ -71,6 +72,7 @@ from app import disk_mute
 from app import drive_mute
 from app import kube_expiry as kube_expiry_mod
 from app import expiry_snooze
+from app import check_dispatch
 from app import fill_alert
 from app import software as software_mod
 from app import tamper as tamper_mod
@@ -1037,7 +1039,7 @@ async def run_due_checks(
     now = datetime.now(timezone.utc)
     async with session_factory() as session:
         enabled = list(
-            await session.scalars(select(Check).where(Check.enabled.is_(True)))
+            await session.scalars(select(Check).where(Check.enabled.is_(True)).order_by(Check.id))
         )
     due = [c for c in enabled if _is_due(c, now)]
     if not due:
@@ -1057,7 +1059,17 @@ async def run_due_checks(
     outcomes_map: dict[int, object] = {}
     probes: dict[int, AgentProbe] = {}
     if remote:
-        got = await _gather_capped([checks_exec.run_check(c) for c in remote], cap, jitter)
+        jobs = [
+            check_dispatch.Probe(partial(checks_exec.run_check, c),
+                                 check_dispatch.http_origin(c.target) if c.type == "http" else None,
+                                 c.interval_seconds or 5)
+            for c in remote
+        ]
+        backends = None
+        if any(job.origin is not None for job in jobs):
+            async with session_factory() as session:
+                backends = await _http_probe_backends(session)
+        got = await check_dispatch.gather(jobs, cap, jitter, backends)
         for c, outcome in zip(remote, got):
             if isinstance(outcome, checks_exec.CheckOutcome):
                 probe_scope.explain_panel_fallback(c, outcome)
@@ -1966,6 +1978,11 @@ async def tamper_alerts(session_factory, settings: Settings, now: datetime) -> N
         await _send_alerts(session_factory, settings, pending, now)
 
 
+async def _http_probe_backends(session: AsyncSession) -> dict[bytes, int]:
+    servers = await parents_mod.load_servers(session)
+    return check_dispatch.known_backends(parents_mod.Index(s for s in servers if s.enabled))
+
+
 async def run_location_probes(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings
 ) -> int:
@@ -1975,7 +1992,8 @@ async def run_location_probes(
     interval = max(settings.location_probe_interval, 30)
     async with session_factory() as session:
         enabled = list(
-            await session.scalars(select(Location).where(Location.enabled.is_(True), Location.monitors.is_(True)))
+            await session.scalars(select(Location).where(Location.enabled.is_(True), Location.monitors.is_(True))
+                                  .order_by(Location.id))
         )
         checks = list(
             await session.scalars(
@@ -1983,7 +2001,7 @@ async def run_location_probes(
                     Check.enabled.is_(True),
                     Check.check_locations.is_(True),
                     Check.type == "http",
-                )
+                ).order_by(Check.id)
             )
         )
         existing = {
@@ -2006,10 +2024,14 @@ async def run_location_probes(
     if not jobs:
         return 0
 
-    outcomes = await _gather_capped(
-        [checks_exec.probe_via_proxy(c, loc.url) for c, loc in jobs],
+    async with session_factory() as session:
+        backends = await _http_probe_backends(session)
+    outcomes = await check_dispatch.gather(
+        [check_dispatch.Probe(partial(checks_exec.probe_via_proxy, c, loc.url),
+                              check_dispatch.http_origin(c.target), interval) for c, loc in jobs],
         settings.check_max_concurrency,
         max(settings.check_jitter_ms, 0) / 1000.0,
+        backends,
     )
     async with session_factory() as session:
         for (c, loc), res in zip(jobs, outcomes):
