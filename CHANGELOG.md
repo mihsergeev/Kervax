@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format is based on
 
 - Keep the trusted agent proxy refresh timer running through temporary Docker unavailability and arm it before the immediate refresh during setup. Exact peer validation and fail-closed behavior stay in place.
 - Show a source-access troubleshooting hint for agent API 403 responses. The invalid-token hint applies to 401 responses.
+- Ship signed agent 2.72 built with Go 1.27.4 to address CVE-2026-97054.
 
 ## [1.8.140] - 2026-11-18
 

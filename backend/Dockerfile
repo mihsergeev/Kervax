@@ -5,7 +5,7 @@
 # панель раздает бинарь этой сборки, а подписан бинарь сборки release.py, и sha256
 # совпадают, только пока их собирает один Go. Менять оба места вместе и выпускать новый
 # релиз агента (ops/selfcheck.py это проверяет).
-FROM golang:1.27.3-alpine AS agent
+FROM golang:1.27.4-alpine AS agent
 ARG AGENT_PUBKEY=
 WORKDIR /agent
 COPY agent/go.mod ./
