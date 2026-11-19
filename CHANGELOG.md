@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.143] - 2026-11-20
+
+- Exclude PostgreSQL base backup connections from replica counts and replay lag. Real replicas in catch-up and streaming state still trigger lag alerts.
+
 ## [1.8.142] - 2026-11-19
 
 - Update the frontend to NGINX 1.31.9 and pin the PostgreSQL 18.7 image.

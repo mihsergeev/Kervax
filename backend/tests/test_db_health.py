@@ -1,10 +1,15 @@
 """Здоровье баз (helper dbstat-setup 0.5): реплика, долгие транзакции, блокировки, wraparound,
 таблицы без VACUUM."""
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+from sqlalchemy import text
+
 from app import collector, db_health
+from app.db import create_engine_and_factory
 from app.models import Server
 
 NOW = datetime(2026, 10, 12, 12, 0, tzinfo=timezone.utc)
@@ -60,6 +65,47 @@ def test_replication():
     assert db_health.problems(_rep(_my(lag=400)), NOW)[0][:2] == (1, "MySQL на хосте: реплика отстает на 6 мин")
 
 
+@pytest.mark.skipif(not os.environ.get("KERVAX_TEST_PG"), reason="PostgreSQL aggregation")
+async def test_pg_primary_lag_excludes_only_backup_senders():
+    src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
+    query = re.search(r'pg_q "\$c" "([^"]+from pg_stat_replication[^"]*)"', src)[1]
+    backup = ("(11, 'backup', NULL::pg_lsn, interval '40 minutes'), "
+              "(12, 'streaming', NULL, interval '30 minutes')")
+    slots = "(12, true, 'physical', 'pg_basebackup_12')"
+    cases = (
+        # The data connection and its WAL stream contribute neither replica count nor lag.
+        ("", "", "0|0"),
+        # A real lag on the same primary still reaches the alert.
+        (", (13, 'streaming', '0/200', interval '11 minutes')", "", "1|660"),
+        # Replicas without an initial apply position can be stuck, including on temporary slots.
+        (", (14, 'catchup', NULL, interval '32 minutes')",
+         ", (14, true, 'physical', 'temporary_standby')", "1|1920"),
+        # A permanent slot with a similar name is distinct from a backup slot.
+        (", (15, 'streaming', NULL, interval '12 minutes')",
+         ", (15, false, 'physical', 'pg_basebackup_15')", "1|720"),
+        # A sender reporting replay remains visible even if the slot resembles a backup.
+        (", (16, 'streaming', '0/700', interval '13 minutes')",
+         ", (16, true, 'physical', 'pg_basebackup_16')", "1|780"),
+    )
+    engine, _ = create_engine_and_factory(os.environ["KERVAX_TEST_PG"])
+    try:
+        async with engine.connect() as conn:
+            for more_senders, more_slots, expected in cases:
+                sql = f"""
+                    with pg_stat_replication(pid, state, replay_lsn, replay_lag)
+                        as (values {backup}{more_senders}),
+                    pg_replication_slots(active_pid, temporary, slot_type, slot_name)
+                        as (values {slots}{more_slots})
+                    {query}
+                """
+                measured = await conn.scalar(text(sql))
+                assert measured == expected
+                replicas, lag = map(int, measured.split("|"))
+                assert bool(db_health.problems(_rep(_pg(replicas=replicas, lag=lag)), NOW)) == (lag > 0)
+    finally:
+        await engine.dispose()
+
+
 def test_transactions_locks_wraparound_vacuum():
     rep = _rep(_pg(xact=8000, xact_db="shop", xact_app="report-job", idle_xact=2400, idle_db="shop", idle_app="api",
                    lock_waits=3, lock_wait=420, xid=1_200_000_000, xid_db="shop",
@@ -90,7 +136,7 @@ def test_alert_home_and_view():
 
 def test_helper_writes_health():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.18  # " in src and "health_pg() {" in src and "health_mysql()" in src
+    assert "KERVAX_SETUP_VERSION=0.19  # " in src and "health_pg() {" in src and "health_mysql()" in src
     # 0.7: без роли postgres - под пользователем контейнера в явную базу, а не в базу с его именем
     assert 'psql -d "${d:-postgres}" -Atqc "$q" ${u:+-U "$u"}' in src
     assert "backend_xmin is not null" in src and "idle_xmin" in src

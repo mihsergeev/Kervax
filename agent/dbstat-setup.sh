@@ -79,7 +79,7 @@
 # 0.18: estimate Qdrant snapshot space from its storage directory, before any snapshot exists.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.18  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.19  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a database it collects an empty file
 
 HELPER_DIR=/lib65/kervax
@@ -365,7 +365,17 @@ health_pg() { # container name
     st=${r%%|*}; lag=$(num "${r#*|}")
   else
     role=primary; st=""
-    r=$(pg_q "$c" "select count(*)||'|'||coalesce(max(extract(epoch from replay_lag)),0)::int from pg_stat_replication" | head -1)
+    # BASE_BACKUP is not a standby. Its separate WAL stream uses a temporary physical slot
+    # named pg_basebackup_<sender PID> and never reports a replay position. PostgreSQL can still
+    # report replay_lag for that stream. Keep other senders, including standbys still catching up.
+    r=$(pg_q "$c" "select count(*)||'|'||coalesce(max(extract(epoch from r.replay_lag)),0)::int
+      from pg_stat_replication r
+      where r.state is distinct from 'backup'
+        and not (r.replay_lsn is null and exists (
+          select 1 from pg_replication_slots s
+          where s.active_pid = r.pid and s.temporary and s.slot_type = 'physical'
+            and s.slot_name::text = 'pg_basebackup_' || r.pid
+        ))" | head -1)
     n=$(num "${r%%|*}"); lag=$(num "${r#*|}")
   fi
   xa=$(pg_oldest "$c" "state='active'")
