@@ -24,20 +24,24 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 # pyproject.toml меняется каждый релиз (версия), и раньше из-за этого каждая выкладка ставила
 # все пакеты с PyPI заново: на панели в РФ это минуты. Список зависимостей отдельно - слой с
 # pip install пересобирается, только когда меняется сам список (или неделя, см. DEPS_EPOCH).
-FROM python:3.14-slim AS deps
+FROM python:3.14.10-slim-trixie AS deps
 COPY backend/pyproject.toml /p.toml
 RUN python -c "import tomllib; d = tomllib.load(open('/p.toml', 'rb')); open('/req.txt', 'w').write(chr(10).join(d['project']['dependencies']) + chr(10))"
 
 # --- бэкенд ---
-FROM python:3.14-slim
+FROM python:3.14.10-slim-trixie
 
 # Непривилегированный пользователь. gosu нужен entrypoint'у: он стартует от root,
 # выравнивает права на смонтированном томе и сбрасывает привилегии — su/sudo для
 # этого не годятся, они плодят промежуточный процесс и ломают доставку сигналов
 # первому процессу контейнера.
+# Refresh OS security updates on the same schedule as Python dependencies.
+ARG DEPS_EPOCH=
 RUN set -eu; \
+    echo "runtime packages, week ${DEPS_EPOCH:-none}"; \
     apt-get update; \
-    apt-get install -y --no-install-recommends apt libapt-pkg7.0 gosu zlib1g; \
+    apt-get install -y --no-install-recommends apt libapt-pkg7.0 gosu zlib1g libssl3t64 openssl; \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libssl3t64)" ge '3.5.7-1~deb13u3'; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd -r -g 10001 kervax; \
     useradd -r -u 10001 -g kervax -d /srv -s /usr/sbin/nologin kervax; \
@@ -49,7 +53,6 @@ WORKDIR /srv
 # пересобирается и раз в неделю: ops/deploy.sh передает DEPS_EPOCH - номер недели, и
 # исправления безопасности (cryptography и т.п.) приезжают не позже чем через неделю.
 # Без DEPS_EPOCH (сборка руками) - только при смене списка.
-ARG DEPS_EPOCH=
 COPY --from=deps /req.txt /tmp/req.txt
 RUN echo "dependencies, week ${DEPS_EPOCH:-none}" \
  && pip install --no-cache-dir -r /tmp/req.txt hatchling

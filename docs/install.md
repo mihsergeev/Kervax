@@ -151,7 +151,21 @@ Put a `compose.yml` there:
 ```yaml
 services:
   caddy:
-    image: lucaslorentz/caddy-docker-proxy:2.13.1-alpine
+    image: local/kervax-caddy-docker-proxy:2.11.9
+    pull_policy: build
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM caddy:2.11.9-builder-alpine@sha256:646fee578e680989ca5c7fd1ce6f1de574d19fd71ef2221810cc0510a9f40c86 AS xcaddy
+        FROM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
+        COPY --from=xcaddy /usr/bin/xcaddy /usr/bin/xcaddy
+        RUN GOTOOLCHAIN=local xcaddy build v2.11.9 --output /out/caddy \
+              --with github.com/lucaslorentz/caddy-docker-proxy/v2@v2.13.1 \
+              --replace golang.org/x/net=golang.org/x/net@v0.62.0
+        FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+        RUN apk upgrade --no-cache
+        COPY --from=build /out/caddy /usr/bin/caddy
+        CMD ["caddy", "docker-proxy"]
     restart: unless-stopped
     ports: ["80:80", "443:443"]
     environment:

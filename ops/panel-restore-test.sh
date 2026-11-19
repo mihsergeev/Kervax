@@ -37,7 +37,7 @@ if [ -d "$SRC" ]; then
         gzip -t "$archive" || { echo "corrupt gzip archive: $archive"; exit 1; }
     done
 fi
-IMAGE=$(docker inspect -f '{{.Config.Image}}' "$DB_CT" 2>/dev/null || echo postgres:18-alpine)
+IMAGE=$(docker inspect -f '{{.Config.Image}}' "$DB_CT" 2>/dev/null || echo postgres:18.7-alpine@sha256:ff64c9e3bdf8e2120107d3559de8db314e8305f7e38c5105903c6295876738ff)
 # Restore roles onto a clean cluster without a duplicate of its bootstrap user.
 # This account exists only in the throwaway container; the dump supplies DBUSER.
 RESTOREUSER="$DBUSER"

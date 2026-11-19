@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.142] - 2026-11-19
+
+- Update the frontend to NGINX 1.31.9 and pin the PostgreSQL 18.7 image.
+- Use Python 3.14.10 on Debian 13 and apply the Debian OpenSSL security update during backend builds.
+- Build Caddy 2.11.9 with the Docker Proxy plugin and updated Go dependencies on new installations.
+
 ## [1.8.141] - 2026-11-19
 
 - Keep the trusted agent proxy refresh timer running through temporary Docker unavailability and arm it before the immediate refresh during setup. Exact peer validation and fail-closed behavior stay in place.
