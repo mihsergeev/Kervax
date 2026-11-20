@@ -58,11 +58,6 @@ async def test_paths_are_cleaned_and_saved(client, auth_headers):
 def _fake_client(answers: dict, calls: list):
     """httpx.AsyncClient that answers by URL: a status code or an exception."""
 
-    class FakeResp:
-        def __init__(self, code):
-            self.status_code = code
-            self.text = ""
-
     class FakeClient:
         def __init__(self, **kw):
             pass
@@ -73,12 +68,15 @@ def _fake_client(answers: dict, calls: list):
         async def __aexit__(self, *a):
             return False
 
-        async def request(self, method, url, **kw):
+        def build_request(self, method, url, **kw):
+            return url
+
+        async def send(self, url, **kw):
             calls.append(url)
             got = answers[url]
             if isinstance(got, Exception):
                 raise got
-            return FakeResp(got)
+            return httpx.Response(got)
 
     return FakeClient
 

@@ -109,12 +109,13 @@ async def locations(session: AsyncSession, chk) -> list[dict]:
     s = get_settings()
 
     async def one(loc: Location) -> dict:
+        timeout_ms = chk.timeout_ms + max(s.location_timeout_extra_ms, 0)
         try:
-            outcome = await checks_exec._run_http(
+            outcome = await checks_exec.within_budget(checks_exec._run_http(
                 chk, proxy=loc.url.strip(),
                 degraded_ms=chk.degraded_ms + max(s.location_degraded_extra_ms, 0),
-                timeout_ms=chk.timeout_ms + max(s.location_timeout_extra_ms, 0),
-            )
+                timeout_ms=timeout_ms,
+            ), timeout_ms, 1, check=chk)
         except Exception as exc:  # noqa: BLE001
             outcome = checks_exec.CheckOutcome(
                 "down", message=checks_exec.humanize_error(str(exc) or type(exc).__name__))

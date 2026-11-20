@@ -5,6 +5,8 @@
 """
 
 import asyncio
+import codecs
+import contextlib
 import ipaddress
 import re
 import math
@@ -12,6 +14,8 @@ import json
 import socket
 import ssl
 import time
+import zlib
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -23,8 +27,35 @@ from app import check_dispatch, net_guard
 from app.config import get_settings
 from app.secret_masks import mask_probe_urls
 
-# верхняя граница читаемого тела при поиске ключевого слова (защита от гигантских ответов)
+# верхняя граница читаемого тела при поиске ключевого слова (защита от гигантских ответов):
+# считается по распакованным байтам, дальше тело не качаем
 _MAX_BODY = 2_000_000
+# весь запрос с редиректами и телом - не дольше стольких таймаутов монитора: таймаут httpx
+# считается на каждую операцию, и сервер, отдающий по байту, держал бы пробу бесконечно
+_DEADLINE_TIMEOUTS = 2
+# распаковываем только то, что умеем распаковать с потолком (br/zstd - нет)
+_ACCEPT_ENCODING = "gzip, deflate"
+_INFLATE_STEP = 64 * 1024
+# у дополнительных путей важен только код ответа: тела читаем не больше этого
+_PATH_BODY = 64 * 1024
+_MAX_LAYERS = 2
+# выход всех слоев распаковки вместе с промежуточными - не больше стольких _MAX_BODY,
+# съеденный ими вход - не больше _INFLATE_INPUT _MAX_BODY; членов gzip на слой - не больше 32
+_INFLATE_BUDGET = 4
+_INFLATE_INPUT = 8
+_MAX_MEMBERS = 32
+# распаковка отдает ход циклу событий не реже чем раз в столько байт работы
+_YIELD_EVERY = 1 << 20
+# каждый кусок из сети - не меньше стольких байт работы; кусков на тело - не больше
+_FEED_COST = 4096
+_MAX_CHUNKS = 16384
+# весь монитор (DNS, https->http, пути, повторы) - не дольше (повторы+1) x 3 таймаута, но не 5 минут
+_CHECK_TIMEOUTS = 3
+_CHECK_BUDGET_MAX = 300.0
+# потолок вместе с ожиданием в очереди к origin - во столько раз больше срока, не больше 600 с
+_HARD_BUDGETS = 2
+# "проверять все адреса": не больше стольких A-записей, параллельно
+_MAX_IPS = 8
 
 # браузероподобный User-Agent — многие сайты режут запросы без него (403/429),
 # из-за чего мониторинг ложно показывал бы «down»
@@ -892,19 +923,24 @@ async def _run_http_all_ips(check, url: str, timeout, degraded_ms, attempt):
     if bad := net_guard.block_reason(cls, _allows_internal(check)):
         return CheckOutcome("down", message=bad)
     # Только A-записи: без IPv6-маршрута AAAA давали бы ложный down в агрегате.
-    ips = [ip for ip in addresses if ":" not in ip]
+    found = [ip for ip in addresses if ":" not in ip]
+    ips = found[:_MAX_IPS]
+    # адресов больше потолка - честно говорим, сколько проверили
+    cut = f" (проверены {len(ips)} из {len(found)})" if len(found) > len(ips) else ""
     if len(ips) <= 1:
         return None  # один адрес (или не зарезолвилось) → обычная проверка
-    results: list[tuple[str, CheckOutcome]] = []
-    for ip in ips:
+
+    # адреса - параллельно: подряд срок монитора делился бы на их число
+    async def one(ip: str) -> CheckOutcome:
         t0 = check_dispatch.probe_clock()
         try:
             r, body = await attempt(url, address=ip)
         except httpx.HTTPError as exc:
-            results.append((ip, CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))))
-            continue
+            return CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))
         latency = int((check_dispatch.probe_clock() - t0) * 1000)
-        results.append((ip, _eval_http(check, r, body, latency, False, degraded_ms)))
+        return _eval_http(check, r, body, latency, False, degraded_ms)
+
+    results = list(zip(ips, await _gather_all(one(ip) for ip in ips)))
 
     total = len(results)
     n_up = sum(1 for _, o in results if o.status == "up")
@@ -916,11 +952,11 @@ async def _run_http_all_ips(check, url: str, timeout, degraded_ms, attempt):
     ]
     if worst.status == "up":
         lat = max((o.latency_ms or 0) for _, o in results)
-        return CheckOutcome("up", lat, message=f"все {total} адреса OK · {lat} мс", ip_results=breakdown)
+        return CheckOutcome("up", lat, message=f"все {total} адреса OK · {lat} мс{cut}", ip_results=breakdown)
     bad = [f"{ip} — {o.message}" for ip, o in results if o.status != "up"]
     return CheckOutcome(
         worst.status, worst.latency_ms,
-        message=_short(f"{n_up}/{total} адресов OK; " + "; ".join(bad[:4])),
+        message=_short(f"{n_up}/{total} адресов OK{cut}; " + "; ".join(bad[:4])),
         ip_results=breakdown,
     )
 
@@ -977,6 +1013,9 @@ class _Phases:
         посреди ответа: отказ в соединении, сертификат и прочее говорят сами за себя."""
         f = self._failed_at()
         sec = _secs((self.dns_ms or 0) if f == "dns" else self.ms.get(f, 0.0))
+        if isinstance(exc, TotalTimeout) and f in _LEAD:
+            # общий срок, а не сумма фазы: по редиректам фаза складывается и врала бы
+            return f"{_LEAD[f]}: весь запрос не уложился в {_secs(exc.seconds * 1000)}"
         if isinstance(exc, httpx.TimeoutException):
             return {
                 "dns": f"DNS не ответил за {sec}",
@@ -988,6 +1027,13 @@ class _Phases:
         if f == "body":
             return _short(f"ответ оборвался на середине ({(str(exc) or type(exc).__name__)[:120]})")
         return ""
+
+
+_LEAD = {
+    "dns": "DNS не ответил", "connect": "сервер не принимает соединение",
+    "tls": "соединение есть, но TLS-рукопожатие висит", "wait": "сервер принял запрос, но не ответил",
+    "body": "ответ начал приходить, но не догрузился",
+}
 
 
 def _secs(ms: float) -> str:
@@ -1014,6 +1060,280 @@ async def _dns_time(url: str, timeout: float) -> tuple[float | None, bool]:
     except (OSError, asyncio.TimeoutError, UnicodeError):
         ok = False
     return (time.perf_counter() - t0) * 1000, ok
+
+
+class _Inflate:
+    """Один слой Content-Encoding (gzip/deflate): за вызов не больше шага на входе и на выходе."""
+
+    def __init__(self, gzip: bool):
+        self.gzip = gzip
+        self.d = zlib.decompressobj(zlib.MAX_WBITS | 16 if gzip else zlib.MAX_WBITS)
+        self.fresh = True  # еще ничего не распаковано: deflate может оказаться без zlib-заголовка
+        self.members = 1  # члены gzip: пустой член - 20 байт без выхода, их число ограничено
+        self.done = False  # дальше вход отбрасываем
+
+    def take(self, data: memoryview) -> tuple[bytes, int]:
+        """(выход не больше _INFLATE_STEP, сколько входа съедено). Остаток не копируем."""
+        if self.done:
+            return b"", len(data)
+        head = data[:_INFLATE_STEP]
+        try:
+            out = self.d.decompress(head, _INFLATE_STEP)
+        except zlib.error as exc:
+            if self.members > 1:  # мусор после члена gzip - конец тела, как у urllib3
+                self.done = True
+                return b"", len(data)
+            if self.gzip or not self.fresh:
+                raise httpx.DecodingError(str(exc)) from exc
+            # deflate без zlib-заголовка, как его принимает httpx
+            self.d, self.fresh = zlib.decompressobj(-zlib.MAX_WBITS), False
+            return self.take(data)
+        self.fresh = False
+        used = len(head) - len(self.d.unconsumed_tail)
+        if self.d.eof:
+            # в завершенный объект вход не подаем: gzip - следующий член, deflate - конец
+            used -= len(self.d.unused_data)
+            if self.gzip and self.members < _MAX_MEMBERS:
+                self.d = zlib.decompressobj(zlib.MAX_WBITS | 16)
+                self.members += 1
+            else:
+                self.done = True
+                used = len(data)
+        return out, used
+
+
+class _Body:
+    """Тело с бюджетом: из сети не больше limit сырых байт, выход всех слоев вместе с
+    промежуточными - не больше _INFLATE_BUDGET x limit, съеденный вход всех слоев - не больше
+    _INFLATE_INPUT x limit. Бюджет кончился - отдаем, что есть, как при обрезке по лимиту:
+    память и CPU не зависят от того, что прислал сайт. Раз в _YIELD_EVERY байт работы
+    отдаем ход циклу событий: распаковка не стопорит планировщик и API. Кусок из сети стоит
+    не меньше _FEED_COST (chunked по байту - это сотни тысяч событий h11), кусков - не больше
+    _MAX_CHUNKS."""
+
+    def __init__(self, layers: list[_Inflate], limit: int):
+        self.layers, self.limit = layers, limit
+        self.out = bytearray()
+        self.raw = 0
+        self.made = 0
+        self.used = 0
+        self.work = 0
+        self.chunks = 0
+        self.stop = False
+
+    async def feed(self, data: bytes) -> bool:
+        """True - читать дальше незачем."""
+        view = memoryview(data)[: self.limit - self.raw]
+        self.raw += len(view)
+        self.chunks += 1
+        await self._push(0, view)
+        if self.raw >= self.limit or self.chunks >= _MAX_CHUNKS:
+            self.stop = True
+        await self._spend(_FEED_COST + len(view))
+        return self.stop
+
+    async def _spend(self, work: int) -> None:
+        self.work += work
+        if self.work >= _YIELD_EVERY:
+            self.work = 0
+            await asyncio.sleep(0)
+
+    async def _push(self, i: int, data: memoryview) -> None:
+        if i == len(self.layers):
+            self.out += data[: self.limit - len(self.out)]
+            self.stop = self.stop or len(self.out) >= self.limit
+            return
+        layer = self.layers[i]
+        pos = 0
+        while not self.stop:
+            chunk, used = layer.take(data[pos:])
+            pos += used
+            self.used += used
+            self.made += len(chunk)
+            if chunk:
+                await self._push(i + 1, memoryview(chunk))
+            stuck = pos < len(data) and not (used or chunk)  # zlib не двинулся - не крутимся
+            if (layer.done or stuck or self.made > _INFLATE_BUDGET * self.limit
+                    or self.used > _INFLATE_INPUT * self.limit):
+                self.stop = True
+            await self._spend(used + len(chunk))
+            # полный шаг - в zlib может остаться придержанный выход, спрашиваем еще
+            if pos >= len(data) and len(chunk) < _INFLATE_STEP:
+                return
+
+
+async def _read_body(resp: httpx.Response, limit: int = _MAX_BODY) -> bytes | bytearray:
+    """Тело ответа: не больше limit распакованных байт, дальше не качаем.
+
+    Распаковка своя: httpx распаковывает пришедший кусок целиком, и 64 КБ gzip из нулей
+    дают 64 МБ, а двойной gzip - гигабайты в памяти планировщика."""
+    if resp.is_stream_consumed:  # ответ уже в памяти (MockTransport)
+        return resp.content[:limit]
+    layers = []
+    for enc in reversed(resp.headers.get_list("content-encoding", split_commas=True)):
+        enc = enc.strip().lower()
+        if enc in ("gzip", "deflate"):  # прочее httpx без brotli/zstandard тоже отдает как есть
+            layers.append(_Inflate(enc == "gzip"))
+    if len(layers) > _MAX_LAYERS:
+        raise httpx.DecodingError(f"слишком много слоев сжатия: {len(layers)}")
+    body = _Body(layers, limit)
+    async with contextlib.aclosing(resp.aiter_raw()) as raw:
+        async for chunk in raw:
+            if await body.feed(chunk):
+                return body.out  # без лишней копии: потребители только декодируют и меряют
+    await body.feed(b"")  # хвост, придержанный zlib
+    return body.out
+
+
+# текстовые кодеки, которые декодировать страницу нельзя: punycode квадратичен (2 МБ - больше
+# минуты синхронно), idna на нем же и бросает UnicodeError. Остальные текстовые кодеки на 2 МБ
+# укладываются в доли секунды (замерено по всем кодекам encodings)
+_SLOW_CODECS = frozenset({"punycode", "idna"})
+
+
+def _body_text(resp: httpx.Response, body: bytes | bytearray) -> str:
+    """Как resp.text: кодировка из Content-Type, иначе utf-8, битые байты заменяются.
+    Не текстовый кодек (rot13, base64, zlib) или _SLOW_CODECS - как utf-8."""
+    enc = resp.encoding or "utf-8"
+    try:
+        info = codecs.lookup(enc)
+        if info._is_text_encoding and info.name not in _SLOW_CODECS:
+            return body.decode(enc, errors="replace")
+    except (LookupError, UnicodeError):
+        pass
+    return body.decode("utf-8", errors="replace")
+
+
+async def _send(client: httpx.AsyncClient, request: httpx.Request) -> httpx.Response:
+    """client.send с редиректами, но без чтения тела 3xx: httpx при follow_redirects делает
+    aread() каждому промежуточному ответу, и бомба в теле редиректа раскрылась бы целиком.
+    Хуки запроса (guard, credential_origin_hook, очередь) client.send вызывает на каждом хопе."""
+    history: list[httpx.Response] = []
+    while True:
+        resp = await client.send(request, stream=True, follow_redirects=False)
+        resp.history = list(history)
+        if resp.next_request is None:
+            return resp
+        await resp.aclose()
+        history.append(resp)
+        request = resp.next_request
+        if len(history) > client.max_redirects:
+            raise httpx.TooManyRedirects("Exceeded maximum allowed redirects.", request=request)
+
+
+async def _fetch(client: httpx.AsyncClient, method: str, url: str, limit: int = _MAX_BODY,
+                 **kw) -> tuple[httpx.Response, bytes | bytearray]:
+    """Запрос с редиректами и тело не больше limit распакованных байт; ответ закрыт."""
+    resp = await _send(client, client.build_request(method, url, **kw))
+    try:
+        return resp, await _read_body(resp, limit)
+    finally:
+        await resp.aclose()
+
+
+class TotalTimeout(httpx.TimeoutException):
+    """Истек общий срок запроса (_Deadline), а не таймаут одной операции httpx."""
+
+    def __init__(self, seconds: float):
+        super().__init__(f"истекло время ожидания: ответ не пришел целиком за {_secs(seconds * 1000)}")
+        self.seconds = seconds
+
+
+class _Budget:
+    """Срок всего монитора (within_budget). Пока хоть один его запрос стоит в очереди к origin
+    (check_dispatch.request_gate), срок стоит: очередь - чужая нагрузка, а не медленный сайт.
+    Счетчик - в самом объекте: дочерние задачи gather видят копию контекста, но тот же объект."""
+
+    def __init__(self, cm: asyncio.Timeout):
+        self.cm = cm
+        self.queued = 0
+        self.left: float | None = None
+        # запросов монитора разом - не больше квоты ворот: иначе он стоял бы в очереди сам за собой
+        self.slots = asyncio.Semaphore(check_dispatch._ORIGIN_CONCURRENCY)
+
+    def pause(self) -> None:
+        self.queued += 1
+        if self.queued == 1 and not self.cm.expired() and (when := self.cm.when()) is not None:
+            self.left = when - asyncio.get_running_loop().time()
+            self.cm.reschedule(None)
+
+    def resume(self) -> None:
+        self.queued -= 1
+        if self.queued == 0 and self.left is not None and not self.cm.expired():
+            self.cm.reschedule(asyncio.get_running_loop().time() + self.left)
+            self.left = None
+
+
+_MONITOR: ContextVar[_Budget | None] = ContextVar("monitor_budget", default=None)
+
+
+@contextlib.asynccontextmanager
+async def _own_turn(mon: _Budget | None):
+    """Место в квоте монитора. Ожидание своей очереди, как и очереди ворот, в задержку сайта
+    не входит (check_dispatch.probe_clock)."""
+    if mon is None:
+        yield
+        return
+    started = time.perf_counter()
+    async with mon.slots:
+        check_dispatch.add_queue_wait(time.perf_counter() - started)
+        yield
+
+
+async def _gather_all(coros) -> list:
+    """gather, но при исключении соседи отменяются, а не висят до своего срока."""
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
+
+class _Deadline:
+    """Общий срок запроса с редиректами и телом; по истечении - httpx.TimeoutException,
+    как у обычного таймаута. Очередь к origin (check_dispatch.request_gate) в срок не входит:
+    pause/resume - хуки до и после ворот."""
+
+    def __init__(self, seconds: float):
+        self.seconds = seconds
+        self.left = seconds
+        self._cm: asyncio.Timeout | None = None
+        self._since: float | None = None
+        self._monitor: _Budget | None = None
+
+    async def __aenter__(self):
+        self._cm = asyncio.timeout(None)
+        await self._cm.__aenter__()
+        self._run()
+        return self
+
+    async def __aexit__(self, et, exc, tb):
+        try:
+            return await self._cm.__aexit__(et, exc, tb)
+        except TimeoutError as err:
+            raise TotalTimeout(self.seconds) from err
+
+    def _run(self) -> None:
+        self._since = asyncio.get_running_loop().time()
+        self._cm.reschedule(self._since + self.left)
+
+    async def pause(self, _request) -> None:
+        if self._since is not None:
+            self.left -= asyncio.get_running_loop().time() - self._since
+            self._since = None
+        self._cm.reschedule(None)
+        self._monitor = _MONITOR.get()
+        if self._monitor is not None:
+            self._monitor.pause()
+
+    async def resume(self, _request) -> None:
+        if self._monitor is not None:
+            self._monitor.resume()
+            self._monitor = None
+        self._run()
 
 
 def _with_phases(out: CheckOutcome, phases: dict | None, one_ip: bool = False) -> CheckOutcome:
@@ -1046,24 +1366,41 @@ async def _run_http(
     verify = not getattr(check, "ignore_tls", False)  # игнор TLS-ошибок (самоподпис./mismatch)
     allow_internal = _allows_internal(check)
 
-    async def attempt(u: str, extensions: dict | None = None, *, address: str | None = None):
-        headers = {"User-Agent": _USER_AGENT, **custom_headers}
+    async def attempt(u: str, extensions: dict | None = None, *, address: str | None = None,
+                      path: bool = False):
+        # свой Accept-Encoding пользователя в любом регистре заменяет наш, а не дублирует
+        headers = httpx.Headers({"User-Agent": _USER_AGENT, "Accept-Encoding": _ACCEPT_ENCODING})
+        headers.update(custom_headers)
         transport = net_guard.MonitorTransport(verify, allow_internal, timeout, address) if proxy is None else None
         hooks = [net_guard.credential_origin_hook(custom_headers)]
         if proxy:
             hooks.append(net_guard.request_hook(allow_internal=allow_internal))
+        deadline = _Deadline(timeout * _DEADLINE_TIMEOUTS)
         gate = check_dispatch.request_gate()
+        mon = _MONITOR.get() if gate is not None else None
         if gate is not None:
-            hooks.append(gate.before_send)
+            async def queue(request: httpx.Request) -> None:
+                # одним хуком: отмена в очереди все равно снимает паузу сроков
+                await deadline.pause(request)
+                try:
+                    await gate.before_send(request)
+                finally:
+                    await deadline.resume(request)
+
+            hooks.append(queue)
         try:
-            async with httpx.AsyncClient(
-                timeout=timeout, follow_redirects=True, proxy=proxy,
-                headers=headers, auth=auth, verify=verify, transport=transport, trust_env=False,
-                event_hooks={"request": hooks},
-            ) as client:
-                resp = await client.request(method, u, extensions=extensions or {})
-                text = resp.text[:_MAX_BODY] if (check.keyword_up or check.keyword_down) else ""
-                return resp, text
+            async with _own_turn(mon):
+                async with deadline, httpx.AsyncClient(
+                    timeout=timeout, follow_redirects=False, proxy=proxy,
+                    headers=headers, auth=auth, verify=verify, transport=transport, trust_env=False,
+                    event_hooks={"request": hooks},
+                ) as client:
+                    # тело читаем и без ключевого слова: latency, как и раньше, - до конца
+                    # ответа (но не дальше _MAX_BODY). Путям ключевое слово не нужно (eval_parts)
+                    resp, body = await _fetch(client, method, u, _PATH_BODY if path else _MAX_BODY,
+                                              extensions=extensions or {})
+            text = _body_text(resp, body) if not path and (check.keyword_up or check.keyword_down) else ""
+            return resp, text
         finally:
             if gate is not None:
                 gate.close()
@@ -1134,13 +1471,13 @@ async def _check_paths(check, main: CheckOutcome, base: str, attempt, degraded_m
     async def one(path: str) -> CheckOutcome:
         t0 = check_dispatch.probe_clock()
         try:
-            r, _ = await attempt(path_url(base, path))
+            r, _ = await attempt(path_url(base, path), path=True)
         except httpx.HTTPError as exc:
             return CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))
         lat = int((check_dispatch.probe_clock() - t0) * 1000)
         return eval_parts(check, r.status_code, True, False, lat, degraded_ms)
 
-    got = await asyncio.gather(*(one(x) for x in paths))
+    got = await _gather_all(one(x) for x in paths)
     return combine_paths(main, list(zip(paths, got)))
 
 
@@ -1322,6 +1659,49 @@ async def _run_dns(check) -> CheckOutcome:
 _RUNNERS = {"http": _run_http, "tcp_port": _run_tcp_port, "cert": _run_cert, "push": _run_push, "dns": _run_dns}
 
 
+def _budget_secs(timeout_ms: int | None, attempts: int, delay: float = 0.0, check=None) -> float:
+    """Срок монитора: на попытку _CHECK_TIMEOUTS таймаутов плюс волны собственной квоты
+    (пути и "все адреса" идут по _ORIGIN_CONCURRENCY разом, каждая волна - срок запроса), плюс
+    паузы между повторами. Живой, но медленный сайт с путями получает свой вердикт, а не срок."""
+    t = max(timeout_ms or 10000, 1000) / 1000
+    one = _CHECK_TIMEOUTS * t
+    if check is not None:
+        q, req = check_dispatch._ORIGIN_CONCURRENCY, _DEADLINE_TIMEOUTS * t
+        if n := len(extra_paths_of(check)):
+            one += math.ceil(n / q) * req
+        if getattr(check, "check_all_ips", False):
+            one += (math.ceil(_MAX_IPS / q) - 1) * req
+    return min(_CHECK_BUDGET_MAX, attempts * one + (attempts - 1) * delay)
+
+
+async def within_budget(run, timeout_ms: int | None, attempts: int,
+                        done: list[CheckOutcome] | None = None, *, delay: float = 0.0,
+                        check=None) -> CheckOutcome:
+    """Весь монитор - не дольше _budget_secs: срок запроса (_Deadline) не покрывает DNS,
+    https->http, пути и повторы. Очередь к origin в
+    срок не входит (_Budget), но жесткий потолок - _HARD_BUDGETS сроков вместе с очередью - не
+    ставится на паузу никогда. По истечении недоделанное отменено, а результат - последняя
+    завершенная попытка из done (с фазами, адресами, путями) или обычный down по таймауту."""
+    secs = _budget_secs(timeout_ms, attempts, delay, check)
+    hard = asyncio.timeout(secs * _HARD_BUDGETS)
+    cm = asyncio.timeout(secs)
+    token = _MONITOR.set(_Budget(cm))
+    try:
+        async with hard, cm:
+            return await run
+    except TimeoutError:
+        if not (cm.expired() or hard.expired()):
+            raise
+        took = _secs(secs * 1000) if cm.expired() else f"{_secs(secs * _HARD_BUDGETS * 1000)} с очередью"
+        if done:
+            out = done[-1]
+            out.message = _short(f"{out.message} · повтор прерван: проверка не уложилась в {took}")
+            return out
+        return CheckOutcome("down", message=f"таймаут: истекло время ожидания, проверка не уложилась в {took}")
+    finally:
+        _MONITOR.reset(token)
+
+
 async def _run_once(check) -> CheckOutcome:
     runner = _RUNNERS.get(check.type)
     if runner is None:
@@ -1340,7 +1720,7 @@ async def probe_via_proxy(check, proxy_url: str) -> CheckOutcome:
     бразильский через KZ-прокси) не мигал ложным down."""
     if not proxy_url:  # прямая проверка — без послаблений
         try:
-            return await _run_http(check)
+            return await within_budget(_run_http(check), check.timeout_ms, 1, check=check)
         except Exception as exc:  # noqa: BLE001
             return CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))
 
@@ -1349,19 +1729,26 @@ async def probe_via_proxy(check, proxy_url: str) -> CheckOutcome:
     timeout_ms = check.timeout_ms + max(s.location_timeout_extra_ms, 0)  # запас на даль/прокси
     attempts = 1 + max(s.location_retries, 0)
     delay = max(s.check_retry_delay_ms, 0) / 1000.0
-    outcome = CheckOutcome("down", message="проба не выполнилась")
-    for i in range(attempts):
-        try:
-            outcome = await _run_http(
-                check, proxy=proxy_url, degraded_ms=degraded, timeout_ms=timeout_ms
-            )
-        except Exception as exc:  # noqa: BLE001
-            outcome = CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))
-        if outcome.status in ("up", "degraded"):
-            return outcome  # живой (пусть и медленный) — не ретраим
-        if i + 1 < attempts:
-            await asyncio.sleep(delay)
-    return outcome
+
+    done: list[CheckOutcome] = []
+
+    async def tries() -> CheckOutcome:
+        outcome = CheckOutcome("down", message="проба не выполнилась")
+        for i in range(attempts):
+            try:
+                outcome = await _run_http(
+                    check, proxy=proxy_url, degraded_ms=degraded, timeout_ms=timeout_ms
+                )
+            except Exception as exc:  # noqa: BLE001
+                outcome = CheckOutcome("down", message=humanize_error(str(exc) or type(exc).__name__))
+            done.append(outcome)
+            if outcome.status in ("up", "degraded"):
+                return outcome  # живой (пусть и медленный) — не ретраим
+            if i + 1 < attempts:
+                await asyncio.sleep(delay)
+        return outcome
+
+    return await within_budget(tries(), timeout_ms, attempts, done, delay=delay, check=check)
 
 
 # нейтральные лёгкие эндпоинты для проверки, что через прокси идёт трафик
@@ -1426,13 +1813,22 @@ async def run_check(check) -> CheckOutcome:
     Так одиночный сетевой блип не приводит к ложному инциденту/алерту."""
     attempts = 1 + max(getattr(check, "retries", 0) or 0, 0)
     delay = max(get_settings().check_retry_delay_ms, 0) / 1000.0
-    outcome = await _run_once(check)
-    for _ in range(1, attempts):
-        if outcome.status == "up":
-            return outcome
-        await asyncio.sleep(delay)
+
+    done: list[CheckOutcome] = []
+
+    async def tries() -> CheckOutcome:
         outcome = await _run_once(check)
-    return outcome
+        done.append(outcome)
+        for _ in range(1, attempts):
+            if outcome.status == "up":
+                return outcome
+            await asyncio.sleep(delay)
+            outcome = await _run_once(check)
+            done.append(outcome)
+        return outcome
+
+    return await within_budget(tries(), getattr(check, "timeout_ms", None), attempts, done,
+                               delay=delay, check=check)
 
 
 def _short(s: str) -> str:

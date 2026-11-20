@@ -79,6 +79,11 @@ def probe_clock() -> float:
     return time.perf_counter() - _QUEUE_WAIT.get()
 
 
+def add_queue_wait(seconds: float) -> None:
+    """Another local wait (a monitor waiting for its own request quota) to exclude from latency."""
+    _QUEUE_WAIT.set(_QUEUE_WAIT.get() + seconds)
+
+
 class RequestGate:
     """Hold one permit until HTTPX has read the response or starts a redirect."""
 

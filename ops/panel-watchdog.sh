@@ -18,7 +18,7 @@
 #
 # INSTALLATION (on the panel host, as root):
 #   install -D -m755 ops/panel-watchdog.sh /lib65/scripts/kervax-panel-watchdog.sh
-#   install -d -m700 /lib65/kervax
+#   mkdir -p /lib65/kervax   # not install -d -m...: the directory may be shared with agent helpers
 #   # adjust HB below to your data path (default /root/kervax/data/heartbeat)
 # The state directory (STATE below) must exist: without it the state is never saved, every run
 # starts from zero strikes, so with STRIKES=2 an alarm (and the recovery) is never sent.

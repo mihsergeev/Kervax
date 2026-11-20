@@ -65,10 +65,6 @@ async def test_run_http_https_fallback_to_http(monkeypatch):
     # домен без схемы → пробуем https, при ошибке подключения фолбэк на http
     calls: list[str] = []
 
-    class FakeResp:
-        status_code = 200
-        text = ""
-
     class FakeClient:
         def __init__(self, **kw):
             pass
@@ -79,12 +75,15 @@ async def test_run_http_https_fallback_to_http(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def request(self, method, url, **kw):
+        def build_request(self, method, url, **kw):
+            return url
+
+        async def send(self, url, **kw):
             calls.append(url)
             if url.startswith("https://"):
                 # реальный кейс http-only сайта: TCP есть, но https рвёт соединение
                 raise httpx.RemoteProtocolError("Server disconnected")
-            return FakeResp()
+            return httpx.Response(200)
 
     monkeypatch.setattr("app.checks.httpx.AsyncClient", FakeClient)
     check = types.SimpleNamespace(
@@ -113,10 +112,6 @@ async def test_run_http_basic_auth_passed(monkeypatch):
     (сайт за 401 начинает отвечать 200)."""
     seen: dict = {}
 
-    class FakeResp:
-        status_code = 200
-        text = ""
-
     class FakeClient:
         def __init__(self, **kw):
             seen.update(kw)
@@ -127,8 +122,11 @@ async def test_run_http_basic_auth_passed(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def request(self, method, url, **kw):
-            return FakeResp()
+        def build_request(self, method, url, **kw):
+            return url
+
+        async def send(self, url, **kw):
+            return httpx.Response(200)
 
     monkeypatch.setattr("app.checks.httpx.AsyncClient", FakeClient)
     check = types.SimpleNamespace(
@@ -161,11 +159,6 @@ async def test_run_http_all_ips_aggregates(monkeypatch):
     с указанием IP, при этом Host/SNI = домен (TLS по домену)."""
     seen: list[dict] = []
 
-    class FakeResp:
-        def __init__(self, code):
-            self.status_code = code
-            self.text = ""
-
     class FakeClient:
         def __init__(self, **kw):
             self.address = kw["transport"].address
@@ -176,10 +169,13 @@ async def test_run_http_all_ips_aggregates(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def request(self, method, url, **kw):
+        def build_request(self, method, url, **kw):
+            return url
+
+        async def send(self, url, **kw):
             seen.append({"url": url, "address": self.address})
             # 10.0.0.2 — мёртвый бэкенд (500), остальные 200
-            return FakeResp(500 if self.address == "10.0.0.2" else 200)
+            return httpx.Response(500 if self.address == "10.0.0.2" else 200)
 
     async def fake_resolve(host, port):
         return ["10.0.0.1", "10.0.0.2"]
@@ -561,10 +557,6 @@ async def test_run_http_custom_headers(monkeypatch):
     """http_headers (JSON) → уходят в запрос (напр. x-application-token для 401)."""
     seen: dict = {}
 
-    class FakeResp:
-        status_code = 200
-        text = ""
-
     class FakeClient:
         def __init__(self, **kw):
             seen.update(kw)
@@ -575,8 +567,11 @@ async def test_run_http_custom_headers(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def request(self, method, url, **kw):
-            return FakeResp()
+        def build_request(self, method, url, **kw):
+            return url
+
+        async def send(self, url, **kw):
+            return httpx.Response(200)
 
     monkeypatch.setattr("app.checks.httpx.AsyncClient", FakeClient)
     check = types.SimpleNamespace(

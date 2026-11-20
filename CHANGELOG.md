@@ -4,9 +4,17 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.147] - 2026-11-20
+
+- Bound HTTP probes against hostile sites. Response bodies are read as a stream up to 2 MB after decompression, redirect bodies are never read, gzip and deflate are decoded with input and output limits (at most two layers), and the probe yields to other work while decoding. A keyword must appear within the first 2 MB, and latency is measured up to that point.
+- Limit how long a probe can take. A request with its redirects and body must finish within twice the monitor timeout, and a whole monitor run with retries, extra paths and all addresses has its own budget of at most 5 minutes. When a retry does not fit, the last finished attempt is reported.
+- Check up to eight addresses in parallel with "Check all IPs" and say how many were checked. Extra paths read at most 64 KB of the body.
+- Search pages with an unusable charset (such as idna or punycode) as UTF-8 instead of failing, and cap the tamper scan of a site. Pages cut at the 2 MB limit are not reported as emptied.
+- Correct the 1.8.146 watchdog note: create the state directory with `mkdir -p /lib65/kervax` and do not change the mode of an existing directory.
+
 ## [1.8.146] - 2026-11-20
 
-- Harden the host watchdog against heartbeat contents. Numbers are accepted only as plain digits, the heartbeat is read once without following symlinks, alert channel values can no longer become curl options, and a heartbeat from the future raises an alarm. Reinstall `ops/panel-watchdog.sh` on the panel host and create its state directory with `install -d -m700 /lib65/kervax`: without it the watchdog never sent an alarm when `KERVAX_WD_STRIKES` was 2 or more.
+- Harden the host watchdog against heartbeat contents. Numbers are accepted only as plain digits, the heartbeat is read once without following symlinks, alert channel values can no longer become curl options, and a heartbeat from the future raises an alarm. Reinstall `ops/panel-watchdog.sh` on the panel host and make sure its state directory exists with `mkdir -p /lib65/kervax` (do not change the mode of an existing directory, agent helpers may live there): without it the watchdog never sent an alarm when `KERVAX_WD_STRIKES` was 2 or more.
 - Reject line breaks and control characters in alert channel settings, require full `http://` or `https://` addresses for the webhook and the Bot API, and keep the bot token and chat ID free of spaces. Invalid values already stored are left out of the heartbeat.
 
 ## [1.8.145] - 2026-11-20

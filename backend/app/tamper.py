@@ -437,7 +437,9 @@ def observe(state: dict | None, obs: dict, now: datetime, fleet: set[str], versi
         signed = set((((st.get("signs") or {}).get("dom") or {}).get("list")) or {})
         base = _take_js(base, obs, signed)
         b_size, b_title = int(base.get("size") or 0), base.get("title") or ""
-        if (b_size >= 2048 and obs["size"] * 5 <= b_size) or (b_title and not obs["title"]):
+        # тело обрезано по лимиту чтения - настоящий размер неизвестен, с базой не сравниваем
+        cut = obs["size"] >= _MAX_BODY
+        if (not cut and b_size >= 2048 and obs["size"] * 5 <= b_size) or (b_title and not obs["title"]):
             seen["empty"] = {"size": obs["size"], "was": b_size, "title": b_title}
         elif b_title and obs["title"] and norm_title(obs["title"]) != norm_title(b_title):
             seen["title"] = {"title": obs["title"], "was": b_title}
@@ -449,7 +451,8 @@ def observe(state: dict | None, obs: dict, now: datetime, fleet: set[str], versi
     if bot:
         diff_title = norm_title(bot["title"]) != norm_title(obs["title"])
         big, small = max(bot["size"], obs["size"]), max(min(bot["size"], obs["size"]), 1)
-        diff_size = big >= 2048 and big >= small * 3
+        # меньшая страница обрезана по лимиту чтения - настоящей разницы не знаем
+        diff_size = big >= 2048 and big >= small * 3 and small < _MAX_BODY
         if (diff_title or diff_size) and norm_title(bot["title"]) != (st.get("bot_ok") or "\0"):
             seen["bot"] = {"title": bot["title"], "size": bot["size"], "human": obs["size"]}
     # отложенная пустая главная не подтягивает базу размера: через 7 дней признак вернется
@@ -785,30 +788,54 @@ def accept(state: dict, key: str, arg: str, now: datetime, mode: str = "") -> di
 # ---------- сеть ----------
 
 async def _get(client: httpx.AsyncClient, url: str, ua: str, limit: int = _MAX_BODY):
-    r = await client.get(url, headers={"User-Agent": ua})
-    return r, r.text[:limit] if r.content else ""
+    """(ответ, текст, размер тела): редиректы без чтения их тел, тело - не больше limit
+    распакованных байт, весь запрос в общий срок, как у монитора (checks._fetch, checks._Deadline)."""
+    async with checks_exec._Deadline(_TIMEOUT * checks_exec._DEADLINE_TIMEOUTS):
+        r, body = await checks_exec._fetch(client, "GET", url, limit, headers={"User-Agent": ua})
+    return r, checks_exec._body_text(r, body), len(body)
 
 
 def _is_html(r: httpx.Response) -> bool:
     return "html" in r.headers.get("content-type", "").lower()
 
 
+_SCAN_TIMEOUT = "не открылась: истекло время ожидания"
+
+
 async def scan(check) -> dict:
-    """Разбор монитора: {"obs": ...} или {"err": ...}."""
+    """Разбор монитора: {"obs": ...} или {"err": ...}. Весь скан (страница, до _MAX_JS скриптов,
+    бот) - в общий срок: не уложился - как сетевая ошибка скана, без признаков."""
+    cm = asyncio.timeout(min(120.0, 3 * _TIMEOUT))
+    try:
+        async with cm:
+            return await _scan(check)
+    except TimeoutError:
+        if not cm.expired():
+            raise
+        return {"err": _SCAN_TIMEOUT}
+
+
+async def _scan(check) -> dict:
     raw = check.target.strip()
     url = raw if urlparse(raw).scheme else "https://" + raw
     auth = (httpx.BasicAuth(check.auth_user or "", check.auth_pass or "")
             if getattr(check, "auth_method", "") == "basic" else None)
     headers = checks_exec._parse_headers(getattr(check, "http_headers", "") or "")
+    # распаковываем только то, что умеем с потолком; свой Accept-Encoding монитора важнее
+    client_headers = httpx.Headers({"Accept-Encoding": checks_exec._ACCEPT_ENCODING})
+    client_headers.update(headers)
     # те же запреты адресов, что у монитора: страница и ее JS не уводят панель во внутреннюю сеть
     transport = net_guard.MonitorTransport(
         not getattr(check, "ignore_tls", False), checks_exec._allows_internal(check), _TIMEOUT
     )
-    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True, auth=auth, headers=headers,
+    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False, auth=auth,
+                                 headers=client_headers,
                                  transport=transport, trust_env=False,
                                  event_hooks={"request": [net_guard.credential_origin_hook(headers)]}) as client:
         try:
-            r, text = await _get(client, url, checks_exec._USER_AGENT)
+            r, text, size = await _get(client, url, checks_exec._USER_AGENT)
+        except httpx.TimeoutException:
+            return {"err": _SCAN_TIMEOUT}
         except httpx.HTTPError as exc:
             return {"err": f"не открылась: {type(exc).__name__}"}
         final = str(r.url)
@@ -827,7 +854,7 @@ async def scan(check) -> dict:
         js_read: dict[str, list[str]] = {}
         for js in page["js"]:
             try:
-                jr, jt = await _get(client, js, checks_exec._USER_AGENT, _MAX_JS_BODY)
+                jr, jt, _ = await _get(client, js, checks_exec._USER_AGENT, _MAX_JS_BODY)
             except httpx.HTTPError:
                 continue
             if jr.status_code != 200:
@@ -838,15 +865,15 @@ async def scan(check) -> dict:
                 domains.setdefault(d, path)
         bot = None
         try:
-            br, bt = await _get(client, url, _BOT_UA)
+            br, bt, bsize = await _get(client, url, _BOT_UA)
             # Cloudflare и др. режут поддельный Googlebot (403, проверка): это не подмена
             if 200 <= br.status_code < 300 and _is_html(br):
                 bp = parse_page(bt, str(br.url))
                 if wall(br.headers, br.headers.get_list("set-cookie"), bt, bp) is None:
-                    bot = {"size": len(br.content), "title": bp["title"]}
+                    bot = {"size": bsize, "title": bp["title"]}
         except httpx.HTTPError:
             pass
-        return {"obs": {"size": len(r.content), "title": page["title"], "domains": domains, "bot": bot,
+        return {"obs": {"size": size, "title": page["title"], "domains": domains, "bot": bot,
                         "engine": engine(r.headers, page["generator"], text),
                         "js": js_read, "js_page": list(dict.fromkeys(urlparse(j).path or j for j in page["js"]))}}
 
