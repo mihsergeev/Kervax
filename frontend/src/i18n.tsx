@@ -5594,6 +5594,15 @@ const EN: Record<string, string> = {
     'nowhere',
   'Webhook получает все алерты, без деления по группам.':
     'The webhook gets all alerts, without splitting by group.',
+  // отказы PUT /api/alerts (backend/app/api/alerts.py _channel_error)
+  'Токен, Chat ID и адреса каналов не должны содержать переводы строк и управляющие символы':
+    'The token, chat ID and channel addresses must not contain line breaks or control characters',
+  'Токен бота и Chat ID пишутся без пробелов, с минуса начинается только числовой Chat ID':
+    'The bot token and chat ID must not contain spaces, and only a numeric chat ID may start with a minus',
+  'URL вебхука должен быть полным адресом http:// или https:// без пробелов':
+    'The webhook URL must be a full http:// or https:// address without spaces',
+  'Адрес API должен быть полным адресом http:// или https:// без пробелов':
+    'The API address must be a full http:// or https:// address without spaces',
   'Чат для групп':
     'Group chat',
   '+ Чат для групп':

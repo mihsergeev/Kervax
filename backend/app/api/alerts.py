@@ -1,5 +1,7 @@
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -7,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from sqlalchemy import func, or_, select, update
 
-from app import alerts, audit, collector, notification_store, panel_errors, settings_store, tg_bot
+from app import alerts, audit, collector, heartbeat, notification_store, panel_errors, settings_store, tg_bot
 from app.config import get_settings
 from app.deps import AdminUser, SessionDep
 from app.models import AuditLog, Check, NotificationDelivery, NotificationEvent, Server, User
@@ -165,11 +167,44 @@ async def get_alerts(_: AdminUser, session: SessionDep) -> AlertConfigOut:
     return await _current(session, get_settings())
 
 
+# Креды каналов уходят в пульс, а его читает root-скрипт сторожа (ops/panel-watchdog.sh): перевод
+# строки дописал бы туда свои строки, а адрес вида "-K файл" curl принял бы за ключ. Токен и чат
+# сторож берет по тем же правилам: что он молча не пошлет, здесь не сохраняется
+
+
+def _http_url(value: str) -> bool:
+    """Полный адрес http(s) с хостом и без пробелов."""
+    if not value.startswith(("http://", "https://")) or any(c.isspace() for c in value):
+        return False
+    try:
+        return bool(urlsplit(value).hostname)
+    except ValueError:
+        return False
+
+
+def _channel_error(body: AlertConfigIn) -> str:
+    """Почему значения каналов нельзя сохранить; пусто - можно. Проверяем то, что сохранится."""
+    values = [v.strip() for v in (body.telegram_token, body.telegram_chat, body.telegram_api, body.webhook)]
+    if any(heartbeat.CONTROL_CHARS.search(v) for v in values):
+        return "Токен, Chat ID и адреса каналов не должны содержать переводы строк и управляющие символы"
+    token, chat = values[0], values[1]
+    if (any(c.isspace() for c in token + chat) or token.startswith("-")
+            or (chat.startswith("-") and not re.fullmatch(r"-[0-9]+", chat))):
+        return "Токен бота и Chat ID пишутся без пробелов, с минуса начинается только числовой Chat ID"
+    if values[3] and not _http_url(values[3]):
+        return "URL вебхука должен быть полным адресом http:// или https:// без пробелов"
+    if values[2] and not _http_url(values[2]):
+        return "Адрес API должен быть полным адресом http:// или https:// без пробелов"
+    return ""
+
+
 @router.put("", response_model=AlertConfigOut)
 async def put_alerts(
     body: AlertConfigIn, user: AdminUser, session: SessionDep
 ) -> AlertConfigOut:
     settings = get_settings()
+    if err := _channel_error(body):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
     if body.tz.strip():
         try:
             ZoneInfo(body.tz.strip())

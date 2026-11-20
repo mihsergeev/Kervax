@@ -10,6 +10,7 @@ import contextlib
 import contextvars
 import logging
 import os
+import re
 import tempfile
 import time
 
@@ -135,6 +136,20 @@ async def probe_alert_channel(cfg: dict) -> bool:
     return False
 
 
+# Креды каналов пульс пишет как есть, а читает его root-скрипт сторожа: перевод строки дописал бы
+# в файл свои строки, а адрес не http(s) ("-K файл") curl принял бы за ключ. API такое не пропускает,
+# но старые значения в базе и восстановление из бэкапа идут мимо него - небезопасное пишем пустым.
+# Та же регулярка в отказе PUT /api/alerts
+CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _hb_value(value: object, url: bool = False) -> str:
+    value = str(value or "")
+    if CONTROL_CHARS.search(value) or (url and value and not value.startswith(("http://", "https://"))):
+        return ""
+    return value
+
+
 async def write_heartbeat(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings,
     cfg: dict, alerts_ok: bool,
@@ -145,10 +160,10 @@ async def write_heartbeat(
         lines = [
             f"ts={int(time.time())}",
             f"alerts_ok={1 if alerts_ok else 0}",
-            f"tg_token={cfg.get('telegram_token', '')}",
-            f"tg_chat={cfg.get('telegram_chat', '')}",
-            f"tg_api={cfg.get('telegram_api', '')}",
-            f"webhook={cfg.get('webhook', '')}",
+            f"tg_token={_hb_value(cfg.get('telegram_token'))}",
+            f"tg_chat={_hb_value(cfg.get('telegram_chat'))}",
+            f"tg_api={_hb_value(cfg.get('telegram_api'), url=True)}",
+            f"webhook={_hb_value(cfg.get('webhook'), url=True)}",
             f"version={settings.version}",
             f"panel={settings.panel_url}",  # чтобы watchdog назвал КОНКРЕТНУЮ панель
             # начало последнего тика (0 - планировщик выключен или еще не начал) и когда он повис

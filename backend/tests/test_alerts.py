@@ -1,3 +1,5 @@
+import pytest
+
 from app import alerts
 
 
@@ -154,3 +156,58 @@ def test_merge_storm_same_failure_only():
     assert str(m).startswith("⚠️⚙️ <b>35 серверов</b>\n<b>Упал x.service</b>\n")
     assert m.endswith("и еще 32") and m.ref.startswith("srv:0,1,2")
     assert alerts.full_text(m).count('<a href="https://kx/web-') == 30
+
+
+_CTRL_ERR = "Токен, Chat ID и адреса каналов не должны содержать переводы строк и управляющие символы"
+_TG_ERR = "Токен бота и Chat ID пишутся без пробелов, с минуса начинается только числовой Chat ID"
+_HOOK_ERR = "URL вебхука должен быть полным адресом http:// или https:// без пробелов"
+_API_ERR = "Адрес API должен быть полным адресом http:// или https:// без пробелов"
+
+
+@pytest.mark.parametrize("field,value,detail", [
+    ("webhook", "-K/data/heartbeat", _HOOK_ERR),
+    ("webhook", "hook.example.test/kervax", _HOOK_ERR),
+    ("webhook", "https://", _HOOK_ERR),
+    ("webhook", "https://hook.example.test/a b", _HOOK_ERR),
+    ("telegram_chat", "-1001234567890\nurl=file:///etc/passwd\noutput=/etc/cron.d/x", _CTRL_ERR),
+    ("telegram_token", "123456:TEST-token\x7f", _CTRL_ERR),
+    ("telegram_api", "file:///etc/passwd", _API_ERR),
+    ("telegram_api", "https://tg.example.test\r\n-K/data/heartbeat", _CTRL_ERR),
+    # что сторож молча не пошлет (ops/panel-watchdog.sh), панель не сохраняет
+    ("telegram_token", "-K/data/heartbeat", _TG_ERR),
+    ("telegram_token", "123456 TEST-token", _TG_ERR),
+    ("telegram_chat", "-100 123", _TG_ERR),
+    ("telegram_chat", "-K/data/heartbeat", _TG_ERR),
+    ("telegram_chat", "-", _TG_ERR),
+])
+async def test_put_alerts_rejects_unsafe_channel_values(client, auth_headers, field, value, detail):
+    """Креды каналов уходят в пульс, а его читает root-скрипт сторожа: перевод строки дописал бы
+    туда свои строки, а "-K файл" curl принял бы за ключ. Такое не сохраняется вовсе."""
+    good = {"telegram_token": "123456:TEST-token", "telegram_chat": "-1001234567890",
+            "telegram_api": "https://tg.example.test", "webhook": "https://hook.example.test/kervax"}
+    r = await client.put("/api/alerts", json=good, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    r = await client.put("/api/alerts", json={**good, field: value}, headers=auth_headers)
+    assert r.status_code == 400, r.text
+    assert r.json()["detail"] == detail
+    saved = (await client.get("/api/alerts", headers=auth_headers)).json()
+    assert {k: saved[k] for k in good} == good
+
+
+@pytest.mark.parametrize("chat,api", [("-1001234567890", "http://192.0.2.10:8081/"),
+                                      ("@alerts_example", "http://[2001:db8::1]:8081/")])
+async def test_put_alerts_accepts_channel_values(client, auth_headers, chat, api):
+    """Отрицательный id чата, @канал, свой адрес API с портом (и IPv6) и пустые значения - обычные
+    настройки."""
+    body = {"telegram_token": "123456:TEST-token", "telegram_chat": chat,
+            "telegram_api": api, "webhook": " https://hook.example.test/kervax?k=1 "}
+    r = await client.put("/api/alerts", json=body, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert got["telegram_chat"] == chat
+    assert got["telegram_api"] == api.rstrip("/")
+    assert got["webhook"] == "https://hook.example.test/kervax?k=1"
+    empty = dict.fromkeys(body, "")
+    r = await client.put("/api/alerts", json=empty, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["webhook"] == "" and r.json()["telegram_chat"] == ""

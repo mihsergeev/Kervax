@@ -88,3 +88,27 @@ async def test_heartbeat_probe_channel(monkeypatch):
 
     monkeypatch.setattr("app.heartbeat.httpx.AsyncClient", FailClient)
     assert await heartbeat.probe_alert_channel(cfg) is False
+
+
+async def test_heartbeat_drops_unsafe_channel_values(tmp_path):
+    """Пульс читает root-скрипт сторожа: старое значение в базе или из бэкапа мимо API не должно
+    дописать в файл свои строки или подсунуть curl ключ вместо адреса."""
+    from app import heartbeat
+    from app.config import Settings
+
+    data = tmp_path / "data"
+    settings = Settings(data_dir=str(data), panel_url="https://kervax.example.test")
+    cfg = {"telegram_token": "123456:TEST-token",
+           "telegram_chat": "-1001234567890\nurl=file:///etc/passwd\noutput=/etc/cron.d/x",
+           "telegram_api": "file:///etc/passwd", "webhook": f"-K{data / 'heartbeat'}"}
+    await heartbeat.write_heartbeat(None, settings, cfg, False)
+    lines = (data / "heartbeat").read_text().splitlines()
+    assert not [x for x in lines if x.startswith(("url=", "output="))]
+    assert {"tg_token=123456:TEST-token", "tg_chat=", "tg_api=", "webhook="} <= set(lines)
+
+    cfg = {"telegram_token": "123456:TEST-token", "telegram_chat": "-1001234567890",
+           "telegram_api": "http://192.0.2.10:8081", "webhook": "https://hook.example.test/kervax"}
+    await heartbeat.write_heartbeat(None, settings, cfg, True)
+    lines = (data / "heartbeat").read_text().splitlines()
+    assert {"tg_chat=-1001234567890", "tg_api=http://192.0.2.10:8081",
+            "webhook=https://hook.example.test/kervax"} <= set(lines)

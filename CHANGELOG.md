@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.146] - 2026-11-20
+
+- Harden the host watchdog against heartbeat contents. Numbers are accepted only as plain digits, the heartbeat is read once without following symlinks, alert channel values can no longer become curl options, and a heartbeat from the future raises an alarm. Reinstall `ops/panel-watchdog.sh` on the panel host and create its state directory with `install -d -m700 /lib65/kervax`: without it the watchdog never sent an alarm when `KERVAX_WD_STRIKES` was 2 or more.
+- Reject line breaks and control characters in alert channel settings, require full `http://` or `https://` addresses for the webhook and the Bot API, and keep the bot token and chat ID free of spaces. Invalid values already stored are left out of the heartbeat.
+
 ## [1.8.145] - 2026-11-20
 
 - Let administrators mark terminal notification delivery problems as reviewed without resending messages. Reviewed deliveries remain visible with the original outcome, attempts, and who reviewed them.
