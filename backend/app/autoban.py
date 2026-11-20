@@ -358,23 +358,117 @@ def _public(ip: str) -> str | None:
     return str(a)
 
 
-def panel_allow(cfg: dict, servers: list[Server], locations: list[Location]) -> list[tuple[str, str]]:
+def panel_allow(cfg: dict, servers: list[Server], locations: list[Location],
+                keep: frozenset[int] = frozenset()) -> list[tuple[str, str]]:
     """Белый список, который панель отдает нодам: свои записи пользователя, адреса всех серверов
-    этой панели (они ходят друг к другу проверками связи) и выходы локаций проверок."""
+    этой панели (они ходят друг к другу проверками связи) и выходы локаций проверок.
+
+    Адрес сервера - только тот, с которого агент пришел по доверенному пути (external_ip_ok:
+    проверка источника, адрес за своими прокси, GRE). Отчет агента (local_ip, ips) и самый левый
+    X-Forwarded-For список не расширяют: с украденным токеном одной ноды любые адреса попадали в
+    белый список автобана всего парка. IP сервера, адрес подключения и дополнительные источники
+    агента меняет и редактор своей группы, и проверкой они не подтверждены - их сюда не берем,
+    нужный адрес админ вписывает в свой список. keep - серверы, чей прежний адрес держим, пока
+    они не отчитались после старта (sync_allow)."""
     out: dict[str, str] = {}
     for x in cfg.get("allow") or []:
         out.setdefault(x["net"], x.get("label") or "панель")
     for s in servers:
-        rep = s.last_report or {}
-        for ip in {s.external_ip, s.agent_ip, s.local_ip, *(rep.get("ips") or [])}:
-            p = _public(ip) if isinstance(ip, str) else None
-            if p:
-                out.setdefault(norm_net(p), s.name[:40])
+        ok = s.external_ip_ok or s.id in keep
+        p = _public(s.external_ip) if ok and isinstance(s.external_ip, str) else None
+        if p:
+            out.setdefault(norm_net(p), s.name[:40])
     for loc in locations:
         p = _public(loc.exit_ip or "")
         if p:
             out.setdefault(norm_net(p), f"локация {loc.name}"[:40])
     return sorted(out.items())
+
+
+# Когда стартовал этот процесс. После миграции 0153 подтвержденных адресов нет ни у кого до первого
+# отчета: прежний адрес сервера держим в списке, пока он не отчитался после старта, не дольше SETTLE
+_STARTED = datetime.now(timezone.utc)
+SETTLE = timedelta(minutes=10)
+
+
+def _no_report_since_start(s: Server) -> bool:
+    seen = s.last_seen if s.last_seen is None or s.last_seen.tzinfo else s.last_seen.replace(tzinfo=timezone.utc)
+    return seen is None or seen < _STARTED
+
+
+def _pending(s: Server, now: datetime) -> bool:
+    """Прежний адрес держим только при первом старте после миграции (подтвержденного адреса у
+    сервера еще не было ни разу), а не после каждого рестарта."""
+    return (now - _STARTED < SETTLE and bool(s.enabled) and bool(s.external_ip) and not s.external_ip_ok
+            and not (s.confirmed_ip4 or s.confirmed_ip6) and _no_report_since_start(s))
+
+
+def allow_skipped(servers: list[Server], now: datetime | None = None) -> list[dict]:
+    """Включенные серверы, чей адрес в белый список не попал, и почему: агент ходит через
+    HTTP-прокси или ретранслятор (панель видит не ноду); еще не было отчета после обновления или
+    перезапуска, первые SETTLE минут (pending); адрес не подтвержден - прокси перед панелью не задан точно (догадка
+    private или чужой прокси)."""
+    now = now or datetime.now(timezone.utc)
+    out = []
+    for s in servers:
+        if s.external_ip_ok or not s.enabled:
+            continue  # в списке (частный адрес helper и так не банит) или сервер выключен
+        rep = s.last_report or {}
+        if rep.get("proxy"):
+            why = "proxy"
+        elif s.relay_via_id is not None:
+            why = "relay"
+        elif (now - _STARTED < SETTLE and not (s.confirmed_ip4 or s.confirmed_ip6)
+              and _no_report_since_start(s)):
+            why = "pending"
+        else:
+            why = "unverified"
+        out.append({"name": s.name, "why": why})
+    return out
+
+
+# смена подтвержденного адреса сервера: алерт не чаще раза в сутки на пару "старый>новый"
+ADDR_ALERT_EVERY = 86400
+_ADDR_ALERTS_KEPT = 16
+
+
+def confirm_address(srv: Server, ip: str, now: datetime) -> tuple[str, str] | None:
+    """Запомнить подтвержденный адрес сервера (отдельно IPv4 и IPv6: нода с двумя стеками
+    отчитывается то так, то так). Вернуть (старый, новый) для алерта, если адрес новый: сменился
+    адрес того же семейства или появился первый адрес другого семейства у сервера, чей адрес уже
+    был подтвержден. Новый - публичный (частный в белый список не идет), пара - раз в сутки
+    (Server.ip_alerts, в базе: переживает рестарт и несколько воркеров)."""
+    try:
+        v4 = ipaddress.ip_address(ip).version == 4
+    except ValueError:
+        return None
+    own, other = ("confirmed_ip4", "confirmed_ip6") if v4 else ("confirmed_ip6", "confirmed_ip4")
+    prev = getattr(srv, own) or getattr(srv, other) or ""
+    setattr(srv, own, ip)
+    # новый адрес публичный (частный в белый список не идет); прежний - любой: переход частный ->
+    # публичный тоже повод (адрес впервые уходит в белый список всех нод)
+    if not prev or prev == ip or not _public(ip):
+        return None
+    ts = now.timestamp()
+    sent = {k: t for k, t in (srv.ip_alerts or {}).items() if isinstance(t, (int, float)) and ts - t < ADDR_ALERT_EVERY}
+    pair = f"{prev}>{ip}"[:140]
+    if pair in sent:
+        srv.ip_alerts = sent
+        return None
+    sent[pair] = ts
+    srv.ip_alerts = dict(sorted(sent.items(), key=lambda x: x[1])[-_ADDR_ALERTS_KEPT:])
+    return prev, ip
+
+
+async def address_changed(session_factory, name: str, old: str, new: str) -> None:
+    """Алерт админу: у сервера сменился подтвержденный адрес, а он уходит в белый список автобана
+    всех нод. Если это не переезд ноды, токен агента мог утечь."""
+    from app.config import get_settings
+
+    text = "\n".join(["⚠️🛡 Kervax", f"Сменился адрес сервера {name}", f"{old} -> {new}",
+                      "Новый адрес попал в белый список автобана всех серверов. Не переезд - перевыпустите токен агента"])
+    async with session_factory() as session:
+        await alerts.security_alert(session, get_settings(), text)
 
 
 def allow_sha(items: list[tuple[str, str]]) -> str:
@@ -393,7 +487,10 @@ async def sync_allow(session_factory, now: datetime) -> int:
         servers = list(await session.scalars(select(Server)))
         locations = list(await session.scalars(select(Location)))
         cfg = await load_settings(session)
-        items = panel_allow(cfg, servers, locations)
+        # правки админа уходят сразу, а сокращение списка из-за неподтвержденных адресов - нет,
+        # пока сервер не отчитался после старта (SETTLE)
+        keep = frozenset(s.id for s in servers if _pending(s, now))
+        items = panel_allow(cfg, servers, locations, keep)
         sha = allow_sha(items)
         paths = [f"{n} {lab}".strip() for n, lab in items]
         for s in servers:

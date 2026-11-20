@@ -22,7 +22,7 @@ async def autoban_settings(_: AdminUser, session: SessionDep) -> dict:
     locs = list(await session.scalars(select(Location)))
     mine = {x["net"] for x in cfg["allow"]}
     auto = [{"net": n, "label": lab} for n, lab in autoban_mod.panel_allow({"allow": []}, servers, locs) if n not in mine]
-    return {**cfg, "auto": auto}
+    return {**cfg, "auto": auto, "skipped": autoban_mod.allow_skipped(servers)}
 
 
 @router.put("/settings")

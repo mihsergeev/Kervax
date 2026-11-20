@@ -5,6 +5,7 @@ import asyncio
 import time
 
 import httpx
+import pytest
 
 from app import ratelimit
 
@@ -94,7 +95,12 @@ async def test_parallel_login_does_not_bypass_failure_limit(client, monkeypatch)
     assert banned.status_code == 429 and banned.json()["detail"] == "locked:60"
 
 
-async def test_allowlisted_address_is_never_blocked(client: httpx.AsyncClient, auth_headers):
+async def test_allowlisted_address_is_never_blocked(client: httpx.AsyncClient, auth_headers, monkeypatch):
+    from app import config
+
+    # белый список действует за точно известным прокси (адрес caddy задан явно или снимком)
+    monkeypatch.setenv("KERVAX_TRUSTED_PROXIES", "172.18.0.5")
+    config.get_settings.cache_clear()
     r = await client.put("/api/login-guard", headers=auth_headers, json={
         "max_failures": 5, "ban_minutes": 60, "allow": [{"net": "203.0.113.0/28", "note": "офис"}]})
     assert r.status_code == 200 and r.json()["allow"] == [{"net": "203.0.113.0/28", "note": "офис"}]
@@ -158,3 +164,54 @@ async def test_guard_is_admin_only(client: httpx.AsyncClient, auth_headers):
     h = {"Authorization": f"Bearer {tok}"}
     assert (await client.get("/api/login-guard", headers=h)).status_code == 403
     assert (await client.put("/api/login-guard", headers=h, json={"max_failures": 5, "ban_minutes": 60, "allow": []})).status_code == 403
+
+
+
+FRONT, GW = "172.20.0.3", "172.20.0.1"  # nginx фронтенда и шлюз внутренней docker-сети
+
+
+@pytest.mark.parametrize("mode,chain,key,known", [
+    # офис без прокси: клиент из LAN пришел в nginx сам, левее - его выдумка
+    ("none", "192.0.2.50, 192.168.1.50", "192.168.1.50", True),
+    # прокси хоста (compose.yml): nginx видит шлюз, клиент подставил адрес левее своего
+    ("gateway", "192.0.2.50, 198.51.100.7, 172.20.0.1", "198.51.100.7", True),
+    # соседний контейнер в сети caddy подставил адрес из белого списка: адрес не точный
+    ("private", "192.0.2.50, 172.19.0.9", "192.0.2.50", True),
+    # офис при умолчании gateway: частный адрес, сам приславший заголовок, - не клиент
+    ("gateway", "192.0.2.50, 192.168.1.50", "192.168.1.50", False),
+])
+async def test_forged_forwarded_address_is_not_allowlisted(client, auth_headers, monkeypatch, mode, chain, key, known):
+    """Подставленный в X-Forwarded-For адрес из белого списка не дает trusted и не обходит
+    счетчик; неопределенный адрес (ключ - адрес чужого прокси) не пускается по белому списку,
+    даже если вписан туда сам, и блокируется как любой адрес."""
+    import ipaddress
+
+    from sqlalchemy import select
+
+    from app import client_ip, config
+    from app.models import LoginBan
+
+    monkeypatch.setenv("KERVAX_TRUSTED_PROXIES", mode)
+    monkeypatch.setenv("KERVAX_BIND", "127.0.0.1:8080")
+    monkeypatch.setattr(client_ip, "_gateways", lambda: frozenset({ipaddress.ip_address(GW)}))
+    config.get_settings.cache_clear()
+    allow = [{"net": "192.0.2.50", "note": "VPN"}] + ([] if known else [{"net": key, "note": "офис"}])
+    r = await client.put("/api/login-guard", headers=auth_headers, json={"max_failures": 5, "ban_minutes": 60, "allow": allow})
+    assert r.status_code == 200
+    app = client._transport.app  # type: ignore[attr-defined]
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=(FRONT, 40000)),
+                                 base_url="http://test") as front:
+        hdr = {"X-Forwarded-For": chain}
+        g = (await front.get("/api/login-guard", headers={**auth_headers, **hdr})).json()
+        assert (g["my_ip"], g["my_ip_known"], g["my_allowed"]) == (key, known, None)
+        assert g["my_ip_exact"] == (known and mode != "private")
+        for _ in range(5):
+            assert (await front.post("/api/auth/login", json=BAD, headers=hdr)).status_code == 401
+        r = await front.post("/api/auth/login", json=GOOD, headers=hdr)
+        assert r.status_code == 429 and r.json()["detail"].startswith("locked:")
+        # человек с определенным адресом входит как обычно
+        assert (await front.post("/api/auth/login", json=GOOD, headers={"X-Forwarded-For": "203.0.113.60"})).status_code == 200
+    factory = app.state.session_factory
+    async with factory() as s:
+        bans = [b.key for b in await s.scalars(select(LoginBan))]
+    assert bans == [key]

@@ -78,7 +78,9 @@ async def test_connection_ip_is_separate_from_agent_source(client, auth_headers,
     report = await client.post("/api/agent/report", json={
         "platform": "windows", "hostname": "windows-fixture", "agent_version": "windows-0.2.1",
         "local_ip": local_ip,
-    }, headers={"Authorization": f"Bearer {created.json()['token']}", "X-Real-IP": source_ip})
+    }, headers={"Authorization": f"Bearer {created.json()['token']}",
+                # адрес агента дописал caddy, caddy - nginx фронтенда (X-Real-IP не в счет)
+                "X-Forwarded-For": f"{source_ip}, 172.18.0.5", "X-Real-IP": "192.0.2.1"})
     assert report.status_code == 200
     server = (await client.get(path, headers=auth_headers)).json()
     assert server["access_ip"] == server["display_external_ip"] == access_ip

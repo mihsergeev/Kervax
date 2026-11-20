@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="KERVAX_", env_file=".env")
 
     app_name: str = "Kervax"
-    version: str = "1.8.149"
+    version: str = "1.8.150"
     debug: bool = False
     # Внешний URL панели — если задан, в алерты добавляется ссылка на монитор
     # (напр. https://kervax.example.com). Пусто = ссылку не добавляем.
@@ -17,6 +17,14 @@ class Settings(BaseSettings):
     data_dir: str = "./data"
     # Проверка IP источника agent API: включать после настройки доверенных прокси.
     agent_source_guard: bool = False
+    # Свои прокси перед nginx фронтенда, чьим X-Forwarded-For верить (app/client_ip.py):
+    # gateway - прокси на хосте панели, private - caddy в общей docker-сети, адреса/сети, пусто - никому
+    trusted_proxies: str = "gateway"
+    # где опубликован фронтенд (KERVAX_BIND из compose): gateway действует только на loopback
+    bind: str = ""
+    # шлюз сети caddy (compose.caddy.yml, пишет quickstart): с него приходят IPv6-клиенты через
+    # docker-proxy, это не клиент (app/client_ip.py)
+    proxy_gateway: str = ""
     # GRE до панели (app/gre.py): из какого пула выделять /30 туннелей и с какого публичного адреса
     # хост панели принимает GRE. Пусто - адрес берется из ответа ops/gre-sync.sh
     gre_pool: str = "10.254.0.0/16"

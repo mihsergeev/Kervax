@@ -2200,7 +2200,9 @@ class AgentReportIn(BaseModel):
     # (/proc/pressure), процессы в D-state, дескрипторы, TCP (ретрансмиты, очередь accept,
     # дропы conntrack) и обновления ОС (перезагрузка, обновления, автообновления)
     listen: list[dict] = []
-    ips: list[str] = []
+    # публичные адреса интерфейсов: агент шлет до 8, потолок 16 с запасом. Для показа и проверок,
+    # разрешений не дают (autoban.panel_allow)
+    ips: list[Annotated[str, Field(max_length=64)]] = Field(default_factory=list, max_length=16)
     psi: dict | None = None
     dstate: dict | None = None
     fds: dict | None = None

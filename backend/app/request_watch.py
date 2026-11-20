@@ -164,9 +164,12 @@ class RequestWatchMiddleware:
             await self.app(scope, receive, _send)
         finally:
             try:
-                xff = next((v.decode("latin-1") for k, v in scope.get("headers") or [] if k == b"x-forwarded-for"), "")
+                xff = ", ".join(v.decode("latin-1") for k, v in scope.get("headers") or [] if k == b"x-forwarded-for")
                 host = (scope.get("client") or (None,))[0]
-                snap = count(client_ip.client_key(host, xff), path, code or 500)
+                who = client_ip.resolve(host, xff)
+                # адрес не определен (чужой прокси, шлюз docker): за ним все агенты и люди одним
+                # адресом - всплеск и отказы по нему были бы ложным алертом, такие не считаем
+                snap = count(who.ip, path, code or 500) if who.known else None
                 factory = getattr(getattr(scope.get("app"), "state", None), "session_factory", None)
                 if snap and factory is not None:
                     t = asyncio.get_running_loop().create_task(write(factory, snap))

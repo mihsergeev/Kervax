@@ -267,7 +267,7 @@ async def test_sync_allow_pushes_list_once(tmp_path):
     engine, factory = await _factory(tmp_path)
     async with factory() as s:
         srv = _srv(_block())
-        srv.external_ip = "198.51.100.20"
+        srv.external_ip, srv.external_ip_ok = "198.51.100.20", True
         old = _srv(_block(), agent="2.54")
         old.id, old.name = 2, "web-b"
         s.add_all([srv, old, Location(name="Алматы", url="socks5://x", exit_ip="192.0.2.77")])
@@ -319,3 +319,86 @@ async def test_api_view_unban_and_settings(client, auth_headers):
     assert r.json()["digest"] == "hour"
     r = await client.put("/api/autoban/settings", json={"allow": [{"net": "example.com"}]}, headers=auth_headers)
     assert r.status_code == 400
+
+
+def test_panel_allow_takes_only_verified_server_addresses():
+    """С украденным токеном одной ноды адрес из отчета (local_ip, ips) или самый левый
+    X-Forwarded-For попадал в белый список автобана всего парка. Адреса, которые правит и
+    редактор своей группы (IP сервера, адрес подключения, источники агента), тоже не берем."""
+    srv = _srv(_block())
+    srv.external_ip, srv.local_ip = "192.0.2.66", "192.0.2.67"
+    srv.last_report = {**srv.last_report, "ips": ["192.0.2.68", "192.0.2.0"]}
+    srv.agent_ip, srv.access_ip, srv.agent_source_ips = "198.51.100.20", "198.51.100.21", ["198.51.100.22"]
+    # адрес из старой версии (мог прийти из левого X-Forwarded-For) не проверен
+    assert autoban.panel_allow({"allow": []}, [srv], []) == []
+    srv.external_ip_ok = True
+    assert autoban.panel_allow({"allow": []}, [srv], []) == [("192.0.2.66/32", "k8s-a")]
+    srv.external_ip = "10.0.0.7"
+    assert autoban.panel_allow({"allow": []}, [srv], []) == []
+
+
+async def test_agent_report_cannot_widen_the_fleet_allowlist(client, auth_headers, monkeypatch):
+    from app import config
+
+    # caddy задан точно (KERVAX_TRUSTED_PROXIES или снимок): адрес агента подтвержден
+    monkeypatch.setenv("KERVAX_TRUSTED_PROXIES", "172.18.0.5")
+    config.get_settings.cache_clear()
+    r = await client.post("/api/servers", json={"name": "k8s-a", "agent_ip": "198.51.100.20"}, headers=auth_headers)
+    token, sid = r.json()["token"], r.json()["server"]["id"]
+    rep = {"hostname": "k8s-a", "os": "U", "agent_version": "2.55", "cpu_percent": 5, "mem_used": 1, "mem_total": 2,
+           "local_ip": "192.0.2.67", "ips": ["192.0.2.68"]}
+    # клиент сам пишет самый левый адрес; caddy дописывает адрес соединения, nginx - caddy
+    hdr = {"Authorization": f"Bearer {token}", "X-Forwarded-For": "192.0.2.99, 203.0.113.30, 172.18.0.5"}
+    assert (await client.post("/api/agent/report", json=rep, headers=hdr)).status_code == 200
+    s = (await client.get(f"/api/servers/{sid}", headers=auth_headers)).json()
+    assert s["external_ip"] == "203.0.113.30"
+    auto = {x["net"] for x in (await client.get("/api/autoban/settings", headers=auth_headers)).json()["auto"]}
+    assert auto == {"203.0.113.30/32"}
+    # список адресов интерфейсов ограничен: агент шлет не больше 8
+    big = {**rep, "ips": [f"192.0.2.{i}" for i in range(1, 18)]}
+    assert (await client.post("/api/agent/report", json=big, headers=hdr)).status_code == 422
+    assert (await client.post("/api/agent/report", json={**rep, "ips": ["x" * 65]}, headers=hdr)).status_code == 422
+
+
+async def test_installer_download_is_noted_for_the_real_client(client):
+    from app import install_watch
+
+    install_watch._SEEN.clear()
+    try:
+        hdr = {"X-Forwarded-For": "192.0.2.99, 203.0.113.31, 172.18.0.5"}
+        await client.get("/api/agent/install.sh", headers=hdr)
+        await client.get("/api/agent/download/amd64", headers=hdr)
+        assert not install_watch.seen("192.0.2.99")
+        assert set(install_watch.seen("203.0.113.31")) <= {"script", "agent"}
+        assert "script" in install_watch.seen("203.0.113.31")
+    finally:
+        install_watch._SEEN.clear()
+
+
+async def test_sync_allow_keeps_unreported_addresses_after_start(tmp_path, monkeypatch):
+    """После обновления (миграция 0153) подтвержденных адресов нет ни у кого до первого отчета:
+    первые SETTLE минут прежний адрес сервера, еще не отчитавшегося после старта, остается в
+    списке, а правки админа уходят сразу. Отчитавшийся с неподтвержденным адресом - выпадает."""
+    monkeypatch.setattr(autoban, "_STARTED", NOW - timedelta(minutes=1))
+    engine, factory = await _factory(tmp_path)
+    async with factory() as s:
+        old = _srv(_block(allow_sha="0123456789abcdef"))
+        old.external_ip, old.external_ip_ok, old.last_seen = "198.51.100.20", False, NOW - timedelta(minutes=5)
+        seen = _srv(_block(allow_sha="0123456789abcdef"))
+        seen.id, seen.name, seen.token_hash = 2, "web-b", "y"
+        seen.external_ip, seen.external_ip_ok, seen.last_seen = "198.51.100.21", False, NOW
+        s.add_all([old, seen])
+        await autoban.save_settings(s, {"allow": [{"net": "192.0.2.50/32", "label": "Мой VPN"}], "digest": "day"})
+        await s.commit()
+    assert await autoban.sync_allow(factory, NOW) == 2
+    async with factory() as s:
+        paths = {c.paths.__repr__() for c in await s.scalars(select(BackupCommand))}
+    assert paths == {repr(["192.0.2.50/32 Мой VPN", "198.51.100.20/32 k8s-a"])}
+    # сервер уже был подтвержден раньше: обычный рестарт его неподтвержденный адрес не держит
+    old.confirmed_ip4 = "198.51.100.20"
+    assert not autoban._pending(old, NOW)
+    old.confirmed_ip4 = ""
+    # окно кончилось: неподтвержденный адрес не держим
+    assert autoban.panel_allow({"allow": []}, [old], [], frozenset(
+        x.id for x in [old] if autoban._pending(x, NOW + autoban.SETTLE))) == []
+    await engine.dispose()

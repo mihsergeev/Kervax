@@ -611,6 +611,9 @@ async def import_checks(
         # резолвер DNS-монитора в виде DoH-адреса на любой хост
         _push_defaults(check)
         _dns_defaults(check)
+        # ручной родитель - сервер, видимый учетке: без этого импорт привязывал монитор к серверу
+        # чужой группы
+        await _parent_check(check, session, user)
         _local_probe_ok(check, user)
         check.allow_internal_target = await _target_ok(check.type, check.target, check.dns_server, user)
         _one_probe_source(check)

@@ -37,8 +37,24 @@ _DUMMY_HASH = hash_password("no-such-user-timing-guard")
 
 def _client_key(request: Request) -> str:
     """Адрес того, кто входит, за своими прокси (см. app/client_ip.py)."""
-    return client_ip.client_key(
-        request.client.host if request.client else None, request.headers.get("x-forwarded-for", ""))
+    return client_ip.request_key(request)
+
+
+class _Source:
+    """Кто входит, для счетчика неудач: адрес за своими прокси (app/client_ip.py), обычный захват
+    попытки и блокировка после неудач. Если адрес не определен (чужой прокси или шлюз docker),
+    ключ - адрес этого прокси: все клиенты за ним делят счет и блокировку, админ видит подсказку
+    задать KERVAX_TRUSTED_PROXIES. Белый список - только для адреса за точно известными прокси."""
+
+    def __init__(self, request: Request, guard: ratelimit.Guard) -> None:
+        who = client_ip.request_client(request)
+        self.key, self.known = who.ip, who.known
+        exact = who.known and who.exact
+        self.trusted = exact and guard.allowed(who.ip) is not None
+        if guard.allow and not exact and not who.quiet:
+            # белый список задан, но молча не действовал бы: подсказка админу
+            state = getattr(request.app, "state", None)
+            client_ip.note_allowlist_inactive(getattr(state, "session_factory", None), who)
 
 
 def ban_words(minutes: int) -> str:
@@ -74,15 +90,17 @@ async def _lockout_alert(session, settings, ban: LoginBan) -> None:
 
 
 async def _record_failure(
-    session, settings, key: str, username: str, action: str, guard: ratelimit.Guard, trusted: bool,
+    session, settings, src: _Source, username: str, action: str, guard: ratelimit.Guard,
 ) -> None:
     """Пишет неудачный вход в журнал и считает его; на переходе в блокировку - запись о ней и
     алерт (подбор пароля). Адрес из белого списка не считается: только запись в журнале."""
-    if trusted:
+    key = src.key
+    if src.trusted:
         await audit.record(session, username, action, key, "адрес в белом списке")
         return
     ban = await ratelimit.record_failure(session, key, guard, username)
-    await audit.record(session, username, action, key)
+    await audit.record(session, username, action, key,
+                       "" if src.known else "адрес клиента не определен, это адрес прокси (KERVAX_TRUSTED_PROXIES)")
     if ban is None:
         return
     minutes = round((ban.until - ban.created_at).total_seconds() / 60)
@@ -96,14 +114,14 @@ async def _record_failure(
 
 
 @asynccontextmanager
-async def _verify_attempt(session, key: str, trusted: bool):
-    async with ratelimit.claim_attempt(session, key, trusted) as claimed:
+async def _verify_attempt(session, src: _Source):
+    async with ratelimit.claim_attempt(session, src.key, src.trusted) as claimed:
         if not claimed:
             raise HTTPException(
                 status.HTTP_429_TOO_MANY_REQUESTS, "Подождите секунду и попробуйте снова",
                 headers={"Retry-After": "1"},
             )
-        ban = None if trusted else await ratelimit.active_ban(session, key)
+        ban = None if src.trusted else await ratelimit.active_ban(session, src.key)
         if ban is not None:
             await ratelimit.note_blocked(session, ban)
             left = (_aware(ban.until) - datetime.now(timezone.utc)).total_seconds()
@@ -114,12 +132,11 @@ async def _verify_attempt(session, key: str, trusted: bool):
 async def _guarded(session, request: Request, username: str, action: str, ok: Callable[[], bool], err: str) -> None:
     """Проверка секрета под тем же счетчиком, что и вход."""
     settings = get_settings()
-    key = _client_key(request)
     guard = await ratelimit.load(session)
-    trusted = guard.allowed(key) is not None
-    async with _verify_attempt(session, key, trusted):
+    src = _Source(request, guard)
+    async with _verify_attempt(session, src):
         if not ok():
-            await _record_failure(session, settings, key, username, action, guard, trusted)
+            await _record_failure(session, settings, src, username, action, guard)
             raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
 
 
@@ -128,15 +145,15 @@ async def login(
     body: LoginRequest, request: Request, session: SessionDep
 ) -> TokenResponse:
     settings = get_settings()
-    key = _client_key(request)
     guard = await ratelimit.load(session)
-    trusted = guard.allowed(key) is not None
-    async with _verify_attempt(session, key, trusted):
+    src = _Source(request, guard)
+    key = src.key
+    async with _verify_attempt(session, src):
         user = await session.scalar(select(User).where(User.username == body.username))
         # Проверяем и фиктивный хэш, чтобы время ответа не выдавало существование логина.
         password_ok = verify_password(body.password, user.password_hash if user else _DUMMY_HASH)
         if user is None or not password_ok:
-            await _record_failure(session, settings, key, body.username, "login_fail", guard, trusted)
+            await _record_failure(session, settings, src, body.username, "login_fail", guard)
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный логин или пароль")
         if user.totp_enabled:
             if not body.otp:
@@ -151,7 +168,7 @@ async def login(
                     User.totp_secret == user.totp_secret, User.totp_last_counter < counter,
                 ).values(totp_last_counter=counter).returning(User.id).execution_options(synchronize_session=False))
             if accepted is None:
-                await _record_failure(session, settings, key, body.username, "login_2fa_fail", guard, trusted)
+                await _record_failure(session, settings, src, body.username, "login_2fa_fail", guard)
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2fa_invalid")
         await ratelimit.clear(session, key)
     token = create_access_token(

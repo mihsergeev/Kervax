@@ -13,6 +13,14 @@ import { toastError } from './toast'
 import { CountryFlag } from './CountryFlag'
 
 type T = (s: string, vars?: Record<string, string | number>) => string
+
+// почему адрес сервера не в белом списке автобана (backend/app/autoban.py allow_skipped)
+const SKIP_WHY: Record<'proxy' | 'relay' | 'pending' | 'unverified', string> = {
+  proxy: 'агент ходит через HTTP-прокси',
+  pending: 'еще нет отчета после обновления панели',
+  relay: 'агент ходит через ретранслятор',
+  unverified: 'адрес не подтвержден: прокси перед панелью не задан точно',
+}
 const when = (ts: number) =>
   new Date(ts * 1000).toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
 const MODES: { m: 'on' | 'watch' | 'off'; l: string }[] = [
@@ -239,9 +247,16 @@ function AutobanSettingsModal({ onClose }: { onClose: () => void }) {
               onChange={(e) => setText(e.target.value)} />
             <div className="small">
               <button className="ghost small" onClick={() => setShowAuto(!showAuto)}>
-                {showAuto ? '▾' : '▸'} {t('панель добавляет сама адреса серверов и локаций проверок: {n}', { n: cfg.auto.length })}
+                {showAuto ? '▾' : '▸'} {t('панель добавляет сама: подтвержденный адрес, с которого сервер присылает отчеты, и выходы локаций проверок. IP сервера, заданный вручную, сюда не входит - впишите его выше: {n}', { n: cfg.auto.length })}
               </button>
               {showAuto && <div className="muted small mono">{cfg.auto.map((x) => `${x.net} ${x.label}`).join(', ')}</div>}
+              {showAuto && !!cfg.skipped?.length && (
+                <div className="muted small">
+                  {t('не попали: {list}', {
+                    list: cfg.skipped.map((x) => `${x.name} (${t(SKIP_WHY[x.why])})`).join(', '),
+                  })}
+                </div>
+              )}
             </div>
             <label className="small">
               {t('Сводка банов в Telegram')}{' '}

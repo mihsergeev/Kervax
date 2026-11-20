@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import select
 
 from app import checks, collector, inside_probe
 from app.models import AgentProbe, BackupSetupJob, Check, ProbeRequest, Server
@@ -280,3 +281,29 @@ async def test_agent_inventory_cannot_claim_authenticated_monitor(client, auth_h
         response = await client.post("/api/agent/report", headers=trusted, json=report)
         assert [task["id"] for task in response.json()["site_probes"]] == [cid]
         assert response.json()["site_probes"][0]["auth_pass"] == "fake-monitor-password"
+
+
+async def test_import_checks_cannot_pin_a_parent_from_another_group(client, auth_headers):
+    """Импорт проверяет ручного родителя так же, как создание: сервер чужой группы - отказ."""
+    factory = client._transport.app.state.session_factory
+    async with factory() as session:
+        own = Server(name="web-node", token_hash="t-web-node", group_name="web")
+        alien = Server(name="db-node", token_hash="t-db-node", group_name="db")
+        session.add_all([own, alien])
+        await session.commit()
+        own_id, alien_id = own.id, alien.id
+    _, editor = await _user(client, auth_headers, "import-editor", site_groups=["web"], server_groups=["web"])
+    item = {"name": "site", "type": "http", "target": "https://a.example", "group_name": "web",
+            "parent_mode": "server", "parent_server_id": alien_id}
+    single = await client.post("/api/checks", json=item, headers=editor)
+    r = await client.post("/api/checks/import", json={"items": [item]}, headers=editor)
+    assert r.status_code == single.status_code == 400, r.text
+    assert r.json()["detail"] == single.json()["detail"] == "Такого сервера нет"
+    r = await client.post("/api/checks/import", json={"items": [{**item, "parent_server_id": None}]}, headers=editor)
+    assert r.status_code == 400 and "Выберите сервер" in r.json()["detail"]
+    async with factory() as session:
+        assert not list(await session.scalars(select(Check)))
+    r = await client.post("/api/checks/import", json={"items": [{**item, "parent_server_id": own_id}]}, headers=editor)
+    assert r.status_code == 201, r.text
+    async with factory() as session:
+        assert [(c.parent_mode, c.parent_server_id) for c in await session.scalars(select(Check))] == [("server", own_id)]

@@ -376,6 +376,12 @@ export type LoginGuard = {
   allow: AllowEntry[]
   my_ip: string
   my_allowed: string | null
+  // false: это адрес прокси или шлюза, а не ваш (backend/app/client_ip.py)
+  my_ip_known?: boolean
+  // false: прокси задан догадкой (private), белый список входа не действует
+  my_ip_exact?: boolean
+  // белый список задан, но не действует (адрес не точный)
+  allow_inactive?: boolean
   bans: LoginBanRow[]
   recent: LoginFailRow[]
 }
@@ -4725,6 +4731,8 @@ export type AutobanHist = AutobanBan & { ended: number | null; end: string }
 export type AutobanData = { view: AutobanView | null; history: AutobanHist[]; helper: string }
 export type AutobanSettings = {
   allow: { net: string; label: string }[]; digest: 'day' | 'hour' | 'off'; auto: { net: string; label: string }[]
+  // серверы, чей адрес в список не попал: proxy/relay - панель видит не ноду, unverified - адрес не подтвержден
+  skipped?: { name: string; why: 'proxy' | 'relay' | 'pending' | 'unverified' }[]
 }
 export function serverAutoban(id: number): Promise<AutobanData> {
   return api<AutobanData>(`/api/servers/${id}/autoban`)

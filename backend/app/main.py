@@ -39,7 +39,7 @@ from app.bootstrap import ensure_admin, ensure_default_location
 from app.collector import collector_loop, pause_watch
 from app.config import get_settings
 from app.db import create_engine_and_factory
-from app import impersonate
+from app import client_ip, impersonate
 from app.gzip_request import GzipRequestMiddleware
 from app.panel_errors import PanelErrorMiddleware
 from app.request_watch import RequestWatchMiddleware
@@ -77,6 +77,8 @@ def create_app() -> FastAPI:
         _enforce_secrets(settings)
         await ensure_admin(session_factory, settings)
         await ensure_default_location(session_factory, settings)
+        # опечатка в KERVAX_TRUSTED_PROXIES - в лог и в "Ошибки панели", а не молча "никому"
+        await client_ip.check_config(session_factory)
         # Планировщик крутим здесь только в одиночном режиме. При масштабировании
         # (несколько веб-воркеров) его выносят в отдельный процесс app.scheduler_run,
         # а веб-воркеры ставят KERVAX_RUN_SCHEDULER=0 — иначе он запустится N раз.

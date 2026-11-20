@@ -4529,6 +4529,12 @@ const EN: Record<string, string> = {
     'allowlist',
   'в белом списке ({n})':
     'on the allowlist ({n})',
+  'Белый список сейчас не действует: панель не знает точно, какой прокси стоит перед ней, и адрес клиента могли подставить. Задайте адрес своего прокси в KERVAX_TRUSTED_PROXIES или включите снимок прокси (docs/agent-source-guard.md).':
+    'The allowlist does not apply now: the panel does not know exactly which proxy is in front of it, and the client address could be forged. Set your proxy address in KERVAX_TRUSTED_PROXIES or enable the proxy snapshot (docs/agent-source-guard.md).',
+  'это адрес прокси, а не ваш: все входят этим адресом и делят блокировку, белый список не действует - задайте KERVAX_TRUSTED_PROXIES':
+    'this is a proxy address, not yours: everyone signs in with it and shares the lockout, the allowlist does not apply - set KERVAX_TRUSTED_PROXIES',
+  'белый список не действует: адрес caddy не задан точно (KERVAX_TRUSTED_PROXIES или снимок прокси, docs/agent-source-guard.md)':
+    'the allowlist does not apply: the caddy address is not set exactly (KERVAX_TRUSTED_PROXIES or the proxy snapshot, docs/agent-source-guard.md)',
   'ваш':
     'yours',
   'добавить мой адрес':
@@ -7675,7 +7681,12 @@ const EN: Record<string, string> = {
   'наблюдение': 'watching',
   'не присылать': 'do not send',
   'отброшено пакетов: {n}': 'packets dropped: {n}',
-  'панель добавляет сама адреса серверов и локаций проверок: {n}': 'the panel adds by itself the addresses of servers and check locations: {n}',
+  'панель добавляет сама: подтвержденный адрес, с которого сервер присылает отчеты, и выходы локаций проверок. IP сервера, заданный вручную, сюда не входит - впишите его выше: {n}': 'the panel adds by itself: the verified address each server reports from and the check location exits. A server IP set by hand is not included - add it above: {n}',
+  'не попали: {list}': 'not included: {list}',
+  'агент ходит через HTTP-прокси': 'the agent goes through an HTTP proxy',
+  'агент ходит через ретранслятор': 'the agent goes through a relay',
+  'еще нет отчета после обновления панели': 'no report yet since the panel update',
+  'адрес не подтвержден: прокси перед панелью не задан точно': 'address not verified: the proxy in front of the panel is not set exactly',
   'повтор {n}': 'repeat {n}',
   'после бана приходил еще {n} раз: трафик идет к ноде не напрямую': 'came back {n} times after the ban: traffic reaches the node not directly',
   'раз в сутки, в 9 утра': 'once a day, at 9 am',

@@ -1,5 +1,6 @@
 import os
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 
 import httpx
 import pytest
@@ -19,6 +20,8 @@ async def client(tmp_path, monkeypatch) -> AsyncIterator[httpx.AsyncClient]:
     monkeypatch.setenv("KERVAX_ADMIN_USER", "admin")
     monkeypatch.setenv("KERVAX_ADMIN_PASSWORD", "testpass-2026")
     monkeypatch.setenv("KERVAX_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+    # как в установке quickstart (compose.caddy.yml): справа один хоп caddy в docker-сети
+    monkeypatch.setenv("KERVAX_TRUSTED_PROXIES", "private")
     config.get_settings.cache_clear()
 
     from app.bootstrap import ensure_admin
@@ -57,6 +60,22 @@ def _panel_started_long_ago():
     collector._PANEL_STARTED = original - timedelta(hours=1)
     yield
     collector._PANEL_STARTED = original
+
+
+@pytest.fixture(autouse=True)
+def _proxy_state(monkeypatch):
+    """Шлюз docker-сети бэкенда (client_ip._gateways) синтетический, а не /proc/net/route машины с
+    тестами; подсказки админу - с чистого листа; выдержки автобана после старта процесса нет
+    (ее проверяет свой тест)."""
+    import ipaddress
+
+    from app import autoban, client_ip
+
+    monkeypatch.setattr(client_ip, "_gateways", lambda: frozenset({ipaddress.ip_address("172.20.0.1")}))
+    monkeypatch.setattr(client_ip, "_hint_at", [0.0], raising=False)
+    monkeypatch.setattr(client_ip, "_allow_note_at", [0.0], raising=False)
+    monkeypatch.setattr(client_ip, "_peer_first", {}, raising=False)
+    monkeypatch.setattr(autoban, "_STARTED", datetime(2000, 1, 1, tzinfo=timezone.utc), raising=False)
 
 
 @pytest.fixture(autouse=True)

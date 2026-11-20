@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.150] - 2026-11-21
+
+- Trust X-Forwarded-For only from known proxies, set with `KERVAX_TRUSTED_PROXIES`: `gateway` for a proxy on the panel host in front of `127.0.0.1` (the default for `compose.yml`), `private` for the caddy hop (the default for `compose.caddy.yml`; exact with a fresh agent proxy snapshot), explicit addresses or networks, or `none`. The leftmost, client-written address is never used, and the backend now receives `KERVAX_BIND` and the caddy network gateway.
+- Upgrade note: if your reverse proxy runs in another container or on another machine, or the panel is published directly on a public address, set `KERVAX_TRUSTED_PROXIES` (see `.env.example`). Until then every client is seen as the proxy address and shares its sign-in lockout; Panel errors and Users -> Sign-in protection say so. Check that "Your address now" shows your own address.
+- The sign-in allow-list applies only to addresses resolved through exactly known proxies; the page shows when it is inactive.
+- The fleet autoban allow-list now takes only server addresses received over a trusted path (it refills as agents report after the upgrade), lists the servers left out and why, and an alert is sent when a verified server address changes.
+- Importing monitors now checks that the parent server is visible to the user, as creating one does.
+
 ## [1.8.149] - 2026-11-20
 
 - Prune the notification queue. Settled deliveries and their events are removed after 90 days and unreviewed problems after 365 days, in short batches limited to about 10 seconds per run; open incidents and anything that still needs action are kept. A large existing history is cleaned up gradually over the following days.

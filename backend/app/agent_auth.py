@@ -36,7 +36,7 @@ def _ip(value) -> str | None:
     return str(parsed)
 
 
-def _proxy_peers(data_dir: str) -> tuple[set[str], set[str]] | None:
+def proxy_peers(data_dir: str) -> tuple[set[str], set[str]] | None:
     """Отсутствующий/старый/неполный снимок не дает прав доверять заголовкам."""
     try:
         with (Path(data_dir) / PROXY_FILE).open("rb") as handle:
@@ -73,7 +73,7 @@ def source_ip(request: Request, data_dir: str) -> str | None:
     peer = _ip(request.client.host if request.client else None)
     if peer is None:
         return None
-    peers = _proxy_peers(data_dir)
+    peers = proxy_peers(data_dir)
     if peers is None:
         return None
     frontends, forwarded = peers

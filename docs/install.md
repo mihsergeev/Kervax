@@ -437,7 +437,18 @@ itself.
 **I already have a proxy.** Skip the `compose.caddy.yml` overlay — the panel is
 then published on the host (`127.0.0.1:8080` by default, `KERVAX_BIND` changes
 it) and you proxy it with your own nginx/traefik. Inside the container the
-frontend listens on **8080** — it runs without root.
+frontend listens on **8080** — it runs without root. The client address (login
+lockout and allow-list, audit log) is read from `X-Forwarded-For` only behind trusted
+proxies: a proxy on the host itself in front of `127.0.0.1:8080` is trusted by
+default. A proxy in another container or on another machine reaches the panel from
+its own address — add it to `KERVAX_TRUSTED_PROXIES` (words and networks add up:
+`gateway 172.18.0.0/16`; for a container give its docker subnet, its IP changes on
+recreation). With nothing in front (`KERVAX_BIND=0.0.0.0:8080`) set
+`KERVAX_TRUSTED_PROXIES=none`. Check the result under Users → Sign-in protection:
+"Your address now" must be your own address, not the proxy's: otherwise everyone signs
+in with the proxy's address and shares its lockout. Your proxy must append
+the address it saw to `X-Forwarded-For`, never pass the client's header through; for
+nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`. See `.env.example`.
 
 **Alerts.** ⚙ → "Alerts": a Telegram bot or a webhook. The text of each alert
 type, the thresholds and the scope (all nodes / a group / a selection) are

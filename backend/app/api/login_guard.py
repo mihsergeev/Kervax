@@ -8,8 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
-from app import audit, ratelimit
-from app.api.auth import _client_key
+from app import audit, client_ip, ratelimit
 from app.deps import AdminUser, SessionDep
 from app.models import AuditLog, LoginBan
 
@@ -42,7 +41,13 @@ def _aware(ts: datetime) -> datetime:
 async def _out(session, request: Request) -> dict:
     g = await ratelimit.load(session)
     now = datetime.now(timezone.utc)
-    me = _client_key(request)
+    who = client_ip.request_client(request)
+    me = who.ip
+    # белый список действует только для адреса за точно известными прокси (api/auth.py): иначе
+    # и метки "в белом списке" у адресов ниже были бы неправдой
+    exact = who.known and who.exact
+    if g.allow and not exact and not who.quiet:
+        client_ip.note_allowlist_inactive(request.app.state.session_factory, who)
     bans = list(await session.scalars(
         select(LoginBan).where(LoginBan.until > now).order_by(LoginBan.until.desc())))
     banned = {b.key: b for b in bans}
@@ -58,12 +63,12 @@ async def _out(session, request: Request) -> dict:
             r["logins"].append(name)
     recent = sorted(by_key.values(), key=lambda r: (-r["fails"], r["key"]))[:_RECENT_SHOWN]
     for r in recent:
-        a = g.allowed(r["key"])
+        a = g.allowed(r["key"]) if exact else None
         b = banned.get(r["key"])
         r["last"] = r["last"].isoformat()
         r["allowed"] = (a.get("note") or a["net"]) if a else None
         r["banned_until"] = _aware(b.until).isoformat() if b else None
-    mine = g.allowed(me)
+    mine = g.allowed(me) if exact else None
     return {
         "max_failures": g.max_failures,
         "ban_minutes": g.ban_minutes,
@@ -72,6 +77,12 @@ async def _out(session, request: Request) -> dict:
         "ban_choices": list(ratelimit.BAN_CHOICES),
         "allow": g.allow,
         "my_ip": me,
+        # False - адрес не определен (прокси/шлюз, не клиент): задать KERVAX_TRUSTED_PROXIES
+        "my_ip_known": who.known,
+        # False - адрес за прокси, заданным догадкой (private): белый список не действует
+        "my_ip_exact": exact,
+        # список задан, но не действует: баннер над редактором списка
+        "allow_inactive": bool(g.allow) and not exact,
         "my_allowed": (mine.get("note") or mine["net"]) if mine else None,
         "bans": [
             {
@@ -82,7 +93,7 @@ async def _out(session, request: Request) -> dict:
                 "logins": b.logins,
                 "repeat": b.repeat,
                 "blocked": b.blocked,
-                "allowed": bool(g.allowed(b.key)),
+                "allowed": exact and bool(g.allowed(b.key)),
             }
             for b in bans
         ],

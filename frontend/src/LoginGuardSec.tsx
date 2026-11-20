@@ -74,6 +74,7 @@ export function LoginGuardSec({
       </div>
 
       <div className="srv-nav-grp rt-cap">{t('Белый список')}</div>
+      {guard.allow_inactive && <p className="form-error small">{t('Белый список сейчас не действует: панель не знает точно, какой прокси стоит перед ней, и адрес клиента могли подставить. Задайте адрес своего прокси в KERVAX_TRUSTED_PROXIES или включите снимок прокси (docs/agent-source-guard.md).')}</p>}
       {draft.allow.length ? (
         <table className="sec-tbl">
           <thead>
@@ -118,7 +119,12 @@ export function LoginGuardSec({
       </div>
       <p className="muted small">
         {t('Ваш адрес сейчас:')} <span className="mono">{guard.my_ip}</span>
-        {guard.my_allowed ? (
+        {guard.my_ip_known === false ? (
+          <> · {t('это адрес прокси, а не ваш: все входят этим адресом и делят блокировку, белый список не действует - задайте KERVAX_TRUSTED_PROXIES')}</>
+        ) : guard.my_ip_exact === false && !guard.allow_inactive ? (
+          // список пуст: баннера над ним нет, а добавлять неточный адрес бесполезно
+          <> · {t('белый список не действует: адрес caddy не задан точно (KERVAX_TRUSTED_PROXIES или снимок прокси, docs/agent-source-guard.md)')}</>
+        ) : guard.my_ip_exact === false ? null : guard.my_allowed ? (
           <> · {t('в белом списке ({n})', { n: guard.my_allowed })}</>
         ) : !mineIn ? (
           <>

@@ -703,6 +703,14 @@ class Server(Base):
     skip_kervax_updates: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     local_ip: Mapped[str] = mapped_column(String(64), default="")  # сообщает агент
     external_ip: Mapped[str] = mapped_column(String(64), default="")  # источник запроса
+    # external_ip получен по доверенному пути: проверка источника агента, адрес клиента за
+    # своими прокси (app/client_ip.py) или GRE. Только такой адрес идет в белый список автобана
+    external_ip_ok: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # последние подтвержденные адреса по семействам и когда был алерт о смене на пару
+    # "старый>новый" ({пара: unix}, раз в сутки на пару): autoban.address_changed
+    confirmed_ip4: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    confirmed_ip6: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    ip_alerts: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
     access_ip: Mapped[str | None] = mapped_column(String(64))  # адрес для входящего подключения
     # IP, с которого агент будет ходить В панель (опционально): панель ведёт
     # data/agent_allow_ips, а хостовый скрипт (ops/agent-firewall-sync.sh)

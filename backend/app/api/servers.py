@@ -27,6 +27,7 @@ from app import disk_wear
 from app import mute_watch
 from app import drive_mute
 from app import request_watch
+from app import client_ip as client_ip_mod
 from app import install_watch
 from app import panel_errors
 from app import db_health
@@ -3843,8 +3844,8 @@ async def push_signal(token: str, session: SessionDep, status_: str = Query("", 
 
 
 @agent_router.get("/install.sh")
-async def install_script(x_forwarded_for: str = Header(default=""), x_real_ip: str = Header(default="")) -> PlainTextResponse:
-    install_watch.note(_client_ip(x_forwarded_for, x_real_ip), "script")
+async def install_script(request: Request) -> PlainTextResponse:
+    install_watch.note(_client_ip(request), "script")
     path = os.path.join(get_settings().agent_dist_dir, "install.sh")
     if not os.path.exists(path):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "install.sh не найден")
@@ -3865,13 +3866,13 @@ async def panel_ca() -> PlainTextResponse:
 
 
 @agent_router.get("/install-ru.sh")
-async def install_script_ru(x_forwarded_for: str = Header(default=""), x_real_ip: str = Header(default="")) -> PlainTextResponse:
+async def install_script_ru(request: Request) -> PlainTextResponse:
     """Тот же установщик с сообщениями на русском.
 
     Основной install.sh англоязычный — его видят все, кто ставит панель. Русская
     копия нужна там, где команду выполняет человек, которому так понятнее, и
     отличается она ровно языком вывода."""
-    install_watch.note(_client_ip(x_forwarded_for, x_real_ip), "script")
+    install_watch.note(_client_ip(request), "script")
     path = os.path.join(get_settings().agent_dist_dir, "install-ru.sh")
     if not os.path.exists(path):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "install-ru.sh не найден")
@@ -3967,11 +3968,10 @@ async def setup_script(name: str) -> PlainTextResponse:
 
 
 @agent_router.get("/download/{arch}")
-async def download_agent(arch: str, x_forwarded_for: str = Header(default=""),
-                         x_real_ip: str = Header(default="")) -> FileResponse:
+async def download_agent(arch: str, request: Request) -> FileResponse:
     if arch not in ("amd64", "arm64"):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "нет такой архитектуры")
-    install_watch.note(_client_ip(x_forwarded_for, x_real_ip), "agent")
+    install_watch.note(_client_ip(request), "agent")
     path = os.path.join(get_settings().agent_dist_dir, f"kervax-agent-{arch}")
     if not os.path.exists(path):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "бинарь агента не собран")
@@ -4014,8 +4014,7 @@ def agent_gz_ok(arch: str) -> bool:
 
 
 @agent_router.api_route("/download-gz/{arch}", methods=["GET", "HEAD"])
-async def download_agent_gz(arch: str, x_forwarded_for: str = Header(default=""),
-                            x_real_ip: str = Header(default="")) -> FileResponse:
+async def download_agent_gz(arch: str, request: Request) -> FileResponse:
     """Тот же бинарь, сжатый gzip (в 2.4 раза меньше). Агент 2.18+ берет его первым и сам
     распаковывает; подлинность проверяет по подписанному манифесту, как у несжатого. На
     канале за DPI (ru-be, ~0.2 МБ/мин) это 15 минут вместо 40. HEAD нужен агенту, чтобы
@@ -4025,7 +4024,7 @@ async def download_agent_gz(arch: str, x_forwarded_for: str = Header(default="")
     path = os.path.join(get_settings().agent_dist_dir, f"kervax-agent-{arch}.gz")
     if not os.path.exists(path) or not agent_gz_ok(arch):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "сжатого бинаря нет")
-    install_watch.note(_client_ip(x_forwarded_for, x_real_ip), "agent")
+    install_watch.note(_client_ip(request), "agent")
     return FileResponse(path, media_type="application/octet-stream")
 
 
@@ -4053,13 +4052,13 @@ async def agent_manifest_sig() -> FileResponse:
 # --- ingest от агента (авторизация по токену, не JWT) ---
 
 
-def _client_ip(xff: str, xreal: str) -> str:
-    # nginx кладёт исходный адрес агента в X-Forwarded-For (первый токен) / X-Real-IP
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return first[:64]
-    return xreal.strip()[:64]
+def _client_ip(request: Request) -> str:
+    # Адрес за своими прокси (app/client_ip.py). Самый левый X-Forwarded-For пишет сам клиент:
+    # по нему анонимный запрос помечал чужой адрес "скачал установщик", а агент с украденным
+    # токеном - любой адрес внешним адресом сервера. Адрес не определен (за чужим прокси или
+    # шлюзом docker все одним адресом) - пусто: адрес прокси не адрес ноды
+    who = client_ip_mod.request_client(request)
+    return who.ip[:64] if who.known else ""
 
 
 @agent_router.post("/report", response_model=AgentConfigOut)
@@ -4069,8 +4068,6 @@ async def agent_report(
     request: Request,
     background: BackgroundTasks,
     authorization: str = Header(default=""),
-    x_forwarded_for: str = Header(default=""),
-    x_real_ip: str = Header(default=""),
 ) -> AgentConfigOut:
     token = authorization.removeprefix("Bearer ").strip()
     if not token:
@@ -4171,18 +4168,40 @@ async def agent_report(
         server.os = body.os[:128]
     if body.local_ip:
         server.local_ip = body.local_ip[:64]
-    ext = verified_source or _client_ip(x_forwarded_for, x_real_ip)
+    # Подтвержденный адрес (проверка источника или адрес за точно известными прокси) идет в
+    # белый список автобана парка (autoban.panel_allow). Догадка private (соседний контейнер в
+    # сети caddy подставит любой), заданный руками и адрес прокси агента - нет
+    if verified_source:
+        ext, ext_ok = verified_source, True
+    else:
+        who = client_ip_mod.request_client(request)
+        ext = who.ip[:64] if who.known else ""
+        ext_ok = who.known and who.exact
     if body.proxy:
         # Агент ходит через прокси: панель видит адрес прокси, а не ноды. По нему считались бы
         # страна и проверки снаружи, и у всех нод за одним прокси он был бы один. Адрес ноды
         # тогда только тот, что задан руками ("IP сервера"); не задан - прежний не трогаем.
         ext = (server.agent_ip or "").strip()
+        ext_ok = False
+        if not ext:
+            # адрес ноды неизвестен: прежний остается в карточке, но больше не подтвержден
+            server.external_ip_ok = False
     # через GRE до панели (app/gre.py) запрос приходит с адреса ноды в туннеле: в карточку идет
     # ее настоящий публичный адрес, а не 10.254.x.x
     ext = gre_mod.real_ip(server, ext, now)
     via_gre = server.gre_agent_at == now
+    # GRE: адрес туннеля подтвержден, только если и сам запрос пришел точным путем (ext_ok как есть)
     if ext:
         server.external_ip = ext
+        server.external_ip_ok = ext_ok
+    if ext and ext_ok:
+        # Подтвержденный адрес сменился: новый уходит в белый список автобана всех нод. Сравниваем
+        # с прошлым подтвержденным того же семейства (отчет через прокси между ними не прячет
+        # смену), строка сервера уже под блокировкой отчета
+        changed = autoban_mod.confirm_address(server, ext, now)
+        if changed:
+            background.add_task(autoban_mod.address_changed, request.app.state.session_factory,
+                                server.name, *changed)
     server.agent_version = body.agent_version[:32]
     # детект перезагрузки: аптайм упал (с запасом 60с на дрожание) → отметка времени,
     # по которой collector пошлёт разовый алерт «сервер перезагружен». Ждали ли ее (обновления

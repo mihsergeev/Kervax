@@ -85,6 +85,11 @@ services:
       KERVAX_ADMIN_PASSWORD_RESET: ${KERVAX_ADMIN_PASSWORD_RESET:-0}
       KERVAX_DATA_DIR: /data
       KERVAX_AGENT_SOURCE_GUARD: ${KERVAX_AGENT_SOURCE_GUARD:-0}
+      # чьему X-Forwarded-For верить (backend/app/client_ip.py): gateway - прокси на самом хосте
+      # перед KERVAX_BIND; compose.caddy.yml меняет на private (caddy в docker-сети)
+      KERVAX_TRUSTED_PROXIES: ${KERVAX_TRUSTED_PROXIES-gateway}
+      # где опубликован фронтенд: gateway действует, только пока это loopback
+      KERVAX_BIND: ${KERVAX_BIND:-127.0.0.1:8080}
       KERVAX_PANEL_URL: ${KERVAX_PANEL_URL:-}
       KERVAX_DEFAULT_SSH_USER: ${KERVAX_DEFAULT_SSH_USER:-kervax}
       KERVAX_SCHEDULER_TICK: ${KERVAX_SCHEDULER_TICK:-30}

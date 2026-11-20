@@ -9,6 +9,26 @@
 # Set KERVAX_DOMAIN and KERVAX_ALLOW_IPS in .env. To disable the IP allow-list,
 # remove the @denied / abort labels below.
 services:
+  backend:
+    environment:
+      # Whose X-Forwarded-For the panel trusts (backend/app/client_ip.py). "private" strips
+      # exactly one private hop - caddy in the docker network - and takes the address caddy
+      # wrote before it, a LAN client included. The frontend port is not published here, so
+      # nothing else reaches nginx from outside docker. A neighbouring container in the
+      # caddy network could still claim another address, so the login allow-list does not
+      # apply to it. A fresh agent_proxy_peers.json snapshot (docs/agent-source-guard.md)
+      # or caddy's exact address in KERVAX_TRUSTED_PROXIES (it changes when caddy is
+      # recreated) makes the address exact and the allow-list work. Not the whole caddy
+      # subnet: that trusts every neighbour in it.
+      # ":-": an empty value keeps "private" too - with nothing trusted caddy itself would
+      # become every client's address
+      KERVAX_TRUSTED_PROXIES: ${KERVAX_TRUSTED_PROXIES:-private}
+      # the frontend port is not published in this overlay (ports: !reset [] below)
+      KERVAX_BIND: unpublished
+      # the caddy network gateway: an IPv6 client of an IPv4-only caddy network arrives from it
+      # through docker-proxy, so it is never taken as a client address
+      KERVAX_PROXY_GATEWAY: ${KERVAX_PROXY_GATEWAY:-}
+
   frontend:
     # caddy proxies via the internal network — no host port needed, so drop
     # the base compose's published port (avoids a host port conflict).
