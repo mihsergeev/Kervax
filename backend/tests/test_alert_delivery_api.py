@@ -1,12 +1,13 @@
 """Admin-only delivery metadata and explicit enqueue receipts; never send messages."""
-from datetime import datetime, timezone
+import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import func, select
 
 from app import alerts, notification_store as store
 from app.config import get_settings
-from app.models import AlertEvent, AuditLog, NotificationDelivery, User
+from app.models import AlertEvent, AuditLog, NotificationDelivery, NotificationEvent, User
 from app.security import create_access_token
 
 
@@ -46,12 +47,14 @@ async def _headers(client, role):
 async def test_delivery_metadata_is_admin_only(client, auth_headers):
     ids = await _seed(client, ["attention"])
     assert (await client.get("/api/alerts/deliveries")).status_code == 401
+    assert (await client.post("/api/alerts/deliveries/review", json={"ids": ids})).status_code == 401
     for role in ("viewer", "editor"):
         headers = await _headers(client, role)
         read = await client.get("/api/alerts/deliveries", headers=headers)
         assert read.status_code == 403 and "Example 0" not in read.text
         assert (await client.post("/api/alerts/deliveries/retry", headers=headers,
                                   json={"ids": ids, "acknowledge_uncertain": True})).status_code == 403
+        assert (await client.post("/api/alerts/deliveries/review", headers=headers, json={"ids": ids})).status_code == 403
     assert (await client.get("/api/alerts/deliveries", headers=auth_headers)).status_code == 200
 
 
@@ -70,6 +73,78 @@ async def test_delivery_counts_safe_rows_and_bound(client, auth_headers):
     assert len(all_rows["items"]) == 50 and all_rows["more"]
     summary = (await client.get("/api/alerts/deliveries?summary=true", headers=auth_headers)).json()
     assert summary["items"] == [] and summary["bad_count"] == 3
+
+
+async def test_review_preserves_outcome_and_excludes_only_selected_attention(client, auth_headers, monkeypatch):
+    async def forbidden(*args, **kwargs):
+        pytest.fail("Review must not send a message")
+
+    monkeypatch.setattr(alerts, "tg_send", forbidden)
+    monkeypatch.setattr(alerts, "send_alert", forbidden)
+    reviewed, untouched, uncertain, rejected, sending, confirmed, leased = await _seed(
+        client, ["attention", "attention", "uncertain", "rejected", "sending", "confirmed", "attention"])
+    factory = client._transport.app.state.session_factory
+    async with factory() as session:
+        row = await session.get(NotificationDelivery, reviewed)
+        row.last_error = "ReadTimeout"
+        next_attempt = row.next_attempt_at
+        for job_id in (sending, leased):
+            job = await session.get(NotificationDelivery, job_id)
+            job.lease_owner = "test-owner"
+            job.lease_until = datetime.now(timezone.utc) + timedelta(hours=1)
+        await session.commit()
+
+    before = (await client.get("/api/alerts/deliveries", headers=auth_headers)).json()
+    assert {item["id"] for item in before["items"] if item["can_review"]} == {reviewed, untouched}
+    url = "/api/alerts/deliveries/review"
+    ids = [reviewed, reviewed, uncertain, rejected, sending, confirmed, leased, 999999]
+    response = await client.post(url, headers=auth_headers, json={"ids": ids})
+    assert response.status_code == 200
+    assert response.json() == {"reviewed_ids": [reviewed], "skipped_ids": sorted(set(ids) - {reviewed})}
+    second = await client.post(url, headers=auth_headers, json={"ids": [reviewed]})
+    assert second.json() == {"reviewed_ids": [], "skipped_ids": [reviewed]}
+
+    after = (await client.get("/api/alerts/deliveries", headers=auth_headers)).json()
+    assert {item["id"] for item in after["items"]} == {untouched, uncertain, rejected, leased}
+    assert after["counts"] == before["counts"] and after["bad_count"] == before["bad_count"] - 1
+    summary = (await client.get("/api/alerts/deliveries?summary=true", headers=auth_headers)).json()
+    assert summary["bad_count"] == after["bad_count"] and summary["items"] == []
+    history = (await client.get("/api/alerts/deliveries?state=reviewed", headers=auth_headers)).json()
+    item, = history["items"]
+    assert item["id"] == reviewed and item["status"] == "attention" and item["uncertain_count"] == 3
+    assert item["reviewed_by"] == "admin" and item["reviewed_at"]
+    assert not item["can_retry"] and not item["can_review"]
+
+    retry = await client.post("/api/alerts/deliveries/retry", headers=auth_headers,
+                              json={"ids": [reviewed], "acknowledge_uncertain": True})
+    assert retry.json()["queued_ids"] == []
+    async with factory() as session:
+        row = await session.get(NotificationDelivery, reviewed)
+        event = await session.get(NotificationEvent, row.event_id)
+        assert (row.status, row.attempts, row.uncertain_count, row.next_attempt_at) == ("attention", 3, 3, next_attempt)
+        assert row.last_error == "ReadTimeout" and row.message_id is None and not event.history_recorded
+        assert not await session.scalar(select(AlertEvent.id))
+        log, = (await session.scalars(select(AuditLog).where(AuditLog.action == "alert_delivery_review"))).all()
+        assert (log.username, log.detail) == ("admin", str(reviewed))
+    assert reviewed not in {job["id"] for job in await store.due(factory, datetime.now(timezone.utc))}
+
+
+async def test_review_and_retry_cannot_both_win(client, auth_headers):
+    delivery, = await _seed(client, ["attention"])
+    review, retry = await asyncio.gather(
+        client.post("/api/alerts/deliveries/review", headers=auth_headers, json={"ids": [delivery]}),
+        client.post("/api/alerts/deliveries/retry", headers=auth_headers,
+                    json={"ids": [delivery], "acknowledge_uncertain": True}),
+    )
+    assert review.status_code == retry.status_code == 200
+    reviewed = review.json()["reviewed_ids"]
+    queued = retry.json()["queued_ids"]
+    assert reviewed + queued == [delivery]
+    factory = client._transport.app.state.session_factory
+    async with factory() as session:
+        row = await session.get(NotificationDelivery, delivery)
+        assert (row.reviewed_at is not None) == bool(reviewed)
+        assert row.status == ("attention" if reviewed else "pending")
 
 
 async def test_uncertain_retry_requires_confirmation_and_only_enqueues(client, auth_headers, monkeypatch):

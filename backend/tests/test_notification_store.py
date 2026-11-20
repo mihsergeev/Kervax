@@ -350,24 +350,45 @@ def test_migration_upgrade_downgrade_and_notice_default(tmp_path):
     from alembic.operations import Operations
     from sqlalchemy import create_engine, inspect, text
 
-    path = Path(__file__).parents[1] / "alembic" / "versions" / "0149_notification_outbox.py"
-    module_spec = importlib.util.spec_from_file_location("notification_outbox_migration", path)
-    migration = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(migration)
+    versions = Path(__file__).parents[1] / "alembic" / "versions"
+
+    def load(filename):
+        module_spec = importlib.util.spec_from_file_location(filename, versions / f"{filename}.py")
+        module = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(module)
+        return module
+
+    outbox = load("0149_notification_outbox")
+    review = load("0151_notification_delivery_review")
     engine = create_engine(f"sqlite:///{(tmp_path / 'migration.db').as_posix()}")
     try:
         with engine.begin() as connection:
             connection.execute(text("CREATE TABLE check_incidents (id INTEGER PRIMARY KEY, notified BOOLEAN)"))
             with Operations.context(MigrationContext.configure(connection)):
-                migration.upgrade()
+                outbox.upgrade()
             connection.execute(text("INSERT INTO check_incidents (id, notified) VALUES (1, 0)"))
             assert connection.scalar(text("SELECT notice_queued FROM check_incidents WHERE id = 1")) == 0
+            connection.execute(Stream.__table__.insert().values(key="example", observed_at=T0))
+            connection.execute(Event.__table__.insert().values(
+                id=1, stream_key="example", seq=1, episode=1, phase="recovery", level=1,
+                members=[], payload={}, occurred_at=T0, updated_at=T0, history_recorded=False))
+            connection.execute(Delivery.__table__.insert().values(
+                id=1, event_id=1, recipient_key="example", transport_key="example", status="attention",
+                attempts=3, uncertain_count=3, next_attempt_at=T0, created_at=T0, last_error="ReadTimeout"))
+            with Operations.context(MigrationContext.configure(connection)):
+                review.upgrade()
+            original = connection.execute(text(
+                "SELECT status, attempts, uncertain_count, last_error, reviewed_at, reviewed_by "
+                "FROM notification_deliveries WHERE id = 1")).one()
+            assert original == ("attention", 3, 3, "ReadTimeout", None, None)
             inspector = inspect(connection)
             for model in (Stream, Event, Delivery, Transport):
                 columns = {column["name"] for column in inspector.get_columns(model.__tablename__)}
                 assert columns == set(model.__table__.columns.keys())
             with Operations.context(MigrationContext.configure(connection)):
-                migration.downgrade()
+                review.downgrade()
+                assert connection.scalar(text("SELECT status FROM notification_deliveries WHERE id = 1")) == "attention"
+                outbox.downgrade()
             assert set(inspect(connection).get_table_names()) == {"check_incidents"}
             assert "notice_queued" not in {column["name"] for column in inspect(connection).get_columns("check_incidents")}
     finally:

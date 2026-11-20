@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 
 from app import alerts, audit, collector, notification_store, panel_errors, settings_store, tg_bot
 from app.config import get_settings
@@ -33,9 +33,12 @@ _DELIVERY_STATUSES = ("pending", "sending", "confirmed", "uncertain", "rejected"
 _RETRY_WARNING = "Предыдущая доставка не подтверждена, повтор может прислать копию"
 
 
-class DeliveryRetryIn(BaseModel):
+class DeliveryIdsIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ids: list[Annotated[int, Field(strict=True, gt=0, le=9223372036854775807)]] = Field(min_length=1, max_length=50)
+
+
+class DeliveryRetryIn(DeliveryIdsIn):
     acknowledge_uncertain: bool = False
 
 
@@ -45,17 +48,22 @@ def _delivery_time(value):
 
 @router.get("/deliveries")
 async def get_deliveries(_: AdminUser, session: SessionDep,
-                         state: Literal["problems", "all"] = "problems", summary: bool = False) -> dict:
+                         state: Literal["problems", "all", "reviewed"] = "problems", summary: bool = False) -> dict:
     """Admin-only safe metadata; no payloads, recipient addresses or credentials."""
+    delivery_model = NotificationDelivery
+    problem = delivery_model.status.in_(_DELIVERY_PROBLEMS) & or_(
+        delivery_model.status != "attention", delivery_model.reviewed_at.is_(None))
     counts = dict.fromkeys(_DELIVERY_STATUSES, 0)
-    counts.update({name: int(number) for name, number in (await session.execute(
-        select(NotificationDelivery.status, func.count()).group_by(NotificationDelivery.status))).all()})
+    totals = (await session.execute(select(delivery_model.status, func.count(), func.count().filter(problem))
+                                    .group_by(delivery_model.status))).all()
+    counts.update({name: number for name, number, _ in totals})
     query = select(NotificationDelivery, NotificationEvent).join(
         NotificationEvent, NotificationEvent.id == NotificationDelivery.event_id)
     if state == "problems":
-        query = query.where(NotificationDelivery.status.in_(_DELIVERY_PROBLEMS))
-    rows = [] if summary else (await session.execute(
-        query.order_by(NotificationDelivery.id.desc()).limit(51))).all()
+        query = query.where(problem)
+    if state == "reviewed":
+        query = query.where(delivery_model.reviewed_at.is_not(None)).order_by(delivery_model.reviewed_at.desc())
+    rows = [] if summary else (await session.execute(query.order_by(delivery_model.id.desc()).limit(51))).all()
     items = []
     for delivery, event in rows[:50]:
         message = (event.payload or {}).get("message") or {}
@@ -69,11 +77,31 @@ async def get_deliveries(_: AdminUser, session: SessionDep,
             "occurred_at": _delivery_time(event.occurred_at),
             "next_attempt_at": _delivery_time(delivery.next_attempt_at),
             "lease_until": _delivery_time(delivery.lease_until),
-            "can_retry": delivery.status in _DELIVERY_PROBLEMS,
+            "reviewed_at": _delivery_time(delivery.reviewed_at), "reviewed_by": delivery.reviewed_by,
+            "can_review": delivery.status == "attention" and delivery.reviewed_at is None
+            and delivery.lease_until is None and not delivery.lease_owner,
+            "can_retry": delivery.status in _DELIVERY_PROBLEMS and delivery.reviewed_at is None,
             "needs_confirmation": delivery.uncertain_count > 0 or delivery.status == "uncertain",
         })
-    return {"counts": counts, "bad_count": sum(counts.get(name, 0) for name in _DELIVERY_PROBLEMS),
+    return {"counts": counts, "bad_count": sum(bad for _, _, bad in totals),
             "items": items, "more": len(rows) > 50}
+
+
+@router.post("/deliveries/review")
+async def review_deliveries(body: DeliveryIdsIn, user: AdminUser, session: SessionDep) -> dict:
+    """Record review of terminal deliveries without changing their outcomes or scheduling retries."""
+    now = datetime.now(timezone.utc)
+    reviewed_by, _ = audit.actor(user.username)
+    ids = sorted(set(body.ids))
+    d = NotificationDelivery
+    reviewed = sorted(await session.scalars(update(d).where(
+        d.id.in_(ids), d.status == "attention", d.reviewed_at.is_(None),
+        d.lease_owner == "", d.lease_until.is_(None),
+    ).values(reviewed_at=now, reviewed_by=reviewed_by).returning(d.id)))
+    if reviewed:
+        await audit.record(session, user.username, "alert_delivery_review", "",
+                           ",".join(map(str, reviewed)), required=True)
+    return {"reviewed_ids": reviewed, "skipped_ids": [item for item in ids if item not in reviewed]}
 
 
 @router.post("/deliveries/retry")
@@ -91,7 +119,7 @@ async def retry_deliveries(body: DeliveryRetryIn, user: AdminUser, session: Sess
         raise HTTPException(429, "Слишком много повторов доставки, повторите через минуту",
                             headers={"Retry-After": "60"})
     rows = list(await session.scalars(select(NotificationDelivery).where(NotificationDelivery.id.in_(ids))))
-    uncertain = [row.id for row in rows if row.status in _DELIVERY_PROBLEMS and (
+    uncertain = [row.id for row in rows if row.reviewed_at is None and row.status in _DELIVERY_PROBLEMS and (
         row.uncertain_count > 0 or row.status == "uncertain")]
     if uncertain and not body.acknowledge_uncertain:
         raise HTTPException(409, _RETRY_WARNING)

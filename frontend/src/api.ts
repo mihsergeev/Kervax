@@ -1216,6 +1216,7 @@ export function getAlerts(): Promise<AlertConfig> {
 }
 
 export type AlertDeliveryState = 'pending' | 'sending' | 'confirmed' | 'uncertain' | 'rejected' | 'superseded' | 'attention'
+export type AlertDeliveryFilter = 'problems' | 'all' | 'reviewed'
 export type AlertDeliveryItem = {
   id: number
   event_id: number
@@ -1229,6 +1230,9 @@ export type AlertDeliveryItem = {
   occurred_at: string
   next_attempt_at: string
   lease_until: string | null
+  reviewed_at: string | null
+  reviewed_by: string | null
+  can_review: boolean
   can_retry: boolean
   needs_confirmation: boolean
 }
@@ -1239,8 +1243,14 @@ export type AlertDeliveryOverview = {
   more: boolean
 }
 
-export function getAlertDeliveries(state: 'problems' | 'all' = 'problems', summary = false): Promise<AlertDeliveryOverview> {
+export function getAlertDeliveries(state: AlertDeliveryFilter = 'problems', summary = false): Promise<AlertDeliveryOverview> {
   return api(`/api/alerts/deliveries?state=${state}&summary=${summary}`)
+}
+
+export function reviewAlertDeliveries(ids: number[]): Promise<{ reviewed_ids: number[]; skipped_ids: number[] }> {
+  return api('/api/alerts/deliveries/review', {
+    method: 'POST', body: JSON.stringify({ ids }),
+  })
 }
 
 export function retryAlertDeliveries(ids: number[], acknowledgeUncertain = false): Promise<{

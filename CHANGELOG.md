@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.145] - 2026-11-20
+
+- Let administrators mark terminal notification delivery problems as reviewed without resending messages. Reviewed deliveries remain visible with the original outcome, attempts, and who reviewed them.
+
 ## [1.8.144] - 2026-11-20
 
 - Spread scheduled HTTP probes across each batch and limit concurrent requests to the same origin or known backend server, including redirects and additional paths.

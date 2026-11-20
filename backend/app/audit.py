@@ -15,21 +15,27 @@ from app.schemas import AuditEntryOut
 SRV_REF = re.compile(r"srv=(\d+)")
 
 
+def actor(username: str) -> tuple[str, str]:
+    a = impersonate.acting()
+    if a is not None and username == a.target:
+        return a.admin, a.target
+    return username, ""
+
+
 async def record(
     session: AsyncSession,
     username: str,
     action: str,
     target: str = "",
     detail: str = "",
+    *,
+    required: bool = False,
 ) -> None:
-    """Пишет запись в журнал (best-effort, не должно ронять основную операцию).
+    """Пишет запись в журнал и завершает текущую транзакцию.
 
     Во время входа админа под чужой учеткой (app/impersonate.py) запись от имени пользователя
-    уходит на самого админа с пометкой as_user: действовал он, а не пользователь."""
-    as_user = ""
-    a = impersonate.acting()
-    if a is not None and username == a.target:
-        username, as_user = a.admin, a.target
+    уходит на самого админа с пометкой as_user. С required ошибка записи видна вызывающему коду."""
+    username, as_user = actor(username)
     try:
         session.add(
             AuditLog(
@@ -41,8 +47,10 @@ async def record(
             )
         )
         await session.commit()
-    except Exception:  # noqa: BLE001 — журнал не критичен
+    except Exception:  # noqa: BLE001 — большинство операций используют best-effort журнал
         await session.rollback()
+        if required:
+            raise
 
 
 async def readable(session: AsyncSession, rows: list[AuditLog]) -> list[AuditEntryOut]:

@@ -405,31 +405,26 @@ async def defer(factory, ids: list[int], owner: str, now: datetime, until: datet
 
 
 async def retry(factory, ids: list[int], now: datetime, *, acknowledge_uncertain=None) -> list[int]:
-    """Explicit operator retry. Confirmed, superseded and active POSTs are immutable."""
+    """Explicit operator retry. Keep reviewed, confirmed, superseded and active outcomes intact."""
     now = _aware(now)
     await _expired(factory, now)
+    eligible = (Delivery.id.in_(ids), Delivery.status.in_(("pending", "uncertain", "attention", "rejected")),
+                Delivery.reviewed_at.is_(None))
+    if acknowledge_uncertain is False:
+        eligible += (Delivery.uncertain_count == 0,)
     async with factory() as session:
-        keys = list(await session.scalars(select(Delivery.transport_key).where(
-            Delivery.id.in_(ids), Delivery.status.in_(("pending", "uncertain", "attention", "rejected")),
-        ).distinct()))
+        keys = list(await session.scalars(select(Delivery.transport_key).where(*eligible).distinct()))
     async with factory() as session, session.begin():
         # An explicit retry permits one new probe, while preserving active leases.
         # Take transport locks before recipient rows, as claim/finish do.
         for transport_key in sorted(keys):
             await session.execute(update(Transport).where(Transport.key == transport_key)
                                   .values(failures=Transport.failures))
-            eligible = select(Delivery).where(Delivery.id.in_(ids), Delivery.transport_key == transport_key,
-                Delivery.status.in_(("pending", "uncertain", "attention", "rejected")))
-            if acknowledge_uncertain is False:
-                eligible = eligible.where(Delivery.uncertain_count == 0)
-            if await session.scalar(eligible.with_for_update()) is not None:
+            target = select(Delivery.id).where(*eligible, Delivery.transport_key == transport_key).with_for_update()
+            if await session.scalar(target) is not None:
                 await session.execute(update(Transport).where(Transport.key == transport_key)
                                       .values(failures=0, blocked_until=now))
-        statement = update(Delivery).where(
-            Delivery.id.in_(ids), Delivery.status.in_(("pending", "uncertain", "attention", "rejected")),
-        )
-        if acknowledge_uncertain is False:
-            statement = statement.where(Delivery.uncertain_count == 0)
+        statement = update(Delivery).where(*eligible)
         return list(await session.scalars(statement.values(status="pending", attempts=0, uncertain_count=0, next_attempt_at=now,
                  lease_owner="", lease_until=None, last_error="").returning(Delivery.id)))
 
