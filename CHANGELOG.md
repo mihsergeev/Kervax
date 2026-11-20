@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.148] - 2026-11-20
+
+- Keep the root scripts on the panel host from following links or swapped files in the panel data directory: the firewall and GRE sync scripts, the agent proxy peer sync and the quickstart installer now create their files under unpredictable names, read the lists without following symlinks and with a time limit, and treat a failed read as an error instead of an empty list. Reinstall `ops/agent-firewall-sync.sh`, `ops/gre-sync.sh` and `ops/agent-proxy-peers-sync.py` on the panel host where they are installed.
+- With firewalld, keep addresses that are still open in the firewall sync state, so an empty list or the prune limit no longer leaves them open and forgotten.
+- Create files with the agent token and the relay proxy password with private permissions from the start (GRE helper 0.4, relay helper 0.2). Nodes receive the new helpers automatically. Other server helpers are unchanged.
+
 ## [1.8.147] - 2026-11-20
 
 - Bound HTTP probes against hostile sites. Response bodies are read as a stream up to 2 MB after decompression, redirect bodies are never read, gzip and deflate are decoded with input and output limits (at most two layers), and the probe yields to other work while decoding. A keyword must appear within the first 2 MB, and latency is measured up to that point.

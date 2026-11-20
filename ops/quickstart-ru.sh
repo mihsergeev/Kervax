@@ -349,7 +349,10 @@ if [ "$LOCAL_CA" = "1" ]; then
     done
     if [ -n "$root" ]; then
         mkdir -p "$DIR/data"
-        printf '%s\n' "$root" > "$CA_FILE.tmp" && chmod 644 "$CA_FILE.tmp" && mv -f "$CA_FILE.tmp" "$CA_FILE"
+        # в data/ пишет контейнер панели, он уже запущен: случайное имя создается с O_EXCL
+        # (noclobber) и правами 0644 от umask, без фиксированного .tmp, который подменят ссылкой
+        ca_tmp=$(mktemp -u "$CA_FILE.XXXXXXXXXX") && (umask 022 && set -C && printf '%s\n' "$root" > "$ca_tmp") \
+            && mv -fT "$ca_tmp" "$CA_FILE"
         CURL_CA="--cacert $CA_FILE"
         # имя проверяем на этом же сервере: записи в DNS у него может и не быть
         case "$DOMAIN" in *[!0-9.]*) CURL_CA="$CURL_CA --resolve $DOMAIN:443:127.0.0.1" ;; esac

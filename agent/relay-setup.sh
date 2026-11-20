@@ -23,7 +23,7 @@
 # CONNECT to one host:port by itself. python3 is on every one of them, and the whole proxy is
 # right here in the repository: ansible copies it from the repository, nothing is downloaded.
 
-KERVAX_SETUP_VERSION=0.1  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
 # Only where the relay is switched on in the panel: asked with this node's agent token, which
 # goes as the request body straight from the agent config (no quotes, braces or backslashes here:
 # the condition travels through the playbook and the panel's helper index as is). Assigned before
@@ -296,9 +296,21 @@ def read_json(path, default):
         return default
 
 
+def create(path):
+    """A new file only root can read, open for writing. open(path, "w") made it 0644 under the
+    timer's umask 022 until the chmod after the write, and a local user could open it in between
+    and keep reading the proxy password. A leftover of an interrupted run is removed first: O_EXCL
+    never follows a link left in its place."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+
+
 def write_json(path, data, mode, group=None):
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    with os.fdopen(create(tmp), "w", encoding="utf-8") as f:
         json.dump(data, f, sort_keys=True)
     os.chmod(tmp, mode)
     if group:

@@ -8,7 +8,9 @@ import importlib.util
 import io
 import json
 import re
+import os
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -211,6 +213,50 @@ def test_sync_keeps_the_relay_when_the_panel_is_unreachable_and_removes_it_for_a
     assert mod.main() == 1 and (tmp / "relay.json").exists()
     answer["reply"] = 401
     assert mod.main() == 0 and not (tmp / "relay.json").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="права файлов POSIX")
+def test_sync_never_creates_the_proxy_password_readable_by_others(sync, monkeypatch):
+    # таймер работает с umask 022: open(tmp, "w") давал 0644 до chmod после записи, и локальный
+    # пользователь успевал открыть временную копию relay.json с паролем прокси
+    mod, calls, answer, tmp = sync
+    created = []
+    real_open, real_os_open = open, os.open
+
+    def note(path, fd):
+        if str(path).startswith(str(tmp)):
+            created.append((os.path.basename(path), stat.S_IMODE(os.fstat(fd).st_mode)))
+
+    def track_open(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if isinstance(file, (str, os.PathLike)) and set(mode) & set("wax+"):
+            note(file, f.fileno())
+        return f
+
+    def track_os_open(path, flags, *args, **kwargs):
+        fd = real_os_open(path, flags, *args, **kwargs)
+        if flags & os.O_CREAT:
+            note(path, fd)
+        return fd
+
+    monkeypatch.setattr(mod, "open", track_open, raising=False)
+    monkeypatch.setattr(os, "open", track_os_open)
+    victim = tmp / "victim"
+    victim.write_text("synthetic\n")
+    victim.chmod(0o600)
+    (tmp / "relay.json.tmp").symlink_to(victim)  # остаток или подложенная ссылка
+    answer["reply"] = {"enabled": True, "port": 8790, "user": "kervax", "password": "pw-1", "clients": ["203.0.113.40"]}
+    old = os.umask(0o022)
+    try:
+        assert mod.main() == 0
+    finally:
+        os.umask(old)
+    assert {"relay.json.tmp", "state.json.tmp"} <= {name for name, _ in created}
+    assert all(mode & 0o077 == 0 for _, mode in created), created
+    assert victim.read_text() == "synthetic\n" and stat.S_IMODE(victim.stat().st_mode) == 0o600
+    assert not (tmp / "relay.json").is_symlink() and json.loads((tmp / "relay.json").read_text())["password"] == "pw-1"
+    assert stat.S_IMODE((tmp / "relay.json").stat().st_mode) == 0o640  # группа прокси читает
+    assert stat.S_IMODE((tmp / "state.json").stat().st_mode) == 0o600
 
 
 def test_helper_script_rules():

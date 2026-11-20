@@ -20,7 +20,7 @@
 # connect=, the tunnel, its firewall rules and the helper itself, version marker included. Failed
 # requests (including 401/403 during a panel restart) keep the tunnel and retry on the next tick.
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 # Only where GRE is switched on in the panel: asked with this node's agent token, which goes as the
 # request body straight from the agent config (no quotes, braces or backslashes here: the condition
 # travels through the playbook and the panel's helper index as is). Assigned before set -e: the
@@ -110,6 +110,18 @@ def agent_conf():
     return out
 
 
+def create(path):
+    """A new file only root can read, open for writing. open(path, "w") made it 0644 under the
+    timer's umask 022 until the chmod after the write, and a local user could open it in between
+    and keep reading the agent token. A leftover of an interrupted run is removed first: O_EXCL
+    never follows a link left in its place."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+
+
 def set_connect(addr):
     """connect= in the agent config: the address the agent dials for the panel. Written only when
     it changes, with the same owner and mode (the file holds the agent token)."""
@@ -122,7 +134,7 @@ def set_connect(addr):
         return False
     st = os.stat(AGENT_CONF)
     tmp = AGENT_CONF + ".kervax-gre"
-    with open(tmp, "w", encoding="utf-8") as f:
+    with os.fdopen(create(tmp), "w", encoding="utf-8") as f:
         f.write("\n".join(keep) + "\n")
     os.chmod(tmp, st.st_mode & 0o7777)
     try:
@@ -143,7 +155,7 @@ def read_json(path, default):
 
 def write_json(path, data, mode):
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
+    with os.fdopen(create(tmp), "w", encoding="utf-8") as f:
         json.dump(data, f, sort_keys=True)
     os.chmod(tmp, mode)
     os.replace(tmp, path)

@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -223,6 +224,70 @@ def test_sync_does_not_point_an_agent_behind_a_proxy_at_the_tunnel(sync):
                                           "proxy=http://user:fakepass@proxy.example:3128\n", encoding="utf-8")
     mod.main(["x"])
     assert "connect=" not in _conf(tmp)
+
+
+def track_created(monkeypatch, mod, root):
+    """Права каждого файла, который helper создает под root, - сразу после создания, до записи в него."""
+    created = []
+    real_open, real_os_open = open, os.open
+
+    def note(path, fd):
+        if str(path).startswith(str(root)):
+            created.append((os.path.relpath(path, root), stat.S_IMODE(os.fstat(fd).st_mode)))
+
+    def track_open(file, mode="r", *args, **kwargs):
+        f = real_open(file, mode, *args, **kwargs)
+        if isinstance(file, (str, os.PathLike)) and set(mode) & set("wax+"):
+            note(file, f.fileno())
+        return f
+
+    def track_os_open(path, flags, *args, **kwargs):
+        fd = real_os_open(path, flags, *args, **kwargs)
+        if flags & os.O_CREAT:
+            note(path, fd)
+        return fd
+
+    monkeypatch.setattr(mod, "open", track_open, raising=False)
+    monkeypatch.setattr(os, "open", track_os_open)
+    return created
+
+
+@pytest.mark.skipif(os.name == "nt", reason="права файлов POSIX")
+def test_sync_never_creates_the_token_or_config_readable_by_others(sync, monkeypatch):
+    # таймер работает с umask 022: open(tmp, "w") давал 0644 до chmod после записи, и локальный
+    # пользователь успевал открыть временную копию конфига агента с токеном
+    mod, calls, env, tmp = sync
+    (tmp / "kervax-agent.conf").chmod(0o600)
+    victim = tmp / "victim"
+    victim.write_text("synthetic\n")
+    victim.chmod(0o600)
+    (tmp / "kervax-agent.conf.kervax-gre").symlink_to(victim)  # остаток или подложенная ссылка
+    created = track_created(monkeypatch, mod, tmp)
+    old = os.umask(0o022)
+    try:
+        assert mod.main(["x"]) == 0
+    finally:
+        os.umask(old)
+    names = {name for name, _ in created}
+    assert {"kervax-agent.conf.kervax-gre", "gre.json.tmp", os.path.join("gre", "state.json.tmp")} <= names
+    assert all(mode & 0o077 == 0 for _, mode in created), created
+    assert victim.read_text() == "synthetic\n" and stat.S_IMODE(victim.stat().st_mode) == 0o600
+    for f in ("kervax-agent.conf", "gre.json", os.path.join("gre", "state.json")):
+        assert not (tmp / f).is_symlink() and stat.S_IMODE((tmp / f).stat().st_mode) == 0o600, f
+    assert "token=fake-token-example" in _conf(tmp) and "connect=10.254.0.1" in _conf(tmp)
+    assert not (tmp / "kervax-agent.conf.kervax-gre").exists()
+
+    # конфиг агента 0640 (группа агента) - остается 0640
+    (tmp / "kervax-agent.conf").chmod(0o640)
+    env["reach"] = False
+    created.clear()
+    os.umask(0o022)
+    try:
+        assert mod.main(["x"]) == 0
+    finally:
+        os.umask(old)
+    assert "connect=" not in _conf(tmp) and stat.S_IMODE((tmp / "kervax-agent.conf").stat().st_mode) == 0o640
+    assert created and all(mode & 0o077 == 0 for _, mode in created), created
 
 
 def test_helper_script_rules():

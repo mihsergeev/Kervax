@@ -120,7 +120,10 @@ def publish(path, data):
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
                                          prefix=".agent-proxy-peers-", delete=False) as handle:
             temporary = handle.name
-            os.chmod(temporary, 0o644)
+            # through the descriptor: the data directory is writable by the backend container,
+            # which can swap the name for a symlink to a host file before a chmod by name
+            # (by name only where chmod takes no descriptor: test runs on Windows)
+            os.chmod(handle.fileno() if os.chmod in os.supports_fd else temporary, 0o644)
             json.dump(data, handle, sort_keys=True)
             handle.write("\n")
             handle.flush()

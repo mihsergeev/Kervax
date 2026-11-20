@@ -211,6 +211,32 @@ def test_failed_atomic_write_preserves_previous_complete_file_and_cleans_temp(tm
     assert not list(tmp_path.glob(".agent-proxy-peers-*"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks and file modes")
+def test_publish_never_chmods_a_symlink_swapped_in_for_the_temporary(tmp_path, monkeypatch):
+    # The data directory is writable by the backend container: it can rename the fresh temporary
+    # away and leave a symlink to a host file under its name before the mode is set
+    host_file = tmp_path / "host" / "victim"
+    host_file.parent.mkdir()
+    host_file.write_text("synthetic host secret\n")
+    host_file.chmod(0o600)
+    data = tmp_path / "data"
+    data.mkdir()
+    real = sync.tempfile.NamedTemporaryFile
+
+    def swapped(*args, **kwargs):
+        handle = real(*args, **kwargs)
+        os.rename(handle.name, handle.name + ".moved")
+        os.symlink(host_file, handle.name)
+        return handle
+
+    monkeypatch.setattr(sync.tempfile, "NamedTemporaryFile", swapped)
+    sync.publish(data / "agent_proxy_peers.json", {"v": 1})
+    assert host_file.read_text() == "synthetic host secret\n"
+    assert host_file.stat().st_mode & 0o777 == 0o600
+    written = next(data.glob(".agent-proxy-peers-*.moved"))
+    assert json.loads(written.read_text()) == {"v": 1} and written.stat().st_mode & 0o777 == 0o644
+
+
 def test_docker_reads_filtered_metadata_without_env(monkeypatch):
     calls = []
     monkeypatch.setattr(sync.subprocess, "run", lambda argv, **kwargs: calls.append((argv, kwargs)) or SimpleNamespace(stdout="{}"))

@@ -48,6 +48,35 @@ if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK" && flock -w 60 9 || exit 0
 fi
 
+# The data directory is writable by the panel's container while this script runs as root: any
+# name there may be a symlink to a host file, a FIFO or a device node, swapped in at any moment.
+# snapshot: a regular file only (a symlink counts as missing), read once and bounded; nofollow
+# refuses a symlink swapped in after the check right at open, nonblock keeps a FIFO from hanging
+# root, timeout bounds a device. A failed read (a symlink swapped in, a dd or timeout without
+# these options) is not an empty list: it fails, and the run leaves rules, state and the report
+# alone instead of acting on "no addresses".
+snapshot() {
+  if [ -f "$1" ] && [ ! -L "$1" ]; then
+    _snap=$({ timeout 5 dd if="$1" iflag=nofollow,nonblock bs=65536 count=64 status=none 2>/dev/null \
+      || echo __kvx_fail__; } | tr -d '\000\r')
+    case "$_snap" in *__kvx_fail__) ;; *) printf '%s\n' "$_snap"; return 0 ;; esac
+  fi
+  logger -t kervax-agent-fw "could not read $1 as a regular file - leaving the rules alone" 2>/dev/null || true
+  return 1
+}
+# publish: stdin to $1. A fixed "$1.tmp" could be a planted symlink, and root would overwrite and
+# chmod the file it points to. The guard is the name: mktemp -u gives one the container cannot
+# predict, so nothing sits there when noclobber creates it with O_EXCL (set -C opens an EXISTING
+# non-regular file without O_EXCL). umask 022 makes it 0644 with no chmod by name, and mv -T
+# renames over whatever sits at $1 (a symlink, also one to a directory) instead of following it.
+publish() {
+  _tmp=$(mktemp -u "$1.XXXXXXXXXX") || return 1
+  if (umask 022 && set -C && cat > "$_tmp") 2>/dev/null && mv -fT "$_tmp" "$1" 2>/dev/null; then return 0; fi
+  rm -f "$_tmp" 2>/dev/null
+  return 1
+}
+IPS=$(snapshot "$IPS_FILE") || exit 0
+
 CHANGED=0
 
 have_ufw() { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "^Status: active"; }
@@ -106,7 +135,7 @@ fi
 # normalise: valid addresses only, no shell surprises coming from the file. Single addresses,
 # never subnets: "0.0.0.0/0" in the list opened 80/443 of the panel host to everyone. The
 # opened list below still accepts "/", so such a rule left from before is closed by step 2
-DESIRED=$(tr -d '\r' < "$IPS_FILE" | tr -s '[:space:]' '\n' \
+DESIRED=$(printf '%s\n' "$IPS" | tr -s '[:space:]' '\n' \
           | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$|^[0-9a-fA-F]*:[0-9a-fA-F:.]*$' | sort -u || true)
 OPENED=$(tr -d '\r' < "$STATE" | tr -s '[:space:]' '\n' \
          | grep -E '^[0-9a-fA-F.:/]+$' | sort -u || true)
@@ -133,6 +162,7 @@ if [ "$PRUNE" = "1" ] && [ "$DESIRED_N" = "0" ] && [ "$OPENED_N" != "0" ]; then
   logger -t kervax-agent-fw "the agent IP list is empty ($IPS_FILE) - leaving the rules alone" 2>/dev/null || true
   PRUNE=0
 fi
+CLOSED=""
 if [ "$PRUNE" = "1" ]; then
   pruned=0
   for ip in $OPENED; do
@@ -145,6 +175,7 @@ if [ "$PRUNE" = "1" ]; then
     elif have_fwd; then del_firewalld "$ip"
     fi
     pruned=$((pruned + 1))
+    CLOSED="$CLOSED $ip"
     logger -t kervax-agent-fw "closed access for $ip (the server is gone from the panel)" 2>/dev/null || true
   done
 fi
@@ -156,7 +187,11 @@ if have_ufw; then
     | grep -E '^[0-9a-fA-F.:/]+$' | sort -u > "$STATE.tmp" 2>/dev/null \
     || printf '%s\n' $DESIRED > "$STATE.tmp"
 else
-  printf '%s\n' $DESIRED > "$STATE.tmp" 2>/dev/null || true
+  # firewalld is not queried: what is wanted plus what was opened and not closed in this run, so
+  # an empty list or the prune cap does not drop the addresses still open from the state
+  for ip in $DESIRED $OPENED; do
+    case " $CLOSED " in *" $ip "*) ;; *) printf '%s\n' "$ip" ;; esac
+  done | sort -u > "$STATE.tmp" 2>/dev/null || true
 fi
 mv -f "$STATE.tmp" "$STATE" 2>/dev/null || true
 
@@ -169,5 +204,5 @@ if have_ufw; then FW=ufw; elif have_fwd; then FW=firewalld; else FW=none; fi
 {
   echo "# kervax-agent-fw fw=$FW ts=$(date +%s)"
   [ "$FW" = none ] || tr -d '\r' < "$STATE" | grep -E '^[0-9a-fA-F.:/]+$' || true
-} > "$APPLIED.tmp" 2>/dev/null && chmod 0644 "$APPLIED.tmp" 2>/dev/null && mv -f "$APPLIED.tmp" "$APPLIED" 2>/dev/null || true
+} | publish "$APPLIED" || true
 exit 0

@@ -44,15 +44,44 @@ LOCK="${KERVAX_GRE_LOCK:-/run/kervax-gre.lock}"
 MTU=1476
 COMMENT=kervax-gre
 [ -r "$LIST" ] || exit 0
-# the panel always writes the header, even with no tunnels: without it this is a wrong or
-# half-written file, and "no tunnels" from it would tear every tunnel down
-if [ "$(head -n 1 "$LIST" | tr -d '\r')" != "# kervax-gre v1" ]; then
-  logger -t kervax-gre "no header in $LIST - leaving the tunnels alone" 2>/dev/null || true
-  exit 0
-fi
 # cron, boot and the path unit may fire together: one run at a time
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK" && flock -w 60 9 || exit 0
+fi
+
+# The data directory is writable by the panel's container while this script runs as root: any
+# name there may be a symlink to a host file, a FIFO or a device node, swapped in at any moment.
+# snapshot: a regular file only (a symlink counts as missing), read once and bounded; nofollow
+# refuses a symlink swapped in after the check right at open, nonblock keeps a FIFO from hanging
+# root, timeout bounds a device. A failed read (a symlink swapped in, a dd or timeout without
+# these options) is not an empty list: it fails, and the run leaves tunnels, rules and the report
+# alone instead of acting on "no tunnels".
+snapshot() {
+  if [ -f "$1" ] && [ ! -L "$1" ]; then
+    _snap=$({ timeout 5 dd if="$1" iflag=nofollow,nonblock bs=65536 count=64 status=none 2>/dev/null \
+      || echo __kvx_fail__; } | tr -d '\000\r')
+    case "$_snap" in *__kvx_fail__) ;; *) printf '%s\n' "$_snap"; return 0 ;; esac
+  fi
+  logger -t kervax-gre "could not read $1 as a regular file - leaving the tunnels alone" 2>/dev/null || true
+  return 1
+}
+# publish: stdin to $1. A fixed "$1.tmp" could be a planted symlink, and root would overwrite and
+# chmod the file it points to. The guard is the name: mktemp -u gives one the container cannot
+# predict, so nothing sits there when noclobber creates it with O_EXCL (set -C opens an EXISTING
+# non-regular file without O_EXCL). umask 022 makes it 0644 with no chmod by name, and mv -T
+# renames over whatever sits at $1 (a symlink, also one to a directory) instead of following it.
+publish() {
+  _tmp=$(mktemp -u "$1.XXXXXXXXXX") || return 1
+  if (umask 022 && set -C && cat > "$_tmp") 2>/dev/null && mv -fT "$_tmp" "$1" 2>/dev/null; then return 0; fi
+  rm -f "$_tmp" 2>/dev/null
+  return 1
+}
+LIST_TEXT=$(snapshot "$LIST") || exit 0
+# the panel always writes the header, even with no tunnels: without it this is a wrong or
+# half-written file, and "no tunnels" from it would tear every tunnel down
+if [ "$(printf '%s\n' "$LIST_TEXT" | head -n 1)" != "# kervax-gre v1" ]; then
+  logger -t kervax-gre "no header in $LIST - leaving the tunnels alone" 2>/dev/null || true
+  exit 0
 fi
 
 have_ufw() { command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "^Status: active"; }
@@ -61,7 +90,7 @@ if have_ufw; then FW=ufw; elif have_fwd; then FW=firewalld; else FW=none; fi
 
 IP4='([0-9]{1,3}\.){3}[0-9]{1,3}'
 # valid lines only: no shell surprises coming from the file
-WANT=$(tr -d '\r' < "$LIST" | grep -E "^kvxg[0-9]{1,8} $IP4 $IP4/30 $IP4\$" || true)
+WANT=$(printf '%s\n' "$LIST_TEXT" | grep -E "^kvxg[0-9]{1,8} $IP4 $IP4/30 $IP4\$" || true)
 
 # Firewall rules this script added, one per line: "<fw> gre <node IP>" or "<fw> in <iface> <node
 # inner IP>". The firewall is part of the rule: switched from ufw to firewalld, the old ones are
@@ -192,5 +221,5 @@ if [ "$CHANGED" = "1" ] && [ "$FW" = firewalld ]; then firewall-cmd --reload >/d
 {
   echo "# kervax-gre fw=$FW ts=$(date +%s)"
   printf '%s' "$OUT"
-} > "$APPLIED.tmp" 2>/dev/null && chmod 0644 "$APPLIED.tmp" 2>/dev/null && mv -f "$APPLIED.tmp" "$APPLIED" 2>/dev/null || true
+} | publish "$APPLIED" || true
 exit 0

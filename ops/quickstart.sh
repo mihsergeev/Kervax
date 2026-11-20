@@ -352,7 +352,10 @@ if [ "$LOCAL_CA" = "1" ]; then
     done
     if [ -n "$root" ]; then
         mkdir -p "$DIR/data"
-        printf '%s\n' "$root" > "$CA_FILE.tmp" && chmod 644 "$CA_FILE.tmp" && mv -f "$CA_FILE.tmp" "$CA_FILE"
+        # data/ is writable by the panel's container, already running: a random name created with
+        # O_EXCL (noclobber) and 0644 from umask, no fixed .tmp a planted symlink could redirect
+        ca_tmp=$(mktemp -u "$CA_FILE.XXXXXXXXXX") && (umask 022 && set -C && printf '%s\n' "$root" > "$ca_tmp") \
+            && mv -fT "$ca_tmp" "$CA_FILE"
         CURL_CA="--cacert $CA_FILE"
         # a name is checked against this server itself: it may well have no DNS record
         case "$DOMAIN" in *[!0-9.]*) CURL_CA="$CURL_CA --resolve $DOMAIN:443:127.0.0.1" ;; esac
