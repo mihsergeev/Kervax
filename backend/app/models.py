@@ -28,6 +28,7 @@ from sqlalchemy import (
     UniqueConstraint,
     false,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1390,6 +1391,8 @@ class NotificationEvent(Base):
     __table_args__ = (
         UniqueConstraint("stream_key", "seq", name="uq_notification_event_seq"),
         UniqueConstraint("stream_key", "occurrence", name="uq_notification_event_occurrence"),
+        # эпизод ленты: чистка (notification_store.prune) проверяет, что в нем все доставки закрыты
+        Index("ix_notification_event_episode", "stream_key", "episode"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -1404,7 +1407,8 @@ class NotificationEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     history_recorded: Mapped[bool] = mapped_column(Boolean, default=False)
-    tg_alert_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # индекс: кнопки без связи с событием (alert_delivery._resolve_buttons) ищутся через NOT EXISTS
+    tg_alert_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
 
 
 class NotificationDelivery(Base):
@@ -1414,6 +1418,10 @@ class NotificationDelivery(Base):
     __table_args__ = (
         UniqueConstraint("event_id", "recipient_key", name="uq_notification_delivery_recipient"),
         Index("ix_notification_delivery_due", "status", "next_attempt_at"),
+        # подтвержденные, чьи последствия (история, кнопки) еще не записаны: их на каждом
+        # drain ищет alert_delivery._reconcile_confirmed. Частичный индекс - единицы строк
+        Index("ix_notification_delivery_effects", "id", postgresql_where=text("effects_pending"),
+              sqlite_where=text("effects_pending = 1")),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -1432,6 +1440,9 @@ class NotificationDelivery(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reviewed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # confirmed, а последствия еще не записаны (target["effects_recorded"] пока нет). Колонка, а не
+    # условие по JSON: по ней частичный индекс, и drain не разбирает target каждой строки
+    effects_pending: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
 
 class NotificationTransport(Base):

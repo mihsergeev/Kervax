@@ -10138,6 +10138,11 @@ async def _prune(
             )
         )
         await session.commit()
+    # очередь уведомлений - своими короткими пачками, после общего commit: удаление не держит
+    # блокировки лент и доставок дольше одной пачки (drain и admit работают параллельно)
+    from app import notification_store
+    await notification_store.prune(session_factory, now - retention_mod.NOTIFY_KEEP,
+                                   now - retention_mod.NOTIFY_STALE_KEEP)
 
 
 async def _deliver_pending(session_factory, settings: Settings) -> None:

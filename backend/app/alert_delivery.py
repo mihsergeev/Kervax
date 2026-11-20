@@ -857,18 +857,29 @@ async def _effects_done(factory, ids):
                 NotificationDelivery.id.in_(ids), NotificationDelivery.status == "confirmed")
                 .order_by(NotificationDelivery.id).with_for_update()):
             row.target = {**row.target, "effects_recorded": True}
+            row.effects_pending = False
 
 
 async def _reconcile_confirmed(factory, cfg, now):
     """A restart after a confirmed POST repairs metadata without repeating POST."""
     from app import alerts
     async with factory() as session:
-        event_ids = list(await session.scalars(select(NotificationDelivery.event_id).where(
-            NotificationDelivery.status == "confirmed",
-            NotificationDelivery.target["effects_recorded"].as_boolean().is_not(True))
-            .order_by(NotificationDelivery.id).limit(100)))
+        # effects_pending вместо разбора target: частичный индекс, без полного прохода по таблице.
+        # Именно == True (а не is_): так условие совпадает с условием индекса и в Postgres, и в SQLite
+        flagged = (await session.execute(select(NotificationDelivery.id, NotificationDelivery.event_id).where(
+            NotificationDelivery.status == "confirmed", NotificationDelivery.effects_pending == True)  # noqa: E712
+            .order_by(NotificationDelivery.id).limit(100))).all()
+    event_ids = [event_id for _, event_id in flagged]
     jobs = [row for row in await store.deliveries(factory, event_ids)
             if row["status"] == "confirmed" and not row["target"].get("effects_recorded")]
+    # флаг без работы (последствия уже записаны в target) снимаем, иначе такие строки
+    # навсегда займут LIMIT и вытеснят настоящие
+    stuck = sorted({delivery_id for delivery_id, _ in flagged} - {row["id"] for row in jobs})
+    if stuck:
+        async with factory() as session, session.begin():
+            await session.execute(update(NotificationDelivery).where(
+                NotificationDelivery.id.in_(stuck), NotificationDelivery.status == "confirmed",
+                NotificationDelivery.target["effects_recorded"].as_boolean().is_(True)).values(effects_pending=False))
     for row in jobs:
         message = await _render(factory, row, now)
         current = await _configuration(factory, cfg, row, message)

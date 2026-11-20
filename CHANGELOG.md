@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.149] - 2026-11-20
+
+- Prune the notification queue. Settled deliveries and their events are removed after 90 days and unreviewed problems after 365 days, in short batches limited to about 10 seconds per run; open incidents and anything that still needs action are kept. A large existing history is cleaned up gradually over the following days.
+- Speed up the delivery worker on large queues: pending delivery effects are tracked with an indexed flag instead of a JSON scan, and Telegram buttons and incident episodes are looked up by index.
+- The retention window and the delivery status view say how long notification history is kept.
+
 ## [1.8.148] - 2026-11-20
 
 - Keep the root scripts on the panel host from following links or swapped files in the panel data directory: the firewall and GRE sync scripts, the agent proxy peer sync and the quickstart installer now create their files under unpredictable names, read the lists without following symlinks and with a time limit, and treat a failed read as an error instead of an empty list. Reinstall `ops/agent-firewall-sync.sh`, `ops/gre-sync.sh` and `ops/agent-proxy-peers-sync.py` on the panel host where they are installed.

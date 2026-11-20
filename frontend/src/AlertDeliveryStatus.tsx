@@ -94,6 +94,7 @@ export function AlertDeliveryStatus({ onUnauthorized, onCount }: {
     {!data && !error && <p className="muted small">{t('загрузка…')}</p>}
     {data && <>
       <p className="muted small">{t('В очереди: {pending}, подтверждено: {confirmed}', { pending: data.counts.pending, confirmed: data.counts.confirmed })}</p>
+      <p className="muted small">{t('Закрытые доставки хранятся 90 дней, требующие решения - до 365 дней, тревоги открытых инцидентов - пока инцидент открыт. Счетчики считают только хранимые записи.')}</p>
       {!data.items.length && <p className="muted small">{t(state === 'problems' ? 'Нет проблем с доставкой' :
         state === 'reviewed' ? 'Рассмотренных доставок пока нет' : 'Доставок пока нет')}</p>}
       {data.items.map(item => <div className="card" key={item.id} style={{ padding: 12, marginTop: 10, overflowWrap: 'anywhere' }}>

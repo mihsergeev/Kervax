@@ -360,6 +360,7 @@ def test_migration_upgrade_downgrade_and_notice_default(tmp_path):
 
     outbox = load("0149_notification_outbox")
     review = load("0151_notification_delivery_review")
+    indexes = load("0152_notification_outbox_indexes")
     engine = create_engine(f"sqlite:///{(tmp_path / 'migration.db').as_posix()}")
     try:
         with engine.begin() as connection:
@@ -372,20 +373,31 @@ def test_migration_upgrade_downgrade_and_notice_default(tmp_path):
             connection.execute(Event.__table__.insert().values(
                 id=1, stream_key="example", seq=1, episode=1, phase="recovery", level=1,
                 members=[], payload={}, occurred_at=T0, updated_at=T0, history_recorded=False))
-            connection.execute(Delivery.__table__.insert().values(
-                id=1, event_id=1, recipient_key="example", transport_key="example", status="attention",
-                attempts=3, uncertain_count=3, next_attempt_at=T0, created_at=T0, last_error="ReadTimeout"))
+            # схема 0149 без effects_pending: вставка мимо модели
+            for row_id, status, target in ((1, "attention", "{}"), (2, "confirmed", "{}"),
+                                           (3, "confirmed", '{"effects_recorded": true}')):
+                connection.execute(text(
+                    "INSERT INTO notification_deliveries (id, event_id, recipient_key, target, transport_key, status,"
+                    " attempts, uncertain_count, next_attempt_at, lease_owner, last_error, created_at) VALUES"
+                    " (:id, 1, :key, :target, 'example', :status, 3, 3, :at, '', 'ReadTimeout', :at)"),
+                    dict(id=row_id, key=f"example-{row_id}", target=target, status=status, at=T0))
             with Operations.context(MigrationContext.configure(connection)):
                 review.upgrade()
             original = connection.execute(text(
                 "SELECT status, attempts, uncertain_count, last_error, reviewed_at, reviewed_by "
                 "FROM notification_deliveries WHERE id = 1")).one()
             assert original == ("attention", 3, 3, "ReadTimeout", None, None)
+            with Operations.context(MigrationContext.configure(connection)):
+                indexes.upgrade()
+            # флаг получают только подтвержденные без записанных последствий
+            assert set(connection.scalars(text(
+                "SELECT id FROM notification_deliveries WHERE effects_pending = 1"))) == {2}
             inspector = inspect(connection)
             for model in (Stream, Event, Delivery, Transport):
                 columns = {column["name"] for column in inspector.get_columns(model.__tablename__)}
                 assert columns == set(model.__table__.columns.keys())
             with Operations.context(MigrationContext.configure(connection)):
+                indexes.downgrade()
                 review.downgrade()
                 assert connection.scalar(text("SELECT status FROM notification_deliveries WHERE id = 1")) == "attention"
                 outbox.downgrade()

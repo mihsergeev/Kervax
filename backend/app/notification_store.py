@@ -10,12 +10,15 @@ import hashlib
 import inspect
 import json
 import re
+import time
+import weakref
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
 
-from sqlalchemy import exists, or_, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.orm import aliased
 
 from app.models import NotificationDelivery as Delivery
 from app.models import NotificationEvent as Event
@@ -23,6 +26,7 @@ from app.models import NotificationStream as Stream
 from app.models import NotificationTransport as Transport
 
 UNCERTAIN_DELAY = 15 * 60
+_monotonic = time.monotonic
 MAX_ATTEMPTS = 6
 MAX_UNCERTAIN = 3
 _READY = ("pending", "uncertain")
@@ -109,11 +113,18 @@ async def admit(factory, specs: list[dict], now: datetime, callback=None) -> lis
             payload = _json(spec.get("payload") or {})
             if not isinstance(payload, dict):
                 raise ValueError("notification payload must be an object")
-            await _insert_once(session, Stream, dict(key=stream_key, seq=0, episode=0, phase="", members=[],
-                               level=0, observed_at=observed), ["key"])
-            # The insert/no-op is a write barrier on SQLite; FOR UPDATE serializes
-            # the existing stream on PostgreSQL. Both finish before network I/O.
-            stream = await session.scalar(select(Stream).where(Stream.key == stream_key).with_for_update())
+            # prune может держать ленту и удалить ее, пока мы ждем FOR UPDATE: тогда вставка была
+            # пустой (конфликт), а SELECT уже не находит строку. Вставляем снова - лента новая
+            for _ in range(3):
+                await _insert_once(session, Stream, dict(key=stream_key, seq=0, episode=0, phase="", members=[],
+                                   level=0, observed_at=observed), ["key"])
+                # The insert/no-op is a write barrier on SQLite; FOR UPDATE serializes
+                # the existing stream on PostgreSQL. Both finish before network I/O.
+                stream = await session.scalar(select(Stream).where(Stream.key == stream_key).with_for_update())
+                if stream is not None:
+                    break
+            else:
+                raise RuntimeError("notification stream vanished during admission")
             event = None
             if occurrence:
                 event = await session.scalar(select(Event).where(Event.stream_key == stream_key,
@@ -342,6 +353,8 @@ async def finish(factory, ids: list[int], owner: str, status: str, now: datetime
             if target_patch:
                 row.target = {**row.target, **_target(target_patch)}
             row.status = "pending" if status == "retry" else status
+            if status == "confirmed":
+                row.effects_pending = True  # снимает alert_delivery._effects_done
             if status == "uncertain":
                 row.uncertain_count += 1
             if status in {"uncertain", "retry"} and (
@@ -465,6 +478,143 @@ async def load_events(factory, ids: list[int]) -> dict[int, dict]:
                             occurrence=row.occurrence, payload=_json(row.payload),
                             occurred_at=_aware(row.occurred_at), updated_at=_aware(row.updated_at),
                             history_recorded=row.history_recorded, tg_alert_id=row.tg_alert_id) for row in rows}
+
+
+def _settled(row, stale: datetime):
+    """Доставка, которую уже никто не тронет: ни drain, ни повтор, ни окно "Доставка".
+
+    rejected в окне - проблема с кнопкой повтора, отметки просмотра у нее нет. Закрытой она
+    считается, когда по тому же событию подтверждена копия в основной чат (fallback). Все, что
+    требует решения (attention без просмотра, rejected), закрывается само через год (stale).
+    """
+    fallback = aliased(Delivery)
+    return or_(and_(row.status == "confirmed", row.effects_pending == False),  # noqa: E712
+               row.status == "superseded",
+               and_(row.status == "attention", row.reviewed_at.is_not(None)),
+               and_(row.status == "rejected", exists().where(
+                   fallback.event_id == row.event_id, fallback.status == "confirmed",
+                   fallback.target["route"].as_string() == "fallback")),
+               and_(row.status.in_(("attention", "rejected")), row.created_at < stale, row.next_attempt_at < stale))
+
+
+def _prunable(cutoff: datetime, stale: datetime):
+    """Условие на событие: старое, его доставки закрыты и эпизод больше ничего не ждет.
+
+    Последнее событие ленты (last_event_id) отсюда не исключено: его удаляют только вместе
+    с самой лентой, это решает prune. Ссылки covered_events/superseded_by, fan-out отбоя
+    (admit) и кнопки эпизода (_resolve_buttons) живут внутри одного (stream_key, episode),
+    поэтому тревогу или отбой удаляем, только когда в эпизоде не осталось незакрытых доставок.
+    Разовое событие (phase event) эпизод не закрывает никогда: для него смотрим только его
+    собственные доставки. Это и event внутри открытого эпизода смешанной ленты (например
+    server:*:backup_growth): оно уходит по своим доставкам, даже если отбой эпизода еще не
+    отправлен. Тогда из истории этого отбоя может пропасть строка "Событие сообщено вместе
+    с восстановлением" для такого event (covered_events ссылается на удаленное, _history
+    его пропускает), сам отбой и его получатели не меняются.
+    """
+    own, other, job = aliased(Delivery), aliased(Event), aliased(Delivery)
+    # лента - скалярными подзапросами, а не join: это всегда поиск по ключу. С join планировщик
+    # после autoanalyze брал seq scan лент на каждое событие (1M событий: 8 с на пачку)
+    episode = select(Stream.episode).where(Stream.key == Event.stream_key).scalar_subquery()
+    phase = select(Stream.phase).where(Stream.key == Event.stream_key).scalar_subquery()
+    return and_(
+        Event.occurred_at < cutoff, Event.updated_at < cutoff,
+        # открытый эпизод хранит свои тревоги: по ним отбой находит получателей (admit, recovery)
+        or_(Event.phase == "event", phase == "recovery", Event.episode != episode),
+        ~exists().where(Delivery.event_id == Event.id, or_(
+            Delivery.created_at >= cutoff, Delivery.next_attempt_at >= cutoff, Delivery.reviewed_at >= cutoff)),
+        or_(and_(Event.phase == "event", ~exists().where(own.event_id == Event.id, ~_settled(own, stale))),
+            and_(Event.phase != "event", ~exists().where(
+                job.event_id == other.id, other.stream_key == Event.stream_key, other.episode == Event.episode,
+                ~_settled(job, stale)))),
+    )
+
+
+# где остановилась прошлая чистка, по фабрике сессий: следующая продолжает с этого места, а не
+# проходит заново все, что хранится (открытые эпизоды, требующее решения). После конца - с начала
+_resume: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+async def prune(factory, cutoff: datetime, stale: datetime, *, batch: int = 500, budget: float = 10.0) -> dict:
+    """Удалить старые закрытые события с доставками и закрытые ленты без новых наблюдений.
+
+    Каждая пачка - своя короткая транзакция. Ленты пачки блокируются в порядке ключа, как
+    в admit, и только потом условия проверяются заново: новое событие или получатель
+    появляются только под блокировкой ленты. Закрытую доставку может снова открыть повтор
+    оператора (retry: rejected с копией в основной чат, attention старше года) без блокировки
+    ленты, поэтому доставки удаляются только закрытые, и если удалено меньше, чем их у этих
+    событий, пачка откатывается целиком: события останутся до следующего прохода.
+    Лента удаляется вместе с последним событием, когда она закрыта (recovery) или разовая
+    (event), давно не наблюдалась и других событий у нее не осталось. Новая пачка не
+    начинается после budget секунд: остальное - в следующий запуск. Повторный запуск ничего
+    не меняет. Возвращает число удаленных строк.
+    """
+    cutoff, stale = _aware(cutoff), _aware(stale)
+    done = dict(events=0, deliveries=0, streams=0)
+    after = _resume.pop(factory, 0)
+    deadline = _monotonic() + max(0.0, float(budget))
+    while True:
+        if _monotonic() >= deadline:
+            _resume[factory] = after
+            break
+        async with factory() as session:
+            rows = (await session.execute(select(Event.id, Event.stream_key).where(
+                Event.id > after, _prunable(cutoff, stale)).order_by(Event.id).limit(max(1, int(batch))))).all()
+        if not rows:
+            break
+        after = rows[-1][0]
+        try:
+            removed = await _prune_batch(factory, rows, cutoff, stale)
+        except _Reopened:
+            continue
+        for name, value in removed.items():
+            done[name] += value
+    return done
+
+
+class _Reopened(Exception):
+    """Доставку пачки открыли заново (retry) между проверкой и удалением."""
+
+
+async def _drop_deliveries(session, event_ids: list[int], stale: datetime) -> int:
+    expected = await session.scalar(select(func.count()).select_from(Delivery).where(Delivery.event_id.in_(event_ids)))
+    deleted = (await session.execute(delete(Delivery).where(
+        Delivery.event_id.in_(event_ids), _settled(Delivery, stale)))).rowcount
+    if deleted != expected:
+        raise _Reopened
+    return deleted
+
+
+async def _prune_batch(factory, rows, cutoff: datetime, stale: datetime) -> dict:
+    done = dict(events=0, deliveries=0, streams=0)
+    keys = sorted({key for _, key in rows})
+    async with factory() as session, session.begin():
+        if session.bind.dialect.name == "sqlite":
+            # запись первой: на SQLite это блокировка базы на всю пачку
+            await session.execute(update(Stream).where(Stream.key == keys[0]).values(seq=Stream.seq))
+        streams = {row.key: row for row in await session.scalars(
+            select(Stream).where(Stream.key.in_(keys)).order_by(Stream.key).with_for_update())}
+        ids = list(await session.scalars(select(Event.id).where(
+            Event.id.in_([event_id for event_id, _ in rows]), _prunable(cutoff, stale))))
+        last = {stream.last_event_id for stream in streams.values()}
+        events = [event_id for event_id in ids if event_id not in last]
+        closing = {stream.key: stream.last_event_id for stream in streams.values()
+                   if stream.last_event_id in ids and stream.phase in ("recovery", "event")
+                   and _aware(stream.observed_at) < cutoff}
+        if events:
+            done["deliveries"] += await _drop_deliveries(session, events, stale)
+            done["events"] += (await session.execute(delete(Event).where(Event.id.in_(events)))).rowcount
+        if closing:
+            # остались события, которые держит эпизод или незакрытая доставка: лента живет
+            busy = set(await session.scalars(select(Event.stream_key).where(
+                Event.stream_key.in_(list(closing)), Event.id.not_in(list(closing.values()))).distinct()))
+            closing = {key: last_id for key, last_id in closing.items() if key not in busy}
+        if closing:
+            done["deliveries"] += await _drop_deliveries(session, list(closing.values()), stale)
+            done["events"] += (await session.execute(delete(Event).where(
+                Event.id.in_(list(closing.values()))))).rowcount
+            done["streams"] += (await session.execute(delete(Stream).where(
+                Stream.key.in_(list(closing))))).rowcount
+    return done
 
 
 async def deliveries(factory, event_ids: list[int]) -> list[dict]:

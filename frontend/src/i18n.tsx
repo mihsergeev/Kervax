@@ -7103,6 +7103,10 @@ const EN: Record<string, string> = {
     'Panel errors to review: {n}',
   'Ошибки панели и сообщения о проблемах':
     'Panel errors and issue reports',
+  'Очередь уведомлений: ленты, события и доставки. По сроку удаляется закрытое; открытые инциденты хранятся, пока открыты, требующие решения - до 365 дн.':
+    'Notification queue: streams, events and deliveries. Closed items are removed after this period; open incidents are kept while open, items needing a decision for up to 365 days.',
+  'Закрытые доставки хранятся 90 дней, требующие решения - до 365 дней, тревоги открытых инцидентов - пока инцидент открыт. Счетчики считают только хранимые записи.':
+    'Closed deliveries are kept for 90 days, those needing a decision for up to 365 days, alerts of open incidents while the incident is open. Counters include only kept records.',
   'отметил ошибки панели разобранными':
     'marked panel errors as reviewed',
   'вернул ошибки панели в неразобранные':

@@ -30,6 +30,13 @@ PROBES_KEEP = timedelta(days=1)          # ручные проверки нуж�
 REQUESTS_KEEP = timedelta(days=2)        # левые запросы к панели: алерту нужны 10 минут, окну - сутки
 AUTOBAN_KEEP = timedelta(days=90)        # баны сканеров: повтор helper считает за 30 дней, история - квартал
 AUDIT_KEEP = timedelta(days=365)         # журнал действий: "кто это включил" спрашивают и через полгода
+# очередь уведомлений: закрытые доставки и их события. Дольше кнопок (tg_bot, 30 дней): к удалению
+# события его кнопки уже нет, и _resolve_buttons не примет ее за старую, без связи с эпизодом.
+# История алертов отдельно (ALERTS_KEEP). Недоставленное и открытые эпизоды не удаляются,
+# требующее решения (attention без просмотра, rejected без копии в основной чат) - через год
+# (notification_store.prune)
+NOTIFY_KEEP = timedelta(days=90)
+NOTIFY_STALE_KEEP = timedelta(days=365)
 
 # группы со сроком из настроек: ключ срока и таблицы, первая - главная (самая старая запись)
 GROUPS = {
@@ -49,6 +56,7 @@ FIXED = [
     ("panel_requests", REQUESTS_KEEP, ["request_stats"]),
     ("autoban", AUTOBAN_KEEP, ["autoban_bans"]),
     ("panel_errors", panel_errors_mod.KEEP, ["panel_errors"]),
+    ("notifications", NOTIFY_KEEP, ["notification_deliveries", "notification_events", "notification_streams"]),
 ]
 # примерный размер строки с индексами, байт (по продам) - только для оценки в SQLite
 _ROW = {"server_metrics": 1400, "check_samples": 150, "location_samples": 150, "check_ip_samples": 220,
