@@ -429,6 +429,9 @@ WatchdogSec=180
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+# own /tmp and /var/tmp: files other users leave there (docker CLI plugins, configs)
+# do not reach the agent and its child programs
+PrivateTmp=yes
 # the agent updates itself by atomically replacing the binary - writes allowed ONLY here
 ReadWritePaths=BIN_PLACEHOLDER
 # read /dev/kmsg for the OOM victim name (dmesg_restrict=1 blocks unprivileged users)
@@ -456,6 +459,7 @@ WatchdogSec=180
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+PrivateTmp=yes
 ReadWritePaths=BIN_PLACEHOLDER
 # read /dev/kmsg for the OOM victim name (dmesg_restrict=1 blocks unprivileged users)
 AmbientCapabilities=CAP_SYSLOG

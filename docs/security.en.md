@@ -42,7 +42,7 @@ does not replace the host firewall or make an untrusted proxy trustworthy.
 
 - System user `kervax`: no home directory, shell `/usr/sbin/nologin`.
 - systemd hardening: `NoNewPrivileges=true`, `ProtectSystem=strict`,
-  `ProtectHome=true`, writes allowed **only** to `/opt/kervax-agent/bin`
+  `ProtectHome=true`, `PrivateTmp=yes`, writes allowed **only** to `/opt/kervax-agent/bin`
   (`ReadWritePaths`). The single capability is `CAP_SYSLOG` (read-only on
   `/dev/kmsg`, to learn the name of an OOM-killed process).
 

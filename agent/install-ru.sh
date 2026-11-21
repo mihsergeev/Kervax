@@ -424,6 +424,9 @@ WatchdogSec=180
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+# свои /tmp и /var/tmp: чужие файлы оттуда (плагины и конфиг docker CLI) не доходят
+# до агента и его дочерних программ
+PrivateTmp=yes
 # агент обновляет сам себя атомарной заменой бинаря — разрешаем запись ТОЛЬКО сюда
 ReadWritePaths=BIN_PLACEHOLDER
 # читать /dev/kmsg для имени OOM-жертвы (иначе dmesg_restrict=1 не даёт непривил. юзеру)
@@ -451,6 +454,7 @@ WatchdogSec=180
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+PrivateTmp=yes
 ReadWritePaths=BIN_PLACEHOLDER
 # читать /dev/kmsg для имени OOM-жертвы (иначе dmesg_restrict=1 не даёт непривил. юзеру)
 AmbientCapabilities=CAP_SYSLOG

@@ -72,11 +72,14 @@
 # allowed to create a table could otherwise put a quote, a second statement and a queue suffix in
 # its name; the helper would run that statement with the database account it uses for inventory.
 #
+# 0.7: psql runs with HOME=/nonexistent, not /tmp: libpq reads ~/.pgpass and ~/.postgresql/* (the
+# service file, client certificates), and any local user could put them in a shared /tmp.
+#
 # Only queue names, numbers, job class names and the first line of the last error leave the node:
 # no job arguments, no other keys or rows.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.7  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x redis-server >/dev/null 2>&1 || pgrep -x valkey-server >/dev/null 2>&1 || pgrep -x postgres >/dev/null 2>&1 || pgrep -x postmaster >/dev/null 2>&1 || pgrep -x mysqld >/dev/null 2>&1 || pgrep -x mariadbd >/dev/null 2>&1"
 
 HELPER_DIR=/lib65/kervax
@@ -591,7 +594,7 @@ pgrun() { # db sql
   o=$(ns_as "$P" "$M_CLI") || return 1
   # shellcheck disable=SC2086
   timeout -k 2 "$DB_TO" nsenter -t "$P" $o -- /usr/bin/env -i \
-    PATH="$IPATH" HOME=/tmp PGPASSWORD="$pw" PGCONNECT_TIMEOUT=5 PGAPPNAME=kervax-queues \
+    PATH="$IPATH" HOME=/nonexistent PGPASSWORD="$pw" PGCONNECT_TIMEOUT=5 PGAPPNAME=kervax-queues \
     PGOPTIONS="-c statement_timeout=5000 -c lock_timeout=2000 -c default_transaction_read_only=on" \
     "$M_CLI" -X -A -t -q -F "$TAB" -v ON_ERROR_STOP=1 -h "$M_HOST" -p "$M_PORT" -U "$M_USER" -d "$1" -c "$2" 2>"$TMPD/dberr"
 }

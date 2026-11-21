@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.153] - 2026-11-22
+
+- Agent 2.73: programs started by the agent, including the Docker CLI that reports the client and Compose versions, no longer use `/tmp` as their home directory. A local user could place a Docker CLI plugin under `/tmp/.docker` and have it run as the agent user. Nodes with automatic updates receive the fix with the new signed agent.
+- New installations run the agent with a private `/tmp`. The agent watchdog helper 1.1 adds the same setting to existing nodes, checks that it took effect and leaves the agent as it was, with the reason recorded, when the agent does not start with it.
+- The agent removes a partly written helper request instead of leaving it in the queue.
+- The queue monitoring helper 0.7 runs `psql` without a home directory in `/tmp`.
+
 ## [1.8.152] - 2026-11-21
 
 - Lock the backend Python dependencies with hashes (`backend/requirements.txt`, rebuilt with `sh backend/lock.sh`). Images, CI and the dependency audit install exactly the locked packages from wheels, and CI checks that the lock matches `pyproject.toml` and that every hash belongs to a file published for that version.

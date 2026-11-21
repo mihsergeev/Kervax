@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.72"
+const version = "2.73"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -5969,16 +5969,61 @@ func dockerBinary() string {
 	return ""
 }
 
-// dockerExec — запуск docker-подкоманды. HOME=/tmp: под ProtectHome=yes родной
-// $HOME скрыт, а docker CLI пытается читать ~/.docker → иначе падает. Без демона.
+// childHome - HOME и DOCKER_CONFIG дочерних программ агента. Было HOME=/tmp (родной $HOME под
+// ProtectHome=yes скрыт): docker CLI берет плагины из $HOME/.docker/cli-plugins и конфиг из
+// $HOME/.docker/config.json, и любой локальный пользователь, положив
+// /tmp/.docker/cli-plugins/docker-compose, получал выполнение под kervax на ближайшем
+// «docker compose version» (раз в 15 с). Этого каталога нет, а лежит он прямо в «/» (root 0755,
+// проходим для всех): создать его может только root, и агенту виден ответ «нет такого», а не
+// «нет доступа», от которого docker CLI не читает конфиг и теряет compose. Каталог из
+// /var/lib/kervax зависел бы от прав, которые ставят helper'ы. Для docker это пустой конфиг без
+// своих плагинов (системные каталоги плагинов - root). Ставить ничего не надо: дыру закрывает
+// сам бинарь на любой ноде сразу после самообновления, с PrivateTmp в юните и без него.
+// Переменная, а не константа, только ради тестов.
+var childHome = "/nonexistent-kervax"
+
+// rootOnlyPath - p и его предки до «/» либо не существуют, либо настоящие каталоги (не
+// симлинки) владельца uid без записи для группы и остальных: подложить туда плагин или конфиг
+// может только он. Любая другая ошибка (нет доступа, слишком длинное имя) - отказ: что там
+// лежит, агент не знает.
+func rootOnlyPath(p string, uid uint32) bool {
+	if !filepath.IsAbs(p) {
+		return false
+	}
+	for p = filepath.Clean(p); ; p = filepath.Dir(p) {
+		var st syscall.Stat_t
+		if err := syscall.Lstat(p, &st); err == nil {
+			if st.Mode&syscall.S_IFMT != syscall.S_IFDIR || st.Uid != uid || st.Mode&0o022 != 0 {
+				return false
+			}
+		} else if !errors.Is(err, syscall.ENOENT) {
+			return false
+		}
+		if p == "/" {
+			return true
+		}
+	}
+}
+
+var childHomeWarn sync.Once
+
+// dockerExec — запуск docker-подкоманды, без демона. HOME и DOCKER_CONFIG - childHome (см. там).
+// Если его может подменить не только root, docker CLI не запускаем: версии клиента и compose
+// пропадут из отчета, версия сервера все равно придет из API.
 func dockerExec(bin string, args ...string) string {
 	if bin == "" {
+		return ""
+	}
+	if !rootOnlyPath(childHome, 0) {
+		childHomeWarn.Do(func() {
+			fmt.Fprintf(os.Stderr, "kervax-agent: %s не прошел проверку (не root, доступен на запись другим или не виден агенту) - docker CLI не запускаю\n", childHome)
+		})
 		return ""
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Env = append(cleanEnv(), "HOME=/tmp") // без NOTIFY_SOCKET — см. cleanEnv
+	cmd.Env = cleanEnv() // без NOTIFY_SOCKET, HOME и DOCKER_CONFIG - childHome
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -8517,17 +8562,19 @@ func postKubeResult(panelURL, token string, id int, ok bool, output string) {
 
 // cmdOut — запуск команды с таймаутом; возвращает stdout даже при ненулевом rc
 // (systemctl is-enabled печатает "disabled" с rc!=0 — это валидный ответ).
-// окружение для дочерних процессов: без служебных переменных systemd
+// окружение для дочерних процессов: без служебных переменных systemd, HOME и DOCKER_CONFIG -
+// childHome, а не общедоступный /tmp (см. childHome)
 func cleanEnv() []string {
-	out := make([]string, 0, len(os.Environ()))
+	out := make([]string, 0, len(os.Environ())+2)
 	for _, kv := range os.Environ() {
 		if strings.HasPrefix(kv, "NOTIFY_SOCKET=") || strings.HasPrefix(kv, "WATCHDOG_PID=") ||
-			strings.HasPrefix(kv, "WATCHDOG_USEC=") {
+			strings.HasPrefix(kv, "WATCHDOG_USEC=") || strings.HasPrefix(kv, "HOME=") ||
+			strings.HasPrefix(kv, "DOCKER_CONFIG=") {
 			continue
 		}
 		out = append(out, kv)
 	}
-	return out
+	return append(out, "HOME="+childHome, "DOCKER_CONFIG="+childHome)
 }
 
 func cmdOut(timeout time.Duration, name string, args ...string) string {
@@ -8537,7 +8584,7 @@ func cmdOut(timeout time.Duration, name string, args ...string) string {
 	// NOTIFY_SOCKET детям НЕ отдаём: часть утилит его подхватывает и пишет в сокет
 	// systemd, а тот при NotifyAccess=main их отвергает и засоряет журнал строками
 	// «Got notification message from PID …» (десятки в минуту, реальные ошибки в них тонут)
-	cmd.Env = append(cleanEnv(), "HOME=/tmp")
+	cmd.Env = cleanEnv()
 	out, _ := cmd.Output()
 	return strings.TrimSpace(string(out))
 }
@@ -9707,6 +9754,10 @@ func spoolInFor(reqDir, resDir string, cmdID int, lines []string, helper string,
 	res := filepath.Join(resDir, reqID+".res")
 	body := strings.Join(lines, "\n") + "\n"
 	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
+		// недописанный .tmp не оставляем: helper его не разбирает, а его path-юнит
+		// (DirectoryNotEmpty) перезапускался на нем до start-limit, и запросы висели до
+		// ручного reset-failed; к тому же в нем могут быть секреты запроса
+		os.Remove(tmp)
 		return false, "спул недоступен (" + helper + " не установлен?)"
 	}
 	if err := os.Rename(tmp, req); err != nil { // атомарно → процессор не увидит недописанный
@@ -9990,7 +10041,9 @@ func shutdownKind() string {
 	run := func(args ...string) (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, "systemctl", args...).Output()
+		cmd := exec.CommandContext(ctx, "systemctl", args...)
+		cmd.Env = cleanEnv()
+		out, err := cmd.Output()
 		return string(out), err
 	}
 	// не под systemd (контейнер, другой init) - спросить некого, считаем остановкой агента
@@ -11088,7 +11141,7 @@ func aptSimulate() (int, int, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "apt-get", "-s", "-q", "-o", "Debug::NoLocking=true", "dist-upgrade")
-	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	cmd.Env = append(cleanEnv(), "LC_ALL=C")
 	b, err := cmd.Output()
 	if err != nil {
 		return 0, 0, false
@@ -11377,7 +11430,9 @@ func collectPkgs(prev *pkgList) *pkgList {
 		}
 	case "rpm":
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		out, err := exec.CommandContext(ctx, "rpm", "-qa", "--qf", "%{NAME}\\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\\n").Output()
+		cmd := exec.CommandContext(ctx, "rpm", "-qa", "--qf", "%{NAME}\\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\\n")
+		cmd.Env = cleanEnv() // HOME не в /tmp: rpm читает ~/.rpmmacros
+		out, err := cmd.Output()
 		cancel()
 		if err == nil {
 			items = parseRpmQa(out)

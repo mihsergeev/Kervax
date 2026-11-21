@@ -51,6 +51,25 @@ def test_docker_proxy_on_a_unix_socket():
     assert pin in fe and "tcp://127.0.0.1:2375" not in fe
 
 
+def test_agent_private_tmp_and_child_home():
+    # docker CLI агента с HOME=/tmp брал плагины из /tmp/.docker (аудит 20.11): свой /tmp у юнитов,
+    # helper ставит его на старых нодах, а дети агента живут с HOME только root
+    for name in ("install.sh", "install-ru.sh"):
+        s = _src(name)
+        for unit in ("kervax-agent.service", "kervax-agent@.service"):
+            body = s.split(f"cat > /etc/systemd/system/{unit} <<'EOF'\n", 1)[1].split("\nEOF\n", 1)[0]
+            assert "\nProtectHome=true\n" in body and "\nPrivateTmp=yes\n" in body, (name, unit)
+    wd = _src("agent-watchdog.sh")
+    assert "KERVAX_SETUP_VERSION=1.1  # " in wd and "[Service]\nPrivateTmp=yes\n" in wd
+    assert '"$(cat "$MARK" 2>/dev/null)" = "$KERVAX_SETUP_VERSION"' in wd and "-p PrivateTmp --value" in wd
+    # причина без PrivateTmp - в отдельном файле не *.ver: маркер остается чистой версией для панели
+    assert "NOTE=$VERDIR/agent-watchdog.private-tmp" in wd and 'echo "$KERVAX_SETUP_VERSION" > "$MARK"' in wd
+    assert "TPLDROP=$TPLDIR/private-tmp.conf" in wd and '/proc/$pid/root/tmp' in wd
+    main = _src("main.go")
+    assert "HOME=/tmp" not in main.replace("Было HOME=/tmp", "")
+    assert 'var childHome = "/nonexistent-kervax"' in main and '"DOCKER_CONFIG="+childHome' in main
+
+
 def test_kube_patch_only_under_admission_policy():
     s = _src("kube-setup.sh")
     assert "KERVAX_SETUP_VERSION=0.15  # " in s and "kind: ValidatingAdmissionPolicy" in s

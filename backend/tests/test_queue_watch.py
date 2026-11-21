@@ -268,7 +268,7 @@ def test_snooze_accepts_a_queue_key():
 def test_helper_script():
     from pathlib import Path
     src = (Path(__file__).resolve().parents[2] / "agent" / "queues-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.6" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
+    assert "KERVAX_SETUP_VERSION=0.7" in src and "/bin/sh -c" in src and 'KERVAX_SETUP_WHEN="' in src
     # 0.5: клиенты в чужих namespace только от пользователя экземпляра, root контейнера - nobody
     assert 'nsenter -t "$P" -n -m' not in src and 'nsenter -t "$P" -m -n --' not in src
     assert src.count('nsenter -t "$P" $') >= 4 and "u=65534; g=65534" in src and '"/proc/$1/root$f"' not in src
@@ -277,6 +277,8 @@ def test_helper_script():
     # пароль только через stdin или окружение, не в командной строке
     assert "redis-cli -a" not in src and "--pass" not in src and "--requirepass \"$" not in src
     assert 'PGPASSWORD="$pw"' in src and 'MYSQL_PWD="$pw"' in src and "-p$" not in src
+    # 0.7: libpq не читает ~/.pgpass и ~/.postgresql из общего /tmp
+    assert "HOME=/tmp" not in src and 'PATH="$IPATH" HOME=/nonexistent PGPASSWORD=' in src
     # в базе только чтение и короткие запросы
     assert "default_transaction_read_only=on" in src and "statement_timeout=5000" in src
     assert "set session transaction read only" in src and "max_execution_time" in src

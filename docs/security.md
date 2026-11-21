@@ -43,7 +43,7 @@ NAT и HTTP-прокси. Заголовок пересылки от произ�
 
 - Системный юзер `kervax`: без домашнего каталога, shell `/usr/sbin/nologin`.
 - systemd‑хардненинг: `NoNewPrivileges=true`, `ProtectSystem=strict`,
-  `ProtectHome=true`, запись разрешена **только** в `/opt/kervax-agent/bin`
+  `ProtectHome=true`, `PrivateTmp=yes`, запись разрешена **только** в `/opt/kervax-agent/bin`
   (`ReadWritePaths`). Единственная capability — `CAP_SYSLOG` (read‑only на
   `/dev/kmsg`, чтобы узнать имя OOM‑убитого процесса).
 
