@@ -12,6 +12,7 @@ export const ACT: Record<string, string> = {
   logout: 'выход',
   password_fail: 'неверный текущий пароль при смене',
   '2fa_disable_fail': 'неверный код при отключении 2FA',
+  '2fa_enable_fail': 'неверный пароль при включении 2FA',
   login_blocked: 'вход заблокирован',
   login_lockout: 'блокировка входа',
   login_guard: 'изменил защиту входа',

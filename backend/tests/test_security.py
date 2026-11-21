@@ -1,6 +1,7 @@
 """Тесты фиксов безопасности аутентификации (перенос из панели-референса)."""
 
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -42,15 +43,19 @@ async def test_password_change_wrong_current(client: httpx.AsyncClient, auth_hea
     assert r.status_code == 400
 
 
-async def test_totp_code_not_replayable(client: httpx.AsyncClient, auth_headers):
+async def test_totp_code_not_replayable(client: httpx.AsyncClient, auth_headers, monkeypatch):
     setup = (await client.post("/api/auth/2fa/setup", headers=auth_headers)).json()
     secret = setup["secret"]
-    code = totp._hotp(secret, int(time.time() // 30))
+    step = int(time.time() // 30)
+    monkeypatch.setattr(totp, "time", SimpleNamespace(time=lambda: step * 30 + 1))
     assert (
         await client.post(
-            "/api/auth/2fa/enable", json={"otp": code}, headers=auth_headers
+            "/api/auth/2fa/enable", json={"otp": totp._hotp(secret, step), "current_password": "testpass-2026"},
+            headers=auth_headers
         )
     ).status_code == 200
+    # код включения уже принят, входим следующим
+    code = totp._hotp(secret, step + 1)
 
     # первый вход с кодом — успех
     r1 = await client.post(

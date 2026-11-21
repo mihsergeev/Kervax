@@ -271,12 +271,13 @@ function PasswordSec({ changed, onDone, onUnauthorized }: { changed: string | nu
   )
 }
 
-// Вход по коду из приложения (TOTP): включить - QR и подтверждение кодом, выключить - текущим кодом
+// Вход по коду из приложения (TOTP): включить - QR и подтверждение кодом и текущим паролем, выключить - текущим кодом
 function TwoFASec({ enabled, failed, onChange }: { enabled: boolean | null; failed?: boolean; onChange: (on: boolean) => void }) {
   const { t } = useI18n()
   const [setup, setSetup] = useState<TwoFASetup | null>(null)
   const [qr, setQr] = useState<{ uri: string; url: string } | null>(null)
   const [otp, setOtp] = useState('')
+  const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -310,10 +311,11 @@ function TwoFASec({ enabled, failed, onChange }: { enabled: boolean | null; fail
     }, t('Ошибка'))
   const confirmEnable = () =>
     run(async () => {
-      const s = await enable2FA(otp.trim())
+      const s = await enable2FA(otp.trim(), password)
       onChange(s.enabled)
       setSetup(null)
       setOtp('')
+      setPassword('')
     }, t('Неверный код'))
   const turnOff = () =>
     run(async () => {
@@ -357,12 +359,16 @@ function TwoFASec({ enabled, failed, onChange }: { enabled: boolean | null; fail
           {t('Ключ:')} <span className="mono">{setup.secret}</span>
         </p>
         {codeField(true)}
+        <label className="field al-narrow">
+          <span>{t('Текущий пароль')}</span>
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+        </label>
         {error && <p className="form-error">{error}</p>}
         <div className="ans-acts">
-          <button onClick={confirmEnable} disabled={busy || !otp.trim()}>
+          <button onClick={confirmEnable} disabled={busy || !otp.trim() || !password}>
             {busy ? t('…') : t('Включить')}
           </button>
-          <button className="ghost" onClick={() => setSetup(null)}>
+          <button className="ghost" onClick={() => { setSetup(null); setPassword('') }}>
             {t('Отмена')}
           </button>
         </div>

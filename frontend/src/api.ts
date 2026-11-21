@@ -483,11 +483,18 @@ export function setup2FA(): Promise<TwoFASetup> {
   return api<TwoFASetup>('/api/auth/2fa/setup', { method: 'POST' })
 }
 
-export function enable2FA(otp: string): Promise<TwoFAStatus> {
-  return api<TwoFAStatus>('/api/auth/2fa/enable', {
+// Включение 2FA отзывает прежние токены: этому окну бэкенд отдает новый, как при смене пароля
+export async function enable2FA(otp: string, current_password: string): Promise<TwoFAStatus> {
+  const token = getToken()
+  const r = await api<TwoFAStatus & { access_token?: string | null }>('/api/auth/2fa/enable', {
     method: 'POST',
-    body: JSON.stringify({ otp }),
+    body: JSON.stringify({ otp, current_password }),
   })
+  if (r.access_token) {
+    if (!isCurrentSession(token)) throw sessionChanged('POST')
+    setToken(r.access_token)
+  }
+  return { enabled: r.enabled }
 }
 
 export function disable2FA(otp: string): Promise<TwoFAStatus> {

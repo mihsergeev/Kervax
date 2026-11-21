@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.151] - 2026-11-21
+
+- Restoring a configuration backup keeps the current access secrets of records that still exist: agent tokens and their site groups, relay proxy credentials, push monitor tokens and the Ansible inventory token. A token reissued or revoked after the backup no longer works again after a restore. Records are matched by id and creation time, so a reused id never inherits another record's access. Records that no longer exist are restored from the file as before, so a restore onto a fresh panel keeps agents working.
+- A 2FA code is accepted once for enabling and disabling 2FA, as it already was for sign-in.
+- Enabling 2FA asks for the current password under the same attempt limit as sign-in and signs out all other sessions; the browser that enabled it stays signed in. A tab opened before the upgrade is asked to reload instead of counting as a failed attempt.
+- Setting up 2FA no longer replaces a secret that was enabled at the same moment, and re-enabling 2FA right after disabling it no longer rejects fresh codes for up to a minute.
+
 ## [1.8.150] - 2026-11-21
 
 - Trust X-Forwarded-For only from known proxies, set with `KERVAX_TRUSTED_PROXIES`: `gateway` for a proxy on the panel host in front of `127.0.0.1` (the default for `compose.yml`), `private` for the caddy hop (the default for `compose.caddy.yml`; exact with a fresh agent proxy snapshot), explicit addresses or networks, or `none`. The leftmost, client-written address is never used, and the backend now receives `KERVAX_BIND` and the caddy network gateway.

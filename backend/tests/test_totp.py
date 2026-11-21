@@ -1,5 +1,6 @@
 import asyncio
 import time
+from types import SimpleNamespace
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,7 +35,10 @@ def test_provisioning_uri():
     assert "secret=ABCDEF" in uri and "issuer=Kervax" in uri
 
 
-async def test_2fa_full_flow(client: httpx.AsyncClient, auth_headers):
+async def test_2fa_full_flow(client: httpx.AsyncClient, auth_headers, monkeypatch):
+    # часы TOTP задает тест: код принимается один раз, следующему шагу нужен следующий код
+    step = int(time.time() // 30)
+    monkeypatch.setattr(totp, "time", SimpleNamespace(time=lambda: step * 30 + 1))
     # изначально выключена
     r = await client.get("/api/auth/2fa", headers=auth_headers)
     assert r.status_code == 200 and r.json()["enabled"] is False
@@ -48,15 +52,17 @@ async def test_2fa_full_flow(client: httpx.AsyncClient, auth_headers):
 
     # enable с неверным кодом → 400
     r = await client.post(
-        "/api/auth/2fa/enable", headers=auth_headers, json={"otp": "000000"}
+        "/api/auth/2fa/enable", headers=auth_headers, json={"otp": "000000", "current_password": "testpass-2026"}
     )
     assert r.status_code == 400
 
-    # enable с верным кодом → включено
+    # enable с верным кодом → включено, прежние токены отозваны, этому клиенту новый
     r = await client.post(
-        "/api/auth/2fa/enable", headers=auth_headers, json={"otp": _code(secret)}
+        "/api/auth/2fa/enable", headers=auth_headers,
+        json={"otp": totp._hotp(secret, step), "current_password": "testpass-2026"}
     )
     assert r.status_code == 200 and r.json()["enabled"] is True
+    auth_headers = {"Authorization": f"Bearer {r.json()['access_token']}"}
 
     # логин без кода → 401 «2fa_required»
     r = await client.post(
@@ -64,10 +70,10 @@ async def test_2fa_full_flow(client: httpx.AsyncClient, auth_headers):
     )
     assert r.status_code == 401 and r.json()["detail"] == "2fa_required"
 
-    # логин с кодом → токен
+    # логин со следующим кодом → токен
     r = await client.post(
         "/api/auth/login",
-        json={"username": "admin", "password": "testpass-2026", "otp": _code(secret)},
+        json={"username": "admin", "password": "testpass-2026", "otp": totp._hotp(secret, step + 1)},
     )
     assert r.status_code == 200 and "access_token" in r.json()
 
@@ -78,9 +84,10 @@ async def test_2fa_full_flow(client: httpx.AsyncClient, auth_headers):
     )
     assert r.status_code == 401 and r.json()["detail"] == "2fa_invalid"
 
-    # disable с верным кодом
+    # disable с новым кодом
+    step += 2
     r = await client.post(
-        "/api/auth/2fa/disable", headers=auth_headers, json={"otp": _code(secret)}
+        "/api/auth/2fa/disable", headers=auth_headers, json={"otp": totp._hotp(secret, step)}
     )
     assert r.status_code == 200 and r.json()["enabled"] is False
 
@@ -93,9 +100,14 @@ async def test_2fa_full_flow(client: httpx.AsyncClient, auth_headers):
 
 async def test_2fa_code_cannot_be_replayed_by_parallel_logins(client, auth_headers, monkeypatch):
     setup = await client.post("/api/auth/2fa/setup", headers=auth_headers)
-    otp = _code(setup.json()["secret"])
-    enabled = await client.post("/api/auth/2fa/enable", headers=auth_headers, json={"otp": otp})
+    step = int(time.time() // 30)
+    monkeypatch.setattr(totp, "time", SimpleNamespace(time=lambda: step * 30 + 1))
+    enabled = await client.post("/api/auth/2fa/enable", headers=auth_headers,
+                                json={"otp": totp._hotp(setup.json()["secret"], step),
+                                      "current_password": "testpass-2026"})
     assert enabled.status_code == 200
+    # код включения уже принят: для входа - следующий
+    otp = totp._hotp(setup.json()["secret"], step + 1)
 
     original = AsyncSession.scalar
     both_loaded = asyncio.Event()

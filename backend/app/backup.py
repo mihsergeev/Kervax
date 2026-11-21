@@ -29,11 +29,11 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from sqlalchemy import DateTime, delete, func, select, text
+from sqlalchemy import DateTime, delete, false, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app import auth_generations
+from app import auth_generations, settings_store
 from app.models import (
     AppSetting,
     BackupVaultItem,
@@ -65,6 +65,18 @@ _MODELS = [
 _SERVER_METRIC_FIELDS = ("last_report", "last_seen")
 # у связи между серверами - последние попытки и замер, агент пришлет новые
 _LINK_STATE_FIELDS = {"win": None, "last_ts": None, "last_loss": None, "last_rtt": None, "last_err": ""}
+
+# Доступы, которые панель выдает и отзывает сама: токен агента и видимые ему группы сайтов,
+# логин и пароль ретранслятора, адрес push-монитора. У записи, которая есть в БД, восстановление
+# оставляет текущие значения: старый файл не должен оживлять перевыпущенный токен. Запись той же
+# считаем по id и created_at: id переиспользуется (SQLite без AUTOINCREMENT, sequence на PG после
+# restore), а время создания у другой записи с тем же id будет другим и переносится restore как
+# есть. По имени нельзя: сервер и монитор переименовывают. Записей, которых в БД нет, правило не
+# касается - доступ берется из файла, иначе восстановление на чистую панель отключило бы все агенты
+_KEEP_ACCESS = {
+    Server: ("token_hash", "token_site_groups", "relay_user", "relay_password"),
+    Check: ("push_token",),
+}
 
 _NAME_RE = re.compile(r"^kervax-backup-\d{8}-\d{6}\.json$")
 
@@ -165,6 +177,21 @@ def _deserialize(row: dict, model) -> dict:
     return out
 
 
+def _same(row_id, created_at) -> tuple | None:
+    """Ключ "та же запись" для _KEEP_ACCESS. SQLite отдает время без пояса (оно в UTC)."""
+    if row_id is None or created_at is None:
+        return None
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return row_id, created_at
+
+
+async def _current_access(session: AsyncSession, model) -> dict:
+    fields = _KEEP_ACCESS[model]
+    rows = await session.execute(select(model.id, model.created_at, *(getattr(model, f) for f in fields)))
+    return {key: dict(zip(fields, r[2:])) for r in rows if (key := _same(r[0], r[1])) is not None}
+
+
 async def export_data(session: AsyncSession) -> dict:
     tables: dict = {}
     for name, model in _MODELS:
@@ -208,6 +235,19 @@ async def import_data(session: AsyncSession, data: dict, settings: Settings) -> 
         # Записи в эти таблицы ждут завершения восстановления и обновления sequence.
         names = ", ".join(model.__tablename__ for _, model in reversed(present))
         await session.execute(text(f"LOCK TABLE {names} IN SHARE ROW EXCLUSIVE MODE"))
+    elif present:
+        # SQLite открывает транзакцию только перед первой записью, и снимок доступов ниже читался
+        # бы вне нее: перевыпуск токена между снимком и DELETE вернулся бы к прежнему. Пустой
+        # UPDATE берет блокировку записи до снимка, чужие записи ждут конца восстановления
+        await session.execute(update(AppSetting).where(false()).values(value=AppSetting.value)
+                              .execution_options(synchronize_session=False))
+
+    # текущие доступы записей до удаления (_KEEP_ACCESS)
+    access = {model: await _current_access(session, model) for _n, model in present if model in _KEEP_ACCESS}
+    # Токен ansible, выпущенный или отозванный ("") на этой панели, тоже остается текущим.
+    # Строки нет - доступ ни разу не настраивали (чистая панель), он берется из файла
+    keep_ansible = await session.scalar(
+        select(AppSetting.key).where(AppSetting.key == settings_store.ANSIBLE_KEY)) is not None
 
     # чистим существующие (в обратном порядке) и вставляем заново
     for _name, model in reversed(present):
@@ -215,7 +255,8 @@ async def import_data(session: AsyncSession, data: dict, settings: Settings) -> 
         if model is AppSetting:
             # Эти строки относятся к личности учетки, а не конфигурации панели:
             # старый бэкап не должен возвращать работоспособность отозванным JWT.
-            statement = statement.where(~AppSetting.key.startswith(auth_generations.PREFIX))
+            statement = statement.where(~AppSetting.key.startswith(auth_generations.PREFIX),
+                                        AppSetting.key != settings_store.ANSIBLE_KEY)
         await session.execute(statement)
     counts: dict = {}
     for name, model in present:
@@ -223,8 +264,14 @@ async def import_data(session: AsyncSession, data: dict, settings: Settings) -> 
         for row in rows:
             if model is AppSetting and str(row.get("key", "")).startswith(auth_generations.PREFIX):
                 await auth_generations.merge_revocation(session, row["key"], row["value"])
+            elif model is AppSetting and row.get("key") == settings_store.ANSIBLE_KEY:
+                if not keep_ansible:
+                    session.add(model(**_deserialize(row, model)))
             else:
-                session.add(model(**_deserialize(row, model)))
+                values = _deserialize(row, model)
+                if model in access:
+                    values.update(access[model].get(_same(values.get("id"), values.get("created_at"))) or {})
+                session.add(model(**values))
         counts[name] = len(rows)
 
     if postgres:

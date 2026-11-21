@@ -149,6 +149,8 @@ class PasswordChangeRequest(BaseModel):
 
 class TwoFAStatusOut(BaseModel):
     enabled: bool
+    # включение 2FA отзывает прежние токены, клиент, который включил, получает новый
+    access_token: str | None = None
 
 
 class TwoFASetupOut(BaseModel):
@@ -158,6 +160,12 @@ class TwoFASetupOut(BaseModel):
 
 class TwoFAVerifyRequest(BaseModel):
     otp: str = Field(min_length=1, max_length=16)
+
+
+class TwoFAEnableRequest(TwoFAVerifyRequest):
+    # Включение с одним токеном без пароля отдавало бы учетку тому, кто его украл: его секрет,
+    # новый токен ему и отзыв сеансов владельца. Без пароля (старая вкладка) - 400 без счета
+    current_password: str = Field(default="", max_length=128)
 
 
 class AuditEntryOut(BaseModel):

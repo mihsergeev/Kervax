@@ -339,11 +339,11 @@ LEGACY_SITE_DEFAULTS: frozenset[str] = frozenset({
 # Доступ ansible к списку нод (GET /api/ansible/servers). Храним только хеш токена: сам
 # токен показываем один раз при выпуске, как токен агента. used_at - когда ansible
 # последний раз спрашивал, чтобы в настройках было видно, что связка работает.
-_ANSIBLE_KEY = "ansible_access"
+ANSIBLE_KEY = "ansible_access"
 
 
 async def get_ansible_access(session: AsyncSession) -> tuple[dict, str | None]:
-    raw = await _get_raw(session, _ANSIBLE_KEY)
+    raw = await _get_raw(session, ANSIBLE_KEY)
     try:
         data = json.loads(raw) if raw else {}
     except ValueError:
@@ -352,13 +352,13 @@ async def get_ansible_access(session: AsyncSession) -> tuple[dict, str | None]:
 
 
 async def set_ansible_access(session: AsyncSession, data: dict | None) -> None:
-    await _set_raw(session, _ANSIBLE_KEY, json.dumps(data) if data else "")
+    await _set_raw(session, ANSIBLE_KEY, json.dumps(data) if data else "")
 
 
 async def mark_ansible_used(session: AsyncSession, data: dict, raw: str, used_at: str) -> bool:
     # Keep a token revoked or rotated while the inventory request was in flight.
     result = await session.execute(
-        update(AppSetting).where(AppSetting.key == _ANSIBLE_KEY, AppSetting.value == raw)
+        update(AppSetting).where(AppSetting.key == ANSIBLE_KEY, AppSetting.value == raw)
         .values(value=json.dumps({**data, "used_at": used_at}))
     )
     await session.commit()

@@ -1,8 +1,9 @@
+import inspect
 import math
 import re
 import secrets
 import string
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -22,6 +23,7 @@ from app.schemas import (
     TelegramOut,
     TelegramUpdate,
     TokenResponse,
+    TwoFAEnableRequest,
     TwoFASetupOut,
     TwoFAStatusOut,
     TwoFAVerifyRequest,
@@ -129,15 +131,36 @@ async def _verify_attempt(session, src: _Source):
         yield
 
 
-async def _guarded(session, request: Request, username: str, action: str, ok: Callable[[], bool], err: str) -> None:
+async def _guarded(
+    session, request: Request, username: str, action: str, ok: Callable[[], bool | Awaitable[bool]], err: str,
+) -> None:
     """Проверка секрета под тем же счетчиком, что и вход."""
     settings = get_settings()
     guard = await ratelimit.load(session)
     src = _Source(request, guard)
     async with _verify_attempt(session, src):
-        if not ok():
+        passed = ok()
+        if inspect.isawaitable(passed):
+            passed = await passed
+        if not passed:
             await _record_failure(session, settings, src, username, action, guard)
             raise HTTPException(status.HTTP_400_BAD_REQUEST, err)
+
+
+async def _take_totp(session, user: User, otp: str | None, **values) -> int | None:
+    """Принимает код 2FA только один раз: тот же код больше не подойдет ни для входа, ни для
+    включения и отключения 2FA, даже с разных адресов. Условие на счетчик в UPDATE атомарно: из
+    параллельных запросов с одним кодом проходит один. values меняются тем же UPDATE.
+    Возвращает token_version после UPDATE, None - код не принят."""
+    counter = totp.matched_counter(user.totp_secret, otp or "")
+    if counter is None or counter <= user.totp_last_counter:
+        return None
+    return await session.scalar(update(User).where(
+        User.id == user.id, User.username == user.username,
+        User.token_version == user.token_version, User.totp_enabled.is_(user.totp_enabled),
+        User.totp_secret == user.totp_secret, User.totp_last_counter < counter,
+    ).values(totp_last_counter=counter, **values).returning(User.token_version)
+        .execution_options(synchronize_session=False))
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -158,16 +181,7 @@ async def login(
         if user.totp_enabled:
             if not body.otp:
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2fa_required")
-            counter = totp.matched_counter(user.totp_secret, body.otp)
-            # Один код принимается только один раз, даже при входах с разных адресов.
-            accepted = None
-            if counter is not None and counter > user.totp_last_counter:
-                accepted = await session.scalar(update(User).where(
-                    User.id == user.id, User.username == user.username,
-                    User.token_version == user.token_version, User.totp_enabled.is_(True),
-                    User.totp_secret == user.totp_secret, User.totp_last_counter < counter,
-                ).values(totp_last_counter=counter).returning(User.id).execution_options(synchronize_session=False))
-            if accepted is None:
+            if await _take_totp(session, user, body.otp) is None:
                 await _record_failure(session, settings, src, body.username, "login_2fa_fail", guard)
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "2fa_invalid")
         await ratelimit.clear(session, key)
@@ -279,7 +293,15 @@ async def twofa_setup(user: CurrentUser, session: SessionDep) -> TwoFASetupOut:
             "2FA уже включена — сначала отключите её",
         )
     secret = totp.random_secret()
-    user.totp_secret = secret  # ожидающий подтверждения секрет (enabled ещё False)
+    # Ожидающий подтверждения секрет. Условие в UPDATE: параллельное включение со старым
+    # секретом не должно получить замену уже активного. Счетчик относится к прежнему секрету:
+    # коды нового им не повторить, а без сброса повторное включение ждало бы до минуты
+    done = await session.scalar(update(User).where(
+        User.id == user.id, User.username == user.username, User.totp_enabled.is_(False),
+    ).values(totp_secret=secret, totp_last_counter=0).returning(User.id)
+        .execution_options(synchronize_session=False))
+    if done is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "2FA уже включена — сначала отключите её")
     await session.commit()
     return TwoFASetupOut(
         secret=secret,
@@ -289,7 +311,7 @@ async def twofa_setup(user: CurrentUser, session: SessionDep) -> TwoFASetupOut:
 
 @router.post("/2fa/enable", response_model=TwoFAStatusOut)
 async def twofa_enable(
-    body: TwoFAVerifyRequest, user: CurrentUser, session: SessionDep
+    body: TwoFAEnableRequest, request: Request, user: CurrentUser, session: SessionDep
 ) -> TwoFAStatusOut:
     if user.totp_enabled:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "2FA уже включена")
@@ -297,12 +319,24 @@ async def twofa_enable(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "Сначала запросите настройку (setup)"
         )
-    if not totp.verify(user.totp_secret, body.otp):
+    user_id, username = user.id, user.username
+    if not body.current_password:
+        # Вкладка со старой сборкой шлет включение без пароля. Это не подбор: в счетчик неудач
+        # не идет, иначе пять нажатий блокировали бы адрес и слали алерт о подборе
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Обновите страницу: нужен текущий пароль")
+    # текущий пароль, как при смене пароля: тот же счетчик неудач и блокировка адреса
+    await _guarded(session, request, username, "2fa_enable_fail",
+                   lambda: verify_password(body.current_password, user.password_hash), "Неверный текущий пароль")
+    # Код подтверждения тоже расходуется: им же нельзя сразу войти. Сеансы, открытые одним
+    # паролем (и украденный токен), закрываются, как при смене пароля; этому клиенту - новый токен
+    version = await _take_totp(session, user, body.otp, totp_enabled=True, token_version=User.token_version + 1)
+    if version is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Неверный код")
-    user.totp_enabled = True
     await session.commit()
-    await audit.record(session, user.username, "2fa_enable", user.username)
-    return TwoFAStatusOut(enabled=True)
+    await audit.record(session, username, "2fa_enable", username)
+    settings = get_settings()
+    token = create_access_token(username, settings.jwt_secret, settings.jwt_ttl_minutes, version, user_id)
+    return TwoFAStatusOut(enabled=True, access_token=token)
 
 
 @router.post("/2fa/disable", response_model=TwoFAStatusOut)
@@ -311,11 +345,13 @@ async def twofa_disable(
 ) -> TwoFAStatusOut:
     if not user.totp_enabled:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "2FA не включена")
-    # шесть цифр с украденным токеном перебирались бы без счета: тот же лимит, что у входа
-    await _guarded(session, request, user.username, "2fa_disable_fail",
-                   lambda: totp.verify(user.totp_secret, body.otp), "Неверный код")
-    user.totp_enabled = False
-    user.totp_secret = ""
+    # шесть цифр с украденным токеном перебирались бы без счета: тот же лимит, что у входа.
+    # Код одноразовый, как при входе: подсмотренный или уже введенный код 2FA не отключит.
+    # Сеансы не отзываются: все они открыты с кодом (открытые без него закрыло включение)
+    async def take() -> bool:
+        return await _take_totp(session, user, body.otp, totp_enabled=False, totp_secret="") is not None
+
+    await _guarded(session, request, user.username, "2fa_disable_fail", take, "Неверный код")
     await session.commit()
     await audit.record(session, user.username, "2fa_disable", user.username)
     return TwoFAStatusOut(enabled=False)

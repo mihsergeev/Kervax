@@ -1,9 +1,13 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
+from sqlalchemy import text, update
+from sqlalchemy.exc import OperationalError
 
 from app import backup, config
+from app.models import Server
 
 pytestmark = pytest.mark.pg
 
@@ -190,6 +194,118 @@ async def test_backup_restore_rejects_foreign_file(
         "/api/backup/restore", json={"foo": "bar"}, headers=auth_headers
     )
     assert r.status_code == 400
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _report(client, token: str) -> int:
+    r = await client.post("/api/agent/report", json={"agent_version": "2.9"}, headers=_bearer(token))
+    return r.status_code
+
+
+async def _server_row(client, sid: int) -> Server:
+    async with client._transport.app.state.session_factory() as session:
+        return await session.get(Server, sid)
+
+
+async def test_restore_keeps_current_access_of_existing_records(client, auth_headers):
+    r = await client.post("/api/servers", json={"name": "node-a.example.test"}, headers=auth_headers)
+    sid, old_agent = r.json()["server"]["id"], r.json()["token"]
+    r = await client.post("/api/checks", json={"name": "nightly", "type": "push", "target": "push",
+                                               "push_period": 3600}, headers=auth_headers)
+    cid, old_push = r.json()["id"], r.json()["push_token"]
+    old_ansible = (await client.post("/api/settings/ansible", headers=auth_headers)).json()["token"]
+    async with client._transport.app.state.session_factory() as session:
+        await session.execute(update(Server).where(Server.id == sid).values(
+            relay_user="relay", relay_password="old-relay-secret-example"))
+        await session.commit()
+    sealed = (await client.get("/api/backup/export", headers=auth_headers)).json()
+
+    # после бэкапа все доступы перевыпустили, а сервер переименовали
+    new_agent = (await client.post(f"/api/servers/{sid}/rotate", headers=auth_headers)).json()["token"]
+    new_push = (await client.post(f"/api/checks/{cid}/push-token", headers=auth_headers)).json()["push_token"]
+    new_ansible = (await client.post("/api/settings/ansible", headers=auth_headers)).json()["token"]
+    async with client._transport.app.state.session_factory() as session:
+        await session.execute(update(Server).where(Server.id == sid).values(
+            name="node-b.example.test", relay_password="new-relay-secret-example"))
+        await session.commit()
+    current_hash = (await _server_row(client, sid)).token_hash
+
+    r = await client.post("/api/backup/restore", json=sealed, headers=auth_headers)
+    assert r.status_code == 200
+
+    server = await _server_row(client, sid)
+    # конфигурация из файла, доступы текущие
+    assert server.name == "node-a.example.test"
+    assert server.token_hash == current_hash and server.relay_password == "new-relay-secret-example"
+    assert await _report(client, old_agent) == 401
+    assert await _report(client, new_agent) == 200
+    assert (await client.post(f"/api/agent/push/{old_push}")).status_code == 404
+    assert (await client.post(f"/api/agent/push/{new_push}")).status_code == 200
+    assert (await client.get("/api/ansible/servers", headers=_bearer(old_ansible))).status_code == 401
+    assert (await client.get("/api/ansible/servers", headers=_bearer(new_ansible))).status_code == 200
+
+    # отозванный доступ ansible тоже не возвращается
+    assert (await client.delete("/api/settings/ansible", headers=auth_headers)).status_code == 204
+    assert (await client.post("/api/backup/restore", json=sealed, headers=auth_headers)).status_code == 200
+    assert (await client.get("/api/ansible/servers", headers=_bearer(old_ansible))).status_code == 401
+
+
+async def test_restore_does_not_give_a_reused_id_the_access_of_another_record(client, auth_headers):
+    await client.post("/api/servers", json={"name": "keep.example.test"}, headers=auth_headers)
+    without_a = (await client.get("/api/backup/export", headers=auth_headers)).json()
+    r = await client.post("/api/servers", json={"name": "a.example.test"}, headers=auth_headers)
+    a_id, a_token = r.json()["server"]["id"], r.json()["token"]
+    async with client._transport.app.state.session_factory() as session:
+        # сервер A заведен задолго до бэкапа (SQLite хранит время создания с точностью до секунды)
+        await session.execute(update(Server).where(Server.id == a_id).values(
+            created_at=datetime.now(timezone.utc) - timedelta(days=1)))
+        await session.commit()
+    with_a = (await client.get("/api/backup/export", headers=auth_headers)).json()
+
+    # бэкап без A удаляет его; id A достается новому серверу C: в SQLite max(id)+1, на PostgreSQL
+    # restore ставит sequence на max(id)+1
+    assert (await client.post("/api/backup/restore", json=without_a, headers=auth_headers)).status_code == 200
+    r = await client.post("/api/servers", json={"name": "c.example.test"}, headers=auth_headers)
+    assert r.json()["server"]["id"] == a_id
+    c_token = r.json()["token"]
+    assert await _report(client, c_token) == 200
+
+    # вернули бэкап с A: токен C не переходит к A, у A токен из файла
+    assert (await client.post("/api/backup/restore", json=with_a, headers=auth_headers)).status_code == 200
+    assert (await _server_row(client, a_id)).name == "a.example.test"
+    assert await _report(client, c_token) == 401
+    assert await _report(client, a_token) == 200
+
+
+async def test_sqlite_restore_reads_current_access_under_its_write_lock(client, auth_headers, monkeypatch):
+    factory = client._transport.app.state.session_factory
+    async with factory() as session:
+        if session.get_bind().dialect.name != "sqlite":
+            pytest.skip("на PostgreSQL снимок берется под LOCK TABLE")
+    await client.post("/api/servers", json={"name": "node.example.test"}, headers=auth_headers)
+    sealed = (await client.get("/api/backup/export", headers=auth_headers)).json()
+    original = backup._current_access
+    outcome = []
+
+    async def rotate_during_snapshot(session, model):
+        # перевыпуск токена из другого соединения в момент снимка должен ждать конца restore
+        async with factory() as other:
+            await other.execute(text("PRAGMA busy_timeout = 0"))
+            try:
+                await other.execute(update(Server).values(token_hash="rotated-in-between"))
+                await other.commit()
+                outcome.append("written")
+            except OperationalError as e:
+                outcome.append("locked" if "locked" in str(e) else str(e))
+        return await original(session, model)
+
+    monkeypatch.setattr(backup, "_current_access", rotate_during_snapshot)
+    r = await client.post("/api/backup/restore", json=sealed, headers=auth_headers)
+    assert r.status_code == 200
+    assert outcome and set(outcome) == {"locked"}
 
 
 async def test_backup_config_roundtrip(client: httpx.AsyncClient, auth_headers):
