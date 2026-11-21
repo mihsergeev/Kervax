@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.152] - 2026-11-21
+
+- Lock the backend Python dependencies with hashes (`backend/requirements.txt`, rebuilt with `sh backend/lock.sh`). Images, CI and the dependency audit install exactly the locked packages from wheels, and CI checks that the lock matches `pyproject.toml` and that every hash belongs to a file published for that version.
+- Upgrade note: a panel that builds its images during deployment no longer picks up newer Python packages every week. The weekly rebuild still refreshes operating system packages; Python package updates now arrive with a release. A weekly audit workflow and a Dependabot configuration report and propose dependency updates.
+- Pin the GitHub Actions used by CI and releases to commit SHAs, and the Go, Python and Node base images to digests.
+- The `latest` image tag moves only for the highest stable version, so tagging a backport no longer rolls it back. Releases run one at a time.
+
 ## [1.8.151] - 2026-11-21
 
 - Restoring a configuration backup keeps the current access secrets of records that still exist: agent tokens and their site groups, relay proxy credentials, push monitor tokens and the Ansible inventory token. A token reissued or revoked after the backup no longer works again after a restore. Records are matched by id and creation time, so a reused id never inherits another record's access. Records that no longer exist are restored from the file as before, so a restore onto a fresh panel keeps agents working.

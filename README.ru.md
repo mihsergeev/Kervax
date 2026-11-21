@@ -237,11 +237,16 @@ PostgreSQL в `compose.yml` настроен под временные ряды,
 ## Разработка
 
 ```sh
-cd backend && python -m venv .venv && . .venv/bin/activate && pip install -e .[dev] && pytest -q
+cd backend && python -m venv .venv && . .venv/bin/activate
+pip install --require-hashes --no-deps --only-binary :all: -r requirements-dev.txt
+pip install --no-deps --no-build-isolation --no-index .
+pytest -q
 cd ../frontend && npm ci && npm run dev
 ```
 
 FastAPI, SQLAlchemy 2 async, Alembic, PostgreSQL; React 19, Vite, TypeScript; агент на Go.
+Зависимости бэкенда закреплены с хешами в `backend/requirements*.txt`, исходники - в
+`backend/requirements*.in`; после правки зависимостей запусти `sh backend/lock.sh`.
 `python docs/make-shots.py` пересобирает скриншоты с живой панели на демо-данных: все имена, домены и
 адреса в них вымышлены (RFC 2606, RFC 5737).
 

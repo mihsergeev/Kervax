@@ -25,27 +25,35 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: backend/pyproject.toml
+          cache-dependency-path: backend/requirements-dev.txt
       # тесты *_front.py собирают frontend/tests/*.check.ts через rolldown из node_modules фронта
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      # Те же lock-файлы, что у образа: версии и sha256 закреплены, pip ничего не выбирает сам,
+      # только колеса. Пакет панели - без зависимостей, без индекса и без build isolation
+      # (hatchling тоже из lock).
       - name: Install
-        run: pip install .[dev]
+        run: |
+          pip install --require-hashes --no-deps --only-binary :all: -r requirements-dev.txt
+          pip install --no-deps --no-build-isolation --no-index .
+          pip check
+      # Правка requirements*.in без пересборки lock (sh backend/lock.sh) или хеш, которого нет
+      # на PyPI, здесь падает
+      - name: Lock is up to date
+        run: sh lock.sh --check
       - name: Install frontend
         working-directory: frontend
         run: npm ci
       - name: Lint (ruff, pyflakes)
-        run: |
-          pip install ruff==0.17.6
-          ruff check --config pyproject.toml . ../ops
+        run: ruff check --config pyproject.toml . ../ops # ruff из requirements-dev.txt
       - name: Tests
         env:
           KERVAX_REQUIRE_FRONT: "1" # пропуск теста фронта - падение, а не тихий skip
@@ -55,10 +63,9 @@ jobs:
       # Реальные uid/права/симлинки: установщик пишет только в изолированное дерево теста.
       - name: Backup installer security regression
         run: sudo env PATH="$PATH" "$(command -v python)" -m pytest --noconftest -q tests/test_backup_dump_paths_security.py tests/test_backup_pg_dump_runner.py tests/test_mongo_dump_runner.py tests/test_recheck_helper.py
+      # Аудит lock-файлов, а не окружения раннера: requirements.txt - ровно то, что уходит в образ
       - name: Dependency audit (pip-audit)
-        run: |
-          pip install pip-audit
-          pip-audit
+        run: pip-audit --disable-pip --require-hashes -r requirements.txt -r requirements-dev.txt
 
   # Миграции и PostgreSQL. Тесты выше идут на SQLite через create_all: миграция, которая не
   # накатывается на PG, и расхождение моделей со схемой всплывали только на проде, где
@@ -86,14 +93,17 @@ jobs:
     env:
       KERVAX_DB_URL: postgresql+asyncpg://kervax:kervax@localhost:5432/kervax
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
           cache: pip
-          cache-dependency-path: backend/pyproject.toml
+          cache-dependency-path: backend/requirements-dev.txt
       - name: Install
-        run: pip install .[dev]
+        run: |
+          pip install --require-hashes --no-deps --only-binary :all: -r requirements-dev.txt
+          pip install --no-deps --no-build-isolation --no-index .
+          pip check
       - name: Upgrade from scratch
         run: alembic upgrade head
       - name: Models match the schema
@@ -113,8 +123,8 @@ jobs:
   selfcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - name: Consistency selfcheck
@@ -126,8 +136,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           cache: npm
@@ -150,8 +160,8 @@ jobs:
       run:
         working-directory: agent
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: "1.27.4"
           cache: false # агент не имеет внешних модулей и go.sum
@@ -175,7 +185,7 @@ jobs:
             dockerfile: frontend/Dockerfile
             context: ./frontend
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Контекст — КОРЕНЬ репозитория, а не backend/: образ бэкенда собирает ещё
       # и Go-агента (agent/main.go) и подхватывает подписанный манифест из
       # agent-dist/. С контекстом ./backend сборка падает на первом же COPY.

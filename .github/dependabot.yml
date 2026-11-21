@@ -1,0 +1,64 @@
+# Обновления зависимостей. Все версии закреплены (lock-файлы, SHA actions, digest образов),
+# поэтому сами они не приезжают: раз в неделю Dependabot готовит PR, CI проверяет его как
+# любой другой, в панели он попадает со следующим релизом.
+# Срочные PR по advisories (Dependabot security updates) этот файл НЕ включает: их включает
+# владелец в настройках репозитория (Settings -> Code security). Без них уязвимость в lock
+# всплывет в еженедельном .github/workflows/audit.yml, а исправление приедет с плановым PR.
+# cooldown - свежий выпуск ждет несколько дней: подмененный пакет обычно снимают раньше.
+version: 2
+updates:
+  # backend/requirements*.txt - lock от `uv pip compile` (backend/lock.sh): Dependabot
+  # пересобирает их из requirements*.in тем же uv с теми же флагами (--universal, хеши).
+  # Список зависимостей дублируется в pyproject.toml - тест test_dependency_lock.py
+  # покажет, если PR поменял только одно место.
+  - package-ecosystem: uv
+    directory: /backend
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      npm:
+        patterns: ["*"]
+
+  # .github/workflows: пины по SHA с комментарием # vX.Y.Z Dependabot обновляет вместе
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Базовые образы: тег и digest обновляются вместе
+  - package-ecosystem: docker
+    directories:
+      - /backend
+      - /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    ignore:
+      # Go агента меняется только вместе с agent-signing/release.py и новым подписанным
+      # релизом агента (ops/selfcheck.py): иначе панель раздает бинарь не той сборки
+      - dependency-name: golang
+    groups:
+      docker:
+        patterns: ["*"]

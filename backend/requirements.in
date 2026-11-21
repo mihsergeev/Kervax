@@ -1,0 +1,26 @@
+# Исходник runtime-lock бэкенда. Образ (backend/Dockerfile) ставит ровно requirements.txt:
+# версии и sha256 закреплены, pip сверяет хеш каждого файла (--require-hashes --no-deps).
+#
+# Список повторяет [project].dependencies и [build-system].requires из pyproject.toml
+# (hatchling собирает пакет без build isolation, в образе и в CI) - сверяет
+# tests/test_dependency_lock.py. Поменял зависимость - поменяй оба места и пересобери lock:
+#     sh backend/lock.sh
+# Генератор - uv, версия закреплена в requirements-dev.in. Lock универсальный
+# (--universal --python-version 3.12): один файл и для Python 3.12 в CI, и для 3.14 в образе.
+# Свежие версии приносит Dependabot (.github/dependabot.yml), CI проверяет lock: sh lock.sh --check
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic-settings>=2.4
+sqlalchemy[asyncio]>=2.0
+asyncpg>=0.30
+aiosqlite>=0.20
+alembic>=1.13
+bcrypt>=4.1
+PyJWT>=2.8
+# 50.0 - первая без PYSEC-2026-3552; ниже опускаться нельзя
+cryptography>=50.0
+httpx[socks]>=0.27
+# DNS-мониторы: записи A/AAAA/CNAME/MX/NS/TXT, свой резолвер и TCP при обрезанном ответе
+dnspython>=2.7
+# сборка самого пакета (build-system), без нее pip install --no-build-isolation . не пойдет
+hatchling

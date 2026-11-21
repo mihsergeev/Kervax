@@ -275,11 +275,16 @@ own if the panel, scheduler, database or alert channel stops.
 ## Development
 
 ```sh
-cd backend && python -m venv .venv && . .venv/bin/activate && pip install -e .[dev] && pytest -q
+cd backend && python -m venv .venv && . .venv/bin/activate
+pip install --require-hashes --no-deps --only-binary :all: -r requirements-dev.txt
+pip install --no-deps --no-build-isolation --no-index .
+pytest -q
 cd ../frontend && npm ci && npm run dev
 ```
 
 FastAPI, SQLAlchemy 2 async, Alembic, PostgreSQL; React 19, Vite, TypeScript; agent in Go.
+Backend dependencies are locked with hashes in `backend/requirements*.txt`, generated from
+`backend/requirements*.in`; after changing a dependency run `sh backend/lock.sh`.
 `python docs/make-shots.py` rebuilds the screenshots from a live panel on demo data: every name,
 domain and address in them is invented (RFC 2606, RFC 5737).
 

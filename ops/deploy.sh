@@ -277,8 +277,9 @@ git archive "$REF" > "$STAGE/src.tar"
 printf '%s\n' "$NEW_LIST" > "$STAGE/manifest.txt"
 printf '%s\n' "$STALE" | grep -v '^$' > "$STAGE/stale.txt" || true
 cp "$(dirname "$0")/deploy-remote.sh" "$STAGE/run.sh"
-# DEPS_EPOCH - номер недели: зависимости бэкенда в отдельном слое, и он пересобирается раз в
-# неделю или при смене их списка, а не на каждом релизе (backend/Dockerfile)
+# DEPS_EPOCH - номер недели: раз в неделю образы пересобирают слой пакетов ОС (apt в backend,
+# apk во frontend), и исправления дистрибутива приезжают без выпуска. Python- и npm-пакеты
+# закреплены lock-файлами: их слои пересобираются только при смене lock (backend/Dockerfile)
 cat > "$STAGE/params" <<EOF
 FILES='$FILES'
 SERVICES='$SERVICES'

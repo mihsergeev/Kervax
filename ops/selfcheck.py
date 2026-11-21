@@ -350,6 +350,7 @@ def check_agent_go_image() -> None:
     совпадают, только пока Go один и тот же. Сменил образ в одном месте (например, влил
     PR dependabot) - панель перестает раздавать релиз, самообновление встает у всего
     парка. Плавающий тег вроде 1.27-alpine тоже нельзя: следующий патч Go сменит байты.
+    Тег закреплен digest'ом: пересборка образа под тем же тегом не подменит компилятор.
     """
     dock = re.search(r"^FROM (golang:\S+) AS agent", read("backend/Dockerfile"), re.M)
     rel_path = "agent-signing/release.py"
@@ -359,13 +360,13 @@ def check_agent_go_image() -> None:
         fail("agent", "не нашел образ Go в backend/Dockerfile или в agent-signing/release.py")
         return
     img = dock.group(1)
-    m = re.fullmatch(r"golang:(\d+\.\d+\.\d+)-alpine", img)
+    m = re.fullmatch(r"golang:(\d+\.\d+\.\d+)-alpine@sha256:[0-9a-f]{64}", img)
     if img != rel.group(1):
         fail("agent", f"Go для агента: в Dockerfile {img}, в release.py {rel.group(1)} - "
                       "бинарь панели не совпадет с подписанным")
     elif not m:
-        fail("agent", f"образ Go {img} без точного патча: следующий выпуск Go сменит байты "
-                      "бинаря, и он разойдется с подписанным")
+        fail("agent", f"образ Go {img} без точного патча и digest: следующий выпуск Go сменит "
+                      "байты бинаря, и он разойдется с подписанным")
     elif not ci or ci.group(1) != m.group(1):
         fail("agent", f"CI проверяет агента на Go {ci.group(1) if ci else '?'}, а собираем "
                       f"на {m.group(1)}")

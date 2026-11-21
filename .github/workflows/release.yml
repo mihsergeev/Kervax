@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# Выпуски по очереди: решение о теге latest и его публикация у двух выпусков не перемешиваются.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   # Тот же SHA уже полностью проверен в main. Не запускаем полный CI второй раз.
   # Без свежего успешного CI (все jobs и обязательные steps) релиз блокируется.
@@ -21,7 +26,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify successful main CI for this exact commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -34,33 +39,37 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Compute owner (lowercase) and version
+      - name: Compute owner (lowercase), version and latest
         id: meta
         run: |
           echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
           echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          # latest - только старшей стабильной версии: тег бэкпорта или пре-релиза latest не
+          # откатывает. Теги - с GitHub: checkout неглубокий и тегов не содержит. Ошибка
+          # ls-remote или тег, которого нет в списке, останавливают выпуск.
+          tags=$(git ls-remote --tags --refs origin 'refs/tags/v*')
+          latest=$(printf '%s\n' "$tags" | sh ops/release-latest.sh "$GITHUB_REF_NAME")
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
 
       # Собираем локально: в GHCR попадут именно проверенные ниже образы.
       - name: Build backend
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: backend/Dockerfile
           load: true
           tags: |
             ghcr.io/${{ steps.meta.outputs.owner }}/kervax-backend:${{ steps.meta.outputs.version }}
-            ghcr.io/${{ steps.meta.outputs.owner }}/kervax-backend:latest
 
       - name: Build frontend
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ./frontend
           load: true
           tags: |
             ghcr.io/${{ steps.meta.outputs.owner }}/kervax-frontend:${{ steps.meta.outputs.version }}
-            ghcr.io/${{ steps.meta.outputs.owner }}/kervax-frontend:latest
 
       - name: Scan release backend
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -82,7 +91,7 @@ jobs:
           exit-code: "1"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -92,8 +101,20 @@ jobs:
         env:
           OWNER: ${{ steps.meta.outputs.owner }}
           VERSION: ${{ steps.meta.outputs.version }}
+          LATEST: ${{ steps.meta.outputs.latest }}
         run: |
           docker push "ghcr.io/$OWNER/kervax-backend:$VERSION"
           docker push "ghcr.io/$OWNER/kervax-frontend:$VERSION"
-          docker push "ghcr.io/$OWNER/kervax-backend:latest"
-          docker push "ghcr.io/$OWNER/kervax-frontend:latest"
+          if [ "$LATEST" = true ]; then
+            # еще раз прямо перед push: пока шли сборка и сканирование, мог появиться тег новее
+            tags=$(git ls-remote --tags --refs origin 'refs/tags/v*')
+            LATEST=$(printf '%s\n' "$tags" | sh ops/release-latest.sh "$GITHUB_REF_NAME")
+          fi
+          if [ "$LATEST" = true ]; then
+            for image in kervax-backend kervax-frontend; do
+              docker tag "ghcr.io/$OWNER/$image:$VERSION" "ghcr.io/$OWNER/$image:latest"
+              docker push "ghcr.io/$OWNER/$image:latest"
+            done
+          else
+            echo "latest is left as is: $GITHUB_REF_NAME is not the highest stable version"
+          fi
