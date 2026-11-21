@@ -60,7 +60,9 @@ docker exec -e PGPASSWORD="$PW" "$DB_CT" pg_dump -U "$DBUSER" -d "$DBNAME" -Fc >
 # The archive's table of contents, read by pg_restore of the same container (no client on the host)
 toc=$(docker exec -i "$DB_CT" pg_restore --list < "$file.tmp") || { rm -f "$file.tmp"; fail "the dump is not a readable archive"; }
 for t in alembic_version servers checks users app_settings; do
-    printf '%s\n' "$toc" | grep -q "TABLE DATA public $t " || { rm -f "$file.tmp"; fail "no data of table $t in the dump"; }
+    # here-string, not "printf | grep -q": grep exits at the first match, and under pipefail the
+    # writer's SIGPIPE failed the check of a complete dump whose listing was long
+    grep -q "TABLE DATA public $t " <<<"$toc" || { rm -f "$file.tmp"; fail "no data of table $t in the dump"; }
 done
 mv "$file.tmp" "$file"
 cp "$DIR/.env" "$OUT/dotenv"

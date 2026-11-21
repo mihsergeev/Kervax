@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.154] - 2026-11-22
+
+- Fix the check of the panel database dump in `ops/panel-pgdump.sh`: a complete dump with a long table of contents could be rejected as missing table data. Reinstall the script on panel hosts where it runs from cron.
+
 ## [1.8.153] - 2026-11-22
 
 - Agent 2.73: programs started by the agent, including the Docker CLI that reports the client and Compose versions, no longer use `/tmp` as their home directory. A local user could place a Docker CLI plugin under `/tmp/.docker` and have it run as the agent user. Nodes with automatic updates receive the fix with the new signed agent.
