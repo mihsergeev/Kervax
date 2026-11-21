@@ -11,6 +11,8 @@ from app.config import Settings
 from app.db import Base, create_engine_and_factory
 from app.models import NotificationEvent, NotificationStream, Server, TgAlert
 
+pytestmark = pytest.mark.pg
+
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc)
 SETTINGS = Settings(alert_telegram_token="fixture-token", alert_telegram_chat="100",
                     panel_url="https://panel.example.com")

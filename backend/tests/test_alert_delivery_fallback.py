@@ -10,6 +10,8 @@ from app import alert_delivery, alert_delivery_fallback as fallback, alerts, not
 from app.db import Base, create_engine_and_factory
 from app.models import NotificationDelivery as Delivery, NotificationEvent as Event, Server
 
+pytestmark = pytest.mark.pg
+
 NOW = datetime(2026, 11, 15, 0, tzinfo=timezone.utc)
 CFG = {"telegram_api": "https://telegram.example.test", "telegram_token": "fixture-token",
        "telegram_chat": "main-example", "webhook": "", "tg_buttons": False,

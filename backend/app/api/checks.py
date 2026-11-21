@@ -3,7 +3,6 @@ from urllib.parse import urlparse
 
 import asyncio
 import ipaddress
-import re
 import secrets
 from types import SimpleNamespace
 

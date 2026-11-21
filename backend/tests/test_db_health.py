@@ -65,6 +65,7 @@ def test_replication():
     assert db_health.problems(_rep(_my(lag=400)), NOW)[0][:2] == (1, "MySQL на хосте: реплика отстает на 6 мин")
 
 
+@pytest.mark.pg
 @pytest.mark.skipif(not os.environ.get("KERVAX_TEST_PG"), reason="PostgreSQL aggregation")
 async def test_pg_primary_lag_excludes_only_backup_senders():
     src = (Path(__file__).resolve().parents[2] / "agent" / "dbstat-setup.sh").read_text(encoding="utf-8")

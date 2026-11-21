@@ -3,7 +3,6 @@
 данные: ни алертов, ни пунктов "требует действий"."""
 import bz2
 import gzip
-import io
 import json
 from datetime import datetime, timedelta, timezone
 

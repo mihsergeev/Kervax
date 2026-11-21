@@ -498,7 +498,6 @@ def problems(s: Server, now: datetime) -> list[dict]:
     rs = _after(_after(rs, "docker:", fixed.after(s, "docker_restarts")), "pod:", fixed.after(s, "kube_restarts"))
     dk = st.get("docker") if isinstance(st.get("docker"), dict) else {}
     muted = muted_keys(s)
-    ctrl = podnames.ctrls(s.last_report)
     groups: dict[str, list[tuple[str, int, datetime | None, str]]] = {}
     for key in sorted(rs):
         if not key.startswith("docker:") or key in muted:

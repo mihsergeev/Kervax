@@ -2,11 +2,10 @@
 import gzip
 import json
 import os
-import re
 import subprocess
 import sys
 import pytest
-from tests.test_backup_dump_paths_security import installed, setup_dump
+from tests.test_backup_dump_paths_security import installed, setup_dump  # noqa: F401
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid()!=0,
                                reason="isolated full installer needs Linux root ownership")

@@ -8,6 +8,8 @@ from app import checks as checks_exec
 from app.models import Check
 from app.schemas import CheckCreate, CheckUpdate
 
+pytestmark = pytest.mark.pg
+
 
 @pytest.fixture
 def _fake_runner(monkeypatch):

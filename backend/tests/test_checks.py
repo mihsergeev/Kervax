@@ -7,6 +7,8 @@ import pytest
 
 from app import checks as checks_exec
 
+pytestmark = pytest.mark.pg
+
 
 # --- чистая логика ---
 
@@ -20,7 +22,6 @@ def test_status_matches():
 
 
 def test_cert_days_left():
-    import ssl
     from datetime import datetime, timedelta, timezone
 
     future = datetime.now(timezone.utc) + timedelta(days=30)

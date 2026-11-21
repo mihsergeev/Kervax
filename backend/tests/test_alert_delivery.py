@@ -12,6 +12,8 @@ from app import alert_delivery, alerts, notification_store as store
 from app.db import Base, create_engine_and_factory
 from app.models import AppSetting, AlertEvent, NotificationDelivery, NotificationEvent, NotificationStream, Server, TgAlert, User
 
+pytestmark = pytest.mark.pg
+
 NOW = datetime(2026, 11, 15, 12, tzinfo=timezone.utc)
 
 

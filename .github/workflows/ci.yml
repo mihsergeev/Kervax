@@ -31,9 +31,24 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
           cache-dependency-path: backend/pyproject.toml
+      # тесты *_front.py собирают frontend/tests/*.check.ts через rolldown из node_modules фронта
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Install
         run: pip install .[dev]
+      - name: Install frontend
+        working-directory: frontend
+        run: npm ci
+      - name: Lint (ruff, pyflakes)
+        run: |
+          pip install ruff==0.17.6
+          ruff check --config pyproject.toml . ../ops
       - name: Tests
+        env:
+          KERVAX_REQUIRE_FRONT: "1" # пропуск теста фронта - падение, а не тихий skip
         run: pytest -q -n auto
       - name: Agent source host security regression
         run: python -m pytest --noconftest -q ../ops/tests
@@ -90,7 +105,7 @@ jobs:
           KERVAX_TEST_PG: postgresql+asyncpg://kervax:kervax@localhost:5432/kervax_tests
         run: |
           PGPASSWORD=kervax psql -h localhost -U kervax -d kervax -c 'create database kervax_tests'
-          pytest -q tests/test_backup.py tests/test_auth.py tests/test_users.py tests/test_checks.py tests/test_servers.py tests/test_maint.py tests/test_check_edit_roundtrip.py tests/test_audit_view.py tests/test_home_mute.py tests/test_api_scope_regressions.py tests/test_auth_identity.py tests/test_recent_beats.py tests/test_alert_recheck.py tests/test_alert_recheck_pg.py tests/test_alert_observation_pg.py tests/test_db_health.py::test_pg_primary_lag_excludes_only_backup_senders tests/test_mongo_dumps.py tests/test_notification_store.py tests/test_notification_retention.py tests/test_alert_delivery.py tests/test_alert_delivery_actions.py tests/test_alert_delivery_recovery.py tests/test_alert_delivery_fallback.py tests/test_alert_delivery_api.py tests/test_notification_source_policy.py tests/test_mute_watch.py::test_hold_released_when_worse tests/test_mute_watch.py::test_hold_release_cas_preserves_new_operator_snooze_before_post
+          pytest -q -m pg
 
   # Проверка «панель не молчит»: рядом с кодом живут списки, написанные руками
   # (виды алертов, подписи helper'ов, разделы, переводы). Код уходит вперёд —
@@ -121,6 +136,8 @@ jobs:
         run: npm ci
       - name: Dependency audit (npm audit)
         run: npm run audit:build
+      - name: Lint (oxlint)
+        run: npm run lint
       - name: Build
         run: npm run build
 

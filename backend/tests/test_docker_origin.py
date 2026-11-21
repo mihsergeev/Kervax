@@ -1,7 +1,6 @@
 """Opaque image identity is not a purpose; only bounded root evidence grants SOCK."""
 from copy import deepcopy
 import gzip
-import hashlib
 import io
 import json
 from pathlib import Path
@@ -10,8 +9,8 @@ import types
 
 import pytest
 
-from app import docker_origin, docker_risk, setup_scripts
-from tests.test_docker_risk import _c, _rep, _srv, _names
+from app import docker_origin, setup_scripts
+from tests.test_docker_risk import _c, _rep, _names
 
 SCRIPT = Path(__file__).parents[2] / 'agent/docker-origin-setup.sh'
 SOURCE = SCRIPT.read_text(encoding='utf-8').split("<<'PYTHON_COLLECTOR'\n", 1)[1].split('\nPYTHON_COLLECTOR\n', 1)[0]

@@ -225,7 +225,7 @@ def test_tunnel_part_matches_the_helper():
     # те же интерфейс, режим, ttl и mtu, что держит helper: он пересоздаст интерфейс таким же
     helper = (AGENT / "gre-setup.sh").read_text(encoding="utf-8")
     assert 'IFACE = "kervax-gre"' in helper and '"mode", "gre"' in helper and '"ttl", "64"' in helper
-    assert f"mode gre local \"$l\" remote \"$1\" ttl 64" in script and f"mtu {gre.MTU} up" in script
+    assert "mode gre local \"$l\" remote \"$1\" ttl 64" in script and f"mtu {gre.MTU} up" in script
     assert 'COMMENT = "kervax-gre"' in helper and "comment kervax-gre" in script
     # сообщения для ноды фронт переводит по точному тексту
     front = (ROOT / "frontend/src/installProxy.ts").read_text(encoding="utf-8")

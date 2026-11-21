@@ -10,6 +10,8 @@ from app.config import get_settings
 from app.models import AlertEvent, AuditLog, NotificationDelivery, NotificationEvent, User
 from app.security import create_access_token
 
+pytestmark = pytest.mark.pg
+
 
 async def _seed(client, statuses):
     factory = client._transport.app.state.session_factory

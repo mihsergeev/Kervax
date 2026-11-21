@@ -10,6 +10,8 @@ from app.api import checks as checks_api
 from app.models import Check, CheckSample, User
 from app.security import hash_password
 
+pytestmark = pytest.mark.pg
+
 
 async def test_recent_beats_preserves_window_order_disabled_empty_and_ties(client, monkeypatch):
     now = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)

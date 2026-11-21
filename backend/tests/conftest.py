@@ -91,6 +91,25 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "calm: тест с выдержкой отбоя и повторами после отбоя (collector._SETTLE_S)")
 
 
+def pytest_collection_modifyitems(config, items):
+    """Файлы *_pg.py целиком в прогоне на PostgreSQL (pytest -m pg), без ручной метки."""
+    for item in items:
+        if item.path.name.endswith("_pg.py"):
+            item.add_marker(pytest.mark.pg)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_makereport(item, call):
+    """KERVAX_REQUIRE_FRONT=1 (CI, job backend): пропуск теста *_front.py - падение. Без node и
+    node_modules фронта такие тесты молча уходили в skip, и проверки фронта не было вовсе."""
+    rep = yield
+    if rep.skipped and os.environ.get("KERVAX_REQUIRE_FRONT") == "1" and item.path.name.endswith("_front.py"):
+        why = rep.longrepr[2] if isinstance(rep.longrepr, tuple) else rep.longrepr
+        rep.outcome = "failed"
+        rep.longrepr = f"KERVAX_REQUIRE_FRONT=1, а тест фронта пропущен: {why}"
+    return rep
+
+
 @pytest.fixture(autouse=True)
 def _calm_off(request, monkeypatch):
     """Без общей выдержки отбоя и тихих повторов (collector._SETTLE_S, _AGAIN_S): тесты каждого вида

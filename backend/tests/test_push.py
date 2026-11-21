@@ -2,7 +2,6 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from sqlalchemy import select
 
 from app import checks
 from app.models import Check

@@ -5,6 +5,8 @@ import pytest
 
 from app import backup, config
 
+pytestmark = pytest.mark.pg
+
 
 def _open(sealed: dict) -> dict:
     return backup.unseal(sealed, config.get_settings())

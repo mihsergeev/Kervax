@@ -9,6 +9,8 @@ from app import checks, collector, inside_probe
 from app.models import AgentProbe, BackupSetupJob, Check, ProbeRequest, Server
 from tests.test_manual_run import REPORT, _local_setup
 
+pytestmark = pytest.mark.pg
+
 
 PW = "fakepass-example"
 

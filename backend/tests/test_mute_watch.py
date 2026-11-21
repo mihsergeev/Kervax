@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from sqlalchemy import select
 
 from app import mute_watch as mw
@@ -278,6 +279,7 @@ async def test_short_snooze_fires_as_before(tmp_path, monkeypatch):
     await engine.dispose()
 
 
+@pytest.mark.pg
 async def test_hold_released_when_worse(tmp_path, monkeypatch):
     """Удержание при 92% (проблема), диск дошел до 99% (критично): заглушка снимается, и алерт идет
     в этом же тике."""
@@ -314,6 +316,7 @@ def test_view_hides_hold_changed_by_hand():
     assert over == {"kube_pod": {"at": _iso(NOW)}}
 
 
+@pytest.mark.pg
 async def test_hold_release_cas_preserves_new_operator_snooze_before_post(tmp_path, monkeypatch):
     from contextlib import asynccontextmanager
     from app import collector

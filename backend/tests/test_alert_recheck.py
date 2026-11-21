@@ -8,6 +8,8 @@ from app import alert_recheck as rc, tamper
 from app.models import AlertRecheck, Check, Server, User
 from app.security import hash_agent_token
 
+pytestmark = pytest.mark.pg
+
 
 def factory(client):
     return client._transport.app.state.session_factory

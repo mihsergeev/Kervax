@@ -12,6 +12,8 @@ from app.db import create_engine_and_factory
 from app.models import AlertEvent, NotificationDelivery, NotificationEvent, Server, TgAlert, User
 from tests.test_alert_delivery import configuration, database, http, lost_response  # noqa: F401
 
+pytestmark = pytest.mark.pg
+
 NOW = datetime(2026, 11, 15, 16, tzinfo=timezone.utc)
 SETTINGS = Settings()
 

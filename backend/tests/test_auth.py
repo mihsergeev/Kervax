@@ -1,4 +1,7 @@
 import httpx
+import pytest
+
+pytestmark = pytest.mark.pg
 
 
 async def test_login_ok(client: httpx.AsyncClient) -> None:

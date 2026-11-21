@@ -12,11 +12,11 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import select, update
 
 from app import fixed, home_mute, probe_scope, tamper
 from app.collector import _ALERT_SECTION, _aware, seen_online
-from app.models import AlertRecheck, Check, Server, User
+from app.models import AlertRecheck, Check, Server
 
 TIMEOUT = 180
 PANEL_TIMEOUT = 60

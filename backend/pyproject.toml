@@ -42,3 +42,15 @@ testpaths = ["tests"]
 # backend/ в sys.path и при обычной (не editable) установке, как в CI: тесты импортируют
 # друг у друга (from tests.test_users import ...), а без этого пакет tests не виден
 pythonpath = ["."]
+markers = [
+    # CI job migrations: pytest -m pg с KERVAX_TEST_PG; файлы *_pg.py помечаются в conftest.py
+    "pg: тест входит в прогон на PostgreSQL",
+]
+
+# CI: только pyflakes (F) - неопределенные имена, мертвые импорты и переменные. Стиль не проверяем
+[tool.ruff.lint]
+select = ["F"]
+
+[tool.ruff.lint.per-file-ignores]
+# фикстуры pytest импортируются из соседних тестов и приходят параметром с тем же именем
+"tests/**" = ["F811"]

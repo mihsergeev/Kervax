@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from sqlalchemy import select
 
 from app import alert_delivery, collector, maint
@@ -10,6 +11,8 @@ from app.alerts import full_text
 from app.config import Settings
 from app.db import Base, create_engine_and_factory
 from app.models import AlertEvent, Check, MaintenanceWindow, NotificationDelivery, Server
+
+pytestmark = pytest.mark.pg
 
 TZ = "Europe/Moscow"  # UTC+3 без перехода
 

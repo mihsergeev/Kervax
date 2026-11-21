@@ -2,11 +2,12 @@
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
 
 from app import alert_delivery, alerts, notification_store as store
 from app.models import AlertEvent, NotificationDelivery, NotificationEvent, TgAlert
-from tests.test_alert_delivery import NOW, configuration, database, dispatch, http, message, rows
+from tests.test_alert_delivery import NOW, configuration, database, dispatch, http, message, rows  # noqa: F401
+
+pytestmark = pytest.mark.pg
 
 
 def test_verification_copy_keeps_critical_priority_inside_the_notification_budget():

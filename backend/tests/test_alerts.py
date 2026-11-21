@@ -53,8 +53,7 @@ async def test_alert_coverage_finds_silent_objects(client, auth_headers):
     молчало. Молчание мониторинга не видно вообще: метрики идут, графики
     рисуются, а когда нода ляжет — не придёт ничего.
     """
-    from sqlalchemy import select
-    from app.models import Check, Server
+    from app.models import Server
 
     factory = client._transport.app.state.session_factory  # noqa: SLF001
     async with factory() as s:

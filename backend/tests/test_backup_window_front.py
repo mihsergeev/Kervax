@@ -27,7 +27,8 @@ def test_backup_window(tmp_path, tz):
     )
     got = json.loads(subprocess.run(
         [node, str(out)], check=True, capture_output=True, text=True, encoding="utf-8",
-        env={**os.environ, "TZ": tz},
+        # часы backupWindowNote - локаль по умолчанию; на CI LANG=C.UTF-8 дает en-US и "11:30 PM"
+        env={**os.environ, "TZ": tz, "LC_ALL": "ru_RU.UTF-8"},
     ).stdout)
     assert got["just_started"] is None
     assert got["past_midnight"] is None

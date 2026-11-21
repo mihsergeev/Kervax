@@ -9,6 +9,8 @@ from app.bootstrap import ensure_admin
 from app.models import User
 from app.security import create_access_token
 
+pytestmark = pytest.mark.pg
+
 
 PW = "fakepass-example"
 

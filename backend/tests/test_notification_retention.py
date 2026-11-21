@@ -15,6 +15,8 @@ from app.db import Base, create_engine_and_factory
 from app.models import AlertEvent, NotificationDelivery as Delivery, NotificationEvent as Event
 from app.models import NotificationStream as Stream
 
+pytestmark = pytest.mark.pg
+
 NOW = datetime.now(timezone.utc)
 CUTOFF = NOW - timedelta(days=90)
 STALE = NOW - timedelta(days=365)

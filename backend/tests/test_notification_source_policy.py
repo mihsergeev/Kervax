@@ -7,9 +7,11 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from app import alert_delivery, alerts, config, parents, settings_store, tg_bot
+from app import alert_delivery, alerts, config, parents, tg_bot
 from app.db import Base, create_engine_and_factory
 from app.models import AlertEvent, Check, NotificationDelivery, NotificationEvent, Server, TgAlert, User
+
+pytestmark = pytest.mark.pg
 
 
 @pytest.fixture

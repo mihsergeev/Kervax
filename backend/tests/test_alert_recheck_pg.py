@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
-from sqlalchemy import select
 
 from app import alert_recheck as rc
 from app.models import AlertRecheck, Server

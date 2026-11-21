@@ -1,6 +1,8 @@
 import httpx
 import pytest
 
+pytestmark = pytest.mark.pg
+
 
 async def test_server_enroll_report_flow(client: httpx.AsyncClient, auth_headers):
     # регистрация сервера → токен + команда установки

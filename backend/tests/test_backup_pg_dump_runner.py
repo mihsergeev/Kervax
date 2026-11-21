@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from tests.test_backup_dump_paths_security import installed, setup_dump
+from tests.test_backup_dump_paths_security import installed, setup_dump  # noqa: F401
 
 
 pytestmark = pytest.mark.skipif(

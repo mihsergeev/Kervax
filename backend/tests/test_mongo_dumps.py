@@ -5,6 +5,8 @@ from app.api.servers import _backup_coverage
 from app.models import Server
 from app.schemas import BackupCommandIn
 
+pytestmark = pytest.mark.pg
+
 
 def server(agent="2.62", helper="0.50", dump=None, native=False):
     report = {"setup_versions": {"backup-setup": helper},

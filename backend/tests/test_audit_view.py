@@ -3,7 +3,11 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.models import AuditLog, Server
+
+pytestmark = pytest.mark.pg
 
 
 async def test_srv_ref_shows_server_name(client, auth_headers):

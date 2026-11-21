@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Require previously reporting agents to report again after backend recreation."""
 import argparse
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 import math
 import os

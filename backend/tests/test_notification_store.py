@@ -11,6 +11,8 @@ from app.db import Base, create_engine_and_factory
 from app.models import AlertEvent, NotificationDelivery as Delivery, NotificationEvent as Event
 from app.models import NotificationStream as Stream, NotificationTransport as Transport
 
+pytestmark = pytest.mark.pg
+
 T0 = datetime(2026, 11, 14, 12, tzinfo=timezone.utc)
 
 

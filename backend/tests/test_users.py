@@ -5,6 +5,8 @@ import asyncio
 import httpx
 import pytest
 
+pytestmark = pytest.mark.pg
+
 
 async def _mk_viewer(
     client: httpx.AsyncClient, auth_headers, username="watcher", password="viewerpass-001"

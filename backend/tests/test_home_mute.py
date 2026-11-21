@@ -3,8 +3,12 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from app import home_mute, os_support
 from app.models import Server
+
+pytestmark = pytest.mark.pg
 
 NOW = datetime(2026, 10, 23, 12, 0, tzinfo=timezone.utc)
 TS = int(NOW.timestamp())

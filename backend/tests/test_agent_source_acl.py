@@ -12,7 +12,7 @@ from starlette.requests import Request
 
 from app import agent_auth, config
 from app.models import Check, DockerCommand, Server
-from tests.test_gre_helper import sync as gre_sync
+from tests.test_gre_helper import sync as gre_sync  # noqa: F401
 
 PRIMARY = "198.51.100.20"
 OTHER = "198.51.100.21"

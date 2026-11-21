@@ -1,5 +1,5 @@
 """Не переживет перезагрузку (контейнеры, юниты) и доступы (заброшенные учетки, слабые ключи, второй root)."""
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app import access_audit, collector, os_support, reboot_survive
