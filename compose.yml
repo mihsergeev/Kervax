@@ -65,6 +65,9 @@ services:
 
   backend:
     logging: *logging
+    # по SIGTERM планировщик внутри backend доделывает идущую стадию (отправка алертов и запись
+    # состояния) и выходит; 10 с по умолчанию на стадию не хватает, дальше docker убивает процесс
+    stop_grace_period: 60s
     build:
       context: .
       dockerfile: backend/Dockerfile

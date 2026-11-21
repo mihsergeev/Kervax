@@ -87,8 +87,21 @@ def _servers_added_long_ago(monkeypatch):
     monkeypatch.setattr(collector, "_NEW_SERVER_QUIET", 0)
 
 
+@pytest.fixture(autouse=True)
+def _delivery_own_clock(request, monkeypatch):
+    """Тесты доставки ведут свои часы (now в прошлом, повтор через now + 16 минут). Нижняя граница
+    реальным временем в drain (alert_delivery._wall) перенесла бы их в сегодня: выключаем ее.
+    Тест с меткой wall_clock идет с настоящей границей (долгая стадия сборщика)."""
+    if request.node.get_closest_marker("wall_clock"):
+        return
+    from app import alert_delivery
+
+    monkeypatch.setattr(alert_delivery, "_wall", lambda: datetime(2000, 1, 1, tzinfo=timezone.utc))
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "calm: тест с выдержкой отбоя и повторами после отбоя (collector._SETTLE_S)")
+    config.addinivalue_line("markers", "wall_clock: drain с нижней границей реальным временем (alert_delivery._wall)")
 
 
 def pytest_collection_modifyitems(config, items):

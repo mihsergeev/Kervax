@@ -1,13 +1,12 @@
 """Durably own bot reminders while retaining the original callback identity."""
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 
 from app import alert_delivery, notification_store, settings_store
-from app.models import AppSetting, NotificationEvent, TgAlert
+from app.models import NotificationEvent, TgAlert
 
 
 class _ObsoleteAction(Exception):
@@ -70,22 +69,14 @@ async def enqueue(factory, cfg: dict, row_id: int, kind: str, level: int,
                 raise _ObsoleteAction
             undo.pop("held", None)
             row.undo = undo or None
-            setting = await session.get(AppSetting, settings_store.MAIN_PASSED_KEY, with_for_update=True)
-            try:
-                passed = json.loads(setting.value) if setting is not None else []
-            except (TypeError, ValueError):
-                passed = []
-            if not isinstance(passed, list):
-                passed = []
-            for target in (row.target or "").split(", "):
-                pair = [row.kind, target.strip()]
-                if pair[1] and pair not in passed:
-                    passed.append(pair)
-            value = json.dumps(passed[-300:], ensure_ascii=False)
-            if setting is None:
-                session.add(AppSetting(key=settings_store.MAIN_PASSED_KEY, value=value))
-            else:
-                setting.value = value
+            def passed(current):
+                for target in (row.target or "").split(", "):
+                    pair = [row.kind, target.strip()]
+                    if pair[1] and pair not in current:
+                        current.append(pair)
+                return current
+
+            await settings_store.update_main_passed(session, passed)
         event = await session.get(NotificationEvent, event_id)
         event.tg_alert_id = row_id
 

@@ -34,8 +34,8 @@ async def main() -> None:
     await ensure_admin(factory, settings)
     await ensure_default_location(factory, settings)
     log.info("планировщик запущен (tick=%ss)", settings.scheduler_tick)
-    # docker stop шлет SIGTERM: доделываем тик и выходим (collector_loop смотрит stop после
-    # тика). По умолчанию Python умирал сразу, и убитый между отправкой алерта и записью
+    # docker stop шлет SIGTERM: доделываем идущую стадию и выходим (collector_loop смотрит stop
+    # перед каждой стадией). По умолчанию Python умирал сразу, и убитый между отправкой алерта и записью
     # состояния планировщик после старта слал тот же алерт второй раз
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

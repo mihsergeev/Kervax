@@ -1000,13 +1000,13 @@ async def _note_passed(session_factory, cfg: dict, messages: list, on_main: list
 
 
 async def note_passed(session_factory, add: list, drop: set | None = None) -> None:
+    def change(cur):
+        new = [x for x in cur if tuple(x) not in (drop or set())]
+        return new + [x for x in add if x not in new]
+
     try:
-        async with session_factory() as session:
-            cur = await settings_store.get_main_passed(session)
-            new = [x for x in cur if tuple(x) not in (drop or set())]
-            new += [x for x in add if x not in new]
-            if new != cur:
-                await settings_store.set_main_passed(session, new)
+        async with session_factory() as session, session.begin():
+            await settings_store.update_main_passed(session, change)
     except Exception:  # noqa: BLE001
         log.warning("критичные в основном чате не записаны", exc_info=True)
 

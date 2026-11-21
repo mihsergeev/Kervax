@@ -193,6 +193,19 @@ async def _current_access(session: AsyncSession, model) -> dict:
 
 
 async def export_data(session: AsyncSession) -> dict:
+    if session.get_bind().dialect.name != "postgresql":
+        return await _export(session)
+    # Таблицы читаются несколькими SELECT, в READ COMMITTED у каждого свой момент: монитор мог
+    # попасть в бэкап без своего сервера. Один снимок - REPEATABLE READ READ ONLY на отдельном
+    # соединении: у сессии вызывающего транзакция уже идет (проверка админа, настройки бэкапа)
+    async with session.bind.connect() as connection:
+        connection = await connection.execution_options(
+            isolation_level="REPEATABLE READ", postgresql_readonly=True)
+        async with AsyncSession(bind=connection) as snapshot, snapshot.begin():
+            return await _export(snapshot)
+
+
+async def _export(session: AsyncSession) -> dict:
     tables: dict = {}
     for name, model in _MODELS:
         rows = list(await session.scalars(select(model)))

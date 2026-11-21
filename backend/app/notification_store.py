@@ -29,6 +29,12 @@ UNCERTAIN_DELAY = 15 * 60
 _monotonic = time.monotonic
 MAX_ATTEMPTS = 6
 MAX_UNCERTAIN = 3
+# подготовка POST упала (alert_delivery): отсрочка строки и сколько раз подряд до attention
+PREPARE_DELAY = 5 * 60
+MAX_PREPARE = 3
+# пачка упала до POST, виновная строка неизвестна: столько секунд строки пачки идут по одной
+SOLO_WINDOW = 60 * 60
+_PREPARE_MARKS = frozenset({"prepare_failures", "solo_until"})
 _READY = ("pending", "uncertain")
 
 
@@ -300,7 +306,7 @@ def _safe_error(error: str) -> str:
         return error.replace(" ", "_").replace(":", "_")
     allowed = {"ReadTimeout", "ReadError", "WriteTimeout", "WriteError", "ConnectTimeout",
                "ConnectError", "PoolTimeout", "RemoteProtocolError", "LocalProtocolError",
-               "TransportError", "TgRejected", "RuntimeError", "LeaseExpired", "CancelledError"}
+               "TransportError", "TgRejected", "RuntimeError", "LeaseExpired", "CancelledError", "PrepareError"}
     return error if error in allowed else ("DeliveryError" if error else "")
 
 
@@ -350,6 +356,8 @@ async def finish(factory, ids: list[int], owner: str, status: str, now: datetime
             delay = max(delay, UNCERTAIN_DELAY)
         next_attempt = _retry_at(now, delay, retry_after)
         for row in rows:
+            if _PREPARE_MARKS & (row.target or {}).keys():  # дошла до исхода - метки сбоев подготовки сначала
+                row.target = _fresh(row.target)
             if target_patch:
                 row.target = {**row.target, **_target(target_patch)}
             row.status = "pending" if status == "retry" else status
@@ -385,6 +393,34 @@ async def defer(factory, ids: list[int], owner: str, now: datetime, until: datet
     no network attempt, so undo that reservation while retaining the circuit.
     An expired own lease is safe here: both owners/status still fence a reclaim.
     """
+    return await _release(factory, ids, owner, now, until, failed=False)
+
+
+async def fail_prepare(factory, ids: list[int], owner: str, now: datetime, delay: int = PREPARE_DELAY, *,
+                       count: bool = True, solo: bool = False) -> list[int]:
+    """Подготовка POST упала (рендер, политика, получатель): попытки не было, как в defer.
+
+    Но с отсрочкой и счетчиком подряд в target: строка, которая падает всегда, не стоит вечно в
+    голове due и не держит канал получателя. После MAX_PREPARE подряд - attention с причиной
+    PrepareError, как после MAX_UNCERTAIN: оператор видит ее в окне доставки. Транспорт не
+    блокируется, соседние строки идут.
+
+    count=False - сбой не строки (база, сеть, пачка целиком): только отсрочка. solo=True - пачка
+    упала, а чья строка виновата, неизвестно: до SOLO_WINDOW drain шлет эти строки по одной, и
+    счетчик растет только у той, что падает сама. Метки снимают finish и retry.
+    """
+    now = _aware(now)
+    return await _release(factory, ids, owner, now, now + timedelta(seconds=delay), failed=True,
+                          count=count, solo=solo)
+
+
+def _fresh(target: dict) -> dict:
+    """target без меток сбоев подготовки (prepare_failures, solo_until)."""
+    return {name: value for name, value in (target or {}).items() if name not in _PREPARE_MARKS}
+
+
+async def _release(factory, ids: list[int], owner: str, now: datetime, until: datetime, *, failed: bool,
+                   count: bool = True, solo: bool = False) -> list[int]:
     now, until = _aware(now), _aware(until)
     ids = sorted(set(int(value) for value in ids))
     if not ids:
@@ -404,7 +440,20 @@ async def defer(factory, ids: list[int], owner: str, now: datetime, until: datet
             Delivery.id.in_(ids), Delivery.status == "sending", Delivery.lease_owner == owner,
         ).order_by(Delivery.id).with_for_update()))
         for row in rows:
+            target = dict(row.target or {})
+            if not failed:
+                target.pop("prepare_failures", None)  # подготовка удалась (defer) - счетчик подряд сначала
+            elif count:
+                target["prepare_failures"] = int(target.get("prepare_failures") or 0) + 1
+            if solo:
+                target["solo_until"] = (now + timedelta(seconds=SOLO_WINDOW)).isoformat()
+            if target != row.target:
+                row.target = target
             row.status = "uncertain" if row.uncertain_count else "pending"
+            if failed:
+                row.last_error = "PrepareError"
+                if count and target["prepare_failures"] >= MAX_PREPARE:
+                    row.status = "attention"
             row.attempts = max(0, row.attempts - 1)
             row.next_attempt_at = max(_aware(row.next_attempt_at), until, now)
             row.lease_owner, row.lease_until = "", None
@@ -438,8 +487,13 @@ async def retry(factory, ids: list[int], now: datetime, *, acknowledge_uncertain
                 await session.execute(update(Transport).where(Transport.key == transport_key)
                                       .values(failures=0, blocked_until=now))
         statement = update(Delivery).where(*eligible)
-        return list(await session.scalars(statement.values(status="pending", attempts=0, uncertain_count=0, next_attempt_at=now,
-                 lease_owner="", lease_until=None, last_error="").returning(Delivery.id)))
+        queued = list(await session.scalars(statement.values(status="pending", attempts=0, uncertain_count=0, next_attempt_at=now,
+                      lease_owner="", lease_until=None, last_error="").returning(Delivery.id)))
+        # ручной повтор - с чистого листа и для сбоев подготовки, иначе одна неудача снова attention
+        for row in await session.scalars(select(Delivery).where(Delivery.id.in_(queued))):
+            if _PREPARE_MARKS & (row.target or {}).keys():
+                row.target = _fresh(row.target)
+        return queued
 
 
 async def set_tg_alert(factory, event_id: int, aid: int) -> int:

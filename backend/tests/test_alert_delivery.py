@@ -8,9 +8,10 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from app import alert_delivery, alerts, notification_store as store
+from app import alert_delivery, alerts, heartbeat, notification_store as store
 from app.db import Base, create_engine_and_factory
-from app.models import AppSetting, AlertEvent, NotificationDelivery, NotificationEvent, NotificationStream, Server, TgAlert, User
+from app.models import (AppSetting, AlertEvent, NotificationDelivery, NotificationEvent, NotificationStream,
+                        NotificationTransport, Server, TgAlert, User)
 
 pytestmark = pytest.mark.pg
 
@@ -389,3 +390,284 @@ async def test_http_200_without_message_id_is_uncertain_not_history(database, ht
     assert await rows(factory, AlertEvent) == []
     await dispatch(factory, message(at=NOW + timedelta(seconds=1)), NOW + timedelta(seconds=1))
     assert len(http.sent()) == 1
+
+
+async def test_late_stage_clock_does_not_expire_the_lease_before_post(database, http, monkeypatch):
+    # Стадия сборщика шла 10 минут: now ее начала отстал, аренда от него истекла бы до POST
+    factory, _url = database
+    wall = NOW + timedelta(minutes=10)
+    monkeypatch.setattr(alert_delivery, "_wall", lambda: wall, raising=False)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def gated(_url, _payload):
+        entered.set()
+        await release.wait()
+        return Response({"ok": True, "result": {"message_id": 652}})
+
+    http.answer = gated
+    first = asyncio.create_task(dispatch(factory, message()))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        job = (await rows(factory, NotificationDelivery))[0]
+        assert job.status == "sending" and store._aware(job.lease_until) > wall
+        # параллельный drain бота (tg_bot) с реальными часами
+        await alert_delivery.drain(factory, configuration(), wall + timedelta(seconds=1))
+        job = (await rows(factory, NotificationDelivery))[0]
+        assert job.status == "sending" and job.uncertain_count == 0
+    finally:
+        release.set()
+        result = await asyncio.wait_for(first, timeout=5)
+    assert result
+    job = (await rows(factory, NotificationDelivery))[0]
+    assert job.status == "confirmed" and job.uncertain_count == 0 and len(http.sent()) == 1
+
+
+async def test_failed_row_before_post_is_set_aside_and_others_are_sent(database, http, monkeypatch):
+    factory, _url = database
+    cfg = configuration(webhook="https://hook.example.invalid/kervax")
+    render = alert_delivery._render
+
+    async def broken(factory, row, now):
+        if row["target"]["type"] == "webhook":
+            raise RuntimeError("fixture render failure")
+        return await render(factory, row, now)
+
+    monkeypatch.setattr(alert_delivery, "_render", broken)
+    await dispatch(factory, message(), cfg=cfg)
+    jobs = {job.target["type"]: job for job in await rows(factory, NotificationDelivery)}
+    assert jobs["telegram"].status == "confirmed" and len(http.sent()) == 1
+    hook = jobs["webhook"]
+    assert hook.status == "pending" and hook.attempts == hook.uncertain_count == 0
+    assert not hook.lease_owner and hook.lease_until is None and hook.target["prepare_failures"] == 1
+    later = NOW + timedelta(seconds=store.PREPARE_DELAY)
+    assert store._aware(hook.next_attempt_at) == later
+    async with factory() as session:
+        transport = await session.get(NotificationTransport, hook.transport_key)
+        assert not transport.lease_owner and transport.blocked_until is None
+    monkeypatch.setattr(alert_delivery, "_render", render)
+    await alert_delivery.drain(factory, cfg, later)
+    assert all(job.status == "confirmed" for job in await rows(factory, NotificationDelivery))
+
+
+async def test_failure_after_post_stays_ambiguous_without_leaving_dispatch(database, http, monkeypatch, caplog):
+    factory, _url = database
+    finish = store.finish
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("fixture database failure after POST")
+
+    monkeypatch.setattr(store, "finish", broken)
+    assert not await dispatch(factory, message())
+    assert "исход неизвестен" in caplog.text
+    job = (await rows(factory, NotificationDelivery))[0]
+    assert len(http.sent()) == 1 and job.status == "sending" and job.lease_owner
+    monkeypatch.setattr(store, "finish", finish)
+    await alert_delivery.drain(factory, configuration(), NOW + timedelta(seconds=121))
+    job = (await rows(factory, NotificationDelivery))[0]
+    assert job.status == "uncertain" and job.last_error == "LeaseExpired" and len(http.sent()) == 1
+
+
+async def _jobs_by_target(factory):
+    events = [event.id for event in await rows(factory, NotificationEvent)]
+    return {job["payload"]["message"]["target"]: job for job in await store.deliveries(factory, events)}
+
+
+@pytest.mark.parametrize("threshold", [0, 1])
+async def test_poison_row_is_set_aside_then_quarantined_and_neighbours_go(database, http, monkeypatch, threshold):
+    factory, _url = database
+    render = alert_delivery._render
+
+    async def broken(factory, row, now):
+        if row["payload"]["message"]["target"] == "node-2":
+            raise KeyError("fixture corrupt payload")
+        return await render(factory, row, now)
+
+    monkeypatch.setattr(alert_delivery, "_render", broken)
+    heartbeat.reset()
+    await dispatch(factory, [message(1), message(2)], threshold=threshold)
+    assert len(http.sent()) == 1 and "node-1" in http.sent()[0]["text"]
+    jobs = await _jobs_by_target(factory)
+    assert jobs["node-1"]["status"] == "confirmed"
+    poison = jobs["node-2"]
+    assert poison["status"] == "pending" and poison["attempts"] == poison["uncertain_count"] == 0
+    assert poison["target"]["prepare_failures"] == 1 and poison["last_error"] == "PrepareError"
+    assert poison["next_attempt_at"] == NOW + timedelta(seconds=store.PREPARE_DELAY) and not poison["lease_owner"]
+    async with factory() as session:
+        transport = await session.get(NotificationTransport, poison["transport_key"])
+        assert not transport.lease_owner and transport.blocked_until is None
+    assert await store.due(factory, NOW + timedelta(seconds=1)) == []  # не стоит в голове due
+    heartbeat.stage_done(alert_delivery.DELIVERY_STAGE, True)
+    assert alert_delivery.DELIVERY_STAGE in heartbeat.stage_fail_line()
+    at = NOW
+    for _ in range(store.MAX_PREPARE - 1):
+        at += timedelta(seconds=store.PREPARE_DELAY)
+        await alert_delivery.drain(factory, configuration(), at)
+    poison = (await _jobs_by_target(factory))["node-2"]
+    assert poison["status"] == "attention" and poison["last_error"] == "PrepareError"
+    assert poison["target"]["prepare_failures"] == store.MAX_PREPARE and poison["attempts"] == 0
+    assert await store.due(factory, at + timedelta(days=1)) == [] and len(http.sent()) == 1
+    heartbeat.reset()
+
+
+def _poisoned(allowed):
+    if any(message.target == "node-2" for _row, message, _cfg in allowed):
+        raise RuntimeError("fixture poison breaks the bundle")
+
+
+@pytest.mark.parametrize("hook", ["_filter_envelopes", "_save_policy_messages"])
+async def test_poison_breaking_the_bundle_goes_solo_and_only_it_is_quarantined(database, http, monkeypatch, hook):
+    factory, _url = database
+    original = getattr(alert_delivery, hook)
+
+    async def broken(factory, allowed, *args):
+        _poisoned(allowed)
+        return await original(factory, allowed, *args)
+
+    monkeypatch.setattr(alert_delivery, hook, broken)
+    await dispatch(factory, [message(1), message(2)], threshold=1)
+    jobs = await _jobs_by_target(factory)
+    assert http.sent() == []
+    for job in jobs.values():  # из пачки виновную не узнать: без счетчика, следующий проход - по одной
+        assert job["status"] == "pending" and "prepare_failures" not in job["target"]
+        assert job["target"]["solo_until"] and job["next_attempt_at"] == NOW + timedelta(seconds=alert_delivery._BUNDLE_DELAY)
+    at = NOW + timedelta(seconds=alert_delivery._BUNDLE_DELAY)
+    await alert_delivery.drain(factory, configuration(), at)
+    jobs = await _jobs_by_target(factory)
+    assert len(http.sent()) == 1 and "node-1" in http.sent()[0]["text"]
+    assert jobs["node-1"]["status"] == "confirmed" and "solo_until" not in jobs["node-1"]["target"]
+    assert jobs["node-2"]["target"]["prepare_failures"] == 1
+    for _ in range(store.MAX_PREPARE - 1):
+        at = (await _jobs_by_target(factory))["node-2"]["next_attempt_at"]
+        await alert_delivery.drain(factory, configuration(), at)
+    poison = (await _jobs_by_target(factory))["node-2"]
+    assert poison["status"] == "attention" and poison["target"]["prepare_failures"] == store.MAX_PREPARE
+    assert len(http.sent()) == 1
+    # ручной повтор - с чистого листа: метки сбоев подготовки сняты
+    assert await store.retry(factory, [poison["id"]], at) == [poison["id"]]
+    poison = (await _jobs_by_target(factory))["node-2"]
+    assert poison["status"] == "pending" and not {"prepare_failures", "solo_until"} & poison["target"].keys()
+
+
+def _database_down():
+    from sqlalchemy.exc import OperationalError
+
+    return OperationalError("SELECT 1", {}, ConnectionError("fixture database unavailable"))
+
+
+@pytest.mark.parametrize("level", ["bundle", "row"])
+async def test_infrastructure_failure_never_quarantines_healthy_rows(database, http, monkeypatch, level):
+    factory, _url = database
+    name = "_filter_envelopes" if level == "bundle" else "_render"
+    original = getattr(alert_delivery, name)
+
+    async def down(factory, first, *args):
+        if level == "bundle" or first["payload"]["message"]["target"] == "node-2":
+            raise _database_down()
+        return await original(factory, first, *args)
+
+    monkeypatch.setattr(alert_delivery, name, down)
+    await dispatch(factory, [message(1), message(2)], threshold=1)
+    at = NOW
+    for _ in range(store.MAX_PREPARE + 2):
+        at += timedelta(seconds=store.PREPARE_DELAY)
+        await alert_delivery.drain(factory, configuration(), at)
+    jobs = await _jobs_by_target(factory)
+    assert all(job["status"] != "attention" and "prepare_failures" not in job["target"]
+               and "solo_until" not in job["target"] for job in jobs.values() if job["status"] != "confirmed")
+    assert jobs["node-2"]["status"] == "pending"
+    monkeypatch.setattr(alert_delivery, name, original)
+    await alert_delivery.drain(factory, configuration(), at + timedelta(seconds=store.PREPARE_DELAY))
+    assert all(job["status"] == "confirmed" for job in (await _jobs_by_target(factory)).values())
+
+
+async def test_unparsable_row_is_split_out_and_the_storm_stays_one_post(database, http, monkeypatch):
+    factory, _url = database
+    original = alert_delivery.unpack
+    await alert_delivery.admit(factory, configuration(), [message(source) for source in (1, 2, 3)], 1, "HTML", NOW)
+
+    def corrupt(payload):
+        if payload.get("target") == "node-2":
+            raise KeyError("fixture corrupt payload")
+        return original(payload)
+
+    monkeypatch.setattr(alert_delivery, "unpack", corrupt)
+    await alert_delivery.drain(factory, configuration(), NOW)
+    jobs = await _jobs_by_target(factory)
+    assert len(http.sent()) == 1 and "node-2" not in http.sent()[0]["text"]
+    assert jobs["node-1"]["status"] == jobs["node-3"]["status"] == "confirmed"
+    assert jobs["node-2"]["status"] == "pending" and jobs["node-2"]["target"]["prepare_failures"] == 1
+
+
+@pytest.mark.parametrize("where", ["due", "claim", "bundles"])
+async def test_drain_failures_stay_inside_and_reach_the_heartbeat(database, http, monkeypatch, where):
+    factory, _url = database
+    await alert_delivery.admit(factory, configuration(), [message()], 0, "HTML", NOW)
+
+    async def fail(*_args, **_kwargs):
+        raise RuntimeError("fixture queue failure")
+
+    def fail_now(*_args, **_kwargs):
+        raise RuntimeError("fixture grouping failure")
+
+    target, name, value = {"due": (store, "due", fail), "claim": (store, "claim", fail),
+                           "bundles": (alert_delivery, "_bundles", fail_now)}[where]
+    monkeypatch.setattr(target, name, value)
+    heartbeat.reset()
+    await alert_delivery.drain(factory, configuration(), NOW)
+    heartbeat.stage_done(alert_delivery.DELIVERY_STAGE, True)
+    assert alert_delivery.DELIVERY_STAGE in heartbeat.stage_fail_line()
+    heartbeat.reset()
+    job = (await rows(factory, NotificationDelivery))[0]
+    # не разобрали пачку - шлем по одной; очередь и claim сломаны - строка не тронута
+    assert (job.status, len(http.sent())) == (("confirmed", 1) if where == "bundles" else ("pending", 0))
+    assert job.uncertain_count == 0 and not job.lease_owner
+
+
+async def test_cancel_before_post_returns_rows_without_uncertainty(database, http, monkeypatch):
+    factory, _url = database
+    entered, gate = asyncio.Event(), asyncio.Event()
+
+    async def slow(*_args):
+        entered.set()
+        await gate.wait()
+
+    monkeypatch.setattr(alert_delivery, "_wanted", slow)
+    task = asyncio.create_task(dispatch(factory, message()))
+    await asyncio.wait_for(entered.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    job = (await rows(factory, NotificationDelivery))[0]
+    assert job.status == "pending" and job.attempts == job.uncertain_count == 0
+    assert not job.lease_owner and job.lease_until is None and http.sent() == []
+    async with factory() as session:
+        assert not (await session.get(NotificationTransport, job.transport_key)).lease_owner
+
+
+@pytest.mark.wall_clock
+async def test_dispatch_from_a_long_stage_keeps_its_lease_against_the_bot(database, http):
+    # настоящая граница реальным временем: стадия сборщика началась 10 минут назад
+    factory, _url = database
+    stage_now = datetime.now(timezone.utc) - timedelta(minutes=10)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def gated(_url, _payload):
+        entered.set()
+        await release.wait()
+        return Response({"ok": True, "result": {"message_id": 653}})
+
+    http.answer = gated
+    first = asyncio.create_task(dispatch(factory, message(at=stage_now), stage_now))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        job = (await rows(factory, NotificationDelivery))[0]
+        assert store._aware(job.lease_until) > datetime.now(timezone.utc)
+        await alert_delivery.drain(factory, configuration())  # бот: реальное время
+        job = (await rows(factory, NotificationDelivery))[0]
+        assert job.status == "sending" and job.uncertain_count == 0
+    finally:
+        release.set()
+        result = await asyncio.wait_for(first, timeout=5)
+    assert result
+    job = (await rows(factory, NotificationDelivery))[0]
+    assert job.status == "confirmed" and job.uncertain_count == 0 and len(http.sent()) == 1

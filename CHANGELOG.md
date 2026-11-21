@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.155] - 2026-11-22
+
+- Alert delivery leases now start from the current time even when a long collector stage passes an earlier time, so a parallel Telegram bot pass no longer marks a delivery as uncertain, blocks the transport for 15 minutes and later sends a "Repeat" duplicate.
+- A failure while preparing one alert no longer stops the others. A row that fails before sending is put back and retried later without counting a delivery attempt; a row that keeps failing on its own is moved to attention after three tries. Database and network failures only postpone delivery. A storm stays one message when one of its rows cannot be read. Failures inside delivery no longer abort the collector tick and are reported in the heartbeat as a partial stage.
+- On shutdown the collector finishes its current stage instead of being cancelled in the middle of sending, and a delivery cancelled before sending returns to the queue. The backend container now gets up to 60 seconds to stop, so a deployment keeps the old backend a little longer.
+- Writes of the main-channel delivery record lock the row, so concurrent writers no longer lose entries.
+- Backup export on PostgreSQL reads all tables from one consistent snapshot.
+
 ## [1.8.154] - 2026-11-22
 
 - Fix the check of the panel database dump in `ops/panel-pgdump.sh`: a complete dump with a long table of contents could be rejected as missing table data. Reinstall the script on panel hosts where it runs from cron.

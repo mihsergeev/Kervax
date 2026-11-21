@@ -65,8 +65,8 @@ async def test_restart_repairs_history_and_original_buttons_without_another_post
         raise RuntimeError("fixture crash after confirmed response")
 
     monkeypatch.setattr(alert_delivery, "_history", crashed)
-    with pytest.raises(RuntimeError, match="fixture crash"):
-        await dispatch(factory, message(), cfg=cfg)
+    # сбой после подтвержденного POST пишется в лог и не выходит из доставки
+    await dispatch(factory, message(), cfg=cfg)
     job = (await rows(factory, NotificationDelivery))[0]
     assert job.status == "confirmed" and len(http.sent()) == 1
     assert await rows(factory, AlertEvent) == []

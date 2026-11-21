@@ -3,6 +3,8 @@
 import json
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
@@ -553,7 +555,10 @@ async def set_dup_pause(session: AsyncSession, data: dict) -> None:
 
 async def get_main_passed(session: AsyncSession) -> list[list[str]]:
     """[[вид, объект], ...] - критичные, ушедшие в основной чат во время паузы копий."""
-    raw = await _get_raw(session, MAIN_PASSED_KEY)
+    return _main_passed(await _get_raw(session, MAIN_PASSED_KEY))
+
+
+def _main_passed(raw: str | None) -> list[list[str]]:
     try:
         data = json.loads(raw) if raw else []
     except ValueError:
@@ -561,9 +566,23 @@ async def get_main_passed(session: AsyncSession) -> list[list[str]]:
     return [[str(x[0]), str(x[1])] for x in data if isinstance(x, list) and len(x) == 2]         if isinstance(data, list) else []
 
 
-async def set_main_passed(session: AsyncSession, data: list) -> None:
+async def update_main_passed(session: AsyncSession, change) -> None:
+    """change(список) -> новый список, под блокировкой строки и в транзакции вызывающего.
+
+    Писателей три (admit, alerts.note_passed, действие "придержано"). Без FOR UPDATE двое читали
+    один снимок, и последний затирал пары первого. Строки еще нет - вставка on_conflict: второй
+    ждет первого на ней, а не падает на ключе. На SQLite вставка - уже блокировка записи базы.
+    """
+    insert = sqlite_insert if session.get_bind().dialect.name == "sqlite" else pg_insert
+    await session.execute(insert(AppSetting).values(key=MAIN_PASSED_KEY, value="[]")
+                          .on_conflict_do_nothing(index_elements=["key"]))
+    row = await session.scalar(select(AppSetting).where(AppSetting.key == MAIN_PASSED_KEY)
+                               .with_for_update().execution_options(populate_existing=True))
+    current = _main_passed(row.value)
     # держим последние: отбой, который так и не пришел (сервер удалили), не должен копиться вечно
-    await _set_raw(session, MAIN_PASSED_KEY, json.dumps([list(x) for x in data][-300:], ensure_ascii=False))
+    wanted = [list(x) for x in change([list(x) for x in current])][-300:]
+    if wanted != current:
+        row.value = json.dumps(wanted, ensure_ascii=False)
 
 
 async def get_escalation(session: AsyncSession) -> dict:

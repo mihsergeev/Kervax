@@ -46,6 +46,10 @@ from app.request_watch import RequestWatchMiddleware
 
 _WEAK_SECRETS = {"", "changeme", "dev-insecure-change-me"}
 _WEAK_PASSWORDS = {"", "changeme", "admin"}
+# остановка: сколько ждать конец идущей стадии планировщика и потом его отмену. Вместе с
+# --timeout-graceful-shutdown uvicorn (HTTP-запросы, до lifespan) меньше stop_grace_period 60 с
+_STOP_GRACE = 45.0
+_CANCEL_WAIT = 2.0
 
 
 def _enforce_secrets(settings) -> None:
@@ -84,11 +88,22 @@ def create_app() -> FastAPI:
         # а веб-воркеры ставят KERVAX_RUN_SCHEDULER=0 — иначе он запустится N раз.
         # Иначе воркер сам следит за паузами: после заморозки машины "на связи" в списке
         # серверов судим с той же льготой, что и планировщик (collector.awaiting_after_pause).
+        stop = asyncio.Event()
         task = asyncio.create_task(
-            collector_loop(session_factory, settings) if settings.run_scheduler else pause_watch()
+            collector_loop(session_factory, settings, stop) if settings.run_scheduler else pause_watch()
         )
         yield
+        # Выкладка: планировщик выходит сам после идущей стадии (из паузы между тиками - сразу).
+        # cancel() обрывал POST в Telegram посреди отправки: доставка становилась неизвестной,
+        # транспорт вставал на 15 минут, потом уходил дубль "Повтор". Не успел за _STOP_GRACE -
+        # отменяем и ждем отмену до закрытия базы, до SIGKILL docker (stop_grace_period в compose.yml)
+        stop.set()
+        await asyncio.wait({task}, timeout=_STOP_GRACE if settings.run_scheduler else 0)
         task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), _CANCEL_WAIT)
+        except asyncio.TimeoutError:
+            logging.getLogger("kervax.main").warning("фоновая задача не завершилась за %s с", _CANCEL_WAIT)
         await engine.dispose()
 
     # доки/схему API отдаём только в debug — в проде не раскрываем поверхность API

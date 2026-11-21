@@ -365,8 +365,8 @@ async def test_partial_atom_does_not_leak_muted_fact_in_wire_or_restart_history(
         raise RuntimeError("fixture crash after confirmed filtered POST")
 
     monkeypatch.setattr(alert_delivery, "_history", crash)
-    with pytest.raises(RuntimeError, match="fixture crash"):
-        await alert_delivery.drain(p.factory, p.cfg, p.now)
+    # сбой после подтвержденного POST пишется в лог и не выходит из доставки
+    await alert_delivery.drain(p.factory, p.cfg, p.now)
     assert len(p.calls) == 1 and "allowed-beta" in str(p.calls[0]["text"])
     assert "hidden-alpha" not in str(p.calls[0]["text"])
     saved = (await jobs(p))[0]
@@ -470,8 +470,8 @@ async def test_retry_rechecks_canonical_facts_and_replaces_saved_snapshot(panel,
 
     monkeypatch.setattr(alert_delivery, "_history", crash)
     later = p.now + timedelta(minutes=16)
-    with pytest.raises(RuntimeError, match="fixture crash"):
-        await alert_delivery.drain(p.factory, p.cfg, later)
+    # сбой после подтвержденного POST пишется в лог и не выходит из доставки
+    await alert_delivery.drain(p.factory, p.cfg, later)
     assert len(p.calls) == 2
     saved = (await jobs(p))[0]
     assert saved.status == "confirmed"

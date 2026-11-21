@@ -7,6 +7,7 @@ Credentials are resolved at send time and never copied into the journal.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import html
 import json
@@ -26,6 +27,10 @@ from app.models import AlertEvent, AppSetting, Check, CheckIncident, Notificatio
 log = logging.getLogger("kervax.alert_delivery")
 _monotonic = time.monotonic
 _FIELDS = ("section", "group", "kind", "target", "recovery", "ref", "full", "line", "mutes")
+# стадия сборщика, в пульсе которой видна деградация доставки (collector_loop, то же имя)
+DELIVERY_STAGE = "доставка уведомлений"
+# сбой пачки до POST, не привязанный к строке: отсрочка всей пачки
+_BUNDLE_DELAY = 120
 
 
 def _hash(*parts) -> str:
@@ -153,14 +158,9 @@ async def admit(factory, cfg, messages, threshold, parse_mode, now, on_accept=No
         if (spec["phase"] != "recovery" and alerts.dup_paused(cfg) and alerts.critical(message)
                 and alerts.route_hits(cfg, message) and any(r["target"].get("route") == "main"
                                                           for r in spec["recipients"])):
-            current = await settings_store.get_main_passed(session)
-            wanted = current + [list(pair) for pair in alerts._pairs(message) if list(pair) not in current]
-            if wanted != current:
-                row = await session.get(AppSetting, settings_store.MAIN_PASSED_KEY)
-                if row is None:
-                    session.add(AppSetting(key=settings_store.MAIN_PASSED_KEY, value=json.dumps(wanted[-300:])))
-                else:
-                    row.value = json.dumps(wanted[-300:])
+            pairs = [list(pair) for pair in alerts._pairs(message)]
+            await settings_store.update_main_passed(
+                session, lambda current: current + [pair for pair in pairs if pair not in current])
         complete = {original for original in expected if sum(
             origins[item] == original for item in callbacks) == expected[original]}
         if on_accept is not None and len(inspect.signature(on_accept).parameters) > 1:
@@ -744,32 +744,102 @@ async def _hold_confirmed(factory, cfg, allowed, aids):
                 row.undo = {**(row.undo or {}), "held": str(cfg.get("telegram_chat") or "")}
 
 
+def _degraded(what: str) -> None:
+    """Доставка отработала не целиком: видно в пульсе (stage_fail), drain сам не падает."""
+    from app import heartbeat
+    heartbeat.stage_partial(DELIVERY_STAGE, what)
+
+
+def _infra(exc: BaseException) -> bool:
+    """Сбой не строки, а среды (база, пул, сеть, таймаут): в карантин за него не отправляем."""
+    from sqlalchemy.exc import SQLAlchemyError
+    return isinstance(exc, (SQLAlchemyError, OSError, asyncio.TimeoutError, ConnectionError))
+
+
+def _solo(row, now) -> bool:
+    """Пачка с этой строкой недавно упала до POST (store.fail_prepare solo): шлем ее одну."""
+    try:
+        until = row["target"].get("solo_until")
+        return bool(until) and _utc(until) > now
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 async def _post(factory, cfg, rows, now):
+    """Одна пачка получателя. Ее сбой не трогает остальные и не уходит в сборщик."""
+    owner, stage, started = uuid.uuid4().hex, [], _monotonic()
+    ids = [row["id"] for row in rows]
+
+    def at():
+        return now + timedelta(seconds=max(0, _monotonic() - started))
+    try:
+        await _post_owned(factory, cfg, rows, now, owner, stage)
+    except asyncio.CancelledError:
+        if not stage:
+            # остановка до POST: попытки не было. Иначе строки дождались бы просрочки аренды,
+            # ложного uncertain и дубля "Повтор"
+            try:
+                await asyncio.shield(store.defer(factory, ids, owner, at(), at()))
+            except Exception:  # noqa: BLE001
+                log.exception("доставка уведомлений: аренду при остановке не сняли")
+        raise
+    except Exception as exc:  # noqa: BLE001 - соседние пачки и стадия сборщика должны отработать
+        _degraded("сбой пачки")
+        if "confirmed" in stage:
+            log.exception("доставка уведомлений: сбой после подтвержденной отправки, "
+                          "последствия допишет следующий проход")
+        elif stage:
+            # POST мог уйти: строки остаются sending, и просрочка аренды честно даст uncertain
+            log.exception("доставка уведомлений: сбой после отправки, исход неизвестен")
+        else:
+            log.exception("доставка уведомлений: сбой пачки до отправки, отложили")
+            try:
+                # попытки не было: без uncertain, с отсрочкой. Счетчик до attention - только строке,
+                # которая падает одна; из пачки виновную не узнать: следующий проход шлет по одной
+                if _infra(exc) or len(ids) > 1:
+                    await store.fail_prepare(factory, ids, owner, at(), _BUNDLE_DELAY, count=False,
+                                             solo=not _infra(exc))
+                else:
+                    await store.fail_prepare(factory, ids, owner, at())
+            except Exception:  # noqa: BLE001
+                log.exception("доставка уведомлений: аренду не сняли, вернется по просрочке")
+
+
+async def _post_owned(factory, cfg, rows, now, owner, stage):
     from app import alerts, tg_buttons
-    owner = uuid.uuid4().hex
     started = _monotonic()
     claimed = await store.claim(factory, [row["id"] for row in rows], owner, now)
     claimed.sort(key=lambda row: (row["occurred_at"], row["payload"].get("batch_order", 0), row["id"]))
     if not claimed:
         return
-    allowed, rejected, obsolete = [], [], []
+    allowed, rejected, obsolete, broken, unavailable = [], [], [], [], []
     deferred = defaultdict(list)
     for row in claimed:
-        message = await _render(factory, row, now)
-        wanted = await _wanted(factory, row, message, now)
-        if isinstance(wanted, datetime):
-            deferred[wanted].append(row["id"])
+        try:
+            message = await _render(factory, row, now)
+            wanted = await _wanted(factory, row, message, now)
+            if isinstance(wanted, datetime):
+                deferred[wanted].append(row["id"])
+                continue
+            if not wanted:
+                obsolete.append(row["id"])
+                continue
+            message = getattr(message, "delivery_replacement", message)
+            configuration = await _configuration(factory, cfg, row, message)
+        except Exception as exc:  # noqa: BLE001 - одна строка не держит пачку: ее откладываем, остальные идут
+            log.exception("доставка уведомлений: строка %s не подготовлена, отложена", row["id"])
+            _degraded(f"строка {row['id']}")
+            (unavailable if _infra(exc) else broken).append(row["id"])
             continue
-        if not wanted:
-            obsolete.append(row["id"])
-            continue
-        message = getattr(message, "delivery_replacement", message)
-        configuration = await _configuration(factory, cfg, row, message)
         if configuration is False:
             obsolete.append(row["id"])
             continue
         (allowed if configuration is not None else rejected).append((row, message, configuration))
     checked_at = now + timedelta(seconds=max(0, _monotonic() - started))
+    if broken:
+        await store.fail_prepare(factory, broken, owner, checked_at)
+    if unavailable:  # база или сеть, не сама строка: без счетчика
+        await store.fail_prepare(factory, unavailable, owner, checked_at, _BUNDLE_DELAY, count=False)
     for until, ids in deferred.items():
         await store.defer(factory, ids, owner, checked_at, until)
     if rejected:
@@ -794,6 +864,7 @@ async def _post(factory, cfg, rows, now):
         for event_id in event_ids[1:]:
             await store.set_tg_alert(factory, event_id, aid)
     sent = []
+    stage.append("posted")
     try:
         # Preserve the established transport seam used by integrations. A real
         # Telegram response without a message id is marked uncertain there.
@@ -824,6 +895,8 @@ async def _post(factory, cfg, rows, now):
                        retry_after=getattr(errors, "retry_after", None),
                        target_patch={"editable": len(texts) == 1})
     actual = {item[0]["id"] for item in allowed} & set(finished)
+    if status == "confirmed" and actual:
+        stage.append("confirmed")
     allowed = [item for item in allowed if item[0]["id"] in actual]
     event_ids = [row["event_id"] for row, _, _ in allowed]
     if status == "rejected" and actual:
@@ -905,9 +978,29 @@ async def _reconcile_confirmed(factory, cfg, now):
         await _effects_done(factory, [row["id"]])
 
 
+def _wall() -> datetime:
+    """Реальное время: нижняя граница часов drain (тесты с явными часами в прошлом ее подменяют)."""
+    return datetime.now(timezone.utc)
+
+
 async def drain(factory, cfg, now=None, *, limit=100):
-    """Claim recipient jobs before POST; never send without durable ownership."""
-    now = _utc(now or datetime.now(timezone.utc))
+    """Claim recipient jobs before POST; never send without durable ownership.
+
+    Сбой не выходит наружу: вызывающий - стадия сборщика, и ее запись состояния важнее.
+    """
+    try:
+        await _drain(factory, cfg, now, limit)
+    except Exception:  # noqa: BLE001
+        log.exception("доставка уведомлений: проход очереди прерван")
+        _degraded("проход очереди прерван")
+
+
+async def _drain(factory, cfg, now, limit):
+    # now вызывающего - начало стадии сборщика, к доставке он отстает на минуты. Аренда от него
+    # истекла бы еще до POST: параллельный drain (tg_bot) объявил бы доставку неизвестной,
+    # транспорт встал бы на 15 минут, потом ушел бы дубль "Повтор". Аренда и решения о просрочке -
+    # не раньше реального времени, дальше монотонно (current_time)
+    now = max(_utc(now or datetime.now(timezone.utc)), _wall())
     started = _monotonic()
 
     def current_time():
@@ -916,45 +1009,87 @@ async def drain(factory, cfg, now=None, *, limit=100):
     async with factory() as session:
         if await settings_store.get_muted(session) or not alerts.alerts_enabled(cfg):
             return
-    await _reconcile_confirmed(factory, cfg, current_time())
-    await _coalesce_closed(factory, current_time())
+    # починка после подтвержденных POST и сводка закрытых эпизодов не держат саму отправку
+    try:
+        await _reconcile_confirmed(factory, cfg, current_time())
+    except Exception:  # noqa: BLE001
+        log.exception("доставка уведомлений: последствия подтвержденных не дописаны, отправляем дальше")
+        _degraded("последствия подтвержденных")
+    try:
+        await _coalesce_closed(factory, current_time())
+    except Exception:  # noqa: BLE001
+        log.exception("доставка уведомлений: закрытые эпизоды не свернуты, отправляем дальше")
+        _degraded("сводка закрытых эпизодов")
     due = await store.due(factory, current_time(), limit=limit)
     due.sort(key=lambda row: (row["occurred_at"], row["payload"].get("batch_order", 0), row["id"]))
     groups = defaultdict(list)
     for row in due:
         groups[(row["recipient_key"], row["transport_key"], row["payload"].get("parse_mode"))].append(row)
     for rows in groups.values():
-        threshold = int(rows[0]["payload"].get("threshold") or 0)
-        displayed = _messages([(row, unpack(row["payload"]["message"]), None) for row in rows])
-        if threshold and len(alerts.merge_storm(displayed)) >= threshold:
-            await _post(factory, cfg, rows, current_time())
-        else:
-            parent = list(range(len(rows)))
+        alone = {row["id"] for row in rows if _solo(row, now)}
+        bundles = [[row] for row in rows if row["id"] in alone] + _group(
+            alerts, [row for row in rows if row["id"] not in alone])
+        for bundle in bundles:
+            await _post(factory, cfg, bundle, current_time())
 
-            def find(index):
-                while parent[index] != index:
-                    index = parent[index]
-                return index
 
-            def join(indices):
-                for index in indices[1:]:
-                    parent[find(index)] = find(indices[0])
+def _group(alerts, rows):
+    """Пачки получателя. Строки, на которых падает разбор, - отдельно: испорченная отложится в
+    _post_owned и уйдет в attention, а не встанет навсегда в голове due. Остальные - как обычно,
+    по одной только если и без испорченных разбор падает (иначе шторм - десятки POST до 429)."""
+    if not rows:
+        return []
+    try:
+        return _bundles(alerts, rows)
+    except Exception:  # noqa: BLE001
+        log.exception("доставка уведомлений: не разобрали пачку получателя")
+        _degraded("разбор пачки")
+    bad = []
+    for row in rows:
+        try:
+            message = unpack(row["payload"]["message"])
+            alerts.merge_storm(_messages([(row, message, None)]))
+        except Exception:  # noqa: BLE001
+            bad.append(row)
+    rest = [row for row in rows if all(row["id"] != item["id"] for item in bad)]
+    try:
+        grouped = _bundles(alerts, rest) if rest else []
+    except Exception:  # noqa: BLE001
+        log.exception("доставка уведомлений: разбор падает и без испорченных строк, шлем по одной")
+        grouped = [[row] for row in rest]
+    return grouped + [[row] for row in bad]
 
-            envelopes = defaultdict(list)
-            for index, row in enumerate(rows):
-                if key := row["payload"].get("envelope_key"):
-                    envelopes[key].append(index)
-            for indices in envelopes.values():
-                join(indices)
-            origins = []
-            alerts.merge_storm([unpack(row["payload"]["message"]) for row in rows], origins)
-            for indices in origins:
-                join(indices)
-            bundles = defaultdict(list)
-            for index, row in enumerate(rows):
-                bundles[find(index)].append(row)
-            for bundle in bundles.values():
-                await _post(factory, cfg, bundle, current_time())
+
+def _bundles(alerts, rows):
+    threshold = int(rows[0]["payload"].get("threshold") or 0)
+    displayed = _messages([(row, unpack(row["payload"]["message"]), None) for row in rows])
+    if threshold and len(alerts.merge_storm(displayed)) >= threshold:
+        return [rows]
+    parent = list(range(len(rows)))
+
+    def find(index):
+        while parent[index] != index:
+            index = parent[index]
+        return index
+
+    def join(indices):
+        for index in indices[1:]:
+            parent[find(index)] = find(indices[0])
+
+    envelopes = defaultdict(list)
+    for index, row in enumerate(rows):
+        if key := row["payload"].get("envelope_key"):
+            envelopes[key].append(index)
+    for indices in envelopes.values():
+        join(indices)
+    origins = []
+    alerts.merge_storm([unpack(row["payload"]["message"]) for row in rows], origins)
+    for indices in origins:
+        join(indices)
+    bundles = defaultdict(list)
+    for index, row in enumerate(rows):
+        bundles[find(index)].append(row)
+    return list(bundles.values())
 
 
 async def dispatch(cfg, can_send, messages, threshold, parse_mode, factory, *,

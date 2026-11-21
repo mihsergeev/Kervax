@@ -10444,6 +10444,12 @@ async def collector_loop(
     in_scheduler = heartbeat.IN_SCHEDULER.set(True)
 
     async def stage(name: str, coro) -> None:
+        if stop is not None and stop.is_set():
+            # SIGTERM (выкладка): выходим после текущей стадии, а не всего тика - docker ждет
+            # stop_grace_period, тик идет минуты. Стадии независимы, каждая пишет свое состояние
+            # сама: пропущенная просто отработает после старта, как будто тик кончился здесь
+            coro.close()
+            return
         try:
             await coro
         except Exception:  # noqa: BLE001 — соседние стадии должны отработать
@@ -10460,13 +10466,14 @@ async def collector_loop(
             # и монитор минуту горит «проверять некому» с открытым инцидентом.
             await stage("привязка локальных проверок", rebind_local_probes(session_factory))
             try:
-                n = await run_due_checks(session_factory, settings)
-                if n:
-                    log.info("исполнено мониторов: %d", n)
-                m = await run_location_probes(session_factory, settings)
-                if m:
-                    log.info("проверок через локации: %d", m)
-                heartbeat.stage_done("мониторы", True)
+                if stop is None or not stop.is_set():  # остановка: как stage(), дальше не идем
+                    n = await run_due_checks(session_factory, settings)
+                    if n:
+                        log.info("исполнено мониторов: %d", n)
+                    m = await run_location_probes(session_factory, settings)
+                    if m:
+                        log.info("проверок через локации: %d", m)
+                    heartbeat.stage_done("мониторы", True)
             except Exception:  # noqa: BLE001 — цикл не должен падать
                 log.exception("ошибка планировщика мониторов")
                 heartbeat.stage_done("мониторы", False)
@@ -10535,9 +10542,10 @@ async def collector_loop(
                 session_factory, datetime.now(timezone.utc)))
             await stage("сводка непокрытого", _daily_uncovered(session_factory, settings))
             await stage("автобэкап", _maybe_auto_backup(session_factory, settings))
+            # имя - alert_delivery.DELIVERY_STAGE: туда же пишется деградация доставки
             await stage("доставка уведомлений", _deliver_pending(session_factory, settings))
             if stop is not None and stop.is_set():
-                # SIGTERM (выкладка): тик доделан и состояние записано, выходим. Убитый между
+                # SIGTERM (выкладка): идущая стадия доделана и записала состояние, выходим. Убитый между
                 # отправкой алерта и записью состояния процесс слал после старта тот же алерт
                 log.info("планировщик остановлен по сигналу после тика")
                 return
@@ -10558,3 +10566,5 @@ async def collector_loop(
         pause_task.cancel()
         logging.getLogger("kervax").removeHandler(err_handler)
         heartbeat.IN_SCHEDULER.reset(in_scheduler)
+        # дождаться отмены: иначе бот и пульс доживают до закрытия базы и цикла событий
+        await asyncio.wait({hb_task, tg_task, pause_task}, timeout=2)

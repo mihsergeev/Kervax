@@ -540,8 +540,8 @@ async def test_restart_repairs_confirmed_group_edit_without_posting_again(tmp_pa
 
     monkeypatch.setattr(alert_delivery, "_save_buttons", crash_after_confirmation)
     now = T0 + timedelta(minutes=1)
-    with pytest.raises(RuntimeError, match="fixture stopped after confirmed edit"):
-        await collector._send_alerts(factory, SET, [_down(names[1], ids[names[1]], now)], now)
+    # сбой после подтвержденной правки пишется в лог и не выходит из доставки
+    await collector._send_alerts(factory, SET, [_down(names[1], ids[names[1]], now)], now)
     assert len(sent) == len(edits) == 1
     async with factory() as session:
         assert all(job.status == "confirmed" for job in await session.scalars(select(NotificationDelivery)))
