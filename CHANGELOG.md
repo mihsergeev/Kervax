@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.156] - 2026-11-22
+
+- The agent installer refuses a panel address over plain `http://` unless `--insecure-http` is given, and over https it no longer follows redirects to http. The install command shown by a panel that itself runs on http includes the flag and a warning. Upgrade note: a manual agent installation with an `http://` address now needs `--insecure-http`.
+- The installer checks the downloaded agent binary against the panel's signed release manifest before installing it, and stops when the hash does not match or the panel reports a broken release. Panels without a signed release still install their own build, with a warning. The binary is now prepared in a root-only directory and moved into place, so an agent running during a reinstall can no longer redirect the installer's writes.
+- Quickstart installs the newest release whose images are published instead of the main branch and the `latest` images, and pins it with `KERVAX_VERSION` in `.env`; `--version` selects a release. Running quickstart again updates the panel to the newest release and refuses to move it to an older one unless `--allow-downgrade` is given. The `.env` file is created private from the start. Upgrade note: a panel installed by an older quickstart from the main branch is pinned to the newest release on the next run; one built from source ahead of that release is left as is with an explanation.
+
 ## [1.8.155] - 2026-11-22
 
 - Alert delivery leases now start from the current time even when a long collector stage passes an earlier time, so a parallel Telegram bot pass no longer marks a delivery as uncertain, blocks the transport for 15 minutes and later sends a "Repeat" duplicate.

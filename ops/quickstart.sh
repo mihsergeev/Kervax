@@ -7,6 +7,11 @@
 # clones the repository, generates the secrets, starts the panel and prints its
 # address together with the admin password.
 #
+# Only this script comes from main. The repository is checked out at the latest release
+# tag and the images are pinned to it (KERVAX_VERSION in .env): the files and the images
+# are one released version, and a commit in main reaches an installation only through a
+# release. A repeated run upgrades to the newest release.
+#
 # The default domain is <public-IP>.sslip.io. sslip.io is a public DNS service that
 # answers with the address written in the name itself: 203.0.113.10.sslip.io →
 # 203.0.113.10. Such a name needs no registration, so Let's Encrypt issues an
@@ -28,6 +33,8 @@
 #   --allow-ips "A B"    let only these addresses reach the panel (see below)
 #   --build              build images from source instead of pulling from GHCR
 #   --dir <path>         install directory (default /opt/kervax)
+#   --version <vX.Y.Z>   this release instead of the latest one
+#   --allow-downgrade    let a repeated run go to an older release (see step 5)
 #
 # Russian version of this script: ops/quickstart-ru.sh
 set -eu
@@ -37,6 +44,8 @@ ALLOW_IPS=""
 BUILD=0
 LOCAL_CA=0
 DIR=/opt/kervax
+VERSION=""
+ALLOW_DOWNGRADE=0
 REPO=https://github.com/mihsergeev/Kervax.git
 
 while [ $# -gt 0 ]; do
@@ -46,7 +55,9 @@ while [ $# -gt 0 ]; do
         --build) BUILD=1; shift ;;
         --local-ca) LOCAL_CA=1; shift ;;
         --dir) DIR="$2"; shift 2 ;;
-        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        --version) VERSION="$2"; shift 2 ;;
+        --allow-downgrade) ALLOW_DOWNGRADE=1; shift ;;
+        -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -214,21 +225,100 @@ YML
 fi
 
 # ── 5. Repository ────────────────────────────────────────────────────────────
+# A release, never main: the scripts below run as root and the images have to match them.
+# The latest release is the highest stable vX.Y.Z tag whose images are already in the registry -
+# the order ops/release-latest.sh moves the latest images in. GitHub's "latest release" is not
+# used: a backport published after a newer version becomes it and would take the panel back. A
+# tag comes minutes before its images (the Release workflow), and a failed workflow leaves a tag
+# without them for good: such a tag is passed over, before anything in $DIR or .env changes.
+# --build builds the images itself and takes the highest tag.
+command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git) >/dev/null 2>&1
+IMAGES=ghcr.io/mihsergeev      # the owner in lower case, as release.yml publishes it
+stable_tags() {                # stable tags of the repository, highest first
+    git ls-remote --tags --refs "$REPO" 'refs/tags/v*' 2>/dev/null | cut -f2 | sed -n 's#^refs/tags/##p' \
+        | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+        | sort -t . -k 1.2,1nr -k 2,2nr -k 3,3nr
+}
+published() {                  # both images of release $1 are in the registry
+    docker manifest inspect "$IMAGES/kervax-backend:${1#v}" >/dev/null 2>&1 &&
+        docker manifest inspect "$IMAGES/kervax-frontend:${1#v}" >/dev/null 2>&1
+}
+# ver_lt A B: version A (without v) is lower than B, by numbers; pre-release suffixes are ignored
+ver_lt() {
+    [ "${1%%-*}" != "${2%%-*}" ] &&
+        [ "$(printf '%s\n%s\n' "${1%%-*}" "${2%%-*}" | sort -t . -k 1,1n -k 2,2n -k 3,3n | head -n 1)" = "${1%%-*}" ]
+}
+if [ -n "$VERSION" ]; then
+    TAG="v${VERSION#v}"
+    # the whole value, not line by line: a newline would smuggle anything past grep
+    case "$TAG" in *[!0-9A-Za-z.-]*) TAG="" ;; esac
+    printf '%s\n' "$TAG" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' \
+        || die "--version must look like vX.Y.Z"
+    [ "$BUILD" = 1 ] || published "$TAG" || die "the images of $TAG are not in $IMAGES (not published yet, or is ghcr.io out of reach?).
+  Pick another release, wait a few minutes after a fresh tag, or build from source: --build"
+else
+    TAG=""
+    n=0
+    for t in $(stable_tags); do
+        if [ "$BUILD" = 1 ] || published "$t"; then TAG=$t; break; fi
+        echo "  $t: its images are not in $IMAGES (yet), looking at the previous release"
+        n=$((n + 1))
+        [ "$n" -lt 5 ] || break
+    done
+    [ -n "$TAG" ] || [ "$n" = 0 ] || die "none of the latest $n releases has its images in $IMAGES: is ghcr.io reachable?
+  Or build from source: --build"
+    [ -n "$TAG" ] || die "could not get the releases from github.com: is it reachable? Or pass --version vX.Y.Z"
+fi
 if [ -d "$DIR/.git" ]; then
-    say "Updating $DIR"
-    git -C "$DIR" pull --ff-only >/dev/null || die "git pull failed"
+    say "Updating $DIR to $TAG"
+    # only that tag: a tag that changed on the server is refused, not taken over
+    git -C "$DIR" fetch -q origin "refs/tags/$TAG:refs/tags/$TAG" >/dev/null || die "could not fetch $TAG into $DIR"
+    # Never backwards on its own: the database was migrated by the newer code, and the older
+    # backend fails at start on a revision it does not know (alembic) and restarts in a loop.
+    CUR=$(grep '^KERVAX_VERSION=' "$DIR/.env" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    printf '%s\n' "$CUR" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' || CUR=""
+    BACK=""
+    if [ -n "$CUR" ]; then
+        # the installed release is known: only its number matters (an upgrade from a backport
+        # release is not a descendant of the newer tag, and that is fine)
+        ver_lt "${TAG#v}" "$CUR" && BACK="$TAG is older than the installed $CUR.
+  The database may already have a newer schema, and the older panel would not start on it.
+  Pass --allow-downgrade only together with a backup of the $TAG database to restore"
+    elif grep '^COMPOSE_FILE=' "$DIR/.env" 2>/dev/null | grep -q 'compose\.ghcr\.yml'; then
+        # Installed from main before the panel was pinned to releases, on the latest images: the
+        # database follows the images (the highest release), not the files in $DIR. The latest
+        # release with images is that one; an explicitly older one could be below it.
+        TOP=$(stable_tags | head -n 1)
+        if [ -n "$VERSION" ] && [ -n "$TOP" ] && ver_lt "${TAG#v}" "${TOP#v}"; then
+            BACK="$TAG is older than $TOP, the latest images the panel may run on.
+  Pass --allow-downgrade only together with a backup of the $TAG database to restore"
+        else
+            echo "  The panel ran the latest images: from now on it is pinned to $TAG."
+        fi
+    elif ! git -C "$DIR" merge-base --is-ancestor HEAD "refs/tags/$TAG" 2>/dev/null; then
+        # built from source of a commit that $TAG does not contain: its migrations may be in the database
+        BACK="$DIR is built from commit $(git -C "$DIR" rev-parse --short HEAD 2>/dev/null), which $TAG does not contain,
+  and the database may already have migrations newer than $TAG. Wait for a release that contains
+  that commit and run this again. If it never comes (the commit left main), restore a backup made
+  on $TAG and pass --allow-downgrade"
+    fi
+    if [ -n "$BACK" ]; then
+        [ "$ALLOW_DOWNGRADE" = 1 ] || die "not going back: $BACK."
+        say "WARNING: going back on --allow-downgrade: $BACK"
+        echo "  A database schema newer than $TAG stops the backend at start: restore a matching backup."
+    fi
+    git -C "$DIR" checkout -q --detach "refs/tags/$TAG" >/dev/null || die "could not switch $DIR to $TAG"
 elif [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
     die "directory $DIR is not empty and is not a Kervax repository.
   Remove it (rm -rf $DIR) or install the panel elsewhere: --dir /path"
 else
-    say "Cloning into $DIR"
-    command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git) >/dev/null 2>&1
+    say "Cloning $TAG into $DIR"
     # Clone next to the target and move the finished copy into place: a clone
     # interrupted halfway otherwise leaves a non-empty directory without .git, after
     # which a retry is impossible — it can neither clone (occupied) nor pull (not a
     # repository).
     rm -rf "$DIR.tmp"
-    git clone -q "$REPO" "$DIR.tmp" || { rm -rf "$DIR.tmp"; die "could not clone $REPO"; }
+    git clone -q --branch "$TAG" "$REPO" "$DIR.tmp" || { rm -rf "$DIR.tmp"; die "could not clone $TAG of $REPO"; }
     rm -rf "$DIR"
     mv "$DIR.tmp" "$DIR"
 fi
@@ -249,7 +339,9 @@ if [ -f .env ]; then
     ADMIN_PW=$(grep '^KERVAX_ADMIN_PASSWORD=' .env | cut -d= -f2-)
 else
     say "Writing .env with random secrets"
-    cp .env.example .env
+    # 0600 from the start: with the default umask the copy was readable by everyone until
+    # the chmod below, and the secrets go into it in between
+    (umask 077 && cp .env.example .env)
     ADMIN_PW=$(openssl rand -base64 18)
     set_env() { sed -i "s|^$1=.*|$1=$2|" .env; }
     set_env KERVAX_ADMIN_PASSWORD "$ADMIN_PW"
@@ -271,6 +363,15 @@ if grep -q '^COMPOSE_FILE=' .env; then
     sed -i "s|^COMPOSE_FILE=.*|COMPOSE_FILE=$COMPOSE_LIST|" .env
 else
     printf 'COMPOSE_FILE=%s\n' "$COMPOSE_LIST" >> .env
+fi
+
+# KERVAX_VERSION is written ALWAYS as well: it pins the images (compose.ghcr.yml) to the
+# release checked out above. Without it they follow latest, and the panel's files and
+# images drift apart.
+if grep -q '^KERVAX_VERSION=' .env; then
+    sed -i "s|^KERVAX_VERSION=.*|KERVAX_VERSION=${TAG#v}|" .env
+else
+    printf 'KERVAX_VERSION=%s\n' "${TAG#v}" >> .env
 fi
 
 # KERVAX_PROXY_GATEWAY is written ALWAYS too. The caddy overlay allows that one
@@ -298,7 +399,7 @@ else
     # --pull always is required: without it a repeated run starts the image already
     # on disk, and the "upgrade" only updates the repository files. The panel stays
     # on the old version — silently.
-    docker compose $FILES up -d --pull always || die "startup failed"
+    docker compose $FILES up -d --pull always || die "startup failed (the images of a release appear a few minutes after its tag)"
 fi
 
 sh "$DIR/ops/agent-proxy-peers-setup.sh" "$DIR" $FILES || die "proxy peer snapshot could not be refreshed"

@@ -3502,6 +3502,8 @@ const EN: Record<string, string> = {
     'The Windows command is available over HTTPS when the collector is installed on the panel.',
   'токен показывается один раз': 'the token is shown only once',
   'Сначала заполните поля выше: прокси попадет в команду': 'Fill in the fields above first: the proxy goes into the command',
+  'Панель открыта по http: агент, его helper-скрипты (они работают от root) и токен пойдут по сети без шифрования. В команде стоит --insecure-http. Ставьте так только в закрытой сети или задайте панели адрес https':
+    'The panel is served over http: the agent, its helper scripts (they run as root) and the token will travel unencrypted. The command carries --insecure-http. Install this way only on a closed network, or give the panel an https address',
   'Панель пока закрыта для этого сервера, ждем 10 с (curl $?, попытка $i/24)':
     'The panel does not let this server in yet, waiting 10 s (curl $?, attempt $i/24)',
   'Панель так и не ответила: проверьте IP сервера в ее настройках и исходящий 443 (или прокси)':

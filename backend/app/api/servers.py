@@ -590,17 +590,23 @@ def _install_cmd(token: str) -> str:
     cacert = ' --cacert "$2"' if ca else ""
     u = urlsplit(base)
     hostport = f"{u.hostname or 'ПАНЕЛЬ'}:{u.port or (80 if u.scheme == 'http' else 443)}"
+    # к https-панели редирект не уводит установщик на http или другой протокол (curl 7.21.4+)
+    proto = "" if u.scheme == "http" else " --proto =https --proto-redir =https"
     script = (
         "f=$(mktemp) && for i in $(seq 24); do"
-        f" curl -fsL --compressed --connect-timeout 10 -m 120{cacert}"
+        f" curl -fsL --compressed --connect-timeout 10 -m 120{cacert}{proto}"
         ' ${KERVAX_PROXY:+--proxy "$KERVAX_PROXY"}'
         f' ${{KERVAX_CONNECT:+--resolve "{hostport}:$KERVAX_CONNECT"}}'
         f' -o "$f" {base}/api/agent/install.sh && exec sh "$f" "$@";'
         f' echo "{INSTALL_WAIT_MSG}" >&2; sleep 10; done;'
         f' echo "{INSTALL_GIVEUP_MSG}" >&2; exit 1'
     )
+    # Панель по http (внутренняя или mesh-сеть без TLS): install.sh без явного флага такой адрес не
+    # принимает - бинарь, helper'ы от root и токен пошли бы открытым текстом. Флаг ставит сама
+    # панель, а окно установки об этом предупреждает
+    insecure = "--insecure-http " if u.scheme == "http" else ""
     if not ca:
-        return f"KERVAX_TOKEN={token} sh -c '{script}' - {base}"
+        return f"KERVAX_TOKEN={token} sh -c '{script}' - {insecure}{base}"
     # Корень едет в самой команде: скачать его с панели нечем, https к ней без корня и не
     # проверить, а отключать проверку (-k) нельзя. curl проверяет панель этим корнем, install.sh
     # доверяет ему в ОС (агент и helper'ы ходят в панель системным хранилищем). --ca-file стоит
@@ -610,7 +616,7 @@ def _install_cmd(token: str) -> str:
     b64 = base64.b64encode(ca.encode("ascii")).decode("ascii")
     return (
         f'{PANEL_CA_VAR}=$(mktemp) && echo {b64} | base64 -d > "${PANEL_CA_VAR}" && '
-        f"KERVAX_TOKEN={token} sh -c '{script}' - --ca-file \"${PANEL_CA_VAR}\" {base}"
+        f"KERVAX_TOKEN={token} sh -c '{script}' - --ca-file \"${PANEL_CA_VAR}\" {insecure}{base}"
     )
 
 

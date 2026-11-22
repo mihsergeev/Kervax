@@ -55,7 +55,8 @@ No magic — every step can be done by hand (see the next section):
    issued, and it is better to learn that now;
 3. starts `caddy-docker-proxy`, which terminates TLS and routes by container
    labels;
-4. clones the repository into `/opt/kervax`;
+4. clones the latest release (its tag, not `main`) into `/opt/kervax` and pins the
+   images to it with `KERVAX_VERSION` in `.env` (`--version vX.Y.Z` picks another release);
 5. writes an `.env` with a random admin password, JWT secret and database
    password;
 6. starts the panel from prebuilt images (`--build` builds from source instead);
@@ -319,6 +320,12 @@ no scrape targets to declare.
 The agent only connects **outwards**, over HTTPS, to the panel. It opens no port,
 runs no shell, and the panel stores nothing but a SHA-256 of its token.
 
+`install.sh` refuses a panel address over plain `http://`: the binary, the helpers that run
+as root and the token would travel unencrypted. A panel whose own address is `http://` (a
+closed network without TLS) puts `--insecure-http` into its command and warns about it in
+the window. When the panel has a signed agent release, the downloaded binary is checked
+against the SHA-256 in its manifest, the same way the agent checks its updates.
+
 A panel installed with `--local-ca` shows a longer command: it starts with the CA
 root (`echo ... | base64 -d > /tmp/kervax-panel-ca.crt`) and passes it to
 `install.sh` with `--ca-file`. Run it as is, see
@@ -455,6 +462,13 @@ type, the thresholds and the scope (all nodes / a group / a selection) are
 editable in the panel.
 
 **Upgrading.**
+
+A panel installed with `quickstart.sh` sits on a release tag with `KERVAX_VERSION` in
+`.env`: run the same quickstart command again, it moves the files and the images to the
+newest release together (`git pull` does not work on a tag). It never goes back to an older
+release by itself: the database may already have a newer schema (`--allow-downgrade` overrides
+that, restore a matching backup then). The commands below are for
+a panel set up by hand from `main`.
 
 On prebuilt images:
 

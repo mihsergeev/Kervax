@@ -136,7 +136,7 @@ def test_installers_survive_a_cut_transfer():
         # зависшая передача бинаря - ошибка и повтор с места обрыва; сначала сжатый
         assert "--speed-limit 512 --speed-time 60 --retry 10" in src and "-C - \"$1\"" in src, name
         assert src.index("download-gz/$ARCH") < src.index("/api/agent/download/$ARCH"), name
-        assert 'gzip -dc "$BIN.new.gz" > "$BIN.new"' in src, name
+        assert 'gzip -dc "$NEW.gz" > "$NEW"' in src, name
         # helper'ы: сначала файл, потом bash
         assert '/api/agent/setup/$1.sh" | bash' not in src and 'bash "$f" </dev/null' in src, name
 

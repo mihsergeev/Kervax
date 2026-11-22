@@ -29,6 +29,11 @@
 # этот адрес с именем панели в TLS и SNI (curl --resolve), агент получает connect= в конфиге.
 # Helper gre-setup подхватывает туннель в течение минуты.
 #
+# Адрес панели должен быть https://: по http:// бинарь, helper'ы, которые работают от root, и
+# токен агента шли бы открытым текстом. Панель в закрытой сети без TLS (внутренний или
+# mesh-адрес) ставится с явным --insecure-http; панель сама добавляет его в свою команду,
+# когда ее адрес http://.
+#
 # Это русская версия установщика: отличается только языком сообщений.
 # Английская — agent/install.sh, её же раздаёт панель по /api/agent/install.sh.
 #
@@ -45,7 +50,8 @@ set -eu
 # управление restic-бэкапом. Каждый шаг самодетектируется. Флаг --no-auto — только агент.
 # --ca-file <путь>: корень, которым подписан сертификат панели (см. шаг доверия ниже)
 # --proxy <url>: прокси до панели для установщика и агента (см. шапку)
-URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0
+# --insecure-http: разрешить панель по http:// (см. шапку)
+URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0; INSECURE_HTTP=0
 # KERVAX_PROXY в окружении - то же, что --proxy: так его передает команда установки из панели
 PROXY="${KERVAX_PROXY:-}"; WANT_PROXY=0
 # KERVAX_CONNECT (или --connect): адрес панели внутри GRE-туннеля, см. шапку
@@ -61,6 +67,7 @@ for a in "$@"; do
     --proxy=*) PROXY="${a#--proxy=}" ;;
     --connect) WANT_CONNECT=1 ;;
     --connect=*) CONNECT="${a#--connect=}" ;;
+    --insecure-http) INSECURE_HTTP=1 ;;
     --docker) WANT_DOCKER=1 ;;
     --no-auto) NO_AUTO=1 ;;
     --uninstall) UNINSTALL=1 ;;
@@ -194,7 +201,7 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 if [ -z "$URL" ] || [ -z "$TOKEN" ]; then
-  echo "Использование: install.sh [--ca-file <корень.pem>] [--proxy <url>] <url_панели> <токен> [инстанс] [--no-auto]" >&2
+  echo "Использование: install.sh [--ca-file <корень.pem>] [--proxy <url>] [--insecure-http] <url_панели> <токен> [инстанс] [--no-auto]" >&2
   echo "               install.sh --uninstall [инстанс]" >&2
   exit 1
 fi
@@ -203,6 +210,25 @@ if [ -n "$INSTANCE" ] && ! printf '%s' "$INSTANCE" | grep -Eq '^[A-Za-z0-9_-]+$'
   exit 1
 fi
 
+# Открытый http только по явному флагу: все запросы ниже (бинарь, helper'ы, которые bash
+# выполняет от root, токен в конфиге агента и в его отчетах) шли бы без шифрования, и любой на
+# пути мог бы их подменить. Через GRE (--connect) или прокси схема панели та же.
+# Схема в любом регистре (HTTPS://) - та же схема: сначала она приводится к нижнему регистру.
+case "$URL" in
+  [Hh][Tt][Tt][Pp][Ss]://*) URL="https://${URL#*://}" ;;
+  [Hh][Tt][Tt][Pp]://*) URL="http://${URL#*://}" ;;
+esac
+case "$URL" in
+  https://?*) ;;
+  http://?*)
+    if [ "$INSECURE_HTTP" != 1 ]; then
+      echo "✗ $URL - открытый http: агент, его helper'ы (они работают от root) и токен пошли бы без шифрования." >&2
+      echo "  Укажите https:// адрес панели. Только в доверенной закрытой сети: добавьте --insecure-http." >&2
+      exit 1
+    fi
+    echo "! $URL - открытый http (--insecure-http): агент, его helper'ы и токен идут без шифрования." >&2 ;;
+  *) echo "Адрес панели должен начинаться с https:// (http:// только с --insecure-http)." >&2; exit 1 ;;
+esac
 case "$PROXY" in
   *[[:space:]]*) PROXY_OK=0 ;;
   "" | http://?* | https://?* | socks5://?*) PROXY_OK=1 ;;
@@ -227,8 +253,14 @@ fi
 # Все запросы к панели идут через pcurl: с --proxy он добавляет прокси, и только им.
 # Helper'ы, пришедшие с панели, работают без него (свои загрузки, локальный API
 # Kubernetes) и его не видят.
+# По https редирект не может увести запрос на открытый http или другой протокол: --proto и
+# --proto-redir (curl 7.21.4+; в CentOS 7 - 7.29). Они ограничивают адрес панели, а не прокси.
+PROTO="--proto =https --proto-redir =https"
+if [ "$INSECURE_HTTP" = 1 ]; then PROTO=""; fi
 pcurl() {
-  if [ -n "$PROXY" ]; then curl --proxy "$PROXY" "$@"; else curl "$@"; fi
+  # $PROTO - список опций, делится намеренно
+  # shellcheck disable=SC2086
+  if [ -n "$PROXY" ]; then curl $PROTO --proxy "$PROXY" "$@"; else curl $PROTO "$@"; fi
 }
 # Через GRE каждый curl этого установщика идет на адрес панели в туннеле, в том числе в условиях
 # helper'ов (условие gre-setup тоже спрашивает панель): имя остается в TLS и SNI, подменяется
@@ -333,8 +365,21 @@ mkdir -p "$BIN_DIR"
 # и chmod: mkdir -p существующий каталог не трогает, а переустановка должна починить тот,
 # что прошлый запуск оставил с 0700.
 chmod 0755 /opt/kervax-agent "$BIN_DIR"
+chown 0:0 /opt/kervax-agent
 # во временный файл + mv: атомарно и не спотыкается о «Text file busy»,
 # когда на сервере уже крутится другой инстанс агента с этим бинарём
+# Временный файл - в собственном каталоге root рядом с BIN_DIR (та же файловая система, mv -
+# это rename), а не в BIN_DIR: тот принадлежит kervax, и агент, которому нельзя доверять, мог
+# бы положить туда симлинк под временным именем, и root записал бы скачанное или сделал chmod
+# в любой файл. mv -T заменяет саму запись каталога: не идет по симлинку на месте бинаря и
+# отказывается, если там каталог.
+# остатки установки, убитой сигналом (старше суток: идущая установка моложе)
+find /opt/kervax-agent -maxdepth 1 -name '.install.*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+DL=$(mktemp -d /opt/kervax-agent/.install.XXXXXX)
+# dash не выполняет trap EXIT, когда его убивает сигнал: ловушки сигналов убирают и выходят сами
+trap 'rm -rf "$DL"' EXIT
+trap 'rm -rf "$DL"; exit 1' INT TERM HUP
+NEW=$DL/kervax-agent
 # --connect-timeout: если панель закрыта фаерволом — быстрое понятное падение,
 # а не многоминутное зависание (проверьте «IP сервера» в панели и её фаервол)
 # -C - и --retry: на канале, который рвёт длинную передачу (DPI по пути, нестабильный
@@ -353,23 +398,60 @@ fetch() {
   pcurl -fsSL --connect-timeout 15 --speed-limit 512 --speed-time 60 --retry 10 --retry-delay 5 \
        $RETRY_ALL -C - "$1" -o "$2"
 }
+# Подписанный релиз-манифест панели перечисляет sha256 ровно тех бинарей, что отдает
+# /api/agent/download (несовпадающий с ними манифест панель не отдает), и агент сверяет с ним
+# каждое самообновление. Первый бинарь сверяется так же: устаревший или подмененный файл на
+# панели или по пути, докачка, склеенная из двух разных сборок, останавливаются здесь.
+# 404 - у панели нет подписанного релиза (публичный образ, сборка без ключа подписи): сверять
+# не с чем, бинарь берется как есть, с предупреждением. Любой другой ответ - отказ. Подпись здесь
+# не проверяется: ее ключ пришел бы с той же панели, что и этот установщик с манифестом, и
+# ничего сверх sha256 не доказал бы.
+verify_agent() {
+  vman=$(mktemp)
+  vcode=$(pcurl -sS --connect-timeout 15 -m 60 --retry 3 --retry-delay 5 -o "$vman" -w '%{http_code}' \
+          "${URL%/}/api/agent/manifest" 2>/dev/null) || true
+  case "$vcode" in
+    200) ;;
+    404)
+      rm -f "$vman"
+      echo "! У панели нет подписанного релиза агента (нет манифеста): бинарь не с чем сверить." >&2
+      return 0 ;;
+    *)
+      echo "✗ Манифест агента на панели недоступен (HTTP ${vcode:-000}): $(head -c 300 "$vman" 2>/dev/null)" >&2
+      rm -f "$vman"
+      return 1 ;;
+  esac
+  vwant=$(tr -d '[:space:]' < "$vman" | grep -o "\"$ARCH\":{[^}]*}" | grep -o '"sha256":"[0-9a-f]\{64\}"' | cut -d'"' -f4 || true)
+  rm -f "$vman"
+  vgot=$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || true)
+  if [ -z "$vwant" ] || [ "$vgot" != "$vwant" ]; then
+    echo "✗ Скачанный агент не совпадает с подписанным релизом панели ($ARCH):" >&2
+    echo "  sha256 ${vgot:-неизвестен (нет sha256sum?)}, в манифесте ${vwant:-нет $ARCH}." >&2
+    return 1
+  fi
+  echo "✓ Агент совпадает с подписанным релизом панели ($ARCH, sha256 $vwant)"
+}
+# остатки прежних установщиков, которые качали прямо в BIN_DIR (rm не идет по ссылкам)
 rm -f "$BIN.new" "$BIN.new.gz"
 if command -v gzip >/dev/null 2>&1 \
    && pcurl -fsI --connect-timeout 15 -m 60 "${URL%/}/api/agent/download-gz/$ARCH" >/dev/null 2>&1 \
-   && fetch "${URL%/}/api/agent/download-gz/$ARCH" "$BIN.new.gz" \
-   && gzip -dc "$BIN.new.gz" > "$BIN.new"; then
-  rm -f "$BIN.new.gz"
+   && fetch "${URL%/}/api/agent/download-gz/$ARCH" "$NEW.gz" \
+   && gzip -dc "$NEW.gz" > "$NEW"; then
+  rm -f "$NEW.gz"
 else
-  rm -f "$BIN.new" "$BIN.new.gz"
-  fetch "${URL%/}/api/agent/download/$ARCH" "$BIN.new"
+  rm -f "$NEW" "$NEW.gz"
+  fetch "${URL%/}/api/agent/download/$ARCH" "$NEW"
 fi || {
   echo "✗ Не удалось скачать агента с панели: передача все время обрывается." >&2
   echo "  Выполните команду еще раз. Если панель за фаерволом, проверьте IP сервера в ее настройках." >&2
   [ -n "$PROXY" ] && echo "  Скачивали через прокси: проверьте, что он доступен и пускает этот сервер." >&2
   exit 1
 }
-chmod 0755 "$BIN.new"
-mv -f "$BIN.new" "$BIN"
+verify_agent "$NEW" || exit 1
+chmod 0755 "$NEW"
+mv -fT "$NEW" "$BIN"
+rm -rf "$DL"
+trap - EXIT INT TERM HUP
 # ТОЛЬКО свой каталог: агенту нужно право заменить самого себя при обновлении,
 # и ничего больше. Рекурсивный chown по родительскому каталогу — как раз то, чем
 # он однажды забрал у панели её базу.

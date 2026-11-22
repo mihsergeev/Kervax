@@ -6401,6 +6401,10 @@ export function InstallModal({
           {pending && path !== 'gre' && (
             <p className="ic-hint t-degraded small">{t('Сначала заполните поля выше: прокси попадет в команду')}</p>
           )}
+          {/* панель по http: команда несет --insecure-http (app/api/servers.py, _install_cmd) */}
+          {enroll.install_cmd.includes(' --insecure-http ') && (
+            <p className="ic-hint t-degraded small">{t('Панель открыта по http: агент, его helper-скрипты (они работают от root) и токен пойдут по сети без шифрования. В команде стоит --insecure-http. Ставьте так только в закрытой сети или задайте панели адрес https')}</p>
+          )}
           <details className="ic-more">
             <summary className="muted small">{t('Агент сам настроит Docker, Kubernetes и доступ к бэкапам')}</summary>
             <p className="muted small">

@@ -7,6 +7,11 @@
 # клонирует репозиторий, придумывает секреты, поднимает панель и печатает адрес
 # с паролем администратора.
 #
+# Из main берется только этот скрипт. Репозиторий ставится на тег последнего выпуска,
+# и образы закрепляются на нем же (KERVAX_VERSION в .env): файлы и образы - одна
+# выпущенная версия, и коммит в main попадает в установку только через выпуск.
+# Повторный запуск обновляет до самого нового выпуска.
+#
 # Домен по умолчанию — <публичный-IP>.sslip.io. sslip.io — публичный DNS, который
 # отвечает адресом, записанным в самом имени: 203.0.113.10.sslip.io → 203.0.113.10.
 # Свой домен ничего не требует, поэтому Let's Encrypt выдаёт на него сертификат,
@@ -27,6 +32,8 @@
 #   --allow-ips "A B"    пускать к панели только с этих адресов (см. ниже)
 #   --build              собирать образы из исходников вместо готовых из GHCR
 #   --dir <путь>         каталог установки (по умолчанию /opt/kervax)
+#   --version <vX.Y.Z>   этот выпуск вместо последнего
+#   --allow-downgrade    пустить повторный запуск на более старый выпуск (см. шаг 5)
 #
 # Это русская версия скрипта: она отличается только языком сообщений.
 # Английская — ops/quickstart.sh.
@@ -37,6 +44,8 @@ ALLOW_IPS=""
 BUILD=0
 LOCAL_CA=0
 DIR=/opt/kervax
+VERSION=""
+ALLOW_DOWNGRADE=0
 REPO=https://github.com/mihsergeev/Kervax.git
 
 while [ $# -gt 0 ]; do
@@ -46,7 +55,9 @@ while [ $# -gt 0 ]; do
         --build) BUILD=1; shift ;;
         --local-ca) LOCAL_CA=1; shift ;;
         --dir) DIR="$2"; shift 2 ;;
-        -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+        --version) VERSION="$2"; shift 2 ;;
+        --allow-downgrade) ALLOW_DOWNGRADE=1; shift ;;
+        -h|--help) sed -n '2,39p' "$0"; exit 0 ;;
         *) echo "неизвестный аргумент: $1" >&2; exit 2 ;;
     esac
 done
@@ -214,20 +225,99 @@ YML
 fi
 
 # ── 5. Репозиторий ───────────────────────────────────────────────────────────
+# Выпуск, а не main: скрипты ниже работают от root, и образы должны им соответствовать.
+# Последний выпуск - старший стабильный тег vX.Y.Z, у которого образы уже в реестре: в этом
+# порядке ops/release-latest.sh двигает образы latest. "Последний релиз" GitHub не используется:
+# бэкпорт, опубликованный после более новой версии, становится им и увел бы панель назад. Тег
+# появляется за минуты до своих образов (Release workflow), а упавший workflow оставляет тег без
+# них насовсем: такой тег пропускается, пока в $DIR и .env ничего не изменено.
+# --build собирает образы сам и берет старший тег.
+command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git) >/dev/null 2>&1
+IMAGES=ghcr.io/mihsergeev      # владелец в нижнем регистре, как публикует release.yml
+stable_tags() {                # стабильные теги репозитория, старший первым
+    git ls-remote --tags --refs "$REPO" 'refs/tags/v*' 2>/dev/null | cut -f2 | sed -n 's#^refs/tags/##p' \
+        | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+        | sort -t . -k 1.2,1nr -k 2,2nr -k 3,3nr
+}
+published() {                  # оба образа выпуска $1 есть в реестре
+    docker manifest inspect "$IMAGES/kervax-backend:${1#v}" >/dev/null 2>&1 &&
+        docker manifest inspect "$IMAGES/kervax-frontend:${1#v}" >/dev/null 2>&1
+}
+# ver_lt A B: версия A (без v) ниже B, по числам; суффиксы пре-релизов не учитываются
+ver_lt() {
+    [ "${1%%-*}" != "${2%%-*}" ] &&
+        [ "$(printf '%s\n%s\n' "${1%%-*}" "${2%%-*}" | sort -t . -k 1,1n -k 2,2n -k 3,3n | head -n 1)" = "${1%%-*}" ]
+}
+if [ -n "$VERSION" ]; then
+    TAG="v${VERSION#v}"
+    # значение целиком, а не построчно: перевод строки протащил бы мимо grep что угодно
+    case "$TAG" in *[!0-9A-Za-z.-]*) TAG="" ;; esac
+    printf '%s\n' "$TAG" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' \
+        || die "--version должен выглядеть как vX.Y.Z"
+    [ "$BUILD" = 1 ] || published "$TAG" || die "образов $TAG нет в $IMAGES (еще не опубликованы или ghcr.io недоступен?).
+  Выберите другой выпуск, подождите несколько минут после свежего тега или соберите из исходников: --build"
+else
+    TAG=""
+    n=0
+    for t in $(stable_tags); do
+        if [ "$BUILD" = 1 ] || published "$t"; then TAG=$t; break; fi
+        echo "  $t: образов в $IMAGES (еще) нет, смотрю предыдущий выпуск"
+        n=$((n + 1))
+        [ "$n" -lt 5 ] || break
+    done
+    [ -n "$TAG" ] || [ "$n" = 0 ] || die "ни у одного из последних $n выпусков нет образов в $IMAGES: доступен ли ghcr.io?
+  Или соберите из исходников: --build"
+    [ -n "$TAG" ] || die "не удалось получить выпуски с github.com: доступен ли он? Или укажите --version vX.Y.Z"
+fi
 if [ -d "$DIR/.git" ]; then
-    say "Обновляю $DIR"
-    git -C "$DIR" pull --ff-only >/dev/null || die "git pull не прошёл"
+    say "Обновляю $DIR до $TAG"
+    # только этот тег: изменившийся на сервере тег отвергается, а не перенимается
+    git -C "$DIR" fetch -q origin "refs/tags/$TAG:refs/tags/$TAG" >/dev/null || die "не удалось получить $TAG в $DIR"
+    # Назад сам не идет: базу уже мигрировал более новый код, и старый бэкенд падает на старте
+    # на незнакомой ревизии (alembic) и перезапускается по кругу.
+    CUR=$(grep '^KERVAX_VERSION=' "$DIR/.env" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    printf '%s\n' "$CUR" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' || CUR=""
+    BACK=""
+    if [ -n "$CUR" ]; then
+        # установленный выпуск известен: важен только его номер (обновление с бэкпорт-выпуска -
+        # не потомок более нового тега, и это нормально)
+        ver_lt "${TAG#v}" "$CUR" && BACK="$TAG старше установленной $CUR.
+  В базе может быть уже более новая схема, и старая панель на ней не запустится.
+  --allow-downgrade - только вместе с бэкапом базы $TAG для восстановления"
+    elif grep '^COMPOSE_FILE=' "$DIR/.env" 2>/dev/null | grep -q 'compose\.ghcr\.yml'; then
+        # Поставлена из main до закрепления на выпусках, на образах latest: база идет за образами
+        # (старший выпуск), а не за файлами в $DIR. Последний выпуск с образами - он и есть;
+        # явно указанный старый может оказаться ниже.
+        TOP=$(stable_tags | head -n 1)
+        if [ -n "$VERSION" ] && [ -n "$TOP" ] && ver_lt "${TAG#v}" "${TOP#v}"; then
+            BACK="$TAG старше $TOP - последних образов, на которых могла работать панель.
+  --allow-downgrade - только вместе с бэкапом базы $TAG для восстановления"
+        else
+            echo "  Панель работала на образах latest: с этого запуска она закреплена на $TAG."
+        fi
+    elif ! git -C "$DIR" merge-base --is-ancestor HEAD "refs/tags/$TAG" 2>/dev/null; then
+        # собрана из исходников коммита, которого нет в $TAG: его миграции могут быть в базе
+        BACK="$DIR собран из коммита $(git -C "$DIR" rev-parse --short HEAD 2>/dev/null), которого нет в $TAG,
+  и в базе могут быть миграции новее $TAG. Дождитесь выпуска, который содержит этот коммит, и
+  запустите еще раз. Если его не будет (коммит ушел из main), восстановите бэкап, сделанный на
+  $TAG, и укажите --allow-downgrade"
+    fi
+    if [ -n "$BACK" ]; then
+        [ "$ALLOW_DOWNGRADE" = 1 ] || die "назад не иду: $BACK."
+        say "ВНИМАНИЕ: откат по --allow-downgrade: $BACK"
+        echo "  Схема базы новее $TAG останавливает бэкенд на старте: восстановите подходящий бэкап."
+    fi
+    git -C "$DIR" checkout -q --detach "refs/tags/$TAG" >/dev/null || die "не удалось переключить $DIR на $TAG"
 elif [ -d "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
     die "каталог $DIR не пуст и не является репозиторием Kervax.
   Уберите его (rm -rf $DIR) или поставьте панель в другой: --dir /путь"
 else
-    say "Клонирую в $DIR"
-    command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git) >/dev/null 2>&1
+    say "Клонирую $TAG в $DIR"
     # Клонируем рядом и переносим готовое: прерванный на середине клон иначе
     # оставляет непустой каталог без .git, после которого повторный запуск
     # невозможен — ни склонировать (занято), ни обновить (не репозиторий).
     rm -rf "$DIR.tmp"
-    git clone -q "$REPO" "$DIR.tmp" || { rm -rf "$DIR.tmp"; die "не удалось клонировать $REPO"; }
+    git clone -q --branch "$TAG" "$REPO" "$DIR.tmp" || { rm -rf "$DIR.tmp"; die "не удалось клонировать $TAG из $REPO"; }
     rm -rf "$DIR"
     mv "$DIR.tmp" "$DIR"
 fi
@@ -248,7 +338,9 @@ if [ -f .env ]; then
     ADMIN_PW=$(grep '^KERVAX_ADMIN_PASSWORD=' .env | cut -d= -f2-)
 else
     say "Готовлю .env со случайными секретами"
-    cp .env.example .env
+    # 0600 сразу: с обычным umask копия была читаема всем до chmod ниже, а секреты
+    # пишутся в нее как раз между ними
+    (umask 077 && cp .env.example .env)
     ADMIN_PW=$(openssl rand -base64 18)
     set_env() { sed -i "s|^$1=.*|$1=$2|" .env; }
     set_env KERVAX_ADMIN_PASSWORD "$ADMIN_PW"
@@ -269,6 +361,15 @@ if grep -q '^COMPOSE_FILE=' .env; then
     sed -i "s|^COMPOSE_FILE=.*|COMPOSE_FILE=$COMPOSE_LIST|" .env
 else
     printf 'COMPOSE_FILE=%s\n' "$COMPOSE_LIST" >> .env
+fi
+
+# KERVAX_VERSION прописываем тоже ВСЕГДА: он закрепляет образы (compose.ghcr.yml) на
+# выпуске, на который поставлен репозиторий выше. Без него образы идут за latest, и
+# файлы панели расходятся с ее образами.
+if grep -q '^KERVAX_VERSION=' .env; then
+    sed -i "s|^KERVAX_VERSION=.*|KERVAX_VERSION=${TAG#v}|" .env
+else
+    printf 'KERVAX_VERSION=%s\n' "${TAG#v}" >> .env
 fi
 
 # KERVAX_PROXY_GATEWAY прописываем тоже ВСЕГДА. Этот один адрес пускается в
@@ -296,7 +397,7 @@ else
     # --pull always обязателен: без него повторный запуск поднимает образ,
     # который уже лежит локально, и «обновление» обновляет только файлы
     # репозитория. Панель при этом остаётся прежней версии — молча.
-    docker compose $FILES up -d --pull always || die "запуск не удался"
+    docker compose $FILES up -d --pull always || die "запуск не удался (образы выпуска появляются через несколько минут после его тега)"
 fi
 
 sh "$DIR/ops/agent-proxy-peers-setup.sh" "$DIR" $FILES || die "не удалось обновить адреса прокси"

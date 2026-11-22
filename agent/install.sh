@@ -30,6 +30,11 @@
 # (curl --resolve), and the agent gets connect= in its config. The gre-setup helper takes the
 # tunnel over within a minute.
 #
+# The panel address must be https://: over http:// the binary, the helpers that run as root and the
+# agent token would travel in the clear. A panel on a closed network without TLS (an internal or
+# mesh address) is installed with an explicit --insecure-http; the panel puts it into its own
+# command when its address is http://.
+#
 # Russian version of this installer: agent/install-ru.sh
 #
 # The whole script is one { ... } block: sh reads a compound command to its end before
@@ -46,7 +51,8 @@ set -eu
 # agent only.
 # --ca-file <path>: the root that signed the panel's certificate (see the trust step below)
 # --proxy <url>: proxy to the panel for this installer and the agent (see the header)
-URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0
+# --insecure-http: allow a panel at http:// (see the header)
+URL=""; TOKEN=""; INSTANCE=""; WANT_DOCKER=0; NO_AUTO=0; UNINSTALL=0; CA_FILE=""; WANT_CA=0; INSECURE_HTTP=0
 # KERVAX_PROXY in the environment is the same as --proxy: the panel's install command passes it so
 PROXY="${KERVAX_PROXY:-}"; WANT_PROXY=0
 # KERVAX_CONNECT (or --connect): the panel's address inside the GRE tunnel, see the header
@@ -62,6 +68,7 @@ for a in "$@"; do
     --proxy=*) PROXY="${a#--proxy=}" ;;
     --connect) WANT_CONNECT=1 ;;
     --connect=*) CONNECT="${a#--connect=}" ;;
+    --insecure-http) INSECURE_HTTP=1 ;;
     --docker) WANT_DOCKER=1 ;;
     --no-auto) NO_AUTO=1 ;;
     --uninstall) UNINSTALL=1 ;;
@@ -196,7 +203,7 @@ if [ "$UNINSTALL" = 1 ]; then
 fi
 
 if [ -z "$URL" ] || [ -z "$TOKEN" ]; then
-  echo "Usage: install.sh [--ca-file <root.pem>] [--proxy <url>] <panel_url> <token> [instance] [--no-auto]" >&2
+  echo "Usage: install.sh [--ca-file <root.pem>] [--proxy <url>] [--insecure-http] <panel_url> <token> [instance] [--no-auto]" >&2
   echo "       install.sh --uninstall [instance]" >&2
   exit 1
 fi
@@ -205,6 +212,25 @@ if [ -n "$INSTANCE" ] && ! printf '%s' "$INSTANCE" | grep -Eq '^[A-Za-z0-9_-]+$'
   exit 1
 fi
 
+# Plain http only on an explicit flag: every request below (the binary, the helpers bash runs as
+# root, the token in the agent config and in its reports) would go unencrypted, and anyone on the
+# way could swap them. Through GRE (--connect) or a proxy the panel's scheme stays the same.
+# The scheme in any case (HTTPS://) is the same scheme: it is written in lower case first.
+case "$URL" in
+  [Hh][Tt][Tt][Pp][Ss]://*) URL="https://${URL#*://}" ;;
+  [Hh][Tt][Tt][Pp]://*) URL="http://${URL#*://}" ;;
+esac
+case "$URL" in
+  https://?*) ;;
+  http://?*)
+    if [ "$INSECURE_HTTP" != 1 ]; then
+      echo "✗ $URL is plain http: the agent, its helpers (they run as root) and the token would travel unencrypted." >&2
+      echo "  Use the panel's https:// address. Only on a trusted closed network: add --insecure-http." >&2
+      exit 1
+    fi
+    echo "! $URL is plain http (--insecure-http): the agent, its helpers and the token travel unencrypted." >&2 ;;
+  *) echo "The panel address must start with https:// (http:// only with --insecure-http)." >&2; exit 1 ;;
+esac
 case "$PROXY" in
   *[[:space:]]*) PROXY_OK=0 ;;
   "" | http://?* | https://?* | socks5://?*) PROXY_OK=1 ;;
@@ -229,8 +255,14 @@ fi
 # Every request to the panel goes through pcurl: with --proxy it adds the proxy, and
 # only to these requests. Helpers piped from the panel run without it (their own
 # downloads, the local Kubernetes API) and are not affected.
+# Over https a redirect may not take a request to plain http or another protocol: --proto and
+# --proto-redir (curl 7.21.4+; CentOS 7 has 7.29). They limit the panel's URL, not the proxy's.
+PROTO="--proto =https --proto-redir =https"
+if [ "$INSECURE_HTTP" = 1 ]; then PROTO=""; fi
 pcurl() {
-  if [ -n "$PROXY" ]; then curl --proxy "$PROXY" "$@"; else curl "$@"; fi
+  # $PROTO is a list of options, split on purpose
+  # shellcheck disable=SC2086
+  if [ -n "$PROXY" ]; then curl $PROTO --proxy "$PROXY" "$@"; else curl $PROTO "$@"; fi
 }
 # Through GRE every curl of this installer goes to the panel's inner address, the helper
 # conditions it evaluates included (the one of gre-setup asks the panel too): the name stays
@@ -336,8 +368,21 @@ mkdir -p "$BIN_DIR"
 # chmod too: mkdir -p leaves an existing directory as it is, and a reinstall has to fix
 # the one an earlier run left at 0700.
 chmod 0755 /opt/kervax-agent "$BIN_DIR"
+chown 0:0 /opt/kervax-agent
 # to a temp file plus mv: atomic, and it does not trip over "Text file busy" when
 # another agent instance on the server already runs this binary.
+# The temp file lives in a directory of root's own next to BIN_DIR (the same file system, so
+# mv is a rename), not in BIN_DIR: that one belongs to kervax, and an agent that is not to be
+# trusted could put a symlink under the temporary name there and have root write the download
+# or chmod into any file. mv -T replaces the directory entry itself: it does not follow a
+# symlink put in place of the binary and refuses a directory there.
+# leftovers of an install killed by a signal (older than a day: a running one is younger)
+find /opt/kervax-agent -maxdepth 1 -name '.install.*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
+DL=$(mktemp -d /opt/kervax-agent/.install.XXXXXX)
+# dash runs no EXIT trap when a signal kills it: the signal traps clean up and exit themselves
+trap 'rm -rf "$DL"' EXIT
+trap 'rm -rf "$DL"; exit 1' INT TERM HUP
+NEW=$DL/kervax-agent
 # --connect-timeout: if the panel is behind a firewall this fails fast and clearly
 # instead of hanging for minutes (check "server IP" in the panel and its firewall)
 # -C - plus --retry: on a link that dies partway through a long transfer (a DPI in the
@@ -357,23 +402,60 @@ fetch() {
   pcurl -fsSL --connect-timeout 15 --speed-limit 512 --speed-time 60 --retry 10 --retry-delay 5 \
        $RETRY_ALL -C - "$1" -o "$2"
 }
+# The panel's signed release manifest lists the sha256 of the very binaries /api/agent/download
+# serves (the panel refuses to hand out a manifest that does not match them), and the agent checks
+# every self-update against it. The first binary is checked the same way: a stale or swapped file
+# on the panel or on the way, or a resumed download glued from two different builds, stops here.
+# 404 is a panel without a signed release (the public image, a build without a signing key):
+# there is nothing to compare with, and the binary is taken as it is, with a warning. Any other
+# answer is a refusal. The signature is not checked here: its key would come from the same panel
+# as this installer and the manifest, so it would prove nothing beyond the sha256.
+verify_agent() {
+  vman=$(mktemp)
+  vcode=$(pcurl -sS --connect-timeout 15 -m 60 --retry 3 --retry-delay 5 -o "$vman" -w '%{http_code}' \
+          "${URL%/}/api/agent/manifest" 2>/dev/null) || true
+  case "$vcode" in
+    200) ;;
+    404)
+      rm -f "$vman"
+      echo "! The panel has no signed agent release (no manifest): the binary is not checked against one." >&2
+      return 0 ;;
+    *)
+      echo "✗ The panel's agent manifest is unavailable (HTTP ${vcode:-000}): $(head -c 300 "$vman" 2>/dev/null)" >&2
+      rm -f "$vman"
+      return 1 ;;
+  esac
+  vwant=$(tr -d '[:space:]' < "$vman" | grep -o "\"$ARCH\":{[^}]*}" | grep -o '"sha256":"[0-9a-f]\{64\}"' | cut -d'"' -f4 || true)
+  rm -f "$vman"
+  vgot=$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1 || true)
+  if [ -z "$vwant" ] || [ "$vgot" != "$vwant" ]; then
+    echo "✗ The downloaded agent does not match the panel's signed release ($ARCH):" >&2
+    echo "  sha256 ${vgot:-unknown (sha256sum missing?)}, the manifest says ${vwant:-nothing for $ARCH}." >&2
+    return 1
+  fi
+  echo "✓ The agent matches the panel's signed release ($ARCH, sha256 $vwant)"
+}
+# leftovers of older installers, which downloaded right into BIN_DIR (rm does not follow links)
 rm -f "$BIN.new" "$BIN.new.gz"
 if command -v gzip >/dev/null 2>&1 \
    && pcurl -fsI --connect-timeout 15 -m 60 "${URL%/}/api/agent/download-gz/$ARCH" >/dev/null 2>&1 \
-   && fetch "${URL%/}/api/agent/download-gz/$ARCH" "$BIN.new.gz" \
-   && gzip -dc "$BIN.new.gz" > "$BIN.new"; then
-  rm -f "$BIN.new.gz"
+   && fetch "${URL%/}/api/agent/download-gz/$ARCH" "$NEW.gz" \
+   && gzip -dc "$NEW.gz" > "$NEW"; then
+  rm -f "$NEW.gz"
 else
-  rm -f "$BIN.new" "$BIN.new.gz"
-  fetch "${URL%/}/api/agent/download/$ARCH" "$BIN.new"
+  rm -f "$NEW" "$NEW.gz"
+  fetch "${URL%/}/api/agent/download/$ARCH" "$NEW"
 fi || {
   echo "✗ Could not download the agent from the panel: the transfer kept failing." >&2
   echo "  Run the command again. If the panel sits behind a firewall, check the server IP in its settings." >&2
   [ -n "$PROXY" ] && echo "  The download went through the proxy: check that it is reachable and lets this server in." >&2
   exit 1
 }
-chmod 0755 "$BIN.new"
-mv -f "$BIN.new" "$BIN"
+verify_agent "$NEW" || exit 1
+chmod 0755 "$NEW"
+mv -fT "$NEW" "$BIN"
+rm -rf "$DL"
+trap - EXIT INT TERM HUP
 # ONLY its own directory: the agent needs the right to replace itself on update and
 # nothing more. A recursive chown over the parent directory is exactly how it once
 # took the panel's database away.
