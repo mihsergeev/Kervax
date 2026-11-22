@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.157] - 2026-11-22
+
+- IPv6 addresses that embed an IPv4 address (NAT64, local NAT64, 6to4, Teredo, IPv4-compatible) are classified by that IPv4 address. Cloud metadata endpoints behind them are always refused, and the well-known NAT64 prefix with a public IPv4 address is treated as public. The Azure WireServer, Oracle Cloud and Google Cloud IPv6 metadata addresses are refused as monitor targets.
+- Monitors created before internal targets needed an approval get an explicit decision once their address resolves; an automatic approval of an internal address is recorded in the audit log. Checks through a location proxy reach internal addresses only with an explicit approval.
+- The discovered domains probe no longer checks internal addresses or IP literals reported by an agent with the administrator's access; it explains that such a site is checked from the node.
+- Ops scripts pass the database password to `docker exec` through the environment or standard input instead of the command line.
+- During impersonation the administrator's own token is kept only in the browser tab that started it. "Back to my account" in another tab asks before signing out there.
+
 ## [1.8.156] - 2026-11-22
 
 - The agent installer refuses a panel address over plain `http://` unless `--insecure-http` is given, and over https it no longer follows redirects to http. The install command shown by a panel that itself runs on http includes the flag and a warning. Upgrade note: a manual agent installation with an `http://` address now needs `--insecure-http`.

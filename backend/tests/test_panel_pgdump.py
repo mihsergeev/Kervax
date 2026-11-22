@@ -3,6 +3,7 @@
 With "printf | grep -q" under pipefail, grep left at the first match and the writer's SIGPIPE
 failed the check: a complete dump with a long table of contents was rejected night after night."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -20,7 +21,8 @@ TABLES = ("alembic_version", "servers", "checks", "users", "app_settings")
 def _run(tmp_path, tables, filler_lines):
     panel = tmp_path / "panel"
     panel.mkdir()
-    (panel / ".env").write_text("KERVAX_DB_USER=fixture_admin\nKERVAX_DB_NAME=fixture_database\n")
+    (panel / ".env").write_text("KERVAX_DB_USER=fixture_admin\nKERVAX_DB_NAME=fixture_database\n"
+                                "KERVAX_DB_PASSWORD=fixture-only-placeholder\n")
     out = tmp_path / "dumps"
     bindir = tmp_path / "bin"
     bindir.mkdir()
@@ -31,8 +33,10 @@ def _run(tmp_path, tables, filler_lines):
     docker = bindir / "docker"
     docker.write_text(
         "#!/usr/bin/env python3\n"
-        "import os, sys\n"
+        "import json, os, sys\n"
         "args = sys.argv[1:]\n"
+        "with open(os.environ['FIXTURE_CALLS'], 'a') as f:\n"
+        "    f.write(json.dumps([args, os.environ.get('PGPASSWORD')]) + '\\n')\n"
         "if 'pg_dump' in args: sys.stdout.write('fixture dump\\n'); sys.exit(0)\n"
         "if 'pg_restore' in args:\n"
         "    sys.stdin.read()\n"
@@ -48,6 +52,7 @@ def _run(tmp_path, tables, filler_lines):
         "KERVAX_DUMP_PUSH_URL": "",
         "KERVAX_DUMP_RESTIC_ENV": "",
         "FIXTURE_TOC": str(tmp_path / "toc.txt"),
+        "FIXTURE_CALLS": str(tmp_path / "calls"),
     }
     run = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60)
     return run, out
@@ -59,6 +64,16 @@ def test_long_listing_of_a_complete_dump_is_accepted(tmp_path, attempt):
     assert run.returncode == 0, run.stderr
     assert (out / "last.status").read_text().startswith("ok ")
     assert len(list(out.glob("kervax-*.dump"))) == 1
+
+
+def test_password_reaches_pg_dump_through_the_environment_not_argv(tmp_path):
+    """docker exec -e PGPASSWORD=... showed the database password to every user of the host in ps."""
+    run, _ = _run(tmp_path, TABLES, filler_lines=10)
+    assert run.returncode == 0, run.stderr
+    calls = [json.loads(line) for line in (tmp_path / "calls").read_text().splitlines()]
+    assert [env for args, env in calls if "pg_dump" in args] == ["fixture-only-placeholder"]
+    assert "PGPASSWORD" in next(args for args, _ in calls if "pg_dump" in args)
+    assert not any("fixture-only-placeholder" in a for args, _ in calls for a in args)
 
 
 def test_missing_table_data_is_still_rejected(tmp_path):

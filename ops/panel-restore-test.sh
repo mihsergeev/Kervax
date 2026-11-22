@@ -102,7 +102,7 @@ fi
 echo "restored in $(( $(date +%s) - t0 )) s"
 
 got=$(docker exec "$T" psql -U "$RESTOREUSER" -d "$DBNAME" -tAc "$Q" 2>&1) || { echo "the restored panel schema is not readable"; exit 1; }
-live=$(docker exec -e PGPASSWORD="$PW" "$DB_CT" psql -U "$DBUSER" -d "$DBNAME" -tAc "$Q" 2>&1) || { echo "the live panel schema is not readable"; exit 1; }
+live=$(PGPASSWORD="$PW" docker exec -e PGPASSWORD "$DB_CT" psql -U "$DBUSER" -d "$DBNAME" -tAc "$Q" 2>&1) || { echo "the live panel schema is not readable"; exit 1; }
 echo "             migration|servers|monitors|users|metric rows"
 echo "  restored:  $got"
 echo "  live:      $live"

@@ -135,7 +135,7 @@ async def test_editor_external_discovery_blocks_private_dns_on_root_and_hint(cli
     result = await client.get("/api/checks/discovered/probes", headers=editor)
     items = _by_domain(result.json()["items"])
     assert requests == [("8.8.8.8", "/")]
-    assert net_guard.ADMIN_ONLY_TEXT in items["inner.example"]["ext_message"]
+    assert items["inner.example"]["ext_message"] == domain_probe.NAME_INTERNAL_TEXT
     assert items["rebinding.example"]["ext_code"] == 404
     assert dns_queries.count("rebinding.example") == 1 + len(domain_probe.PATHS)
 

@@ -1152,7 +1152,7 @@ async def test_monitor_credentials_stay_on_original_origin(monkeypatch, mode):
             target=f"http://origin.example.com:{port}/start", timeout_ms=3000, degraded_ms=2000,
             method="GET", keyword_up="", keyword_down="", expected_status="200-399",
             http_headers='{"X-Check-Key": "fixture-key"}', auth_method="basic",
-            auth_user="fixture", auth_pass="fixture-password",
+            auth_user="fixture", auth_pass="fixture-password", allow_internal_target=True,
         )
         if mode == "tamper":
             assert "obs" in await tamper.scan(check)

@@ -78,6 +78,7 @@ from app import software as software_mod
 from app import tamper as tamper_mod
 from app import webfiles as webfiles_mod
 from app import parents as parents_mod
+from app import net_guard
 from app import boot_warmup
 from app import going_down
 from app import maint
@@ -1033,6 +1034,77 @@ async def send_alerts_soon(session_factory, pending: list, now: datetime) -> Non
         log.exception("ошибка отправки алертов ручной проверки")
 
 
+# Решение по мониторам до 0147 (_settle_legacy_targets): имя, которое не разрешилось, пробуем
+# снова не раньше чем через DNS_RETRY; одновременно не больше SETTLE_PARALLEL запросов, и тик ждет
+# их не дольше SETTLE_BUDGET секунд - не успевшие решаются на одном из следующих тиков
+SETTLE_PARALLEL = 8
+SETTLE_BUDGET = 1.0
+_legacy_retry: dict[int, float] = {}
+
+
+async def _legacy_internal_target(check: Check) -> tuple[bool | None, list[str]]:
+    """Решение по монитору, заведенному до 0147 (allow_internal_target = NULL), - то же, что
+    _target_ok при сохранении админом: внутренний адрес одобрен, внешний закреплен как внешний.
+    None - имя пока не разрешилось. Второе - имена, которые одобрены только по ответу DNS."""
+    hosts = [parents_mod.target_host(check)]
+    if check.type == "dns":
+        server = (check.dns_server or "").strip()
+        # _target_ok классифицирует строку резолвера как есть: DoH-адрес (старые записи) целиком не
+        # резолвится и внутренним не считается, поэтому и здесь не ждем, пока он "разрешится"
+        hosts.append("" if "/" in server else server)
+    internal, by_dns = False, []
+    for host in filter(None, hosts):
+        cls, addresses = await net_guard.classified_addresses(host, 3.0)
+        if cls == net_guard.PUBLIC and not addresses:
+            return None, []
+        if cls == net_guard.FORBIDDEN:
+            return False, []
+        if cls == net_guard.INTERNAL and net_guard.address_class(host) == net_guard.PUBLIC:
+            by_dns.append(f"{host} -> {', '.join(addresses)}")
+        internal |= cls == net_guard.INTERNAL
+    return internal, by_dns
+
+
+async def _settle_legacy_targets(session_factory: async_sessionmaker[AsyncSession], due: list[Check]) -> None:
+    """NULL у старых мониторов разрешал внутренние адреса всегда: внешний сайт, имя которого
+    потом стало указывать во внутреннюю сеть (DNS rebinding), панель пускала туда. Решение
+    записываем один раз, дальше монитор живет как заведенный после 0147. Одобрение имени только по
+    ответу DNS неотличимо от одобрения админом, поэтому оно попадает в журнал действий."""
+    mono = time.monotonic()
+    legacy = [c for c in due if c.allow_internal_target is None and _legacy_retry.get(c.id, 0) <= mono]
+    if not legacy:
+        return
+    sem = asyncio.Semaphore(SETTLE_PARALLEL)
+
+    async def one(c: Check) -> tuple[bool | None, list[str]]:
+        async with sem:
+            return await _legacy_internal_target(c)
+
+    tasks = {asyncio.ensure_future(one(c)): c for c in legacy}
+    done, pending = await asyncio.wait(tasks, timeout=SETTLE_BUDGET)
+    for task in pending:
+        task.cancel()
+        _legacy_retry[tasks[task].id] = mono + parents_mod.DNS_RETRY
+    async with session_factory() as session:
+        for task in done:
+            c = tasks[task]
+            allow, by_dns = task.result() if not task.exception() else (None, [])
+            if allow is None:
+                _legacy_retry[c.id] = mono + parents_mod.DNS_RETRY
+                continue
+            _legacy_retry.pop(c.id, None)
+            # монитор успели поправить: решение уже записала правка
+            res = await session.execute(update(Check).where(
+                Check.id == c.id, Check.allow_internal_target.is_(None), Check.target == c.target,
+            ).values(allow_internal_target=allow))
+            await session.commit()
+            if not res.rowcount:
+                continue
+            c.allow_internal_target = allow
+            if allow and by_dns:
+                await audit.record(session, "system", "internal_target_auto", c.name, "; ".join(by_dns))
+
+
 async def run_due_checks(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings
 ) -> int:
@@ -1042,6 +1114,10 @@ async def run_due_checks(
             await session.scalars(select(Check).where(Check.enabled.is_(True)).order_by(Check.id))
         )
     due = [c for c in enabled if _is_due(c, now)]
+    try:
+        await _settle_legacy_targets(session_factory, due)
+    except Exception:  # noqa: BLE001 - проверки идут и без этого, NULL пока остается прежним
+        log.exception("не удалось записать решение по внутренним адресам старых мониторов")
     if not due:
         try:
             await _send_alerts(session_factory, settings, [], now)

@@ -13,11 +13,29 @@ export { getToken, setToken } from './sessionToken'
 // Вход админа под чужой учеткой (backend/app/impersonate.py): токен админа на это время лежит
 // отдельно, а в TOKEN_KEY - токен входа, поэтому все запросы идут с правами пользователя.
 // "Вернуться к себе" возвращает токен админа на место - без повторного входа
+// Токен админа - в sessionStorage вкладки, где начали вход: соседние вкладки его не видят, и
+// он живет, пока жива эта вкладка (браузер может вернуть его вместе с вкладкой, восстанавливая
+// сессию), а не до выхода, как в localStorage. Соседняя вкладка, которая "возвращается к себе"
+// или ловит 401, стирает токен входа, и вкладка с токеном админа возвращает его на место (App)
 const IMP_ADMIN_KEY = 'kervax_admin_token'
 const IMP_ID_KEY = 'kervax_imp_id'
 
+// вход, начатый до обновления, лежал в localStorage: забирает первая открытая вкладка
+for (const key of [IMP_ADMIN_KEY, IMP_ID_KEY]) {
+  const old = localStorage.getItem(key)
+  if (old !== null) {
+    if (!sessionStorage.getItem(key)) sessionStorage.setItem(key, old)
+    localStorage.removeItem(key)
+  }
+}
+
 export function impersonating(): boolean {
-  return !!localStorage.getItem(IMP_ADMIN_KEY)
+  return !!sessionStorage.getItem(IMP_ADMIN_KEY)
+}
+
+export function forgetImpersonation(): void {
+  sessionStorage.removeItem(IMP_ADMIN_KEY)
+  sessionStorage.removeItem(IMP_ID_KEY)
 }
 
 export type ImpersonateOut = { access_token: string; imp_id: number; username: string; expires_at: string }
@@ -26,8 +44,8 @@ export async function startImpersonation(userId: number): Promise<ImpersonateOut
   const own = getToken()
   const out = await api<ImpersonateOut>(`/api/users/${userId}/impersonate`, { method: 'POST' })
   if (!own || !isCurrentSession(own) || impersonating()) throw sessionChanged('POST')
-  localStorage.setItem(IMP_ADMIN_KEY, own)
-  localStorage.setItem(IMP_ID_KEY, String(out.imp_id))
+  sessionStorage.setItem(IMP_ADMIN_KEY, own)
+  sessionStorage.setItem(IMP_ID_KEY, String(out.imp_id))
   setToken(out.access_token)
   return out
 }
@@ -35,10 +53,10 @@ export async function startImpersonation(userId: number): Promise<ImpersonateOut
 // Вернуться к себе: токен админа на место, вход закрывается на сервере (его токен перестает
 // действовать сразу). Закрытие - уже с токеном админа: токен входа к этому времени мог истечь
 export async function stopImpersonation(): Promise<void> {
-  const own = localStorage.getItem(IMP_ADMIN_KEY)
-  const id = localStorage.getItem(IMP_ID_KEY)
-  localStorage.removeItem(IMP_ADMIN_KEY)
-  localStorage.removeItem(IMP_ID_KEY)
+  const own = sessionStorage.getItem(IMP_ADMIN_KEY)
+  const id = sessionStorage.getItem(IMP_ID_KEY)
+  sessionStorage.removeItem(IMP_ADMIN_KEY)
+  sessionStorage.removeItem(IMP_ID_KEY)
   setToken(own)
   setReadOnly(false) // дальше запросы с токеном админа, даже если смотрели глазами наблюдателя
   if (own && id) {

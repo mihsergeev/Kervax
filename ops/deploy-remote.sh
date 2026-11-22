@@ -91,7 +91,7 @@ health() {
 
 migration() {
     pw=$(grep '^KERVAX_DB_PASSWORD=' "$DIR/.env" 2>/dev/null | cut -d= -f2-)
-    result=$(docker exec -e PGPASSWORD="$pw" kervax-db-1 psql -U kervax -d kervax -tAc 'select version_num from alembic_version' 2>/dev/null) || return 1
+    result=$(PGPASSWORD="$pw" docker exec -e PGPASSWORD kervax-db-1 psql -U kervax -d kervax -tAc 'select version_num from alembic_version' 2>/dev/null) || return 1
     # An unavailable database or multiple heads is not evidence that rollback is safe.
     case "$result" in ''|*[!A-Za-z0-9_]*) return 1 ;; esac
     printf '%s\n' "$result"

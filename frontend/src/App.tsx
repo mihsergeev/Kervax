@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, getAlertDeliveries, getPanelErrorCount, getToken, impersonating, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
+import { ApiError, forgetImpersonation, getAlertDeliveries, getPanelErrorCount, getToken, impersonating, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
 import { isCurrentSession, TOKEN_KEY } from './sessionToken'
 import { AuthProvider } from './auth'
 import { useI18n, type Lang } from './i18n'
@@ -292,6 +292,9 @@ export default function App() {
     me()
       .then((u) => {
         if (!isCurrentSession(token) || leaving.current) return
+        // вход под чужой учеткой уже закрыт, а в соседней вкладке вошли заново: старый токен
+        // админа этой вкладки не должен потом подменить новый сеанс
+        if (!u.impersonator) forgetImpersonation()
         setRole(u.role)
         // под чужой учеткой бэкенд режет любые изменения - кнопки правки не рисуем, как у viewer
         setReadOnly(u.role === 'viewer', !!u.can_read_logs, u.impersonator ? u.username : '')
@@ -342,8 +345,10 @@ export default function App() {
 
   useEffect(() => {
     if (getToken()) loadMe()
+    // токен входа стерла соседняя вкладка (вернулась к себе, 401): токен админа лежит в этой
+    else if (impersonating()) returnToSelf()
     else setAuthed(false)
-  }, [loadMe])
+  }, [loadMe, returnToSelf])
 
   const logout = useCallback(() => {
     if (!isCurrentSession(getToken())) return
@@ -400,7 +405,11 @@ export default function App() {
           siteGroups={imp.siteGroups}
           by={imp.by}
           expires={imp.expires}
-          onReturn={returnToSelf}
+          onReturn={() => {
+            // токен админа - только во вкладке, где начали вход (api.ts): здесь вернуть его некуда
+            if (!impersonating() && !window.confirm(t('Вход под этой учеткой начат в другой вкладке: вернуться к себе можно там. Если ту вкладку закрыли, вход закончится сам по истечении срока. Выйти здесь и войти заново?'))) return
+            returnToSelf()
+          }}
         />
       )}
       <div className="header">

@@ -1374,7 +1374,11 @@ async def _run_http(
         transport = net_guard.MonitorTransport(verify, allow_internal, timeout, address) if proxy is None else None
         hooks = [net_guard.credential_origin_hook(custom_headers)]
         if proxy:
-            hooks.append(net_guard.request_hook(allow_internal=allow_internal))
+            # Внутренний адрес через локацию - это сеть прокси, а не панели: только с явным
+            # одобрением админа, старый NULL сюда не пускает. Имя прокси резолвит сам, и ответ его
+            # DNS может отличаться от проверенного здесь - это остается риском локации
+            hooks.append(net_guard.request_hook(
+                allow_internal=getattr(check, "allow_internal_target", None) is True))
         deadline = _Deadline(timeout * _DEADLINE_TIMEOUTS)
         gate = check_dispatch.request_gate()
         mon = _MONITOR.get() if gate is not None else None

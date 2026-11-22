@@ -190,9 +190,11 @@ say "Deploying $REF ($REV), version $VERSION -> $HOST:$DIR"
 BEFORE=$(ssh "$HOST" "cd '$DIR' 2>/dev/null || exit 7
     CF=\$(sudo docker inspect kervax-frontend-1 --format '{{index .Config.Labels \"com.docker.compose.project.config_files\"}}' 2>/dev/null)
     DBPW=\$(sudo grep '^KERVAX_DB_PASSWORD=' .env 2>/dev/null | cut -d= -f2-)
+    # The password goes over stdin: sudo drops the environment, and an argument is visible in ps
+    PSQL() { printf '%s\n' \"\$DBPW\" | sudo docker exec -i kervax-db-1 sh -c 'IFS= read -r PGPASSWORD; export PGPASSWORD; exec psql -U kervax -d kervax -tAc \"\$1\"' sh \"\$1\"; }
     VER=\$(sudo docker exec kervax-backend-1 python -c 'import urllib.request;print(urllib.request.urlopen(\"http://localhost:8000/api/health\").read().decode())' 2>/dev/null)
-    MIG=\$(sudo docker exec -e PGPASSWORD=\"\$DBPW\" kervax-db-1 psql -U kervax -d kervax -tAc 'select version_num from alembic_version' 2>/dev/null | head -1)
-    CNT=\$(sudo docker exec -e PGPASSWORD=\"\$DBPW\" kervax-db-1 psql -U kervax -d kervax -tAc 'select (select count(*) from servers), (select count(*) from checks), (select count(*) from users)' 2>/dev/null | head -1)
+    MIG=\$(PSQL 'select version_num from alembic_version' 2>/dev/null | head -1)
+    CNT=\$(PSQL 'select (select count(*) from servers), (select count(*) from checks), (select count(*) from users)' 2>/dev/null | head -1)
     printf '%s\n%s\n%s\n%s\n' \"\$CF\" \"\$VER\" \"\$MIG\" \"\$CNT\"") || die "could not reach $HOST:$DIR"
 
 CONFIG_FILES=$(printf '%s' "$BEFORE" | sed -n 1p)
@@ -323,9 +325,11 @@ set -e
 say "Verifying that this is what got deployed"
 AFTER=$(ssh "$HOST" "cd '$DIR'
     DBPW=\$(sudo grep '^KERVAX_DB_PASSWORD=' .env | cut -d= -f2-)
+    # The password goes over stdin: sudo drops the environment, and an argument is visible in ps
+    PSQL() { printf '%s\n' \"\$DBPW\" | sudo docker exec -i kervax-db-1 sh -c 'IFS= read -r PGPASSWORD; export PGPASSWORD; exec psql -U kervax -d kervax -tAc \"\$1\"' sh \"\$1\"; }
     VER=\$(sudo docker exec kervax-backend-1 python -c 'import urllib.request;print(urllib.request.urlopen(\"http://localhost:8000/api/health\").read().decode())' 2>/dev/null)
-    MIG=\$(sudo docker exec -e PGPASSWORD=\"\$DBPW\" kervax-db-1 psql -U kervax -d kervax -tAc 'select version_num from alembic_version' 2>/dev/null | head -1)
-    CNT=\$(sudo docker exec -e PGPASSWORD=\"\$DBPW\" kervax-db-1 psql -U kervax -d kervax -tAc 'select (select count(*) from servers), (select count(*) from checks), (select count(*) from users)' 2>/dev/null | head -1)
+    MIG=\$(PSQL 'select version_num from alembic_version' 2>/dev/null | head -1)
+    CNT=\$(PSQL 'select (select count(*) from servers), (select count(*) from checks), (select count(*) from users)' 2>/dev/null | head -1)
     AGT=\$(sudo docker exec kervax-backend-1 python -c 'import urllib.request;print(urllib.request.urlopen(\"http://localhost:8000/api/agent/manifest\").read().decode())' 2>/dev/null | sed -n 's/.*\"version\":\"\([^\"]*\)\".*/\1/p')
     printf '%s\n%s\n%s\n%s\n' \"\$VER\" \"\$MIG\" \"\$CNT\" \"\$AGT\"")
 

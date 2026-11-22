@@ -23,8 +23,9 @@ FORBIDDEN = "forbidden"
 INTERNAL = "internal"
 PUBLIC = "public"
 
-# адреса метаданных облаков вне link-local: AWS по IPv6 и Alibaba
-_METADATA = {ipaddress.ip_address("fd00:ec2::254"), ipaddress.ip_address("100.100.100.200")}
+# адреса метаданных облаков вне link-local: AWS и GCP по IPv6, Alibaba, Oracle, Azure WireServer
+_METADATA = {ipaddress.ip_address(a) for a in (
+    "fd00:ec2::254", "fd20:ce::254", "100.100.100.200", "192.0.0.192", "168.63.129.16")}
 _METADATA_NAMES = {"metadata.google.internal", "metadata", "instance-data", "instance-data.ec2.internal"}
 
 FORBIDDEN_TEXT = "адрес закрыт для проверок из панели (метаданные облака, link-local)"
@@ -34,6 +35,39 @@ ADMIN_ONLY_TEXT = "Проверку внутреннего адреса (localho
 _RANK = {PUBLIC: 0, INTERNAL: 1, FORBIDDEN: 2}
 
 
+# IPv6-адреса со встроенным IPv4: через NAT64 (64:ff9b::a00:1), 6to4 (2002:a00:1::) и Teredo
+# хост панели дойдет до того же IPv4, поэтому он проверяется по правилам IPv4. У 6to4, Teredo,
+# локального NAT64 и IPv4-compatible класс не мягче, чем у самого IPv6-адреса (Python и так
+# считает их частными или зарезервированными), но метаданные облака за ними - "никогда"
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")
+_V4_COMPAT = ipaddress.ip_network("::/96")
+# Где лежат байты IPv4 при префиксе NAT64 длиной /48, /56, /64 и /96 (RFC 6052, 2.2): байт 8
+# ("u") в адрес не входит. Префикс внутри 64:ff9b:1::/48 короче /48 не бывает, поэтому /32 и /40
+# не разбираются. Какой префикс у оператора, по адресу не видно - берем худшую из раскладок
+_NAT64_LAYOUTS = ((6, 7, 9, 10), (7, 9, 10, 11), (9, 10, 11, 12), (12, 13, 14, 15))
+
+
+def _embedded_ipv4(addr: ipaddress.IPv6Address) -> list[ipaddress.IPv4Address]:
+    out: list[ipaddress.IPv4Address] = []
+    if addr.sixtofour:
+        out.append(addr.sixtofour)
+    if addr.teredo:
+        out.extend(addr.teredo)  # сервер и клиент (Python уже снял инверсию клиента)
+    raw = addr.packed
+    if addr in _V4_COMPAT and int(addr) > 1:
+        out.append(ipaddress.IPv4Address(raw[12:]))
+    if addr in _NAT64_LOCAL:
+        for layout in _NAT64_LAYOUTS:
+            # у раскладок короче /96 байт u обязан быть нулем, а 0.0.0.0 - это чужая раскладка
+            if layout[0] < 12 and raw[8]:
+                continue
+            v4 = ipaddress.IPv4Address(bytes(raw[i] for i in layout))
+            if int(v4):
+                out.append(v4)
+    return out
+
+
 def ip_class(ip: str) -> str:
     try:
         addr = ipaddress.ip_address(ip.strip("[]").split("%")[0])
@@ -41,6 +75,16 @@ def ip_class(ip: str) -> str:
         return PUBLIC
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
         addr = addr.ipv4_mapped
+    if isinstance(addr, ipaddress.IPv6Address) and addr in _NAT64:
+        # общий префикс NAT64 - это сам IPv4 (Python относит его к зарезервированному ::/8)
+        addr = ipaddress.IPv4Address(addr.packed[12:])
+    if isinstance(addr, ipaddress.IPv6Address):
+        classes = [_ip_class(addr), *(_ip_class(v4) for v4 in _embedded_ipv4(addr))]
+        return max(classes, key=_RANK.__getitem__)
+    return _ip_class(addr)
+
+
+def _ip_class(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
     if addr in _METADATA or addr.is_link_local or addr.is_unspecified or addr.is_multicast:
         return FORBIDDEN
     if addr.is_loopback or addr.is_private or addr.is_reserved or not addr.is_global:

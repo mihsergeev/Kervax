@@ -660,11 +660,12 @@ def _host_of_raw(target: str) -> str:
 
 def _norm_domain(raw: str) -> str:
     """Домен из отчёта агента → канонический хост (без схемы, пути, порта и точки)."""
-    d = (raw or "").strip().lower().rstrip(".")
+    d = (raw or "").strip().lower()
     if "://" in d:
         d = d.split("://", 1)[1]
     d = d.split("/")[0]
-    return d.split(":", 1)[0]
+    # точку снимаем после пути и порта: "127.0.0.1.:443" иначе оставался с точкой на конце
+    return d.split(":", 1)[0].rstrip(".")
 
 
 def _adopt_problem(domain: str) -> str:
@@ -771,10 +772,7 @@ async def probe_discovered(
     )
     await session.commit()
     if started:
-        background.add_task(
-            domain_probe.run_external, request.app.state.session_factory, started, now,
-            allow_internal=is_admin,
-        )
+        background.add_task(domain_probe.run_external, request.app.state.session_factory, started, now)
     return DomainProbesOut(items=await domain_probe.rows_out(
         session, names, serving, now, None if is_admin else requester,
     ))

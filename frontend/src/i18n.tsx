@@ -340,6 +340,8 @@ const EN: Record<string, string> = {
   'Скоро здесь появятся мониторы, дашборды и алерты.':
     'Monitors, dashboards and alerts are coming here soon.',
   'Вы вошли как {user}': 'Signed in as {user}',
+  'Вход под этой учеткой начат в другой вкладке: вернуться к себе можно там. Если ту вкладку закрыли, вход закончится сам по истечении срока. Выйти здесь и войти заново?':
+    'Signing in as this account was started in another tab: return to yourself there. If that tab was closed, the session ends by itself when it expires. Log out here and sign in again?',
   'Тема': 'Theme',
   'Язык': 'Language',
   'Меню': 'Menu',
@@ -6371,6 +6373,8 @@ const EN: Record<string, string> = {
     'added a location',
   'добавил монитор':
     'added a monitor',
+  'одобрил внутренний адрес старого монитора по ответу DNS':
+    'approved the internal address of an older monitor from its DNS answer',
   'добавил окно обслуживания':
     'added a maintenance window',
   'добавил связь между серверами':

@@ -54,7 +54,7 @@ DBUSER=$(envval KERVAX_DB_USER); DBUSER=${DBUSER:-kervax}
 DBNAME=$(envval KERVAX_DB_NAME); DBNAME=${DBNAME:-kervax}
 
 file="$OUT/kervax-$(date +%Y%m%d-%H%M%S).dump"
-docker exec -e PGPASSWORD="$PW" "$DB_CT" pg_dump -U "$DBUSER" -d "$DBNAME" -Fc > "$file.tmp" \
+PGPASSWORD="$PW" docker exec -e PGPASSWORD "$DB_CT" pg_dump -U "$DBUSER" -d "$DBNAME" -Fc > "$file.tmp" \
     || { rm -f "$file.tmp"; fail "pg_dump failed"; }
 
 # The archive's table of contents, read by pg_restore of the same container (no client on the host)

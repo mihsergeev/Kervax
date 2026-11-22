@@ -20,7 +20,9 @@
 """
 
 import asyncio
+import ipaddress
 import re
+import socket
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
@@ -28,7 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import checks as checks_exec
-from app import manual_probe
+from app import manual_probe, net_guard
 from app.collector import _aware, seen_online
 from app.models import DomainProbe, ProbeRequest, Server, User
 from app.schemas import DomainProbeOut, PathHint
@@ -69,9 +71,34 @@ PATH_TIMEOUT_MS = 5000
 PATH_KIND = "dpath"
 
 
+# Имя или адрес из отчета агента выбирала нода, а не админ: проба мастера идет только наружу.
+# Иначе нода могла направить проверку с правами админа во внутреннюю сеть панели (127.1,
+# имя с A 127.0.0.1). Монитор на внутренний адрес админ заводит сам
+IP_INTERNAL_TEXT = ("адрес из отчета агента во внутренней сети: снаружи панель его не проверяет, "
+                    "монитор на внутренний адрес администратор заводит вручную")
+NAME_INTERNAL_TEXT = ("домен из отчета агента указывает во внутреннюю сеть: снаружи панель его не "
+                      "проверяет, монитор на внутренний адрес администратор заводит вручную")
+
+
 def target(domain: str) -> str:
     """Адрес проверки — тот же, что получит монитор из мастера (checks.adopt_domains)."""
     return f"https://{domain}"
+
+
+def ip_literal(domain: str) -> bool:
+    """Адрес вместо имени, в том числе короткие формы IPv4, которые резолвер тоже примет за
+    адрес (127.1, 0x7f.1), и с точкой на конце."""
+    domain = domain.rstrip(".")
+    try:
+        socket.inet_aton(domain)
+        return True
+    except OSError:
+        pass
+    try:
+        ipaddress.ip_address(domain.strip("[]"))
+        return True
+    except ValueError:
+        return False
 
 
 def requester_key(user: User) -> str:
@@ -179,12 +206,12 @@ def pick(root_code: int, codes: dict[str, int]) -> dict:
     return {}
 
 
-async def _ext_hint(domain: str, root_code: int, allow_internal: bool) -> dict:
+async def _ext_hint(domain: str, root_code: int) -> dict:
     """Перебор типовых путей снаружи - разом, каждый со своим таймаутом."""
 
     async def code_of(path: str) -> int:
         chk = manual_probe.domain_check(target(domain) + path)
-        chk.allow_internal_target = allow_internal
+        chk.allow_internal_target = False
         chk.timeout_ms = PATH_TIMEOUT_MS
         chk.expected_status = "200-299"
         try:
@@ -258,7 +285,6 @@ def _same_moment(a: datetime, b: datetime) -> bool:
 
 async def run_external(
     session_factory: async_sessionmaker[AsyncSession], domains: list[str], started_at: datetime,
-    *, allow_internal: bool,
 ) -> None:
     """Проверка снаружи — фоном, итог каждого домена пишется, как только готов: мастер
     показывает их по мере поступления, а не ждёт самый медленный сайт."""
@@ -268,15 +294,17 @@ async def run_external(
         async with sem:
             try:
                 chk = manual_probe.domain_check(target(domain))
-                chk.allow_internal_target = allow_internal
+                chk.allow_internal_target = False  # см. IP_INTERNAL_TEXT
                 outcome = await checks_exec.run_check(chk)
             except Exception as exc:  # noqa: BLE001 — один домен не должен ронять остальные
                 outcome = checks_exec.CheckOutcome(
                     "down", message=checks_exec.humanize_error(str(exc) or type(exc).__name__)
                 )
+            if net_guard.ADMIN_ONLY_TEXT in outcome.message:
+                outcome.message = IP_INTERNAL_TEXT if ip_literal(domain) else NAME_INTERNAL_TEXT
             hint = None
             if wants_paths(outcome.status, outcome.message):
-                hint = await _ext_hint(domain, _code(outcome.message), allow_internal)
+                hint = await _ext_hint(domain, _code(outcome.message))
         async with session_factory() as session:
             row = await session.get(DomainProbe, domain)
             # домен успели перепроверить — этот итог уже никому не нужен

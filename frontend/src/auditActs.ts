@@ -85,6 +85,7 @@ export const ACT: Record<string, string> = {
   expiry_snooze: 'отложил срок домена или сертификата',
   expiry_watch: 'вернул срок домена или сертификата под присмотр',
   check_create: 'добавил монитор',
+  internal_target_auto: 'одобрил внутренний адрес старого монитора по ответу DNS',
   check_update: 'изменил монитор',
   check_delete: 'удалил монитор',
   check_note: 'заметка к монитору',

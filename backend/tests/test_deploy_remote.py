@@ -61,6 +61,7 @@ elif a[0] == 'exec':
             seen=float(baseline.read_text()) if mode == 'agent-stalled' or not (s/'up-count').exists() else time.time()
             print(json.dumps([[101,seen]]))
     elif 'psql' in a:
+        with (s/'pgpassword').open('a') as f: f.write(os.environ.get('PGPASSWORD', '-')+'\n')
         if mode == 'snapshot-db-fail' or mode == 'rollback-db-fail' and (s/'built').exists(): sys.exit(26)
         if mode == 'snapshot-db-empty' or mode == 'rollback-db-empty' and (s/'built').exists(): sys.exit(0)
         if mode == 'snapshot-db-multiple': print('0141\n0142')
@@ -248,6 +249,16 @@ def test_success_and_repeat_keep_private_settings_and_report_stderr_progress(dep
     assert repeat.returncode == 0, repeat.stdout+repeat.stderr
     assert (second / 'run.status').read_text().strip() == 'ok'
     assert_protected(deployment)
+
+
+def test_database_password_is_not_in_docker_arguments(deployment):
+    _, _, state, _, _, _ = deployment
+    result, status, calls = execute(deployment)
+    assert result.returncode == 0 and status == 'ok', result.stdout+result.stderr
+    # docker exec -e PGPASSWORD=<value> was visible to every user of the host in ps
+    assert not any('fixture-only-placeholder' in arg for call in calls for arg in call)
+    seen = (state / 'pgpassword').read_text().split()
+    assert seen and set(seen) == {'fixture-only-placeholder'}
 
 
 def enable_guard_fixture(deployment):

@@ -165,7 +165,8 @@ async def test_deadline_through_proxy_says_timeout():
         port = server.sockets[0].getsockname()[1]
         # прокси - сам тестовый сервер: на абсолютный URL он отвечает так же
         out = await asyncio.wait_for(checks_exec._run_http(
-            _check(port, target="http://192.0.2.10/"), proxy=f"http://127.0.0.1:{port}"), _HANG)
+            _check(port, target="http://192.0.2.10/", allow_internal_target=True),
+            proxy=f"http://127.0.0.1:{port}"), _HANG)
     assert out.status == "down" and "время ожидания" in out.message, out.message
 
 
