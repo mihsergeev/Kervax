@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -582,9 +583,23 @@ func dropStaleTrialAt(self, want string) {
 // системы, плюс прошедший с нее uptime. Шаг часов назад окно не раздвигает, даже если агента
 // перезапустят; после перезагрузки отметка новая.
 //
-// Часы, которые ядро считает синхронизированными (демон NTP сбросил STA_UNSYNC), верны: отметку
-// по ним переставляем. Так нода, где часы на старте убежали вперед, после синхронизации снова
-// обновляется. Шаг helper'а (date -s) STA_UNSYNC выставляет, и отметку такой шаг не сдвигает.
+// Часы, которые ядро считает синхронизированными (демон NTP сбросил STA_UNSYNC), отметку
+// переставляют назад, но не дальше otaMaxStepBack от самого позднего времени, виденного в эту
+// загрузку (2.75). В 2.74 синхронизированным часам верили целиком, а NTP без аутентификации
+// подделывается: подложный сервер (или chronyc makestep по просьбе панели) отводил часы на
+// сколько угодно, отметка шла за ними, и старый подписанный выпуск снова выглядел свежим. Шаг
+// helper'а (date -s) STA_UNSYNC выставляет, и отметку такой шаг не сдвигает вовсе.
+
+// otaMaxStepBack - на сколько синхронизированные часы могут отвести отметку назад за одну
+// загрузку; аналог MAX_STEP=21600 в helper'е timesync-setup. 6 часов: часы в RTC по местному
+// времени (localtime) на старте для наших поясов впереди UTC на 3-5 часов, и такая нода после
+// синхронизации NTP должна обновляться без перезагрузки. Откат больше - отметка стоит, отказ
+// временный: обновление пойдет после перезагрузки ноды или когда часы догонят отметку.
+const otaMaxStepBack = 6 * time.Hour
+
+// otaStepBackRefused - последний otaNow не пустил синхронизированные часы назад дальше
+// otaMaxStepBack: для текста отказа
+var otaStepBackRefused atomic.Bool
 
 var otaWall = time.Now // тесты подставляют свои часы
 
@@ -612,35 +627,65 @@ func otaNow() time.Time {
 			up, _ = strconv.ParseFloat(f[0], 64)
 		}
 	}
-	return otaClock(otaClockPath(), strings.TrimSpace(string(boot)), up, otaWall(), clockSynced)
+	t, refused := otaClockState(otaClockPath(), strings.TrimSpace(string(boot)), up, otaWall(), clockSynced)
+	otaStepBackRefused.Store(refused)
+	return t
 }
 
-// otaClock - max(now, отметка этой загрузки + прошедший uptime). Нет отметки этой загрузки или
-// часы синхронизированы, а отметка ушла вперед, - ставим ее заново по now.
 func otaClock(path, boot string, up float64, now time.Time, synced func() bool) time.Time {
+	t, _ := otaClockState(path, boot, up, now, synced)
+	return t
+}
+
+// otaClockState - max(now, отметка этой загрузки + прошедший uptime). Файл: "boot wall up" -
+// отметка, и с 2.75 еще "hiwall hiup" - самое позднее время, виденное в эту загрузку (у файла
+// 2.74 оно равно отметке). Нет отметки этой загрузки - ставим по now. Часы ушли вперед дальше
+// самого позднего - запоминаем (иначе после старта с отставшими часами отметка ничего не
+// держала бы). Отметка впереди часов, а часы синхронизированы: ставим ее по now, если это не
+// дальше otaMaxStepBack от самого позднего; иначе отметка стоит, refused.
+func otaClockState(path, boot string, up float64, now time.Time, synced func() bool) (time.Time, bool) {
 	if path == "" || boot == "" || up <= 0 {
-		return now
+		return now, false
+	}
+	at := func(wall int64, was float64) time.Time {
+		return time.Unix(wall, 0).Add(time.Duration((up - was) * float64(time.Second)))
+	}
+	save := func(wall int64, was float64, hiWall int64, hiWas float64) {
+		_ = writeSync(path, []byte(fmt.Sprintf("%s %d %.2f %d %.2f\n", boot, wall, was, hiWall, hiWas)), 0o644)
 	}
 	if b, err := os.ReadFile(path); err == nil {
 		f := strings.Fields(string(b))
-		if len(f) == 3 && f[0] == boot {
+		if (len(f) == 3 || len(f) == 5) && f[0] == boot {
 			wall, e1 := strconv.ParseInt(f[1], 10, 64)
 			was, e2 := strconv.ParseFloat(f[2], 64)
-			if e1 == nil && e2 == nil && was <= up {
-				floor := time.Unix(wall, 0).Add(time.Duration((up - was) * float64(time.Second)))
+			hiWall, hiWas, e3, e4 := wall, was, error(nil), error(nil)
+			if len(f) == 5 {
+				hiWall, e3 = strconv.ParseInt(f[3], 10, 64)
+				hiWas, e4 = strconv.ParseFloat(f[4], 64)
+			}
+			if e1 == nil && e2 == nil && e3 == nil && e4 == nil && was <= up && hiWas <= up {
+				floor, hi := at(wall, was), at(hiWall, hiWas)
 				if !floor.After(now) {
-					return now
+					if now.Sub(hi) > time.Minute {
+						save(now.Unix(), up, now.Unix(), up)
+					}
+					return now, false
 				}
 				// adjtimex - только здесь, в редком случае: вне @system-service, и под
 				// SystemCallFilter без SystemCallErrorNumber вызов на старте убил бы агента
 				if floor.Sub(now) < time.Minute || !synced() {
-					return floor
+					return floor, false
 				}
+				if hi.Sub(now) > otaMaxStepBack {
+					return floor, true
+				}
+				save(now.Unix(), up, hiWall, hiWas)
+				return now, false
 			}
 		}
 	}
-	_ = writeSync(path, []byte(fmt.Sprintf("%s %d %.2f\n", boot, now.Unix(), up)), 0o644)
-	return now
+	save(now.Unix(), up, now.Unix(), up)
+	return now, false
 }
 
 // otaFreshErr - отказ по свежести, которым судили по now (otaNow). Отказ временный: он зависит от
@@ -660,7 +705,12 @@ func otaFreshErr(m manifest, err error, now time.Time) error {
 		return fmt.Errorf("манифест %s выпущен %s, в будущем по часам ноды (%s UTC) - отказ: часы ноды отстают? Повторим позже",
 			m.Version, t.UTC().Format(tf), wall.UTC().Format(tf))
 	}
-	if d := now.Sub(wall); d > time.Minute || d < -time.Minute {
+	if d := now.Sub(wall); otaStepBackRefused.Load() || d > otaMaxStepBack {
+		return fmt.Errorf("манифест %s выпущен %s, старше %d дней по отметке часов этой загрузки (%s UTC), а часы ноды %s UTC "+
+			"отвели назад больше чем на %d ч после загрузки. Обновление продолжится после перезагрузки ноды или когда часы догонят отметку",
+			m.Version, t.UTC().Format("2006-01-02"), int(otaMaxAge.Hours()/24), now.UTC().Format(tf), wall.UTC().Format(tf),
+			int(otaMaxStepBack.Hours()))
+	} else if d > time.Minute || d < -time.Minute {
 		return fmt.Errorf("манифест %s выпущен %s, старше %d дней по отметке часов этой загрузки (%s UTC), а часы ноды %s UTC: "+
 			"часы отводили назад или раньше они убегали вперед. Повторим; отметка сбросится после синхронизации NTP или перезагрузки",
 			m.Version, t.UTC().Format("2006-01-02"), int(otaMaxAge.Hours()/24), now.UTC().Format(tf), wall.UTC().Format(tf))

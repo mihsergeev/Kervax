@@ -186,7 +186,10 @@ wins (agent 2.75+): if that version is not older than the trial, the trial is dr
 writing over it; if it is older, the trial replaces it with the same `rename`. The agent reads
 the installed file's version from a mark in the binary without running it. While the agent drains, the panel gives it no new commands. The previous binary stays
 next to it as `kervax-agent.prev`. Freshness of the signed manifest does not rely on the
-node's clock alone: stepping the clock back within one boot does not extend it.
+node's clock alone: stepping the clock back within one boot does not extend it. Even a clock
+the kernel reports as synchronised (unauthenticated NTP can be spoofed) moves the mark back by
+no more than 6 hours per boot (agent 2.75+), enough for an RTC kept in local time; after a
+larger step back the update waits for a reboot of the node.
 
 ## 5. Threat model: the panel is compromised
 
