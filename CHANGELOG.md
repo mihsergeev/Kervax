@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.164] - 2026-11-24
+
+- Signing in as another user now lasts only while the browser tab that started it is open: the tab confirms it every minute, a closed tab ends it within 30 seconds and a tab that went silent within 5 minutes, with the end recorded in the audit log. A reload keeps it. The one-hour limit stays.
+- Old DNS monitors with a DNS-over-HTTPS resolver in the DNS server field no longer send the query, which skipped the check of internal addresses: such a monitor is down with a message asking for the IP address of a DNS server. New monitors already accepted only an IP address.
+- Monitors created before internal targets needed an approval get their decision even when the name resolves slower than a second: the lookup finishes in the background instead of being retried forever.
+
 ## [1.8.163] - 2026-11-23
 
 - The backend image no longer gives the panel process write access to its own code, migrations and the agent binaries it serves: they belong to root and are only readable, and only /srv/data stays writable. The image drops a 31 MB ownership layer, and the code is compiled at build time.
