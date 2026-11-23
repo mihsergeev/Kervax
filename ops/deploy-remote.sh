@@ -358,6 +358,7 @@ if ! up; then
     rollback && finish rolled-back 1
     finish failed 1
 fi
+UP_DONE=$(date +%s)
 
 step "Verifying"
 BAD=0
@@ -372,8 +373,11 @@ fi
 case " $SERVICES " in
 *" scheduler "*)
     # the scheduler is the one sending alerts: a forgotten one leaves them on the old code.
-    # Its first tick goes right after the start - give it time to fall over if it is going to
-    sleep 30
+    # Its first tick goes right after the start - give it time to fall over if it is going to:
+    # 30 s since the start (compose starts it once the backend is healthy, before `up` returns).
+    # The health and agent checks above already took part of that, wait only for the rest.
+    left=$((30 - ($(date +%s) - UP_DONE)))
+    [ "$left" -le 0 ] || sleep "$left"
     sch=$(docker exec kervax-scheduler-1 sed -n 's/^\s*version: str = "\([0-9.]*\)".*/\1/p' /srv/app/config.py 2>/dev/null | head -1)
     note "scheduler: ${sch:-not running}"
     [ "$sch" = "$VERSION" ] || { note "✗ the scheduler is not on $VERSION"; BAD=1; }

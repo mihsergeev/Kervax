@@ -224,7 +224,14 @@ echo "  compose:                $FILES"
 echo "  to rebuild:             $SERVICES"
 
 # -- What will be shipped and what will be removed ----------------------------
-NEW_LIST=$(git ls-tree -r --name-only "$REF")
+# README screenshots and the landing site do not go to panels: half of the archive (~21 of
+# ~42 MB), and PNG/WebP do not compress - on a slow link to a panel that is most of the
+# upload. Nothing on a panel reads them: the images build from backend/, agent/,
+# agent-dist/, ops/windows-monitor.ps1 and frontend/, the host scripts live in ops/. They
+# stay out of the manifest too, so the cleanup below removes copies left by earlier
+# deploys, and a rollback (prev-src.tar) brings back exactly what was there.
+NOT_SHIPPED='^(docs/img|landing)/'
+NEW_LIST=$(git ls-tree -r --name-only "$REF" | grep -vE "$NOT_SHIPPED")
 OLD_LIST=$(ssh "$HOST" "cat '$DIR/.kervax-deployed' 2>/dev/null" || true)
 if [ -z "$OLD_LIST" ]; then
     warn "no manifest from a previous deploy - nothing is removed this time,"
@@ -255,7 +262,9 @@ fi
 
 if [ -n "$STALE" ]; then
     say "Files removed from the repository (they will be deleted on production)"
-    printf '%s\n' "$STALE" | sed 's/^/  − /'
+    printf '%s\n' "$STALE" | grep -vE "$NOT_SHIPPED" | sed 's/^/  − /'
+    n_skip=$(printf '%s\n' "$STALE" | grep -cE "$NOT_SHIPPED" || true)
+    [ "$n_skip" = 0 ] || echo "  − $n_skip files in docs/img/ and landing/: no longer shipped to panels"
 else
     echo "  no stale files"
 fi
@@ -275,8 +284,14 @@ RUN="$(date -u +%Y%m%d-%H%M%S)-$REV"
 RD="$DIR/.deploy/$RUN"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
-git archive "$REF" > "$STAGE/src.tar"
+git archive "$REF" -- . ':(exclude)docs/img' ':(exclude)landing' > "$STAGE/src.tar"
 printf '%s\n' "$NEW_LIST" > "$STAGE/manifest.txt"
+# The manifest decides what gets deleted on production: it must list exactly what the
+# archive delivers, or a file would be shipped and never cleaned up (or the other way round)
+tar tf "$STAGE/src.tar" | grep -v '/$' | LC_ALL=C sort > "$STAGE/.shipped"
+LC_ALL=C sort "$STAGE/manifest.txt" | cmp -s - "$STAGE/.shipped" \
+    || die "the archive and the manifest list different files - nothing was shipped"
+rm -f "$STAGE/.shipped"
 printf '%s\n' "$STALE" | grep -v '^$' > "$STAGE/stale.txt" || true
 cp "$(dirname "$0")/deploy-remote.sh" "$STAGE/run.sh"
 # DEPS_EPOCH - номер недели: раз в неделю образы пересобирают слой пакетов ОС (apt в backend,
@@ -310,7 +325,9 @@ if [ -f agent-dist/manifest.json ] && [ -f agent-dist/manifest.sig ]; then
 fi
 
 say "Shipping the sources and starting the run $RUN"
-tar -cf - -C "$STAGE" . | ssh "$HOST" "sudo mkdir -p '$RD' && sudo tar xf - -C '$RD' \
+# gzip -1: the sources shrink ~2.4x for a fraction of a second of CPU; the link to a far
+# panel is the slow part. A truncated stream fails in tar on production, the run does not start.
+tar -cf - -C "$STAGE" . | gzip -1 | ssh "$HOST" "sudo mkdir -p '$RD' && sudo tar xzf - -C '$RD' \
     && { sudo sh '$RD/run.sh' start run || { rc=\$?; sudo rm -rf '$RD'; exit \$rc; }; }" \
     || die "the run did not start (another deploy on $HOST? ops/deploy.sh $HOST --attach) - production was not touched"
 
