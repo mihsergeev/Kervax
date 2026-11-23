@@ -20,7 +20,7 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import exists, or_, select, update
 from sqlalchemy.orm import aliased
 
 from app import notification_store as store
@@ -33,8 +33,10 @@ _FIELDS = ("section", "group", "kind", "target", "recovery", "ref", "full", "lin
 DELIVERY_STAGE = "доставка уведомлений"
 # сбой пачки до POST, не привязанный к строке: отсрочка всей пачки
 _BUNDLE_DELAY = 120
-# страховка копии отказа группы в основной чат: только отказы не старше этого (_reconcile_rejected)
-_FALLBACK_WINDOW = timedelta(hours=1)
+# страховка копии отказа группы в основной чат: только отказы не старше этого (_reconcile_rejected).
+# Она нужна лишь на падение процесса между записью отказа и копией: поздно настроенный основной чат
+# не получает устаревшую копию
+_FALLBACK_WINDOW = timedelta(minutes=10)
 # Остановка планировщика (SIGTERM, выкладка), ставит collector_loop: и его стадии, и бот (tg_bot)
 # новых POST не начинают и не повторяют, строки остаются в очереди до старта. Отменить уже
 # начатый POST нельзя без риска дубля: Telegram мог принять сообщение. Его доводим и записываем
@@ -1070,18 +1072,26 @@ async def _reconcile_confirmed(factory, cfg, now):
 async def _reconcile_rejected(factory, cfg, now):
     """Страховка: отказ группы записан (finish), а копия в основной чат нет (процесс упал между ними).
 
-    Только свежие отказы POST (TransportError, не смена получателя) и только события, у которых
-    копии в основной чат нет совсем: enqueue сам проверяет маршрут и вставляет строку один раз.
+    Только свежие отказы POST (TransportError, не смена получателя; next_attempt_at у rejected - время
+    отказа) с теми же условиями, что в enqueue, и только события, у которых в основной чат еще ничего
+    нет: ни копии (fallback), ни своей строки (main), ни строки с адресом основного чата. Иначе
+    enqueue ничего не вставит, а событие занимало бы выборку каждый проход.
     """
     from app import alert_delivery_fallback
+    token, chat = cfg.get("telegram_token") or "", str(cfg.get("telegram_chat") or "")
+    if not token or not chat:
+        return
+    main = store._identity(_telegram_identity(cfg.get("telegram_api"), token, chat)[0])
     copy = aliased(NotificationDelivery)
     job = NotificationDelivery
     async with factory() as session:
         ids = list(await session.scalars(select(job.id).where(
             job.status == "rejected", job.next_attempt_at >= now - _FALLBACK_WINDOW,
-            job.last_error == "TransportError", job.target["route"].as_string() == "group",
-            job.target["bot"].as_string() == "common",
-            ~exists().where(copy.event_id == job.event_id, copy.target["route"].as_string() == "fallback"),
+            job.last_error == "TransportError", job.target["type"].as_string() == "telegram",
+            job.target["route"].as_string() == "group", job.target["bot"].as_string() == "common",
+            job.target["required"].as_boolean().is_(True),
+            ~exists().where(copy.event_id == job.event_id, or_(
+                copy.target["route"].as_string().in_(("main", "fallback")), copy.recipient_key == main)),
         ).order_by(job.id).limit(100)))
     if ids:
         await alert_delivery_fallback.enqueue(factory, cfg, [{"id": value} for value in ids], now)

@@ -377,7 +377,8 @@ async def finish(factory, ids: list[int], owner: str, status: str, now: datetime
             if status in {"uncertain", "retry"} and (
                     row.attempts >= MAX_ATTEMPTS or row.uncertain_count >= MAX_UNCERTAIN):
                 row.status = "attention"
-            row.next_attempt_at = next_attempt
+            # у rejected повторов нет: next_attempt_at - время отказа (по нему страховка копии в основной чат)
+            row.next_attempt_at = now if status == "rejected" else next_attempt
             row.message_id = int(message_id) if status == "confirmed" and message_id is not None else row.message_id
             row.last_error = "" if status == "confirmed" else _safe_error(error)
             row.lease_owner, row.lease_until = "", None

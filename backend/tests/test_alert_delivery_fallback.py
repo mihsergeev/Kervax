@@ -213,3 +213,79 @@ async def test_lost_fallback_after_a_rejection_is_restored_once(db, monkeypatch)
     assert calls == ["group-example", "main-example"]
     async with db() as session:
         assert await session.scalar(select(func.count()).select_from(Delivery)) == 2
+
+
+async def rejected_events(factory, count, *, main_copy=False, age=timedelta(0)):
+    """count событий с отказом группы (как после finish); main_copy - у события своя строка в основной чат."""
+    group, group_transport = alert_delivery._telegram_identity(CFG["telegram_api"], CFG["telegram_token"],
+                                                               "group-example")
+    main, main_transport = alert_delivery._telegram_identity(CFG["telegram_api"], CFG["telegram_token"],
+                                                             CFG["telegram_chat"])
+    import uuid
+    marker = uuid.uuid4().hex[:8]
+    specs = []
+    for index in range(count):
+        recipients = [{"key": group, "transport": group_transport,
+                       "target": {"type": "telegram", "route": "group", "bot": "common",
+                                  "chat": "group-example", "required": True}}]
+        if main_copy:
+            recipients.append({"key": main, "transport": main_transport,
+                               "target": {"type": "telegram", "route": "main", "bot": "common",
+                                          "chat": CFG["telegram_chat"], "required": True}})
+        message = alerts.Msg(f"Example incident {marker}-{index}", "servers", "example", kind="queue",
+                             target="Example", ref="srv:1")
+        specs.append({"stream": f"example:{marker}:{index}", "phase": "fire", "level": 1, "members": [],
+                      "observed_at": NOW, "payload": {"message": alert_delivery.pack(message), "parse_mode": "HTML",
+                                                      "threshold": 0}, "recipients": recipients})
+    events = await store.admit(factory, specs, NOW)
+    rejected_at = NOW - age  # часы drain в тестах - NOW (conftest выключает _wall)
+    async with factory() as session:
+        for row in await session.scalars(select(Delivery).where(Delivery.event_id.in_(events))):
+            if row.target["route"] == "group":
+                row.status, row.last_error, row.next_attempt_at = "rejected", "TransportError", rejected_at
+            else:
+                row.status, row.message_id = "confirmed", 74
+        await session.commit()
+    return events
+
+
+def counted_enqueue(monkeypatch):
+    calls, enqueue = [], fallback.enqueue
+
+    async def counted(factory, cfg, rows, now):
+        calls.append(sorted(row["id"] for row in rows))
+        return await enqueue(factory, cfg, rows, now)
+
+    monkeypatch.setattr(fallback, "enqueue", counted)
+    return calls
+
+
+async def test_rejection_with_its_own_main_row_is_not_rechecked(db, monkeypatch):
+    # у события уже есть строка в основной чат: страховке нечего ставить, проходы ее не трогают
+    await rejected_events(db, 1, main_copy=True)
+    sent, calls = mock_http(monkeypatch), counted_enqueue(monkeypatch)
+    for second in range(5):
+        await alert_delivery.drain(db, CFG, NOW + timedelta(seconds=second))
+    assert calls == [] and sent == []
+
+
+async def test_lost_copy_is_restored_behind_a_storm_of_covered_rejections(db, monkeypatch):
+    # 150 отказов, у которых основной чат уже есть, не вытесняют событие с настоящей потерей копии
+    await rejected_events(db, 150, main_copy=True)
+    lost, = await rejected_events(db, 1)
+    sent, calls = mock_http(monkeypatch), counted_enqueue(monkeypatch)
+    await alert_delivery.drain(db, CFG, NOW)
+    await alert_delivery.drain(db, CFG, NOW + timedelta(seconds=1))
+    assert sent == ["main-example"] and len(calls) == 1
+    async with db() as session:
+        copies = list(await session.scalars(select(Delivery).where(
+            Delivery.event_id == lost, Delivery.target["route"].as_string() == "fallback")))
+    assert [row.status for row in copies] == ["confirmed"]
+
+
+async def test_rejection_older_than_the_window_is_not_restored(db, monkeypatch):
+    # основной чат настроили позже: устаревшая копия не уходит
+    await rejected_events(db, 1, age=timedelta(minutes=11))  # окно страховки - 10 минут
+    sent, calls = mock_http(monkeypatch), counted_enqueue(monkeypatch)
+    await alert_delivery.drain(db, CFG, NOW)
+    assert calls == [] and sent == []
