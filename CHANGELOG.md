@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.160] - 2026-11-23
+
+- Update frontend dependencies: React 19.3.1, Vite 8.3.8, @vitejs/plugin-react 6.3.0, flag-icons 7.6.0, oxlint 1.93.0, Playwright Core 1.65.1 and @types/node 26.6.6.
+- Update the lock generator uv to 0.13.8. Locked backend runtime dependencies are unchanged.
+
 ## [1.8.159] - 2026-11-23
 
 - Agent 2.74 updates itself through a trial run. The verified new binary is started first while the installed one stays in place, and it replaces the installed binary only after the panel has accepted three of its reports and it has run for five minutes. If it crashes, hangs or restarts in that window, systemd brings back the previous version, which retries later and gives up on that version after three failed trials. The previous binary is kept as `kervax-agent.prev`. Before switching, the agent finishes the commands it is running and delivers their results; the panel holds new commands for an agent that is finishing them and keeps the update target until the trial is accepted. Updates to 2.74 itself are still done by the previous update code.
