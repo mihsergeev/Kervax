@@ -39,6 +39,8 @@ set -eu
 HOST=""; REF="HEAD"; DIR=/app/kervax; DRY=0; ALL=0; ATTACH=0; ROLLBACK=0
 # время на панель - в итоговой строке: видно, какая из них тормозит выкладку
 T_HOST=$(date +%s)
+# the script by its absolute path: below it changes into the repository root
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1; shift ;;
@@ -51,8 +53,6 @@ while [ $# -gt 0 ]; do
         *) if [ -z "$HOST" ]; then HOST="$1"; else REF="$1"; fi; shift ;;
     esac
 done
-# the script by its absolute path: below it changes into the repository root
-SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 # --all: прогоняем этот же скрипт по каждой панели из списка. Именно рекурсией, а не
 # циклом внутри: каждая панель проходит ПОЛНУЮ проверку после выкатки. Первая панель из
