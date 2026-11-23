@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.166] - 2026-11-24
+
+- Agent 2.75. When several agent instances on one server (one per panel) update the shared binary, the newest version wins: a trial run no longer replaces a newer installed binary, a trial does not start when the installed binary is already at the target, and an instance whose installed binary is newer than the running process switches to it after finishing its commands instead of staying on old code or refusing the update.
+- Agent 2.75 accepts a step of a synchronised clock back by at most 6 hours within one boot when it checks the age of a signed release, so an unauthenticated time source can no longer widen that window. The first synchronisation after boot may still correct a clock that started ahead, for example a hardware clock kept in local time. A release refused because of the clock is retried, and the message shows the clock the decision was based on.
+- The panel shows an agent on a trial run: a chip in the server list, a mark next to the agent version and an explanation in the update progress, where such a server is no longer counted as updated. An error of a stuck trial is shown instead of the trial mark.
+
 ## [1.8.165] - 2026-11-24
 
 - The Delivery window shows why a notification needs attention or was refused and what to do about it: a message that could not be prepared, sending interrupted before the channel answered, no answer from the channel, a refusal by the channel or a changed recipient. Only a reason code leaves the server.
