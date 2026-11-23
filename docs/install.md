@@ -28,7 +28,7 @@ no domain of your own required, and not one line of nginx config.
 ## The short way: one command
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh
+curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh
 ```
 
 It prints the panel's address and the admin password. Nothing else to type.
@@ -36,14 +36,14 @@ It prints the panel's address and the admin password. Nothing else to type.
 With your own domain (point an A record at the server first):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh -s -- --domain kervax.example.com
+curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh -s -- --domain kervax.example.com
 ```
 
 With the address allow-list from the start — recommended if the panel faces the
 internet:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh -s -- --allow-ips "203.0.113.10 198.51.100.23"
+curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh -s -- --allow-ips "203.0.113.10 198.51.100.23"
 ```
 
 ### What the script does
@@ -73,7 +73,7 @@ dnsmasq, many ISP routers) drops exactly such answers: the name does not resolve
 at all. The panel comes up, https does not, and agents cannot be installed.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh -s -- --local-ca
+curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh -s -- --local-ca
 ```
 
 What changes:

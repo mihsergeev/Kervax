@@ -7,7 +7,7 @@ Open source, AGPL-3.0. Данные остаются в вашем PostgreSQL.
 [English](README.md) · [kervax.ru](https://kervax.ru) · [Установка](docs/install.ru.md) · [Модель безопасности](docs/security.md) · [Изменения](CHANGELOG.md)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh
+curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh
 ```
 
 Ставит Docker, если его нет, поднимает Caddy с сертификатом Let's Encrypt, генерирует секреты и

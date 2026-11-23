@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.158] - 2026-11-23
+
+- The one-command install downloads `quickstart.sh` attached to the latest GitHub Release instead of the main branch: `curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh`. The attached script is exactly the one in the release tag, so a commit in main no longer runs as root on new installations before it is released. The old address keeps working but follows main.
+
 ## [1.8.157] - 2026-11-22
 
 - IPv6 addresses that embed an IPv4 address (NAT64, local NAT64, 6to4, Teredo, IPv4-compatible) are classified by that IPv4 address. Cloud metadata endpoints behind them are always refused, and the well-known NAT64 prefix with a public IPv4 address is treated as public. The Azure WireServer, Oracle Cloud and Google Cloud IPv6 metadata addresses are refused as monitor targets.

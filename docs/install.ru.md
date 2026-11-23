@@ -28,7 +28,7 @@
 ## Быстрый путь: одна команда
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh
+curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh
 ```
 
 Скрипт напечатает адрес панели и пароль администратора. Больше ничего вводить не
@@ -37,14 +37,14 @@ curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quicksta
 Со своим доменом (заранее направьте на сервер A-запись):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh -s -- --domain kervax.example.com
+curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh -s -- --domain kervax.example.com
 ```
 
 Сразу с ограничением доступа по IP — рекомендуется, если панель смотрит в
 интернет:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh -s -- --allow-ips "203.0.113.10 198.51.100.23"
+curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh -s -- --allow-ips "203.0.113.10 198.51.100.23"
 ```
 
 ### Что скрипт делает
@@ -74,7 +74,7 @@ curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quicksta
 вовсе. Панель встает, https нет, и агенты не ставятся.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart-ru.sh | sudo sh -s -- --local-ca
+curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart-ru.sh | sudo sh -s -- --local-ca
 ```
 
 Что меняется:

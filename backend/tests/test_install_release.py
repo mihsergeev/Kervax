@@ -12,6 +12,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -577,3 +578,16 @@ def test_quickstart_documents_the_release_pinning(name):
     head = s[:s.index("\nset -eu\n")]
     assert "--version <vX.Y.Z>" in head and "--allow-downgrade" in head and "KERVAX_VERSION" in head
     assert "git pull" not in s and "(umask 077 && cp .env.example .env)" in s
+
+
+def test_quickstart_commands_take_the_released_script():
+    # Команда установки берет скрипт из вложения последнего выпуска, а не из main: иначе любой
+    # коммит в main сразу исполнялся бы от root на новых установках в обход релизного гейта
+    root = Path(__file__).resolve().parents[2]
+    raw = re.compile(r"raw\.githubusercontent\.com/[^/]+/[^/]+/[^/]+/ops/quickstart")
+    asset = re.compile(r"github\.com/mihsergeev/Kervax/releases/latest/download/quickstart(-ru)?\.sh")
+    for name in ("README.md", "README.ru.md", "docs/install.md", "docs/install.ru.md",
+                 "ops/quickstart.sh", "ops/quickstart-ru.sh"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert not raw.search(text), name
+        assert asset.search(text), name

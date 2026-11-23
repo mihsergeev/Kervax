@@ -1,16 +1,18 @@
 #!/bin/sh
 # Kervax: deploy the panel on a clean server with one command.
 #
-#   curl -fsSL https://raw.githubusercontent.com/mihsergeev/Kervax/main/ops/quickstart.sh | sudo sh
+#   curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh
 #
 # What it does: installs Docker (if missing), brings up caddy-docker-proxy for TLS,
 # clones the repository, generates the secrets, starts the panel and prints its
 # address together with the admin password.
 #
-# Only this script comes from main. The repository is checked out at the latest release
-# tag and the images are pinned to it (KERVAX_VERSION in .env): the files and the images
-# are one released version, and a commit in main reaches an installation only through a
-# release. A repeated run upgrades to the newest release.
+# This script is attached to every GitHub Release as it is in the release tag, so the
+# command above runs the script of the newest release, not of main. The repository is
+# checked out at the latest release tag and the images are pinned to it (KERVAX_VERSION
+# in .env): the files and the images are one released version, and a commit in main
+# reaches an installation only through a release. A repeated run upgrades to the newest
+# release.
 #
 # The default domain is <public-IP>.sslip.io. sslip.io is a public DNS service that
 # answers with the address written in the name itself: 203.0.113.10.sslip.io →
