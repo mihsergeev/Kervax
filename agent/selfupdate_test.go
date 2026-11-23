@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // Самообновление во время выполняющейся команды: exec ждет, пока ее результат дойдет до
@@ -171,14 +172,19 @@ func TestReportCarriesDraining(t *testing.T) {
 	}
 	// проба: панель не снимает цель обновления, пока в отчете trial
 	trialFlag := func() any { m, _ := last.Load().(map[string]any); return m["trial"] }
+	trialFromV := func() any { m, _ := last.Load().(map[string]any); return m["trial_from"] }
 	setTrial(&trialFiles{})
 	defer setTrial(nil)
-	if _, err := send(srv.URL, "fake-token", report{}); err != nil || trialFlag() != true {
-		t.Fatalf("отчет пробы: %v, trial=%v", err, trialFlag())
+	trialMu.Lock()
+	trialFrom = "2.74"
+	trialMu.Unlock()
+	defer func() { trialMu.Lock(); trialFrom = ""; trialMu.Unlock() }()
+	if _, err := send(srv.URL, "fake-token", report{}); err != nil || trialFlag() != true || trialFromV() != "2.74" {
+		t.Fatalf("отчет пробы: %v, trial=%v, trial_from=%v", err, trialFlag(), trialFromV())
 	}
 	setTrial(nil)
-	if _, err := send(srv.URL, "fake-token", report{}); err != nil || trialFlag() != nil {
-		t.Fatalf("отчет после пробы: %v, trial=%v", err, trialFlag())
+	if _, err := send(srv.URL, "fake-token", report{}); err != nil || trialFlag() != nil || trialFromV() != nil {
+		t.Fatalf("отчет после пробы: %v, trial=%v, trial_from=%v", err, trialFlag(), trialFromV())
 	}
 }
 
@@ -337,8 +343,8 @@ func TestSelfUpdateTrialCommit(t *testing.T) {
 	}
 	// так стартует процесс, запущенный exec'ом из пробного бинаря
 	trialOnStart(p.bin, instKey)
-	if !trialPending() {
-		t.Fatal("пробный процесс себя не узнал")
+	if on, from := trialState(); !on || from != version {
+		t.Fatalf("пробный процесс себя не узнал: %v, с версии %q", on, from)
 	}
 	if err := selfUpdate("http://127.0.0.1:1", "9.100"); err == nil || !strings.Contains(err.Error(), "на пробе") {
 		t.Fatalf("обновление поверх непринятой пробы: %v", err)
@@ -385,27 +391,94 @@ func TestSelfUpdateTrialCommit(t *testing.T) {
 	}
 }
 
-// Экземпляры с общим бинарем: пока шла проба A, штатный заменил экземпляр B. A поверх не
-// пишет и пробу снимает без неудачи.
+// markedBin - содержимое бинаря с меткой версии v (как у агента 2.75+)
+func markedBin(name, v string) string {
+	return name + "\x00garbage\x00KERVAX_AGENT_VERSION=" + v + "\x00tail"
+}
+
+// Экземпляры с общим бинарем: пока шла проба A, штатный заменил экземпляр B версией не старше
+// нашей. A поверх не пишет и пробу снимает без неудачи.
 func TestSelfUpdateTrialDoesNotOverwriteOtherInstance(t *testing.T) {
-	self, p := trialSetup(t)
-	runTrial(t, self, version, []byte("trial A")) // версия пробы = version этого процесса
-	trialOnStart(p.bin, instKey)
-	os.WriteFile(self, []byte("committed by B"), 0o755)
-	for i := 0; i < 3; i++ {
-		trialReportOK()
+	for _, other := range []string{version, "99.0"} {
+		self, p := trialSetup(t)
+		runTrial(t, self, version, []byte("trial A")) // версия пробы = version этого процесса
+		trialOnStart(p.bin, instKey)
+		byB := markedBin("committed by B", other)
+		os.WriteFile(self, []byte(byB), 0o755)
+		for i := 0; i < 3; i++ {
+			trialReportOK()
+		}
+		if trialPending() {
+			t.Fatalf("штатный %s: проба не снята", other)
+		}
+		if readFile(t, self) != byB {
+			t.Fatalf("проба A записала поверх штатного %s, который поставил экземпляр B", other)
+		}
+		if _, err := os.Stat(p.mark); !os.IsNotExist(err) {
+			t.Fatal("маркер снятой пробы остался")
+		}
+		if e, _ := lastUpdateError.Load().(string); e != "" {
+			t.Fatalf("снятая проба засчитана как ошибка: %q", e)
+		}
 	}
-	if trialPending() {
-		t.Fatal("проба не снята")
+}
+
+// Гонка экземпляров с разными панелями (2.75): A поставил 2.79, пока шла проба 2.80 у B.
+// Побеждает новейшая версия, а не первый коммит: B ставит свою поверх. В 2.74 B тихо снимал
+// пробу, работал 2.80 из пробного файла, панель снимала цель, а после рестарта нода была 2.79.
+// Бинарь без метки - агент до 2.75, он старше этого кода.
+func TestTrialCommitNewestWins(t *testing.T) {
+	for _, installed := range []string{markedBin("committed by A", "2.74"), markedBin("by A", "1.9.99"), "pre-2.75 binary"} {
+		self, p := trialSetup(t)
+		runTrial(t, self, version, []byte("trial B"))
+		trialOnStart(p.bin, instKey)
+		os.WriteFile(self, []byte(installed), 0o755)
+		for i := 0; i < 3; i++ {
+			trialReportOK()
+		}
+		if trialPending() || readFile(t, self) != "trial B" {
+			t.Fatalf("штатный %q старше пробы, а проба не поставлена", installed)
+		}
+		for _, f := range []string{p.bin, p.mark} {
+			if _, err := os.Stat(f); !os.IsNotExist(err) {
+				t.Fatalf("%s остался", f)
+			}
+		}
+		// следующий старт штатного (это уже проба B) ничего не откатывает
+		trialOnStart(self, instKey)
+		if v, _ := rejectedVersion.Load().(string); v != "" {
+			t.Fatalf("принятая версия отвергнута: %q", v)
+		}
 	}
-	if readFile(t, self) != "committed by B" {
-		t.Fatal("проба A записала поверх штатного, который сменил экземпляр B")
+}
+
+// Метка версии - межверсионный контракт: проба 2.76 читает ее из штатного файла 2.75. Метка
+// есть в собранном бинаре (этот тестовый бинарь собран из тех же исходников).
+func TestVersionMark(t *testing.T) {
+	if versionMark != "\x00KERVAX_AGENT_VERSION="+version+"\x00" {
+		t.Fatalf("формат метки: %q", versionMark)
 	}
-	if _, err := os.Stat(p.mark); !os.IsNotExist(err) {
-		t.Fatal("маркер снятой пробы остался")
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if e, _ := lastUpdateError.Load().(string); e != "" {
-		t.Fatalf("снятая проба засчитана как ошибка: %q", e)
+	if v := binaryVersion(exe); v != version {
+		t.Fatalf("метка в бинаре: %q, нужна %q", v, version)
+	}
+	for in, want := range map[string]string{
+		"x\x00KERVAX_AGENT_VERSION=2.80\x00":                                "2.80",
+		"\x00KERVAX_AGENT_VERSION=bad\x00 \x00KERVAX_AGENT_VERSION=3.1\x00": "3.1",
+		"\x00KERVAX_AGENT_VERSION=2.80":                                     "",
+		"\x00KERVAX_AGENT_VERSION=\x00":                                     "",
+		"\x00KERVAX_AGENT_VERSION=1." + strings.Repeat("1", 40) + "\x00":    "",
+		"no mark at all": "",
+	} {
+		if got := markedVersion([]byte(in)); got != want {
+			t.Fatalf("%q: %q, нужна %q", in, got, want)
+		}
+	}
+	if binaryVersion(filepath.Join(t.TempDir(), "missing")) != "" {
+		t.Fatal("версия у несуществующего файла")
 	}
 }
 
@@ -573,14 +646,117 @@ func TestSelfUpdateChecksFreshnessByOTAClock(t *testing.T) {
 	}))
 	defer srv.Close()
 	err := selfUpdate(srv.URL, "9.99")
-	if err == nil || !strings.Contains(err.Error(), "старше") || !isPermanent(err) {
+	if err == nil || !strings.Contains(err.Error(), "старше 120 дней по часам ноды") || isPermanent(err) {
 		t.Fatalf("манифест судили не по часам OTA: %v", err)
 	}
-	os.WriteFile(clock, []byte("x"), 0o644)
-	otaWall = func() time.Time { return real }
-	if err := otaFreshErr(errors.New("старше"), real.Add(48*time.Hour)); !strings.Contains(err.Error(), "часы ноды") {
-		t.Fatalf("в отказе нет часов ноды: %v", err)
+}
+
+// signedPanel - панель с подписанным манифестом 9.99, выпущенным released; бинаря у нее нет
+func signedPanel(t *testing.T, released time.Time) string {
+	t.Helper()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	oldPub := updatePubKeyB64
+	t.Cleanup(func() { updatePubKeyB64 = oldPub })
+	updatePubKeyB64 = base64.StdEncoding.EncodeToString(pub)
+	man, _ := json.Marshal(map[string]any{"version": "9.99", "released_at": released.UTC().Format(time.RFC3339),
+		"artifacts": map[string]any{"amd64": map[string]any{"sha256": shaOf("x"), "size": 1}, "arm64": map[string]any{"sha256": shaOf("x"), "size": 1}}})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/agent/manifest":
+			w.Write(man)
+		case "/api/agent/manifest.sig":
+			w.Write([]byte(base64.StdEncoding.EncodeToString(ed25519.Sign(priv, man))))
+		default:
+			http.Error(w, "no binary here", http.StatusForbidden)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// Часы на старте убежали вперед, отметка загрузки ушла с ними; потом часы поправили. Отказ по
+// свежести называет оба времени и причину - часы, а не старый выпуск, - и он временный: когда
+// синхронизация сбросит отметку, следующая попытка проходит. В 2.74 отказ был окончательным,
+// версию не пробовали до перезапуска агента, а текст звал искать свежий выпуск.
+func TestOTAFreshRefusalByClockIsTemporary(t *testing.T) {
+	if _, err := os.Stat("/proc/sys/kernel/random/boot_id"); err != nil {
+		t.Skip("нет boot_id")
 	}
+	oldWall, oldSync, oldPath := otaWall, clockSynced, otaClockPath
+	defer func() { otaWall, clockSynced, otaClockPath = oldWall, oldSync, oldPath }()
+	clock := filepath.Join(t.TempDir(), ".kervax-agent.clock")
+	otaClockPath = func() string { return clock }
+	clockSynced = func() bool { return false }
+	real := time.Now()
+	url := signedPanel(t, real.Add(-10*24*time.Hour))
+	otaWall = func() time.Time { return real.Add(200 * 24 * time.Hour) }
+	otaNow() // первая отметка загрузки - по убежавшим часам
+	otaWall = func() time.Time { return real }
+	err := selfUpdate(url, "9.99")
+	if err == nil || isPermanent(err) {
+		t.Fatalf("отказ по отметке часов окончательный: %v", err)
+	}
+	for _, want := range []string{"по отметке часов этой загрузки", real.UTC().Format("2006-01-02 15:04"),
+		real.Add(200 * 24 * time.Hour).UTC().Format("2006-01-02"), "синхронизации NTP"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("в отказе нет %q: %v", want, err)
+		}
+	}
+	// демон NTP синхронизировал часы: отметка сброшена, свежесть пройдена - дальше скачивание
+	clockSynced = func() bool { return true }
+	if err := selfUpdate(url, "9.99"); err == nil || strings.Contains(err.Error(), "манифест") {
+		t.Fatalf("после синхронизации отказ по свежести: %v", err)
+	}
+}
+
+// Отказы по свежести: оба времени в тексте, укладываются в 300 символов панели вместе с версией,
+// и ни один не окончательный - все зависят от часов. Выпуск из будущего - часы отстают.
+func TestOTAFreshErrText(t *testing.T) {
+	oldWall := otaWall
+	defer func() { otaWall = oldWall }()
+	real := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
+	otaWall = func() time.Time { return real }
+	cases := []struct {
+		released, now time.Time
+		want          []string
+	}{
+		{real.Add(-130 * 24 * time.Hour), real, []string{"старше 120 дней по часам ноды (2026-11-23 12:00 UTC)", "верные часы"}},
+		{real.Add(-130 * 24 * time.Hour), real.Add(30 * 24 * time.Hour), []string{"по отметке часов этой загрузки (2026-12-23 12:00 UTC)", "часы ноды 2026-11-23 12:00"}},
+		{real.Add(-100 * 24 * time.Hour), real.Add(30 * 24 * time.Hour), []string{"по отметке", "часы ноды 2026-11-23 12:00"}},
+		{real.Add(48 * time.Hour), real, []string{"в будущем по часам ноды (2026-11-23 12:00 UTC)", "отстают"}},
+	}
+	for _, c := range cases {
+		m := manifest{Version: "2.123", ReleasedAt: c.released.Format(time.RFC3339)}
+		ferr := manifestFresh(m, c.now)
+		if ferr == nil {
+			t.Fatalf("%v: манифест свежий", c.released)
+		}
+		err := otaFreshErr(m, ferr, c.now)
+		if isPermanent(err) {
+			t.Fatalf("отказ по часам окончательный: %v", err)
+		}
+		for _, w := range c.want {
+			if !strings.Contains(err.Error(), w) {
+				t.Fatalf("в отказе нет %q: %v", w, err)
+			}
+		}
+		lastUpdateError.Store("2.123: " + err.Error())
+		if txt := lastUpdateErrorText(); txt != "2.123: "+err.Error() {
+			t.Fatalf("текст обрезан для панели (%d символов): %q", len([]rune("2.123: "+err.Error())), txt)
+		}
+	}
+	lastUpdateError.Store("")
+	// нет даты выпуска - от часов не зависит, окончательный
+	m := manifest{Version: "2.123"}
+	if err := otaFreshErr(m, manifestFresh(m, real), real); !isPermanent(err) {
+		t.Fatalf("манифест без даты: %v", err)
+	}
+	// длинный текст режется по символам, а не посреди буквы
+	lastUpdateError.Store(strings.Repeat("я", 400))
+	if txt := lastUpdateErrorText(); len([]rune(txt)) != 300 || !utf8.ValidString(txt) {
+		t.Fatalf("срез: %d символов, utf8 %v", len([]rune(txt)), utf8.ValidString(txt))
+	}
+	lastUpdateError.Store("")
 }
 
 // timesync-setup 0.4: HTTP-фолбэк не уводит часы больше чем на 6 часов назад от последнего

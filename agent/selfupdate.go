@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -221,12 +222,23 @@ var (
 	trialMu      sync.Mutex
 	trialNow     *trialFiles // этот процесс - пробный и еще не стал штатным
 	trialReports int         // сколько его отчетов панель уже приняла
+	trialFrom    string      // с какой версии проба (из маркера): к ней вернет systemd, если проба сорвется
 )
 
 func trialPending() bool {
 	trialMu.Lock()
 	defer trialMu.Unlock()
 	return trialNow != nil
+}
+
+// trialState - для отчета: идет ли проба и с какой версии
+func trialState() (bool, string) {
+	trialMu.Lock()
+	defer trialMu.Unlock()
+	if trialNow == nil {
+		return false, ""
+	}
+	return true, trialFrom
 }
 
 func setTrial(p *trialFiles) {
@@ -383,7 +395,14 @@ func trialOnStart(self, key string) {
 	if m := trialName.FindStringSubmatch(filepath.Base(self)); m != nil {
 		if m[2] == key {
 			p := trialPaths(filepath.Join(filepath.Dir(self), m[1]), key)
+			from := ""
+			if mk, ok := readTrialMark(p.mark); ok && len(mk.From) <= 32 && versionRe.MatchString(mk.From) {
+				from = mk.From
+			}
 			setTrial(&p)
+			trialMu.Lock()
+			trialFrom = from
+			trialMu.Unlock()
 			fmt.Printf("kervax-agent %s: пробный запуск, %s заменим после %d принятых отчетов и %s работы\n",
 				version, p.self, trialCommitReports, trialCommitAge)
 		}
@@ -412,6 +431,37 @@ func trialOnStart(self, key string) {
 	fmt.Fprintln(os.Stderr, "kervax-agent:", msg)
 	lastUpdateError.Store(m.Version + ": " + msg)
 }
+
+// versionMark - версия в файле бинаря: при коммите пробы ее читают из штатного файла, не
+// запуская его (binaryVersion). Формат - часть межверсионного контракта (TestVersionMark).
+var versionMark = "\x00KERVAX_AGENT_VERSION=" + version + "\x00"
+
+// binaryVersion - версия из метки в файле бинаря; "" - файла нет или метки нет (агент до 2.75)
+func binaryVersion(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return markedVersion(b)
+}
+
+// markedVersion ищет метку по префиксу, вырезанному из своей же метки: отдельной строки с
+// префиксом в бинаре нет, и найти можно только настоящую метку
+func markedVersion(b []byte) string {
+	key := []byte(versionMark[:strings.IndexByte(versionMark, '=')+1])
+	for {
+		i := bytes.Index(b, key)
+		if i < 0 {
+			return ""
+		}
+		b = b[i+len(key):]
+		if end := bytes.IndexByte(b, 0); end > 0 && end <= 32 && versionRe.Match(b[:end]) {
+			return string(b[:end])
+		}
+	}
+}
+
+var versionRe = regexp.MustCompile(`^\d+(\.\d+)*$`)
 
 var flockFn = syscall.Flock // тесты подставляют отказ
 
@@ -459,12 +509,25 @@ func trialReportOK() {
 	m, ok := readTrialMark(p.mark)
 	if !ok || m.Version != version || m.SelfSHA == "" || fileSHA(p.self) != m.SelfSHA {
 		// Штатный за время пробы сменил другой экземпляр агента (общий бинарь) или маркер
-		// пропал: поверх не пишем. Это не неудача версии - пробу тихо снимаем; этот процесс
-		// работает дальше, следующий старт возьмет штатный бинарь.
-		os.Remove(p.mark)
-		setTrial(nil)
-		fmt.Fprintf(os.Stderr, "kervax-agent %s: %s сменился во время пробы - не заменяю его, проба снята\n", version, p.self)
-		return
+		// пропал. Побеждает новейшая версия, а не первый коммит (2.75): в 2.74 проба 2.80 тихо
+		// снималась, если другой экземпляр успел поставить 2.79, процесс работал 2.80 из
+		// пробного файла, панель снимала цель по его отчету, а после рестарта нода молча
+		// становилась 2.79. Штатный не старше нас - поверх не пишем (анти-откат), пробу снимаем
+		// без неудачи: после рестарта будет версия не ниже нашей. Старше или версии в нем нет
+		// (бинари до 2.75 метку не несут, они старше этого кода) - ставим свою поверх.
+		inst := binaryVersion(p.self)
+		if inst != "" && !versionNewer(version, inst) {
+			os.Remove(p.mark)
+			setTrial(nil)
+			fmt.Fprintf(os.Stderr, "kervax-agent %s: %s сменился во время пробы на %s - не заменяю его, проба снята\n",
+				version, p.self, inst)
+			return
+		}
+		if inst == "" {
+			inst = "без метки версии"
+		}
+		fmt.Fprintf(os.Stderr, "kervax-agent %s: %s сменился во время пробы, там версия старше (%s) - ставлю свою\n",
+			version, p.self, inst)
 	}
 	if err := os.Rename(p.bin, p.self); err != nil {
 		// повторим со следующим отчетом; до тех пор юнит при рестарте поднимет прежнюю версию
@@ -580,13 +643,28 @@ func otaClock(path, boot string, up float64, now time.Time, synced func() bool) 
 	return now
 }
 
-// otaFreshErr - отказ по свежести с обоими временами: по отметке загрузки «сейчас» может
-// отличаться от часов ноды, и без этого «манифест старше 120 дней» сбивал с толку
-func otaFreshErr(err error, now time.Time) error {
+// otaFreshErr - отказ по свежести, которым судили по now (otaNow). Отказ временный: он зависит от
+// часов, а их поправят - синхронизация сбросит отметку, и следующая попытка пройдет. В 2.74 отказ
+// был окончательным: версию больше не пробовали до перезапуска агента, даже когда часы уже
+// исправили, а текст «старше 120 дней (нужен свежий выпуск)» звал искать новый выпуск, когда
+// дело было в часах. Поэтому в тексте - время, по которому судили, и часы ноды. Длина: панель
+// принимает 300 символов вместе с версией впереди (TestOTAFreshErrText).
+func otaFreshErr(m manifest, err error, now time.Time) error {
+	const tf = "2006-01-02 15:04"
 	wall := otaWall()
-	if d := now.Sub(wall); d > time.Minute || d < -time.Minute {
-		return fmt.Errorf("%w (время проверки %s по отметке загрузки, часы ноды %s)", err,
-			now.UTC().Format("2006-01-02 15:04"), wall.UTC().Format("2006-01-02 15:04"))
+	t, perr := time.Parse(time.RFC3339Nano, m.ReleasedAt)
+	switch {
+	case perr != nil:
+		return permanent(err) // даты нет - от часов не зависит
+	case t.After(now):
+		return fmt.Errorf("манифест %s выпущен %s, в будущем по часам ноды (%s UTC) - отказ: часы ноды отстают? Повторим позже",
+			m.Version, t.UTC().Format(tf), wall.UTC().Format(tf))
 	}
-	return err
+	if d := now.Sub(wall); d > time.Minute || d < -time.Minute {
+		return fmt.Errorf("манифест %s выпущен %s, старше %d дней по отметке часов этой загрузки (%s UTC), а часы ноды %s UTC: "+
+			"часы отводили назад или раньше они убегали вперед. Повторим; отметка сбросится после синхронизации NTP или перезагрузки",
+			m.Version, t.UTC().Format("2006-01-02"), int(otaMaxAge.Hours()/24), now.UTC().Format(tf), wall.UTC().Format(tf))
+	}
+	return fmt.Errorf("манифест %s выпущен %s, старше %d дней по часам ноды (%s UTC) - отказ: нужен свежий выпуск или верные часы ноды",
+		m.Version, t.UTC().Format("2006-01-02"), int(otaMaxAge.Hours()/24), wall.UTC().Format(tf))
 }

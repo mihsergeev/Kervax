@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.74"
+const version = "2.75"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -76,8 +76,10 @@ var agentProxy string
 // dialTargetFromURL — host:port из URL панели (порт по схеме, если не задан).
 func lastUpdateErrorText() string {
 	v, _ := lastUpdateError.Load().(string)
-	if len(v) > 300 {
-		v = v[:300]
+	// панель принимает 300 символов; режем по символам, а не по байтам: кириллица вдвое
+	// длиннее в байтах, и срез по байтам обрывал текст на середине и посреди буквы
+	if r := []rune(v); len(r) > 300 {
+		v = string(r[:300])
 	}
 	return v
 }
@@ -234,6 +236,9 @@ type report struct {
 	// 2.74: процесс - проба новой версии, штатный бинарь еще прежний. Панель цель обновления не
 	// снимает, пока проба не принята: упадет - прежняя версия повторит
 	Trial bool `json:"trial,omitempty"`
+	// 2.75: с какой версии идет проба - к ней вернет systemd, если проба сорвется (панель
+	// показывает «на пробе» в карточке и в ходе обновления)
+	TrialFrom string `json:"trial_from,omitempty"`
 	// Docker на ноде (nil = не установлен). Present без Access = docker есть, но
 	// агент не видит сокет (нет доступа) → панель подскажет безопасную настройку.
 	Docker *dockerInfo `json:"docker,omitempty"`
@@ -3119,7 +3124,7 @@ func selfUpdate(panelURL, want string) error {
 	}
 	now := otaNow()
 	if err := manifestFresh(m, now); err != nil {
-		return permanent(otaFreshErr(err, now))
+		return otaFreshErr(m, err, now)
 	}
 	art, ok := m.Artifacts[runtime.GOARCH]
 	if !ok {
@@ -9892,7 +9897,7 @@ func send(url, token string, r report) (config, error) {
 	// сетевая задержка, а не «collect занял 2с». Порог алерта её с запасом перекрывает.
 	r.ClockUnix = time.Now().Unix()
 	r.Draining = tasks.isDraining()
-	r.Trial = trialPending()
+	r.Trial, r.TrialFrom = trialState()
 	raw, _ := json.Marshal(r)
 	// Тело сжимаем: DPI рубит соединение по счётчику отданных байт (~16-24 КБ,
 	// см. panelTransport). Отчёт в 13 КБ ужимается примерно до 2 КБ, самый жирный

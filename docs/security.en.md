@@ -181,8 +181,10 @@ commands in progress have finished and sent their results. The installed file is
 atomically (`rename`) only after the panel accepts three reports of the new binary and it has
 run for five minutes; if it does not start, crashes or restarts before that, systemd brings the
 previous version back up, and after three such failures in a row that version is not installed
-again. If another agent instance replaced the installed file in the meantime, the trial is
-dropped without writing over it. While the agent drains, the panel gives it no new commands. The previous binary stays
+again. If another agent instance replaced the installed file in the meantime, the newest version
+wins (agent 2.75+): if that version is not older than the trial, the trial is dropped without
+writing over it; if it is older, the trial replaces it with the same `rename`. The agent reads
+the installed file's version from a mark in the binary without running it. While the agent drains, the panel gives it no new commands. The previous binary stays
 next to it as `kervax-agent.prev`. Freshness of the signed manifest does not rely on the
 node's clock alone: stepping the clock back within one boot does not extend it.
 
