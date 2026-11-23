@@ -61,18 +61,9 @@ WORKDIR /srv
 # Зависимости - до кода: готовая установка из стадии pydeps, без сети.
 COPY --from=pydeps /install /usr/local
 
-COPY backend/pyproject.toml ./
-COPY backend/app ./app
-# Пакет панели собирает hatchling из того же lock. pip check - lock полон для Python 3.15.
-# pip нужен только при сборке. Его vendored-библиотеки не участвуют в работе
-# панели, но иначе остаются в образе со своим независимым циклом обновлений.
-RUN pip install --no-cache-dir --no-deps --no-build-isolation --no-index . \
- && python -m pip check \
- && python -m pip uninstall --yes pip
-
-COPY backend/alembic.ini ./
-COPY backend/alembic ./alembic
-
+# Раздаваемое агентам - до кода панели: бинари меняются только с релизом агента, код
+# панели - каждый выпуск. В таком порядке слои с ~22 МБ бинарей берутся из кэша, и
+# выкладка их заново не собирает и не экспортирует.
 # бинари агента, которые панель раздаёт (/api/agent/download|install.sh)
 COPY --from=agent /out/kervax-agent-amd64 /out/kervax-agent-arm64 \
      /out/kervax-agent-amd64.gz /out/kervax-agent-arm64.gz /srv/agent/
@@ -97,8 +88,29 @@ RUN set -eu; \
 COPY agent/*.sh /srv/agent/
 COPY ops/windows-monitor.ps1 /srv/agent/
 
-# Всё, что панель читает на ходу, отдаём пользователю, под которым она работает.
-RUN chown -R kervax:kervax /srv
+COPY backend/pyproject.toml ./
+COPY backend/app ./app
+COPY backend/alembic.ini ./
+COPY backend/alembic ./alembic
+# Пакет панели собирает hatchling из того же lock. pip check - lock полон для Python 3.15.
+# pip нужен только при сборке. Его vendored-библиотеки не участвуют в работе
+# панели, но иначе остаются в образе со своим независимым циклом обновлений.
+# .pyc кода и миграций - здесь же: панель запускается из /srv, а писать туда не может.
+RUN pip install --no-cache-dir --no-deps --no-build-isolation --no-index . \
+ && python -m pip check \
+ && python -m pip uninstall --yes pip \
+ && python -m compileall -q -j 0 app alembic
+
+# Код, миграции и раздаваемые агентам файлы принадлежат root, панель их только читает:
+# ее процесс не может подменить ни свой код, ни бинарь, который скачает весь парк.
+# Раньше здесь был chown -R kervax /srv - копия всего /srv отдельным слоем (+31 МБ на
+# каждый выпуск) и десятки секунд сборки и экспорта на нагруженной панели. В рантайме
+# панель пишет только в KERVAX_DATA_DIR (том /data, владельца выравнивает entrypoint);
+# /srv/data - для запуска без него (по умолчанию ./data от /srv). Сборка падает, если
+# пользователь панели не может что-то в /srv прочитать: прежний chown это скрывал.
+RUN install -d -o kervax -g kervax /srv/data \
+ && unreadable="$(gosu kervax find /srv ! -readable -print)" \
+ && { [ -z "$unreadable" ] || { echo "kervax cannot read: $unreadable" >&2; exit 1; }; }
 
 COPY backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
