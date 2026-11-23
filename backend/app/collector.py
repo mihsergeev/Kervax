@@ -1037,25 +1037,30 @@ async def send_alerts_soon(session_factory, pending: list, now: datetime) -> Non
 
 # Решение по мониторам до 0147 (_settle_legacy_targets): имя, которое не разрешилось, пробуем
 # снова не раньше чем через DNS_RETRY; одновременно не больше SETTLE_PARALLEL запросов, и тик ждет
-# их не дольше SETTLE_BUDGET секунд - не успевшие решаются на одном из следующих тиков
+# их не дольше SETTLE_BUDGET секунд. Начатый и не успевший резолв не отменяется: он доделывается в
+# фоне (_legacy_inflight, до SETTLE_LOOKUP_TIMEOUT на имя), а результат забирает следующий тик.
+# Раньше его отменяли и начинали заново, и имя, которое резолвится дольше SETTLE_BUDGET, не
+# получало решения никогда - монитор так и оставался с NULL, а NULL пускает во внутреннюю сеть
 SETTLE_PARALLEL = 8
 SETTLE_BUDGET = 1.0
+SETTLE_LOOKUP_TIMEOUT = 10.0
 _legacy_retry: dict[int, float] = {}
+_legacy_inflight: dict[int, tuple[asyncio.Task, Check]] = {}
 
 
-async def _legacy_internal_target(check: Check) -> tuple[bool | None, list[str]]:
+async def _legacy_internal_target(check: Check, timeout: float = 3.0) -> tuple[bool | None, list[str]]:
     """Решение по монитору, заведенному до 0147 (allow_internal_target = NULL), - то же, что
     _target_ok при сохранении админом: внутренний адрес одобрен, внешний закреплен как внешний.
     None - имя пока не разрешилось. Второе - имена, которые одобрены только по ответу DNS."""
     hosts = [parents_mod.target_host(check)]
     if check.type == "dns":
         server = (check.dns_server or "").strip()
-        # _target_ok классифицирует строку резолвера как есть: DoH-адрес (старые записи) целиком не
-        # резолвится и внутренним не считается, поэтому и здесь не ждем, пока он "разрешится"
+        # DoH-адрес (старые записи) исполнитель не спрашивает вовсе (checks._run_dns), поэтому и
+        # здесь не ждем, пока он "разрешится"
         hosts.append("" if "/" in server else server)
     internal, by_dns = False, []
     for host in filter(None, hosts):
-        cls, addresses = await net_guard.classified_addresses(host, 3.0)
+        cls, addresses = await net_guard.classified_addresses(host, timeout)
         if cls == net_guard.PUBLIC and not addresses:
             return None, []
         if cls == net_guard.FORBIDDEN:
@@ -1072,24 +1077,45 @@ async def _settle_legacy_targets(session_factory: async_sessionmaker[AsyncSessio
     записываем один раз, дальше монитор живет как заведенный после 0147. Одобрение имени только по
     ответу DNS неотличимо от одобрения админом, поэтому оно попадает в журнал действий."""
     mono = time.monotonic()
-    legacy = [c for c in due if c.allow_internal_target is None and _legacy_retry.get(c.id, 0) <= mono]
-    if not legacy:
-        return
-    sem = asyncio.Semaphore(SETTLE_PARALLEL)
+    loop = asyncio.get_running_loop()
+    for cid, (task, _c) in list(_legacy_inflight.items()):
+        if task.get_loop() is not loop:  # другой цикл событий (перезапуск): не дождемся
+            del _legacy_inflight[cid]
+    busy = sum(not task.done() for task, _c in _legacy_inflight.values())
+    legacy = [c for c in due if c.allow_internal_target is None and c.id not in _legacy_inflight
+              and _legacy_retry.get(c.id, 0) <= mono]
+    finished: list[tuple[asyncio.Task, Check]] = []
+    if legacy and busy < SETTLE_PARALLEL:
+        # вместе с фоновыми - не больше SETTLE_PARALLEL резолвов разом
+        sem = asyncio.Semaphore(SETTLE_PARALLEL - busy)
+        started: set[int] = set()
 
-    async def one(c: Check) -> tuple[bool | None, list[str]]:
-        async with sem:
-            return await _legacy_internal_target(c)
+        async def one(c: Check) -> tuple[bool | None, list[str]]:
+            async with sem:
+                started.add(c.id)
+                return await _legacy_internal_target(c, SETTLE_LOOKUP_TIMEOUT)
 
-    tasks = {asyncio.ensure_future(one(c)): c for c in legacy}
-    done, pending = await asyncio.wait(tasks, timeout=SETTLE_BUDGET)
-    for task in pending:
-        task.cancel()
-        _legacy_retry[tasks[task].id] = mono + parents_mod.DNS_RETRY
-    async with session_factory() as session:
-        for task in done:
+        tasks = {asyncio.ensure_future(one(c)): c for c in legacy}
+        done, pending = await asyncio.wait(tasks, timeout=SETTLE_BUDGET)
+        finished += [(task, tasks[task]) for task in done]
+        for task in pending:
             c = tasks[task]
-            allow, by_dns = task.result() if not task.exception() else (None, [])
+            if c.id in started:
+                _legacy_inflight[c.id] = (task, c)
+            else:
+                # очередь до резолва не дошла: это не попытка, следующий тик начнет заново
+                task.cancel()
+    for cid, (task, c) in list(_legacy_inflight.items()):
+        if task.done():
+            del _legacy_inflight[cid]
+            finished.append((task, c))
+    if not finished:
+        return
+    now_due = {c.id: c for c in due}
+    async with session_factory() as session:
+        for task, c in finished:
+            failed = task.cancelled() or task.exception() is not None
+            allow, by_dns = (None, []) if failed else task.result()
             if allow is None:
                 _legacy_retry[c.id] = mono + parents_mod.DNS_RETRY
                 continue
@@ -1102,6 +1128,9 @@ async def _settle_legacy_targets(session_factory: async_sessionmaker[AsyncSessio
             if not res.rowcount:
                 continue
             c.allow_internal_target = allow
+            # решение из фона: у этого тика своя копия монитора, и проверка идет уже с ним
+            if (now_c := now_due.get(c.id)) is not None:
+                now_c.allow_internal_target = allow
             if allow and by_dns:
                 await audit.record(session, "system", "internal_target_auto", c.name, "; ".join(by_dns))
 

@@ -1607,6 +1607,10 @@ def dns_expected(text: str, rtype: str) -> list[str]:
     return out
 
 
+DOH_UNSUPPORTED = "резолвер DoH (https://...) не поддерживается: укажите IP-адрес DNS-сервера, например 1.1.1.1"
+DNS_SERVER_NOT_IP = "DNS-сервер монитора - не IP-адрес: укажите IP-адрес DNS-сервера, например 1.1.1.1"
+
+
 async def _run_dns(check) -> CheckOutcome:
     """DNS-монитор: запись в ожидаемое значение, а без ожидаемого - не изменилась с первого
     ответа (его запоминает record_outcome). Сменился A у домена, пропал MX, уехал NS к другому
@@ -1620,6 +1624,13 @@ async def _run_dns(check) -> CheckOutcome:
     server = (getattr(check, "dns_server", "") or "").strip()
     timeout = max(check.timeout_ms, 1000) / 1000.0
     if server:
+        try:
+            ipaddress.ip_address(server)
+        except ValueError:
+            # резолвер - только IP (_dns_defaults при сохранении). Старые записи с DoH-адресом
+            # dnspython спрашивал по https на любой хост, мимо net_guard: ip_class не IP считает
+            # внешним. Такой запрос не уходит, монитор объясняет, что поправить
+            return CheckOutcome("down", message=DOH_UNSUPPORTED if "/" in server else DNS_SERVER_NOT_IP)
         blocked = net_guard.block_reason(net_guard.ip_class(server), _allows_internal(check))
         if blocked:
             return CheckOutcome("down", message=blocked)

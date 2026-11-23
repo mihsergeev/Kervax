@@ -186,12 +186,23 @@ async def test_settle_does_not_overwrite_a_concurrent_edit(client, monkeypatch):
         assert not list(await s.scalars(select(AuditLog).where(AuditLog.action == "internal_target_auto")))
 
 
+async def _drop_inflight() -> None:
+    tasks = [t for t, _c in collector._legacy_inflight.values()]
+    for t in tasks:
+        t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def test_slow_dns_does_not_hold_the_tick(client, monkeypatch):
+    lookups = []
+
     async def resolve(host, timeout):
+        lookups.append(host)
         await asyncio.sleep(30)
         return ["10.0.0.9"]
 
     monkeypatch.setattr(collector, "_legacy_retry", {})
+    monkeypatch.setattr(collector, "_legacy_inflight", {})
     monkeypatch.setattr(collector, "SETTLE_BUDGET", 0.2)
     monkeypatch.setattr(net_guard, "_resolve", resolve)
     async with _factory(client)() as s:
@@ -199,10 +210,137 @@ async def test_slow_dns_does_not_hold_the_tick(client, monkeypatch):
         await s.commit()
         due = list(await s.scalars(select(Check)))
     loop = asyncio.get_running_loop()
-    t0 = loop.time()
-    await collector._settle_legacy_targets(_factory(client), due)
-    assert loop.time() - t0 < 2
-    assert set(collector._legacy_retry) == {c.id for c in due}
+    try:
+        t0 = loop.time()
+        await collector._settle_legacy_targets(_factory(client), due)
+        assert loop.time() - t0 < 2
+        # начатые резолвы доделываются в фоне, до остальных очередь не дошла - это не попытка
+        assert len(collector._legacy_inflight) == len(lookups) == collector.SETTLE_PARALLEL
+        assert collector._legacy_retry == {}
+        # пока фоновые не кончились, новые не начинаются и тик их не ждет
+        t0 = loop.time()
+        await collector._settle_legacy_targets(_factory(client), due)
+        assert loop.time() - t0 < 0.1
+        assert len(lookups) == collector.SETTLE_PARALLEL
+    finally:
+        await _drop_inflight()
+    # часть мест занята фоновыми: новых начинается только на свободные
+    collector._legacy_inflight.clear()
+    lookups.clear()
+    try:
+        await collector._settle_legacy_targets(_factory(client), due[:3])
+        assert len(lookups) == 3
+        await collector._settle_legacy_targets(_factory(client), due)
+        assert len(lookups) == len(collector._legacy_inflight) == collector.SETTLE_PARALLEL
+    finally:
+        await _drop_inflight()
+
+
+async def test_slow_dns_still_gets_a_decision(client, monkeypatch):
+    """Имя, которое резолвится дольше SETTLE_BUDGET: раньше резолв отменялся на каждом тике, и
+    монитор навсегда оставался с NULL (а NULL пускает во внутреннюю сеть)."""
+    answers = {"slow-inner.example.test": ["10.0.0.9"], "slow-public.example.test": ["8.8.8.8"]}
+    timeouts = set()
+
+    async def resolve(host, timeout):
+        timeouts.add(timeout)
+        await asyncio.sleep(0.5)
+        return answers[host]
+
+    monkeypatch.setattr(collector, "_legacy_retry", {})
+    monkeypatch.setattr(collector, "_legacy_inflight", {})
+    monkeypatch.setattr(collector, "SETTLE_BUDGET", 0.2)
+    # повторять сразу: даже так отмененный резолв решения не давал
+    monkeypatch.setattr(collector.parents_mod, "DNS_RETRY", 0)
+    monkeypatch.setattr(net_guard, "_resolve", resolve)
+    async with _factory(client)() as s:
+        s.add_all([Check(name="inner", type="http", target="https://slow-inner.example.test/"),
+                   Check(name="public", type="http", target="https://slow-public.example.test/")])
+        await s.commit()
+    loop = asyncio.get_running_loop()
+    try:
+        for _ in range(4):
+            async with _factory(client)() as s:
+                due = list(await s.scalars(select(Check).order_by(Check.id)))
+            t0 = loop.time()
+            await collector._settle_legacy_targets(_factory(client), due)
+            # тик ждет не дольше прежнего
+            assert loop.time() - t0 < collector.SETTLE_BUDGET + 0.3
+            await asyncio.sleep(0.4)
+    finally:
+        await _drop_inflight()
+    async with _factory(client)() as s:
+        got = {c.name: c.allow_internal_target for c in await s.scalars(select(Check))}
+        audit = [a.target for a in await s.scalars(
+            select(AuditLog).where(AuditLog.action == "internal_target_auto"))]
+    assert got == {"inner": True, "public": False}
+    assert audit == ["inner"]
+    # в фоне резолву дается больше, чем тику
+    assert timeouts == {collector.SETTLE_LOOKUP_TIMEOUT}
+    assert collector._legacy_inflight == {} and collector._legacy_retry == {}
+
+
+async def test_background_decision_reaches_the_monitor_of_this_tick(client, monkeypatch):
+    """Решение, пришедшее из фона, действует уже на проверку этого тика, а не следующего."""
+    gate = asyncio.Event()
+
+    async def resolve(host, timeout):
+        await gate.wait()
+        return ["8.8.8.8"]
+
+    monkeypatch.setattr(collector, "_legacy_retry", {})
+    monkeypatch.setattr(collector, "_legacy_inflight", {})
+    monkeypatch.setattr(collector, "SETTLE_BUDGET", 0.1)
+    monkeypatch.setattr(net_guard, "_resolve", resolve)
+    async with _factory(client)() as s:
+        s.add(Check(name="slow", type="http", target="https://slow-public.example.test/"))
+        await s.commit()
+        first = list(await s.scalars(select(Check)))
+    try:
+        await collector._settle_legacy_targets(_factory(client), first)
+        assert first[0].allow_internal_target is None
+        gate.set()
+        await asyncio.sleep(0.05)
+        async with _factory(client)() as s:
+            second = list(await s.scalars(select(Check)))
+        await collector._settle_legacy_targets(_factory(client), second)
+        assert second[0].allow_internal_target is False
+    finally:
+        await _drop_inflight()
+
+
+async def test_doh_resolver_of_an_old_dns_monitor_is_not_queried(monkeypatch):
+    """DoH-адрес в dns_server новые мониторы сохранить не дают (_dns_defaults: только IP), а
+    старые слали на него https-запрос через dnspython мимо net_guard - на любой хост, в том числе
+    внутренний. Теперь запроса нет, а монитор объясняет, что поправить."""
+    import dns.asyncresolver
+
+    sent = []
+
+    async def no_query(self, *a, **kw):
+        sent.append(self.nameservers)
+        raise AssertionError("DNS-запрос ушел")
+
+    async def send(self, request):
+        sent.append(str(request.url))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(dns.asyncresolver.Resolver, "resolve", no_query)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", send)
+    for allow in (None, False, True):
+        for server in ("https://10.0.0.53/dns-query", "https://doh.example.test/dns-query", "doh.example.test"):
+            check = types.SimpleNamespace(type="dns", target="example.test", dns_type="A", dns_server=server,
+                                          timeout_ms=1000, allow_internal_target=allow)
+            out = await checks_exec._run_dns(check)
+            assert out.status == "down"
+            want = checks_exec.DNS_SERVER_NOT_IP if server == "doh.example.test" else checks_exec.DOH_UNSUPPORTED
+            assert out.message == want, (server, allow)
+    assert sent == []
+    # IP-резолвер как был: запрос уходит
+    check = types.SimpleNamespace(type="dns", target="example.test", dns_type="A", dns_server="1.1.1.1",
+                                  timeout_ms=1000, allow_internal_target=False)
+    out = await checks_exec._run_dns(check)
+    assert sent == [["1.1.1.1"]] and out.status == "down"
 
 
 async def test_location_proxy_needs_explicit_internal_approval(monkeypatch):
