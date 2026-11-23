@@ -7,12 +7,10 @@
 # clones the repository, generates the secrets, starts the panel and prints its
 # address together with the admin password.
 #
-# This script is attached to every GitHub Release as it is in the release tag, so the
-# command above runs the script of the newest release, not of main. The repository is
-# checked out at the latest release tag and the images are pinned to it (KERVAX_VERSION
-# in .env): the files and the images are one released version, and a commit in main
-# reaches an installation only through a release. A repeated run upgrades to the newest
-# release.
+# This script is attached to every GitHub Release as it is in the tag, so the command
+# above runs the newest release's script, not main. The repository is checked out at that
+# tag and the images are pinned to it (KERVAX_VERSION in .env): a commit in main reaches
+# an installation only through a release. A repeated run upgrades to the newest release.
 #
 # The default domain is <public-IP>.sslip.io. sslip.io is a public DNS service that
 # answers with the address written in the name itself: 203.0.113.10.sslip.io →
