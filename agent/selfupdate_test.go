@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -395,6 +396,14 @@ func TestSelfUpdateTrialCommit(t *testing.T) {
 // TestMain: тестовый бинарь, запущенный как помощник clockSynced, только отвечает (как агент)
 func TestMain(m *testing.M) {
 	if len(os.Args) == 2 && os.Args[1] == clockSyncedArg {
+		if os.Getenv("KX_TEST_NOCORE") == "1" { // TestClockHelperNoCore: что выставил помощник
+			noCoreDump()
+			var rl syscall.Rlimit
+			syscall.Getrlimit(syscall.RLIMIT_CORE, &rl)
+			d, _, _ := syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_GET_DUMPABLE, 0, 0)
+			fmt.Printf("core=%d/%d dumpable=%d", rl.Cur, rl.Max, d)
+			return
+		}
 		clockSyncedMain()
 		return
 	}
@@ -469,18 +478,18 @@ func TestTrialAfterNewerInstalled(t *testing.T) {
 	self, p := trialSetup(t)
 	newer := markedBin("committed by A", "99.0")
 	os.WriteFile(self, []byte(newer), 0o755)
-	if err := installedBlocks(self, "98.5"); err == nil || !strings.Contains(err.Error(), "99.0") {
-		t.Fatalf("проба версии старше штатного не остановлена: %v", err)
+	if inst := installedAhead(self, "98.5"); inst != "99.0" {
+		t.Fatalf("проба версии старше штатного не остановлена: %q", inst)
 	}
-	if err := installedBlocks(self, "99.0"); err == nil {
+	if inst := installedAhead(self, "99.0"); inst != "99.0" {
 		t.Fatal("проба версии, равной штатной, не остановлена")
 	}
-	if err := installedBlocks(self, "99.1"); err != nil {
-		t.Fatalf("проба версии новее штатного остановлена: %v", err)
+	if inst := installedAhead(self, "99.1"); inst != "" {
+		t.Fatalf("проба версии новее штатного остановлена: %q", inst)
 	}
 	os.WriteFile(filepath.Join(filepath.Dir(self), "old"), []byte("pre-2.75 binary"), 0o755)
-	if err := installedBlocks(filepath.Join(filepath.Dir(self), "old"), "2.76"); err != nil {
-		t.Fatalf("штатный без метки остановил пробу: %v", err)
+	if inst := installedAhead(filepath.Join(filepath.Dir(self), "old"), "2.76"); inst != "" {
+		t.Fatalf("штатный без метки остановил пробу: %q", inst)
 	}
 	runTrial(t, self, version, []byte("trial B")) // маркер запомнил SHA уже нового штатного
 	trialOnStart(p.bin, instKey)
@@ -489,6 +498,97 @@ func TestTrialAfterNewerInstalled(t *testing.T) {
 	}
 	if trialPending() || readFile(t, self) != newer {
 		t.Fatal("проба старой версии легла поверх более новой штатной")
+	}
+}
+
+// Многопанельная установка: панель 2 просит версию, которую другой экземпляр уже поставил штатной.
+// Процесс не отказывает (иначе он месяцами работал бы старым кодом, а нода в панели 2 была бы
+// красной), а сливает команды и exec'ом переходит в штатный бинарь. Если после перехода версия все
+// равно старше метки - второй раз не переходит, а показывает ошибку.
+func TestSwitchToInstalled(t *testing.T) {
+	self, _ := trialSetup(t)
+	oldStaged := stagedSelf
+	defer func() { stagedSelf = oldStaged; switchFailed.Store(""); os.Unsetenv(switchEnv) }()
+	stagedSelf = func() (string, error) { return self, nil }
+	os.WriteFile(self, []byte(markedBin("committed by A", "99.0")), 0o755)
+	var argv0 string
+	var env []string
+	execFn = func(a string, _ []string, e []string) error {
+		argv0, env = a, e
+		return errors.New("exec в тесте не нужен")
+	}
+	err := selfUpdate("http://127.0.0.1:1", "98.5")
+	if argv0 != self || !strings.Contains(strings.Join(env, "\n"), switchEnv+"=99.0") {
+		t.Fatalf("не перешел в штатный: %q %v", argv0, err)
+	}
+	if err == nil || isPermanent(err) || strings.Contains(err.Error(), "отказ") {
+		t.Fatalf("неудачный exec: %v", err)
+	}
+	if tasks.isDraining() {
+		t.Fatal("после неудачного exec слив не снят")
+	}
+	// цель новее штатного - обычная проба, не переход
+	argv0 = ""
+	if selfUpdate("http://127.0.0.1:1", "99.1"); argv0 != "" {
+		t.Fatal("переход в штатный, который старше цели")
+	}
+	// после перехода процесс все равно старше метки: второй раз не переходим
+	os.Setenv(switchEnv, "99.0")
+	checkSwitched()
+	if os.Getenv(switchEnv) != "" {
+		t.Fatal("переменная перехода осталась для следующих exec")
+	}
+	err = selfUpdate("http://127.0.0.1:1", "98.5")
+	if argv0 != "" || err == nil || !isPermanent(err) || !strings.Contains(err.Error(), "снова не перехожу") {
+		t.Fatalf("повторный переход: %q %v", argv0, err)
+	}
+	// переход удался (версия процесса - та, что в метке): ошибки нет
+	switchFailed.Store("")
+	os.Setenv(switchEnv, version)
+	checkSwitched()
+	if f, _ := switchFailed.Load().(string); f != "" {
+		t.Fatalf("удачный переход засчитан как неудача: %q", f)
+	}
+}
+
+// Помощник clockSynced без дампа памяти; убитый сигналом три раза подряд больше не запускается
+func TestClockHelperNoCore(t *testing.T) {
+	cmd := exec.Command("/proc/self/exe", clockSyncedArg)
+	cmd.Env = append(os.Environ(), "KX_TEST_NOCORE=1")
+	out, err := cmd.Output()
+	if err != nil || string(out) != "core=0/0 dumpable=0" {
+		t.Fatalf("помощник: %q %v", out, err)
+	}
+	old := clockHelperCmd
+	defer func() { clockHelperCmd = old; clockHelperDeaths.Store(0) }()
+	runs := 0
+	clockHelperCmd = func(ctx context.Context) *exec.Cmd {
+		runs++
+		return exec.CommandContext(ctx, "sh", "-c", "kill -SYS $$")
+	}
+	for i := 0; i < 5; i++ {
+		if clockSynced() {
+			t.Fatal("убитый помощник - «синхронизированы»")
+		}
+	}
+	if runs != clockHelperMaxDeaths {
+		t.Fatalf("помощник запущен %d раз, нужно %d", runs, clockHelperMaxDeaths)
+	}
+	// смерть не подряд - счет заново
+	clockHelperDeaths.Store(0)
+	clockHelperCmd = func(ctx context.Context) *exec.Cmd {
+		runs++
+		if runs%2 == 0 {
+			return exec.CommandContext(ctx, "sh", "-c", "printf 1")
+		}
+		return exec.CommandContext(ctx, "sh", "-c", "kill -SYS $$")
+	}
+	runs = 0
+	for i := 0; i < 6; i++ {
+		clockSynced()
+	}
+	if runs != 6 {
+		t.Fatalf("при смертях не подряд помощник запущен %d раз из 6", runs)
 	}
 }
 
@@ -788,9 +888,16 @@ func TestSelfUpdateChecksFreshnessByOTAClock(t *testing.T) {
 	}))
 	defer srv.Close()
 	err := selfUpdate(srv.URL, "9.99")
-	// отметка не впереди часов (она по тем же часам): отказ окончательный, как в 2.74
-	if err == nil || !strings.Contains(err.Error(), "старше 120 дней по часам ноды") || !isPermanent(err) {
+	// отметка не впереди часов (она по тем же часам), но часы не подтверждены: отказ с паузой
+	var le laterError
+	if err == nil || !strings.Contains(err.Error(), "старше 120 дней по часам ноды") || isPermanent(err) || !errors.As(err, &le) {
 		t.Fatalf("манифест судили не по часам OTA: %v", err)
+	}
+	// часы подтверждены синхронизацией - окончательный, как в 2.74
+	clockSynced = func() bool { return true }
+	err = selfUpdate(srv.URL, "9.99")
+	if err == nil || !strings.Contains(err.Error(), "старше 120 дней по часам ноды") || !isPermanent(err) {
+		t.Fatalf("при подтвержденных часах: %v", err)
 	}
 }
 
@@ -870,12 +977,12 @@ func TestOTAFreshRefusalByClockIsTemporary(t *testing.T) {
 // подозрительны - окончательный, как в 2.74, чтобы честно старый выпуск не запрашивать бесконечно.
 func TestOTAFreshErrText(t *testing.T) {
 	oldWall := otaWall
-	defer func() { otaWall = oldWall; otaAhead.Store(otaAheadNone) }()
+	defer func() { otaWall = oldWall }()
 	real := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
 	otaWall = func() time.Time { return real }
 	cases := []struct {
 		released, now time.Time
-		ahead         int32
+		ahead         int
 		perm          bool
 		want          []string
 	}{
@@ -889,13 +996,12 @@ func TestOTAFreshErrText(t *testing.T) {
 		{real.Add(48 * time.Hour), real, otaAheadNone, false, []string{"в будущем по часам ноды (2026-11-23 12:00 UTC)", "отстают"}},
 	}
 	for _, c := range cases {
-		otaAhead.Store(c.ahead)
 		m := manifest{Version: "2.123", ReleasedAt: c.released.Format(time.RFC3339)}
 		ferr := manifestFresh(m, c.now)
 		if ferr == nil {
 			t.Fatalf("%v: манифест свежий", c.released)
 		}
-		err := otaFreshErr(m, ferr, c.now)
+		err := otaFreshErr(m, ferr, otaState{now: c.now, why: c.ahead, confirmed: true})
 		if isPermanent(err) != c.perm {
 			t.Fatalf("окончательный %v, нужен %v: %v", isPermanent(err), c.perm, err)
 		}
@@ -913,10 +1019,21 @@ func TestOTAFreshErrText(t *testing.T) {
 		}
 	}
 	lastUpdateError.Store("")
-	otaAhead.Store(otaAheadNone)
+	// часы не подозрительны, но еще не подтверждены синхронизацией (могли убежать вперед вместе с
+	// отметкой): отказ временный, со своей паузой для этой версии
+	m0 := manifest{Version: "2.123", ReleasedAt: real.Add(-130 * 24 * time.Hour).Format(time.RFC3339)}
+	err := otaFreshErr(m0, manifestFresh(m0, real), otaState{now: real})
+	var le laterError
+	if isPermanent(err) || !errors.As(err, &le) || le.pause != otaUnconfirmedPause ||
+		!strings.Contains(err.Error(), "еще не подтверждены синхронизацией, повтор через 1 ч") {
+		t.Fatalf("отказ при неподтвержденных часах: %v", err)
+	}
+	if len([]rune("2.123: "+err.Error())) > 300 {
+		t.Fatalf("длинный текст: %v", err)
+	}
 	// нет даты выпуска - от часов не зависит, окончательный
 	m := manifest{Version: "2.123"}
-	if err := otaFreshErr(m, manifestFresh(m, real), real); !isPermanent(err) {
+	if err := otaFreshErr(m, manifestFresh(m, real), otaState{now: real}); !isPermanent(err) {
 		t.Fatalf("манифест без даты: %v", err)
 	}
 	// длинный текст режется по символам, а не посреди буквы

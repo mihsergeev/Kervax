@@ -62,6 +62,8 @@ var (
 	lastUpdateError atomic.Value // string
 	rejectedVersion atomic.Value // string — отвергнута ОКОНЧАТЕЛЬНО, больше не пробуем
 	updateRetryAt   atomic.Value // time.Time — не раньше этого момента после временной неудачи
+	updateLaterFor  atomic.Value // string — версия, отказ которой ждет своей паузы (laterError)
+	updateLaterAt   atomic.Value // time.Time — до этого момента ее не пробуем; другие версии - сразу
 )
 
 // разделы меньше этого не мониторим (мелкая системщина: /boot и т.п.)
@@ -3091,10 +3093,11 @@ func selfUpdate(panelURL, want string) error {
 	if trialPending() {
 		return fmt.Errorf("текущая версия еще на пробе - обновимся, когда она продержится")
 	}
-	// анти-откат и от штатного бинаря: его мог обновить другой экземпляр агента (2.75)
-	if self, err := selfExe(); err == nil {
-		if err := installedBlocks(stagedPath(self), want); err != nil {
-			return permanent(err)
+	// анти-откат и от штатного бинаря: его мог обновить другой экземпляр агента (2.75). Штатный уже
+	// новее процесса и не старше цели - переходим в него, а не пробуем
+	if staged, err := stagedSelf(); err == nil {
+		if inst := installedAhead(staged, want); inst != "" && versionNewer(inst, version) {
+			return switchToInstalled(staged, inst)
 		}
 	}
 
@@ -3128,9 +3131,9 @@ func selfUpdate(panelURL, want string) error {
 	if !versionNewer(m.Version, version) {
 		return permanent(fmt.Errorf("%s не новее текущей %s — отказ (анти-откат)", m.Version, version))
 	}
-	now := otaNow()
-	if err := manifestFresh(m, now); err != nil {
-		return otaFreshErr(m, err, now)
+	st := otaNowState()
+	if err := manifestFresh(m, st.now); err != nil {
+		return otaFreshErr(m, err, st)
 	}
 	art, ok := m.Artifacts[runtime.GOARCH]
 	if !ok {
@@ -10349,6 +10352,7 @@ func main() {
 		clockSyncedMain() // помощник clockSynced (selfupdate.go)
 		return
 	}
+	checkSwitched()
 	cfgPath := "/etc/kervax-agent.conf"
 	if len(os.Args) > 1 {
 		cfgPath = os.Args[1]
@@ -10510,7 +10514,12 @@ func main() {
 				want := cfg.Update.Version
 				prev, _ := rejectedVersion.Load().(string)
 				retryAt, _ := updateRetryAt.Load().(time.Time)
+				laterFor, _ := updateLaterFor.Load().(string)
+				laterAt, _ := updateLaterAt.Load().(time.Time)
 				switch {
+				case laterFor == want && time.Now().Before(laterAt):
+					// отказ этой версии с собственной паузой (laterError): ждем ее
+					updating.Store(false)
 				case prev == want:
 					// эту версию мы отвергли ОКОНЧАТЕЛЬНО (подпись, sha, анти-откат) —
 					// она сама себя не починит, тянуть её каждый цикл незачем
@@ -10531,6 +10540,12 @@ func main() {
 						lastUpdateError.Store(fmt.Sprintf("%s: %v", want, uerr))
 						if isPermanent(uerr) {
 							rejectedVersion.Store(want)
+							return
+						}
+						var le laterError
+						if errors.As(uerr, &le) {
+							updateLaterFor.Store(want)
+							updateLaterAt.Store(time.Now().Add(le.pause))
 							return
 						}
 						// Временная беда — обрыв, 502, нет места. Повторим: недокачанное

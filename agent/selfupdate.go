@@ -472,14 +472,64 @@ var (
 	binaryScanMax   = 256 << 20 // как у savePrev
 )
 
-// installedBlocks - штатный бинарь уже не старше want (его поставил другой экземпляр агента с
-// общим бинарем): пробу не начинаем, иначе ее коммит лег бы поверх более новой версии
-func installedBlocks(staged, want string) error {
+// installedAhead - версия штатного бинаря, если он не старше want (его поставил другой экземпляр
+// агента с общим бинарем); "" - старше или метки нет. Пробу тогда не начинаем: ее коммит лег бы
+// поверх более новой версии.
+func installedAhead(staged, want string) string {
 	if inst := binaryVersion(staged); inst != "" && !versionNewer(want, inst) {
-		return fmt.Errorf("штатный бинарь уже %s (поставил другой экземпляр агента), %s не новее - отказ; "+
-			"после перезапуска агент будет на %s", inst, want, inst)
+		return inst
 	}
-	return nil
+	return ""
+}
+
+// stagedSelf - штатный бинарь этого процесса; тесты подставляют свой
+var stagedSelf = func() (string, error) {
+	self, err := selfExe()
+	if err != nil {
+		return "", err
+	}
+	return stagedPath(self), nil
+}
+
+// switchEnv - этот процесс запущен exec'ом в штатный бинарь (switchToInstalled); значение - версия
+// из метки штатного, которую ждали
+const switchEnv = "KERVAX_AGENT_SWITCHED"
+
+// switchFailed - после exec в штатный версия процесса все равно старше его метки (метка врет или
+// файл не тот): снова не перезапускаемся, панель видит ошибку
+var switchFailed atomic.Value // string
+
+// checkSwitched - на старте: разбор switchEnv. Переменную убираем, чтобы она не ехала в
+// следующие exec (проба, новый переход).
+func checkSwitched() {
+	want := os.Getenv(switchEnv)
+	if want == "" {
+		return
+	}
+	os.Unsetenv(switchEnv)
+	if versionNewer(want, version) {
+		switchFailed.Store(want)
+	}
+}
+
+// switchToInstalled - штатный бинарь уже новее этого процесса и не старше цели панели: его
+// поставил другой экземпляр агента с общим бинарем (панели раскатываются не одновременно).
+// Отказ оставил бы процесс на старом коде до рестарта юнита, а ноду в панели красной. Сливаем
+// команды, как перед пробой, и exec в штатный: тот же файл юнит запустил бы и после рестарта,
+// новых прав не нужно, PID тот же (Type=notify). При успехе не возвращается.
+func switchToInstalled(staged, inst string) error {
+	if f, _ := switchFailed.Load().(string); f == inst {
+		return permanent(fmt.Errorf("штатный %s помечен версией %s, но после перехода в него работает %s - "+
+			"снова не перехожу; проверьте файл", staged, inst, version))
+	}
+	if left := tasks.drain(drainMax); left > 0 {
+		fmt.Fprintf(os.Stderr, "kervax-agent: за %s не закончилось команд: %d - перезапуск без них\n", drainMax, left)
+	}
+	fmt.Printf("kervax-agent %s: штатный %s уже версии %s (поставил другой экземпляр агента) - перехожу в него\n",
+		version, staged, inst)
+	err := execFn(staged, os.Args, append(os.Environ(), switchEnv+"="+inst))
+	tasks.resume()
+	return fmt.Errorf("переход в штатный %s: %w", staged, err)
 }
 
 // markedVersion ищет метку по префиксу, вырезанному из своей же метки: отдельной строки с
@@ -651,10 +701,23 @@ const (
 )
 
 var (
-	otaAhead     atomic.Int32
 	otaConfirmed atomic.Bool // в эту загрузку подтвержденное время есть
 	otaMu        sync.Mutex
 )
+
+// otaState - снимок одного otaNow: «сейчас» для свежести, почему оно впереди часов ноды и есть
+// ли подтвержденное синхронизацией время
+type otaState struct {
+	now       time.Time
+	why       int
+	confirmed bool
+}
+
+// otaUnconfirmedPause - через столько повторить отказ по свежести, когда часы не подозрительны, но
+// в эту загрузку еще не подтверждены синхронизацией: они могли убежать вперед вместе с отметкой,
+// и после синхронизации та же цель должна пройти без перезапуска агента. Час - часы обычно
+// синхронизируются за минуты, а честно старый выпуск запрашивается 24 раза в сутки, не 288.
+var otaUnconfirmedPause = time.Hour
 
 var otaWall = time.Now // тесты подставляют свои часы
 
@@ -666,14 +729,48 @@ const clockSyncedArg = "--kervax-clock-synced"
 // без SystemCallErrorNumber ядро убило бы им самого агента. Убьет помощника - «не знаем», как
 // несинхронизированные часы.
 var clockSynced = func() bool {
+	if clockHelperDeaths.Load() >= clockHelperMaxDeaths {
+		return false // помощника раз за разом убивает фильтр системных вызовов: до конца процесса не спрашиваем
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "/proc/self/exe", clockSyncedArg).Output()
+	out, err := clockHelperCmd(ctx).Output()
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ctx.Err() == nil {
+		if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			if clockHelperDeaths.Add(1) == clockHelperMaxDeaths {
+				fmt.Fprintf(os.Stderr, "kervax-agent: проверку синхронизации часов %d раз подряд убил сигнал %v "+
+					"(SystemCallFilter без adjtimex?) - больше не спрашиваю, часы считаю несинхронизированными\n",
+					clockHelperMaxDeaths, ws.Signal())
+			}
+			return false
+		}
+	}
+	clockHelperDeaths.Store(0)
 	return err == nil && strings.TrimSpace(string(out)) == "1"
+}
+
+// clockHelperMaxDeaths - столько смертей помощника от сигнала подряд, и clockSynced его больше не
+// запускает: фильтр системных вызовов не исчезнет, а каждая смерть - запись в журнале ядра
+const clockHelperMaxDeaths = 3
+
+var clockHelperDeaths atomic.Int32
+
+// clockHelperCmd - запуск помощника; тесты подставляют свой
+var clockHelperCmd = func(ctx context.Context) *exec.Cmd {
+	return exec.CommandContext(ctx, "/proc/self/exe", clockSyncedArg)
+}
+
+// noCoreDump - помощника может убить фильтр системных вызовов (SIGSYS, SCMP_ACT_KILL_PROCESS):
+// без дампа памяти, иначе он копился бы каждые 15 минут
+func noCoreDump() {
+	_ = syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{})
+	_, _, _ = syscall.RawSyscall(syscall.SYS_PRCTL, syscall.PR_SET_DUMPABLE, 0, 0)
 }
 
 // clockSyncedMain - процесс-помощник clockSynced
 func clockSyncedMain() {
+	noCoreDump()
 	var tx syscall.Timex
 	state, err := syscall.Adjtimex(&tx)
 	const timeError, staUnsync = 5, 0x40
@@ -693,6 +790,10 @@ var otaClockPath = func() string {
 }
 
 func otaNow() time.Time {
+	return otaNowState().now
+}
+
+func otaNowState() otaState {
 	otaMu.Lock()
 	defer otaMu.Unlock()
 	boot, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
@@ -703,8 +804,7 @@ func otaNow() time.Time {
 		}
 	}
 	t, why := otaClockState(otaClockPath(), strings.TrimSpace(string(boot)), up, otaWall(), clockSynced)
-	otaAhead.Store(int32(why))
-	return t
+	return otaState{now: t, why: why, confirmed: otaConfirmed.Load()}
 }
 
 func otaClock(path, boot string, up float64, now time.Time, synced func() bool) time.Time {
@@ -790,8 +890,9 @@ func otaClockState(path, boot string, up float64, now time.Time, synced func() b
 // выпуск устарел по часам, которым нечего возразить: отказ окончательный, как в 2.74 (до
 // перезапуска агента или новой цели), иначе честно старый выпуск запрашивался бы каждые 5 минут
 // бесконечно. Длина: панель принимает 300 символов вместе с версией впереди (TestOTAFreshErrText).
-func otaFreshErr(m manifest, err error, now time.Time) error {
+func otaFreshErr(m manifest, err error, st otaState) error {
 	const tf = "2006-01-02 15:04"
+	now := st.now
 	wall := otaWall()
 	t, perr := time.Parse(time.RFC3339Nano, m.ReleasedAt)
 	switch {
@@ -802,7 +903,7 @@ func otaFreshErr(m manifest, err error, now time.Time) error {
 			m.Version, t.UTC().Format(tf), wall.UTC().Format(tf))
 	}
 	days := int(otaMaxAge.Hours() / 24)
-	switch otaAhead.Load() {
+	switch st.why {
 	case otaAheadRefused:
 		return fmt.Errorf("манифест %s выпущен %s, старше %d дней по времени, уже подтвержденному синхронизацией часов в эту "+
 			"загрузку (%s UTC), а часы ноды %s UTC: их отвели назад больше чем на %d ч. Обновление пойдет после перезагрузки ноды",
@@ -812,6 +913,31 @@ func otaFreshErr(m manifest, err error, now time.Time) error {
 			"не синхронизированы: на старте они были впереди или их отвели назад. Повторим; отметка сбросится после синхронизации NTP",
 			m.Version, t.UTC().Format("2006-01-02"), days, now.UTC().Format(tf), wall.UTC().Format(tf))
 	}
+	if !st.confirmed {
+		// часы могли убежать вперед и еще не поправлены: та же цель - через otaUnconfirmedPause
+		return retryLater(fmt.Errorf("манифест %s выпущен %s, старше %d дней по часам ноды (%s UTC) - отказ: нужен свежий выпуск "+
+			"или верные часы ноды; часы еще не подтверждены синхронизацией, повтор через %s", m.Version,
+			t.UTC().Format("2006-01-02"), days, wall.UTC().Format(tf), fmtPause(otaUnconfirmedPause)), otaUnconfirmedPause)
+	}
 	return permanent(fmt.Errorf("манифест %s выпущен %s, старше %d дней по часам ноды (%s UTC) - отказ до новой цели или "+
 		"перезапуска агента: нужен свежий выпуск или верные часы ноды", m.Version, t.UTC().Format("2006-01-02"), days, wall.UTC().Format(tf)))
+}
+
+// laterError - временный отказ с собственной паузой для этой версии: общий updateRetryAt не
+// трогаем, новая цель панели пробуется сразу
+type laterError struct {
+	err   error
+	pause time.Duration
+}
+
+func (e laterError) Error() string { return e.err.Error() }
+func (e laterError) Unwrap() error { return e.err }
+
+func retryLater(err error, pause time.Duration) error { return laterError{err, pause} }
+
+func fmtPause(d time.Duration) string {
+	if d >= time.Hour && d%time.Hour == 0 {
+		return fmt.Sprintf("%d ч", int(d.Hours()))
+	}
+	return fmt.Sprintf("%d мин", int(d.Minutes()))
 }

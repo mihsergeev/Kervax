@@ -183,8 +183,10 @@ run for five minutes; if it does not start, crashes or restarts before that, sys
 previous version back up, and after three such failures in a row that version is not installed
 again. Agent instances sharing one binary (agent 2.75+) check the version of the installed file,
 read from a mark in the binary without running it: they do not start a trial of a version
-that is not newer than the installed one, and a trial commit does not write over an installed
-version that is not older (the trial is dropped). An installed file without the mark (agents
+that is not newer than the installed one (if the installed file is newer than the running
+process, the process drains its commands and execs into it, the same file the unit would start
+after a restart), and a trial commit does not write over an installed version that is not
+older (the trial is dropped). An installed file without the mark (agents
 before 2.75) counts as older. While the agent drains, the panel gives it no new commands. The
 previous binary stays next to it as `kervax-agent.prev`. Freshness of the signed manifest does
 not rely on the node's clock alone: stepping the clock back within one boot does not extend
