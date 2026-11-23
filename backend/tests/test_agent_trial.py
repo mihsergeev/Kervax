@@ -71,6 +71,13 @@ async def test_trial_shown_in_server(client, auth_headers):
     got = await server()
     assert (got["agent_trial"], got["agent_trial_from"], got["target_agent_version"]) == (False, None, "")
     # мусор вместо версии в trial_from отчет не проходит
-    r = await client.post("/api/agent/report", headers=agent,
-                          json=dict(REPORT, agent_version="2.76", trial=True, trial_from="x" * 40))
-    assert r.status_code == 422
+    for bad in ("x" * 40, "2.75; x", "v2.75"):
+        r = await client.post("/api/agent/report", headers=agent,
+                              json=dict(REPORT, agent_version="2.76", trial=True, trial_from=bad))
+        assert r.status_code == 422, bad
+    # проба не смогла заменить штатный: ошибка ее же версии видна (не «уже обновлен»), а без пробы - нет
+    err = "2.77: не заменил /opt/kervax-agent/bin/kervax-agent: permission denied"
+    await report("2.77", trial=True, trial_from="2.76", update_error=err)
+    assert (await server())["agent_update_error"] == err
+    await report("2.77", update_error=err)
+    assert (await server())["agent_update_error"] is None

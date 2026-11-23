@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -437,13 +439,47 @@ func trialOnStart(self, key string) {
 // запуская его (binaryVersion). Формат - часть межверсионного контракта (TestVersionMark).
 var versionMark = "\x00KERVAX_AGENT_VERSION=" + version + "\x00"
 
-// binaryVersion - версия из метки в файле бинаря; "" - файла нет или метки нет (агент до 2.75)
+// binaryVersion - версия из метки в файле бинаря; "" - файла нет или метки нет (агент до 2.75).
+// Читаем кусками, не больше binaryScanMax: файл целиком в памяти не нужен.
 func binaryVersion(path string) string {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
-	return markedVersion(b)
+	defer f.Close()
+	keep := len(versionMark) + 32 // хвост прошлого куска: метка могла попасть на стык
+	buf := make([]byte, 0, binaryScanChunk+keep)
+	chunk := make([]byte, binaryScanChunk)
+	for total := 0; total < binaryScanMax; {
+		n, rerr := f.Read(chunk)
+		total += n
+		buf = append(buf, chunk[:n]...)
+		if v := markedVersion(buf); v != "" {
+			return v
+		}
+		if rerr != nil {
+			return ""
+		}
+		if len(buf) > keep {
+			buf = append(buf[:0], buf[len(buf)-keep:]...)
+		}
+	}
+	return ""
+}
+
+var (
+	binaryScanChunk = 1 << 20
+	binaryScanMax   = 256 << 20 // как у savePrev
+)
+
+// installedBlocks - штатный бинарь уже не старше want (его поставил другой экземпляр агента с
+// общим бинарем): пробу не начинаем, иначе ее коммит лег бы поверх более новой версии
+func installedBlocks(staged, want string) error {
+	if inst := binaryVersion(staged); inst != "" && !versionNewer(want, inst) {
+		return fmt.Errorf("штатный бинарь уже %s (поставил другой экземпляр агента), %s не новее - отказ; "+
+			"после перезапуска агент будет на %s", inst, want, inst)
+	}
+	return nil
 }
 
 // markedVersion ищет метку по префиксу, вырезанному из своей же метки: отдельной строки с
@@ -507,23 +543,23 @@ func trialReportOK() {
 		return
 	}
 	defer unlock()
+	// Побеждает новейшая версия, а не первый коммит (2.75): в 2.74 проба 2.80 тихо снималась,
+	// если другой экземпляр агента (общий бинарь) успел поставить 2.79, процесс работал 2.80 из
+	// пробного файла, панель снимала цель по его отчету, а после рестарта нода молча становилась
+	// 2.79. Версию штатного сверяем всегда, а не только когда он сменился за время пробы: проба
+	// могла начаться уже после чужого коммита. Штатный не старше нас - поверх не пишем
+	// (анти-откат), пробу снимаем без неудачи: после рестарта будет версия не ниже нашей. Старше
+	// или версии в нем нет (бинари до 2.75 метку не несут, они старше этого кода) - ставим свою.
+	inst := binaryVersion(p.self)
+	if inst != "" && !versionNewer(version, inst) {
+		os.Remove(p.mark)
+		setTrial(nil)
+		fmt.Fprintf(os.Stderr, "kervax-agent %s: штатный %s уже версии %s - не заменяю его, проба снята\n",
+			version, p.self, inst)
+		return
+	}
 	m, ok := readTrialMark(p.mark)
 	if !ok || m.Version != version || m.SelfSHA == "" || fileSHA(p.self) != m.SelfSHA {
-		// Штатный за время пробы сменил другой экземпляр агента (общий бинарь) или маркер
-		// пропал. Побеждает новейшая версия, а не первый коммит (2.75): в 2.74 проба 2.80 тихо
-		// снималась, если другой экземпляр успел поставить 2.79, процесс работал 2.80 из
-		// пробного файла, панель снимала цель по его отчету, а после рестарта нода молча
-		// становилась 2.79. Штатный не старше нас - поверх не пишем (анти-откат), пробу снимаем
-		// без неудачи: после рестарта будет версия не ниже нашей. Старше или версии в нем нет
-		// (бинари до 2.75 метку не несут, они старше этого кода) - ставим свою поверх.
-		inst := binaryVersion(p.self)
-		if inst != "" && !versionNewer(version, inst) {
-			os.Remove(p.mark)
-			setTrial(nil)
-			fmt.Fprintf(os.Stderr, "kervax-agent %s: %s сменился во время пробы на %s - не заменяю его, проба снята\n",
-				version, p.self, inst)
-			return
-		}
 		if inst == "" {
 			inst = "без метки версии"
 		}
@@ -584,31 +620,68 @@ func dropStaleTrialAt(self, want string) {
 // перезапустят; после перезагрузки отметка новая.
 //
 // Часы, которые ядро считает синхронизированными (демон NTP сбросил STA_UNSYNC), отметку
-// переставляют назад, но не дальше otaMaxStepBack от самого позднего времени, виденного в эту
-// загрузку (2.75). В 2.74 синхронизированным часам верили целиком, а NTP без аутентификации
-// подделывается: подложный сервер (или chronyc makestep по просьбе панели) отводил часы на
-// сколько угодно, отметка шла за ними, и старый подписанный выпуск снова выглядел свежим. Шаг
-// helper'а (date -s) STA_UNSYNC выставляет, и отметку такой шаг не сдвигает вовсе.
+// переставляют назад (2.75):
+//   - пока в эту загрузку агент не видел часов синхронизированными - на любую величину: юнит
+//     стартует до time-sync, на старте часы бывают сбиты (RTC в localtime, севшая батарейка), а
+//     атакующему с подложным NTP это окно при загрузке открыто и так;
+//   - после этого - не дальше otaMaxStepBack от самого позднего времени, виденного при
+//     синхронизированных часах (подтвержденного). В 2.74 синхронизированным часам верили всегда,
+//     а NTP без аутентификации подделывается: подложный сервер (или chronyc makestep по просьбе
+//     панели) отводил часы на сколько угодно, отметка шла за ними, и старый подписанный выпуск
+//     снова выглядел свежим.
+// Шаг helper'а (date -s) STA_UNSYNC выставляет, и отметку такой шаг не сдвигает вовсе.
+//
+// Файлы рядом с бинарем: .kervax-agent.clock - отметка "boot wall up", формат 2.74 (2.74 читает
+// только его и переписал бы любой другой: откат пробы, .prev, соседний экземпляр на 2.74);
+// .kervax-agent.clock-sync - подтвержденное время в том же формате (2.75+). Его нет для этой
+// загрузки - подтвержденного времени еще нет.
 
-// otaMaxStepBack - на сколько синхронизированные часы могут отвести отметку назад за одну
-// загрузку; аналог MAX_STEP=21600 в helper'е timesync-setup. 6 часов: часы в RTC по местному
-// времени (localtime) на старте для наших поясов впереди UTC на 3-5 часов, и такая нода после
-// синхронизации NTP должна обновляться без перезагрузки. Откат больше - отметка стоит, отказ
-// временный: обновление пойдет после перезагрузки ноды или когда часы догонят отметку.
+// otaMaxStepBack - на сколько синхронизированные часы могут отвести отметку назад от
+// подтвержденного времени за одну загрузку; аналог MAX_STEP=21600 в helper'е timesync-setup.
+// 6 часов: законные поправки синхронизированных часов (переход между серверами, правка руками
+// на часовой пояс) укладываются с запасом. Сбитые на старте часы (RTC в localtime) лимит не
+// задевает: до первой синхронизации подтвержденного времени нет.
 const otaMaxStepBack = 6 * time.Hour
 
-// otaStepBackRefused - последний otaNow не пустил синхронизированные часы назад дальше
-// otaMaxStepBack: для текста отказа
-var otaStepBackRefused atomic.Bool
+// почему otaNow оставил «сейчас» впереди часов ноды: для текста отказа
+const (
+	otaAheadNone     = iota
+	otaAheadUnsynced // часы не синхронизированы: синхронизация NTP или перезагрузка поправит
+	otaAheadRefused  // часы позади подтвержденного времени больше чем на otaMaxStepBack: только перезагрузка
+)
+
+var (
+	otaAhead     atomic.Int32
+	otaConfirmed atomic.Bool // в эту загрузку подтвержденное время есть
+	otaMu        sync.Mutex
+)
 
 var otaWall = time.Now // тесты подставляют свои часы
 
-// clockSynced - ядро считает часы синхронизированными (adjtimex только читаем, прав не нужно)
+// clockSyncedArg - с этим аргументом агент только отвечает, синхронизированы ли часы (clockSynced)
+const clockSyncedArg = "--kervax-clock-synced"
+
+// clockSynced - ядро считает часы синхронизированными. adjtimex (только чтение, прав не нужно)
+// зовется в отдельном процессе этого же бинаря: он вне @system-service, и под SystemCallFilter
+// без SystemCallErrorNumber ядро убило бы им самого агента. Убьет помощника - «не знаем», как
+// несинхронизированные часы.
 var clockSynced = func() bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/proc/self/exe", clockSyncedArg).Output()
+	return err == nil && strings.TrimSpace(string(out)) == "1"
+}
+
+// clockSyncedMain - процесс-помощник clockSynced
+func clockSyncedMain() {
 	var tx syscall.Timex
 	state, err := syscall.Adjtimex(&tx)
 	const timeError, staUnsync = 5, 0x40
-	return err == nil && state != timeError && tx.Status&staUnsync == 0
+	if err == nil && state != timeError && tx.Status&staUnsync == 0 {
+		fmt.Print("1")
+	} else {
+		fmt.Print("0")
+	}
 }
 
 var otaClockPath = func() string {
@@ -620,6 +693,8 @@ var otaClockPath = func() string {
 }
 
 func otaNow() time.Time {
+	otaMu.Lock()
+	defer otaMu.Unlock()
 	boot, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	up := 0.0
 	if b, err := os.ReadFile("/proc/uptime"); err == nil {
@@ -627,8 +702,8 @@ func otaNow() time.Time {
 			up, _ = strconv.ParseFloat(f[0], 64)
 		}
 	}
-	t, refused := otaClockState(otaClockPath(), strings.TrimSpace(string(boot)), up, otaWall(), clockSynced)
-	otaStepBackRefused.Store(refused)
+	t, why := otaClockState(otaClockPath(), strings.TrimSpace(string(boot)), up, otaWall(), clockSynced)
+	otaAhead.Store(int32(why))
 	return t
 }
 
@@ -637,63 +712,84 @@ func otaClock(path, boot string, up float64, now time.Time, synced func() bool) 
 	return t
 }
 
-// otaClockState - max(now, отметка этой загрузки + прошедший uptime). Файл: "boot wall up" -
-// отметка, и с 2.75 еще "hiwall hiup" - самое позднее время, виденное в эту загрузку (у файла
-// 2.74 оно равно отметке). Нет отметки этой загрузки - ставим по now. Часы ушли вперед дальше
-// самого позднего - запоминаем (иначе после старта с отставшими часами отметка ничего не
-// держала бы). Отметка впереди часов, а часы синхронизированы: ставим ее по now, если это не
-// дальше otaMaxStepBack от самого позднего; иначе отметка стоит, refused.
-func otaClockState(path, boot string, up float64, now time.Time, synced func() bool) (time.Time, bool) {
-	if path == "" || boot == "" || up <= 0 {
-		return now, false
+// readClockMark - время из файла "boot wall up" этой загрузки, сдвинутое на прошедший uptime
+func readClockMark(path, boot string, up float64) (time.Time, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}, false
 	}
-	at := func(wall int64, was float64) time.Time {
-		return time.Unix(wall, 0).Add(time.Duration((up - was) * float64(time.Second)))
+	f := strings.Fields(string(b))
+	if len(f) != 3 || f[0] != boot {
+		return time.Time{}, false
 	}
-	save := func(wall int64, was float64, hiWall int64, hiWas float64) {
-		_ = writeSync(path, []byte(fmt.Sprintf("%s %d %.2f %d %.2f\n", boot, wall, was, hiWall, hiWas)), 0o644)
+	wall, e1 := strconv.ParseInt(f[1], 10, 64)
+	was, e2 := strconv.ParseFloat(f[2], 64)
+	if e1 != nil || e2 != nil || was > up {
+		return time.Time{}, false // uptime меньше отмеченного - отметка не наша (свой uptime у контейнера)
 	}
-	if b, err := os.ReadFile(path); err == nil {
-		f := strings.Fields(string(b))
-		if (len(f) == 3 || len(f) == 5) && f[0] == boot {
-			wall, e1 := strconv.ParseInt(f[1], 10, 64)
-			was, e2 := strconv.ParseFloat(f[2], 64)
-			hiWall, hiWas, e3, e4 := wall, was, error(nil), error(nil)
-			if len(f) == 5 {
-				hiWall, e3 = strconv.ParseInt(f[3], 10, 64)
-				hiWas, e4 = strconv.ParseFloat(f[4], 64)
-			}
-			if e1 == nil && e2 == nil && e3 == nil && e4 == nil && was <= up && hiWas <= up {
-				floor, hi := at(wall, was), at(hiWall, hiWas)
-				if !floor.After(now) {
-					if now.Sub(hi) > time.Minute {
-						save(now.Unix(), up, now.Unix(), up)
-					}
-					return now, false
-				}
-				// adjtimex - только здесь, в редком случае: вне @system-service, и под
-				// SystemCallFilter без SystemCallErrorNumber вызов на старте убил бы агента
-				if floor.Sub(now) < time.Minute || !synced() {
-					return floor, false
-				}
-				if hi.Sub(now) > otaMaxStepBack {
-					return floor, true
-				}
-				save(now.Unix(), up, hiWall, hiWas)
-				return now, false
-			}
-		}
-	}
-	save(now.Unix(), up, now.Unix(), up)
-	return now, false
+	return time.Unix(wall, 0).Add(time.Duration((up - was) * float64(time.Second))), true
 }
 
-// otaFreshErr - отказ по свежести, которым судили по now (otaNow). Отказ временный: он зависит от
-// часов, а их поправят - синхронизация сбросит отметку, и следующая попытка пройдет. В 2.74 отказ
-// был окончательным: версию больше не пробовали до перезапуска агента, даже когда часы уже
-// исправили, а текст «старше 120 дней (нужен свежий выпуск)» звал искать новый выпуск, когда
-// дело было в часах. Поэтому в тексте - время, по которому судили, и часы ноды. Длина: панель
-// принимает 300 символов вместе с версией впереди (TestOTAFreshErrText).
+// otaClockState - «сейчас» для свежести: max(now, отметка, подтвержденное - otaMaxStepBack).
+// Часы идут вперед - отметка за ними; подтвержденного нет или часы ушли вперед дальше него -
+// спрашиваем ядро и при синхронизированных часах подтверждаем now. Отметка впереди часов больше
+// чем на минуту, а часы синхронизированы: ставим ее по now, если подтвержденного нет или оно
+// впереди не больше otaMaxStepBack; иначе отметка стоит (otaAheadRefused).
+func otaClockState(path, boot string, up float64, now time.Time, synced func() bool) (time.Time, int) {
+	if path == "" || boot == "" || up <= 0 {
+		return now, otaAheadNone
+	}
+	syncPath := path + "-sync"
+	put := func(p string, t time.Time) {
+		_ = writeSync(p, []byte(fmt.Sprintf("%s %d %.2f\n", boot, t.Unix(), up)), 0o644)
+	}
+	floor, ok := readClockMark(path, boot, up)
+	if !ok {
+		put(path, now)
+		floor = now
+	}
+	conf, haveConf := readClockMark(syncPath, boot, up)
+	lim := floor
+	if c := conf.Add(-otaMaxStepBack); haveConf && c.After(lim) {
+		lim = c // отметку мог переписать агент 2.74 (соседний экземпляр, откат пробы)
+	}
+	if lim.Sub(now) < time.Minute {
+		if now.Sub(floor) > time.Minute {
+			put(path, now)
+		}
+		if (!haveConf || now.Sub(conf) > time.Minute) && synced() {
+			put(syncPath, now)
+			haveConf = true
+		}
+		otaConfirmed.Store(haveConf)
+		if lim.After(now) {
+			return lim, otaAheadNone
+		}
+		return now, otaAheadNone
+	}
+	otaConfirmed.Store(haveConf)
+	if haveConf && conf.Sub(now) > otaMaxStepBack {
+		return lim, otaAheadRefused // и синхронизация не поможет
+	}
+	if !synced() {
+		return lim, otaAheadUnsynced
+	}
+	put(path, now)
+	if !haveConf {
+		put(syncPath, now)
+		otaConfirmed.Store(true)
+	}
+	return now, otaAheadNone
+}
+
+// otaFreshErr - отказ по свежести, которым судили по now (otaNow). В тексте - время, по которому
+// судили, и часы ноды: в 2.74 «старше 120 дней (нужен свежий выпуск)» звал искать новый выпуск,
+// когда дело было в часах. Отказ, который зависит от подозрительных часов (отметка впереди или
+// выпуск из будущего), временный: часы поправят, следующая попытка через паузу пройдет. В 2.74
+// он был окончательным, и версию не пробовали до перезапуска агента. Отметка не впереди часов -
+// выпуск устарел по часам, которым нечего возразить: отказ окончательный, как в 2.74 (до
+// перезапуска агента или новой цели), иначе честно старый выпуск запрашивался бы каждые 5 минут
+// бесконечно. Длина: панель принимает 300 символов вместе с версией впереди (TestOTAFreshErrText).
 func otaFreshErr(m manifest, err error, now time.Time) error {
 	const tf = "2006-01-02 15:04"
 	wall := otaWall()
@@ -705,16 +801,17 @@ func otaFreshErr(m manifest, err error, now time.Time) error {
 		return fmt.Errorf("манифест %s выпущен %s, в будущем по часам ноды (%s UTC) - отказ: часы ноды отстают? Повторим позже",
 			m.Version, t.UTC().Format(tf), wall.UTC().Format(tf))
 	}
-	if d := now.Sub(wall); otaStepBackRefused.Load() || d > otaMaxStepBack {
+	days := int(otaMaxAge.Hours() / 24)
+	switch otaAhead.Load() {
+	case otaAheadRefused:
+		return fmt.Errorf("манифест %s выпущен %s, старше %d дней по времени, уже подтвержденному синхронизацией часов в эту "+
+			"загрузку (%s UTC), а часы ноды %s UTC: их отвели назад больше чем на %d ч. Обновление пойдет после перезагрузки ноды",
+			m.Version, t.UTC().Format("2006-01-02"), days, now.UTC().Format(tf), wall.UTC().Format(tf), int(otaMaxStepBack.Hours()))
+	case otaAheadUnsynced:
 		return fmt.Errorf("манифест %s выпущен %s, старше %d дней по отметке часов этой загрузки (%s UTC), а часы ноды %s UTC "+
-			"отвели назад больше чем на %d ч после загрузки. Обновление продолжится после перезагрузки ноды или когда часы догонят отметку",
-			m.Version, t.UTC().Format("2006-01-02"), int(otaMaxAge.Hours()/24), now.UTC().Format(tf), wall.UTC().Format(tf),
-			int(otaMaxStepBack.Hours()))
-	} else if d > time.Minute || d < -time.Minute {
-		return fmt.Errorf("манифест %s выпущен %s, старше %d дней по отметке часов этой загрузки (%s UTC), а часы ноды %s UTC: "+
-			"часы отводили назад или раньше они убегали вперед. Повторим; отметка сбросится после синхронизации NTP или перезагрузки",
-			m.Version, t.UTC().Format("2006-01-02"), int(otaMaxAge.Hours()/24), now.UTC().Format(tf), wall.UTC().Format(tf))
+			"не синхронизированы: на старте они были впереди или их отвели назад. Повторим; отметка сбросится после синхронизации NTP",
+			m.Version, t.UTC().Format("2006-01-02"), days, now.UTC().Format(tf), wall.UTC().Format(tf))
 	}
-	return fmt.Errorf("манифест %s выпущен %s, старше %d дней по часам ноды (%s UTC) - отказ: нужен свежий выпуск или верные часы ноды",
-		m.Version, t.UTC().Format("2006-01-02"), int(otaMaxAge.Hours()/24), wall.UTC().Format(tf))
+	return permanent(fmt.Errorf("манифест %s выпущен %s, старше %d дней по часам ноды (%s UTC) - отказ до новой цели или "+
+		"перезапуска агента: нужен свежий выпуск или верные часы ноды", m.Version, t.UTC().Format("2006-01-02"), days, wall.UTC().Format(tf)))
 }

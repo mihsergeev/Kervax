@@ -392,6 +392,15 @@ func TestSelfUpdateTrialCommit(t *testing.T) {
 	}
 }
 
+// TestMain: тестовый бинарь, запущенный как помощник clockSynced, только отвечает (как агент)
+func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == clockSyncedArg {
+		clockSyncedMain()
+		return
+	}
+	os.Exit(m.Run())
+}
+
 // markedBin - содержимое бинаря с меткой версии v (как у агента 2.75+)
 func markedBin(name, v string) string {
 	return name + "\x00garbage\x00KERVAX_AGENT_VERSION=" + v + "\x00tail"
@@ -450,6 +459,57 @@ func TestTrialCommitNewestWins(t *testing.T) {
 		if v, _ := rejectedVersion.Load().(string); v != "" {
 			t.Fatalf("принятая версия отвергнута: %q", v)
 		}
+	}
+}
+
+// Проба началась уже после того, как другой экземпляр поставил более новую версию: SHA штатного в
+// маркере - уже от нее, и до 2.75 коммит клал старую версию поверх. Теперь пробу не начинаем, а
+// начатую (агентом 2.74) не коммитим: версия штатного сверяется всегда.
+func TestTrialAfterNewerInstalled(t *testing.T) {
+	self, p := trialSetup(t)
+	newer := markedBin("committed by A", "99.0")
+	os.WriteFile(self, []byte(newer), 0o755)
+	if err := installedBlocks(self, "98.5"); err == nil || !strings.Contains(err.Error(), "99.0") {
+		t.Fatalf("проба версии старше штатного не остановлена: %v", err)
+	}
+	if err := installedBlocks(self, "99.0"); err == nil {
+		t.Fatal("проба версии, равной штатной, не остановлена")
+	}
+	if err := installedBlocks(self, "99.1"); err != nil {
+		t.Fatalf("проба версии новее штатного остановлена: %v", err)
+	}
+	os.WriteFile(filepath.Join(filepath.Dir(self), "old"), []byte("pre-2.75 binary"), 0o755)
+	if err := installedBlocks(filepath.Join(filepath.Dir(self), "old"), "2.76"); err != nil {
+		t.Fatalf("штатный без метки остановил пробу: %v", err)
+	}
+	runTrial(t, self, version, []byte("trial B")) // маркер запомнил SHA уже нового штатного
+	trialOnStart(p.bin, instKey)
+	for i := 0; i < 3; i++ {
+		trialReportOK()
+	}
+	if trialPending() || readFile(t, self) != newer {
+		t.Fatal("проба старой версии легла поверх более новой штатной")
+	}
+}
+
+// Метку ищем кусками: на стыке кусков она тоже находится
+func TestBinaryVersionChunks(t *testing.T) {
+	old := binaryScanChunk
+	defer func() { binaryScanChunk = old }()
+	binaryScanChunk = 64
+	path := filepath.Join(t.TempDir(), "bin")
+	for pad := 40; pad < 140; pad++ {
+		os.WriteFile(path, []byte(strings.Repeat("x", pad)+markedBin("", "3.21")), 0o755)
+		if v := binaryVersion(path); v != "3.21" {
+			t.Fatalf("смещение %d: %q", pad, v)
+		}
+	}
+	oldMax := binaryScanMax
+	defer func() { binaryScanMax = oldMax }()
+	binaryScanMax = 128
+	os.WriteFile(path, []byte(strings.Repeat("x", 300)+markedBin("", "3.21")), 0o755)
+	if v := binaryVersion(path); v != "" {
+		t.Fatalf("метка дальше предела: %q", v)
 	}
 }
 
@@ -623,51 +683,83 @@ func TestOTAClockResetsWhenSynced(t *testing.T) {
 	}
 }
 
-// 2.75: синхронизированные часы отводят отметку назад не больше чем на otaMaxStepBack от самого
-// позднего времени этой загрузки - и за один шаг, и шагами подряд. В 2.74 подложный NTP отводил
-// ее на сколько угодно, и старый подписанный выпуск снова выглядел свежим.
-func TestOTAClockStepBackLimit(t *testing.T) {
+// 2.75: синхронизированные часы отводят отметку назад на любую величину, только пока в эту загрузку
+// часы не были подтверждены синхронизацией (на старте они бывают сбиты: RTC в localtime, юнит до
+// time-sync). После - не больше чем на otaMaxStepBack от подтвержденного времени, и за один шаг,
+// и шагами подряд. В 2.74 подложный NTP отводил ее на сколько угодно в любой момент.
+func TestOTAClockSyncConfirm(t *testing.T) {
 	real := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
-	step := func(back time.Duration) (time.Time, bool) {
-		path := filepath.Join(t.TempDir(), ".kervax-agent.clock")
-		otaClock(path, "boot-a", 100, real.Add(back), notSynced)
-		return otaClockState(path, "boot-a", 100, real, isSynced)
+	path := func() string { return filepath.Join(t.TempDir(), ".kervax-agent.clock") }
+	// старт с RTC впереди на 9 и 12 часов, часы еще не синхронизированы; потом NTP их поправил
+	for _, ahead := range []time.Duration{9 * time.Hour, 12 * time.Hour, 300 * 24 * time.Hour} {
+		pt := path()
+		otaClock(pt, "boot-a", 100, real.Add(ahead), notSynced)
+		if got, why := otaClockState(pt, "boot-a", 100, real, notSynced); !got.Equal(real.Add(ahead)) || why != otaAheadUnsynced {
+			t.Fatalf("+%v без синхронизации: %v %d", ahead, got, why)
+		}
+		if got, why := otaClockState(pt, "boot-a", 100, real, isSynced); !got.Equal(real) || why != otaAheadNone {
+			t.Fatalf("+%v после синхронизации: %v %d", ahead, got, why)
+		}
+		// теперь часы подтверждены: откат на 200 дней не проходит
+		back := real.Add(-200 * 24 * time.Hour)
+		if got, why := otaClockState(pt, "boot-a", 100, back, isSynced); !got.Equal(real) || why != otaAheadRefused {
+			t.Fatalf("+%v, потом откат на 200 дней: %v %d", ahead, got, why)
+		}
 	}
-	if got, refused := step(6 * time.Hour); !got.Equal(real) || refused {
-		t.Fatalf("откат ровно на 6 ч не принят: %v %v", got, refused)
+	// часы синхронизированы с самого начала: подтверждены первым же otaNow
+	confirmed := func() string {
+		pt := path()
+		otaClock(pt, "boot-a", 100, real, isSynced)
+		return pt
 	}
-	if got, refused := step(6*time.Hour + time.Second); !got.Equal(real.Add(6*time.Hour+time.Second)) || !refused {
-		t.Fatalf("откат на 6 ч с секундой принят: %v %v", got, refused)
+	// законный шаг назад на 1.5 часа проходит, следующий на 5 - уже 6.5 от подтвержденного
+	pt := confirmed()
+	if got, why := otaClockState(pt, "boot-a", 100, real.Add(-90*time.Minute), isSynced); !got.Equal(real.Add(-90*time.Minute)) || why != otaAheadNone {
+		t.Fatalf("шаг на 1.5 ч: %v %d", got, why)
 	}
-	if got, refused := step(200 * 24 * time.Hour); !got.Equal(real.Add(200*24*time.Hour)) || !refused {
-		t.Fatalf("откат на 200 дней принят: %v %v", got, refused)
+	if _, why := otaClockState(pt, "boot-a", 100, real.Add(-390*time.Minute), isSynced); why != otaAheadRefused {
+		t.Fatalf("второй шаг (всего 6.5 ч) принят: %d", why)
 	}
-	// шагами: 5 часов можно, еще 2 - уже 7 от самого позднего, нельзя
-	path := filepath.Join(t.TempDir(), ".kervax-agent.clock")
-	otaClock(path, "boot-a", 100, real.Add(5*time.Hour), notSynced)
-	if got := otaClock(path, "boot-a", 100, real, isSynced); !got.Equal(real) {
-		t.Fatalf("первый шаг: %v", got)
+	// порог: ровно 6 часов - можно, 6 часов и секунда - нет
+	if got, why := otaClockState(confirmed(), "boot-a", 100, real.Add(-otaMaxStepBack), isSynced); !got.Equal(real.Add(-otaMaxStepBack)) || why != otaAheadNone {
+		t.Fatalf("ровно 6 ч: %v %d", got, why)
 	}
-	if got, refused := otaClockState(path, "boot-a", 100, real.Add(-2*time.Hour), isSynced); !got.Equal(real) || !refused {
-		t.Fatalf("второй шаг назад принят: %v %v", got, refused)
+	if _, why := otaClockState(confirmed(), "boot-a", 100, real.Add(-otaMaxStepBack-time.Second), isSynced); why != otaAheadRefused {
+		t.Fatalf("6 ч с секундой: %d", why)
 	}
-	// старт с отставшими часами (RTC сброшен), потом NTP вперед: самое позднее время запомнено,
-	// и откат назад к старой дате не проходит
-	path = filepath.Join(t.TempDir(), ".kervax-agent.clock")
-	old := real.Add(-300 * 24 * time.Hour)
-	otaClock(path, "boot-a", 100, old, notSynced)
-	if got := otaClock(path, "boot-a", 200, real, notSynced); !got.Equal(real) {
-		t.Fatalf("часы вперед: %v", got)
+	// не синхронизированы, но позади подтвержденного дальше лимита: синхронизация не поможет
+	if _, why := otaClockState(confirmed(), "boot-a", 100, real.Add(-7*time.Hour), notSynced); why != otaAheadRefused {
+		t.Fatalf("без синхронизации позади подтвержденного на 7 ч: %d", why)
 	}
-	back := real.Add(100 * time.Second).Add(-200 * 24 * time.Hour)
-	if got, refused := otaClockState(path, "boot-a", 300, back, isSynced); !got.Equal(real.Add(100*time.Second)) || !refused {
-		t.Fatalf("откат после старта с отставшими часами: %v %v", got, refused)
+	// подтверждение без шага: старт до синхронизации, потом ядро сказало «синхронизированы»
+	pt = path()
+	otaClock(pt, "boot-a", 100, real, notSynced)
+	if _, err := os.Stat(pt + "-sync"); !os.IsNotExist(err) {
+		t.Fatal("подтверждено по несинхронизированным часам")
 	}
-	// файл отметки 2.74 (три поля): самое позднее - сама отметка
-	path = filepath.Join(t.TempDir(), ".kervax-agent.clock")
-	os.WriteFile(path, []byte(fmt.Sprintf("boot-a %d 100.00\n", real.Add(7*time.Hour).Unix())), 0o644)
-	if _, refused := otaClockState(path, "boot-a", 100, real, isSynced); !refused {
-		t.Fatal("отметка 2.74 на 7 ч впереди сброшена синхронизированными часами")
+	otaClock(pt, "boot-a", 200, real.Add(100*time.Second), isSynced)
+	if _, why := otaClockState(pt, "boot-a", 300, real.Add(-200*24*time.Hour), isSynced); why != otaAheadRefused {
+		t.Fatalf("после подтверждения откат на 200 дней: %d", why)
+	}
+	// шаг helper'а вперед (несинхронизированный) подтвержденное не двигает: после него NTP может
+	// вернуть часы к подтвержденному
+	pt = confirmed()
+	otaClock(pt, "boot-a", 100, real.Add(10*24*time.Hour), notSynced)
+	if got, why := otaClockState(pt, "boot-a", 100, real, isSynced); !got.Equal(real) || why != otaAheadNone {
+		t.Fatalf("возврат после шага helper'а вперед: %v %d", got, why)
+	}
+	// отметку переписал агент 2.74 (откат пробы, соседний экземпляр): подтвержденное держит
+	pt = confirmed()
+	os.WriteFile(pt, []byte(fmt.Sprintf("boot-a %d 100.00\n", real.Add(-200*24*time.Hour).Unix())), 0o644)
+	if got, why := otaClockState(pt, "boot-a", 100, real.Add(-200*24*time.Hour), isSynced); !got.Equal(real.Add(-otaMaxStepBack)) || why != otaAheadRefused {
+		t.Fatalf("отметка 2.74 переписана: %v %d", got, why)
+	}
+	// файл отметки остается в формате 2.74: три поля, иначе 2.74 его переписал бы
+	if f := strings.Fields(readFile(t, pt)); len(f) != 3 {
+		t.Fatalf("формат отметки: %q", f)
+	}
+	if f := strings.Fields(readFile(t, pt+"-sync")); len(f) != 3 || f[0] != "boot-a" {
+		t.Fatalf("формат подтвержденного: %q", f)
 	}
 }
 
@@ -696,7 +788,8 @@ func TestSelfUpdateChecksFreshnessByOTAClock(t *testing.T) {
 	}))
 	defer srv.Close()
 	err := selfUpdate(srv.URL, "9.99")
-	if err == nil || !strings.Contains(err.Error(), "старше 120 дней по часам ноды") || isPermanent(err) {
+	// отметка не впереди часов (она по тем же часам): отказ окончательный, как в 2.74
+	if err == nil || !strings.Contains(err.Error(), "старше 120 дней по часам ноды") || !isPermanent(err) {
 		t.Fatalf("манифест судили не по часам OTA: %v", err)
 	}
 }
@@ -728,7 +821,7 @@ func signedPanel(t *testing.T, released time.Time) string {
 // поправили. Отказ по свежести называет оба времени и причину - часы, а не старый выпуск, - и он
 // временный: когда синхронизация сбросит отметку, следующая попытка проходит без перезагрузки. В
 // 2.74 отказ был окончательным, версию не пробовали до перезапуска агента, а текст звал искать
-// свежий выпуск. Откат на 200 дней синхронизированные часы не сбрасывают (2.75), отказ остается.
+// свежий выпуск. Откат на 200 дней после подтверждения синхронизацией (2.75) - отказ до перезагрузки.
 func TestOTAFreshRefusalByClockIsTemporary(t *testing.T) {
 	if _, err := os.Stat("/proc/sys/kernel/random/boot_id"); err != nil {
 		t.Skip("нет boot_id")
@@ -759,52 +852,60 @@ func TestOTAFreshRefusalByClockIsTemporary(t *testing.T) {
 	if err := selfUpdate(url, "9.99"); err == nil || strings.Contains(err.Error(), "манифест") {
 		t.Fatalf("после синхронизации отказ по свежести: %v", err)
 	}
-	// отметка на 200 дней впереди: синхронизированные часы ее не сбрасывают
+	// часы подтверждены синхронизацией на 200 дней позже, потом их отвели назад
 	os.Remove(clock)
+	os.Remove(clock + "-sync")
 	otaWall = func() time.Time { return real.Add(200 * 24 * time.Hour) }
-	clockSynced = func() bool { return false }
 	otaNow()
 	otaWall = func() time.Time { return real }
-	clockSynced = func() bool { return true }
 	err = selfUpdate(url, "9.99")
-	if err == nil || isPermanent(err) || !strings.Contains(err.Error(), "отвели назад больше чем на 6 ч после загрузки") ||
-		!strings.Contains(err.Error(), "после перезагрузки ноды или когда часы догонят отметку") {
+	if err == nil || isPermanent(err) || !strings.Contains(err.Error(), "уже подтвержденному синхронизацией") ||
+		!strings.Contains(err.Error(), "Обновление пойдет после перезагрузки ноды") || strings.Contains(err.Error(), "догонят") {
 		t.Fatalf("откат на 200 дней: %v", err)
 	}
 }
 
-// Отказы по свежести: оба времени в тексте, укладываются в 300 символов панели вместе с версией,
-// и ни один не окончательный - все зависят от часов. Выпуск из будущего - часы отстают.
+// Отказы по свежести: оба времени в тексте, укладываются в 300 символов панели вместе с версией.
+// Подозрительные часы (отметка впереди, выпуск из будущего) - отказ временный; часы не
+// подозрительны - окончательный, как в 2.74, чтобы честно старый выпуск не запрашивать бесконечно.
 func TestOTAFreshErrText(t *testing.T) {
 	oldWall := otaWall
-	defer func() { otaWall = oldWall }()
-	otaStepBackRefused.Store(false)
+	defer func() { otaWall = oldWall; otaAhead.Store(otaAheadNone) }()
 	real := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
 	otaWall = func() time.Time { return real }
 	cases := []struct {
 		released, now time.Time
+		ahead         int32
+		perm          bool
 		want          []string
 	}{
-		{real.Add(-130 * 24 * time.Hour), real, []string{"старше 120 дней по часам ноды (2026-11-23 12:00 UTC)", "верные часы"}},
-		{real.Add(-130 * 24 * time.Hour), real.Add(30 * 24 * time.Hour), []string{"по отметке часов этой загрузки (2026-12-23 12:00 UTC)", "часы ноды 2026-11-23 12:00"}},
-		{real.Add(-100 * 24 * time.Hour), real.Add(30 * 24 * time.Hour), []string{"по отметке", "часы ноды 2026-11-23 12:00 UTC отвели назад больше чем на 6 ч"}},
-		{real.Add(-120*24*time.Hour + time.Hour), real.Add(2 * time.Hour), []string{"по отметке часов этой загрузки (2026-11-23 14:00 UTC)", "синхронизации NTP"}},
-		{real.Add(48 * time.Hour), real, []string{"в будущем по часам ноды (2026-11-23 12:00 UTC)", "отстают"}},
+		{real.Add(-130 * 24 * time.Hour), real, otaAheadNone, true,
+			[]string{"старше 120 дней по часам ноды (2026-11-23 12:00 UTC)", "до новой цели или перезапуска агента", "нужен свежий выпуск"}},
+		{real.Add(-130 * 24 * time.Hour), real.Add(30 * 24 * time.Hour), otaAheadUnsynced, false,
+			[]string{"по отметке часов этой загрузки (2026-12-23 12:00 UTC)", "часы ноды 2026-11-23 12:00 UTC не синхронизированы", "синхронизации NTP"}},
+		{real.Add(-130 * 24 * time.Hour), real.Add(30 * 24 * time.Hour), otaAheadRefused, false,
+			[]string{"уже подтвержденному синхронизацией часов в эту загрузку (2026-12-23 12:00 UTC)", "часы ноды 2026-11-23 12:00 UTC",
+				"больше чем на 6 ч", "после перезагрузки ноды"}},
+		{real.Add(48 * time.Hour), real, otaAheadNone, false, []string{"в будущем по часам ноды (2026-11-23 12:00 UTC)", "отстают"}},
 	}
 	for _, c := range cases {
+		otaAhead.Store(c.ahead)
 		m := manifest{Version: "2.123", ReleasedAt: c.released.Format(time.RFC3339)}
 		ferr := manifestFresh(m, c.now)
 		if ferr == nil {
 			t.Fatalf("%v: манифест свежий", c.released)
 		}
 		err := otaFreshErr(m, ferr, c.now)
-		if isPermanent(err) {
-			t.Fatalf("отказ по часам окончательный: %v", err)
+		if isPermanent(err) != c.perm {
+			t.Fatalf("окончательный %v, нужен %v: %v", isPermanent(err), c.perm, err)
 		}
 		for _, w := range c.want {
 			if !strings.Contains(err.Error(), w) {
 				t.Fatalf("в отказе нет %q: %v", w, err)
 			}
+		}
+		if strings.Contains(err.Error(), "догонят") {
+			t.Fatalf("невыполнимое обещание: %v", err)
 		}
 		lastUpdateError.Store("2.123: " + err.Error())
 		if txt := lastUpdateErrorText(); txt != "2.123: "+err.Error() {
@@ -812,15 +913,7 @@ func TestOTAFreshErrText(t *testing.T) {
 		}
 	}
 	lastUpdateError.Store("")
-	// синхронизированные часы не пустили назад (шагами), хотя сейчас отметка впереди меньше 6 ч:
-	// синхронизация ее уже не сбросит - текст про перезагрузку
-	otaStepBackRefused.Store(true)
-	m0 := manifest{Version: "2.123", ReleasedAt: real.Add(-120*24*time.Hour + time.Hour).Format(time.RFC3339)}
-	if err := otaFreshErr(m0, manifestFresh(m0, real.Add(2*time.Hour)), real.Add(2*time.Hour)); isPermanent(err) ||
-		!strings.Contains(err.Error(), "отвели назад больше чем на 6 ч") {
-		t.Fatalf("отказ после отвергнутого шага назад: %v", err)
-	}
-	otaStepBackRefused.Store(false)
+	otaAhead.Store(otaAheadNone)
 	// нет даты выпуска - от часов не зависит, окончательный
 	m := manifest{Version: "2.123"}
 	if err := otaFreshErr(m, manifestFresh(m, real), real); !isPermanent(err) {
@@ -897,31 +990,31 @@ NOW=$((mark + 60)); step 1 yes
 	}
 }
 
-// adjtimex (вне @system-service) зовем только в редком случае: отметка впереди часов. Под
-// SystemCallFilter без SystemCallErrorNumber вызов на старте убил бы агента SIGSYS.
-func TestOTAClockCallsAdjtimexOnlyWhenMarkAhead(t *testing.T) {
+// adjtimex вне @system-service: под SystemCallFilter без SystemCallErrorNumber вызов убил бы агента
+// SIGSYS. Поэтому его делает отдельный процесс того же бинаря (clockSyncedArg), а ядро спрашиваем,
+// только пока часы этой загрузки не подтверждены, или когда отметка впереди часов.
+func TestClockSyncedInHelperProcess(t *testing.T) {
+	out, err := exec.Command("/proc/self/exe", clockSyncedArg).Output()
+	if err != nil || (string(out) != "0" && string(out) != "1") {
+		t.Fatalf("помощник: %q %v", out, err)
+	}
+	if got := clockSynced(); got != (string(out) == "1") {
+		t.Fatalf("clockSynced %v, помощник %q", got, out)
+	}
 	path := filepath.Join(t.TempDir(), ".kervax-agent.clock")
 	calls := 0
 	synced := func() bool { calls++; return true }
 	real := time.Date(2026, 11, 23, 12, 0, 0, 0, time.UTC)
-	// нет отметки; отметка позади часов; впереди меньше минуты; новая загрузка
-	otaClock(path, "boot-a", 100, real, synced)
+	otaClock(path, "boot-a", 100, real, synced) // первая отметка: подтверждаем
 	otaClock(path, "boot-a", 200, real.Add(100*time.Second), synced)
-	otaClock(path, "boot-a", 300, real.Add(170*time.Second), synced)
-	otaClock(path, "boot-b", 10, real, synced)
-	if calls != 0 {
-		t.Fatalf("adjtimex вызван %d раз на обычном пути", calls)
-	}
-	otaClock(path, "boot-b", 20, real.Add(-time.Hour), synced)
+	otaClock(path, "boot-a", 300, real.Add(230*time.Second), synced)
 	if calls != 1 {
-		t.Fatalf("adjtimex не вызван, когда отметка впереди часов: %d", calls)
+		t.Fatalf("при подтвержденных часах ядро спрошено %d раз", calls)
 	}
-	// старт агента: otaNow берет clockSynced лениво
-	old, oldPath := clockSynced, otaClockPath
-	defer func() { clockSynced, otaClockPath = old, oldPath }()
-	clockSynced = func() bool { t.Fatal("adjtimex на старте"); return false }
-	otaClockPath = func() string { return filepath.Join(t.TempDir(), ".kervax-agent.clock") }
-	otaNow()
+	otaClock(path, "boot-a", 400, real.Add(-time.Hour), synced)
+	if calls != 2 {
+		t.Fatalf("отметка впереди часов, а ядро не спрошено: %d", calls)
+	}
 }
 
 // Блокировка коммита - страховка: файл не открыть или ФС без flock - коммитим без нее;

@@ -249,7 +249,9 @@ def agent_update_error(rep: dict) -> str:
         return ""
     want = err.split(":", 1)[0].strip()
     have = str(rep.get("agent_version") or "")
-    if want and have and re.fullmatch(r"\d+(\.\d+)*", want) and _ver_tuple(have) >= _ver_tuple(want):
+    # проба той же версии (агент 2.74+) еще не штатная: ее ошибка (не заменил штатный) - настоящая
+    if (want and have and not rep.get("trial") and re.fullmatch(r"\d+(\.\d+)*", want)
+            and _ver_tuple(have) >= _ver_tuple(want)):
         return ""
     return err
 

@@ -3091,6 +3091,12 @@ func selfUpdate(panelURL, want string) error {
 	if trialPending() {
 		return fmt.Errorf("текущая версия еще на пробе - обновимся, когда она продержится")
 	}
+	// анти-откат и от штатного бинаря: его мог обновить другой экземпляр агента (2.75)
+	if self, err := selfExe(); err == nil {
+		if err := installedBlocks(stagedPath(self), want); err != nil {
+			return permanent(err)
+		}
+	}
 
 	manBytes, err := httpGetLimited(base+"/api/agent/manifest", 1<<20)
 	if err != nil {
@@ -10339,6 +10345,10 @@ func sdNotify(state string) {
 }
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == clockSyncedArg {
+		clockSyncedMain() // помощник clockSynced (selfupdate.go)
+		return
+	}
 	cfgPath := "/etc/kervax-agent.conf"
 	if len(os.Args) > 1 {
 		cfgPath = os.Args[1]
@@ -10350,6 +10360,7 @@ func main() {
 		trialOnStart(self, instKey)
 	}
 	otaNow()
+	otaAsked := time.Now()
 	url, token := readConfig(cfgPath)
 	if url == "" || token == "" {
 		fmt.Fprintln(os.Stderr, "kervax-agent: в конфиге нужны url= и token=")
@@ -10466,6 +10477,12 @@ func main() {
 			lastOK.Store(time.Now().Unix()) // отчёт реально принят панелью
 			trialReportOK()                 // проба, что продержалась, становится штатной
 			pkgEvDrop(len(r.PkgEv))         // события журнала дошли - из очереди их
+			// пока часы в эту загрузку не подтверждены синхронизацией, раз в 15 минут спрашиваем
+			// (selfupdate.go): иначе первый же откат часов синхронизацией сдвинул бы отметку на любую величину
+			if !otaConfirmed.Load() && time.Since(otaAsked) > 15*time.Minute {
+				otaAsked = time.Now()
+				otaNow()
+			}
 			if cfg.WantPkgs && time.Now().Unix() >= pkgRetryAt.Load() && pkgUploading.CompareAndSwap(false, true) {
 				go uploadPkgs(url, token)
 			}

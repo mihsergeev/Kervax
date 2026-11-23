@@ -2215,7 +2215,7 @@ class AgentReportIn(BaseModel):
     # агент 2.74+: работает проба новой версии, штатный бинарь еще прежний - цель обновления не снимаем
     trial: bool = False
     # агент 2.75+: с какой версии идет проба - к ней вернется нода, если проба сорвется
-    trial_from: str = Field(default="", max_length=32)
+    trial_from: str = Field(default="", max_length=32, pattern=r"^(\d+(\.\d+)*)?$")
     docker: dict | None = None  # снимок Docker: {present,access,version,compose,containers}
     kube: dict | None = None  # снимок Kubernetes: {present,access,flavor,version,nodes,pods,…}
     backup: dict | None = None  # статус restic-бэкапа: {present,success,last_backup_ts,skipped,…}

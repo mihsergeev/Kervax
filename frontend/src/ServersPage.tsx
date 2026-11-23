@@ -7438,7 +7438,7 @@ function ServerDetail({
             </span>
             <span className="srv-meta-item">
               <span className="srv-meta-k">{t('агент')}</span> {s.agent_version || '—'}
-              {s.agent_trial && <span className="type-chip trial-chip" title={agentTrialTip(s, t)}>{t('проба')}</span>}
+              {s.agent_trial && s.online && <span className="type-chip trial-chip" title={agentTrialTip(s, t)}>{t('проба')}</span>}
               {s.skip_kervax_updates && <span className="type-chip">{t('Обновления пропускаются')}</span>}
               {s.agent_can_update && !s.skip_kervax_updates && !isViewer &&
                 (s.target_agent_version && s.target_agent_version !== s.agent_version ? (

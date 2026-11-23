@@ -181,15 +181,18 @@ commands in progress have finished and sent their results. The installed file is
 atomically (`rename`) only after the panel accepts three reports of the new binary and it has
 run for five minutes; if it does not start, crashes or restarts before that, systemd brings the
 previous version back up, and after three such failures in a row that version is not installed
-again. If another agent instance replaced the installed file in the meantime, the newest version
-wins (agent 2.75+): if that version is not older than the trial, the trial is dropped without
-writing over it; if it is older, the trial replaces it with the same `rename`. The agent reads
-the installed file's version from a mark in the binary without running it. While the agent drains, the panel gives it no new commands. The previous binary stays
-next to it as `kervax-agent.prev`. Freshness of the signed manifest does not rely on the
-node's clock alone: stepping the clock back within one boot does not extend it. Even a clock
-the kernel reports as synchronised (unauthenticated NTP can be spoofed) moves the mark back by
-no more than 6 hours per boot (agent 2.75+), enough for an RTC kept in local time; after a
-larger step back the update waits for a reboot of the node.
+again. Agent instances sharing one binary (agent 2.75+) check the version of the installed file,
+read from a mark in the binary without running it: they do not start a trial of a version
+that is not newer than the installed one, and a trial commit does not write over an installed
+version that is not older (the trial is dropped). An installed file without the mark (agents
+before 2.75) counts as older. While the agent drains, the panel gives it no new commands. The
+previous binary stays next to it as `kervax-agent.prev`. Freshness of the signed manifest does
+not rely on the node's clock alone: stepping the clock back within one boot does not extend
+it. A clock the kernel reports as synchronised does move the mark, but once the clock has been
+synchronised in the boot, no more than 6 hours back from the confirmed time (agent 2.75+;
+unauthenticated NTP can be spoofed); after a larger step back the update waits for a reboot of
+the node. Before the first synchronisation in a boot (a clock that was wrong at start) the mark
+can move by any amount.
 
 ## 5. Threat model: the panel is compromised
 
