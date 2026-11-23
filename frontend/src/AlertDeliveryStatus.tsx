@@ -12,6 +12,35 @@ const LABELS: Record<AlertDeliveryState, string> = {
   attention: 'Требует внимания',
 }
 
+type Translate = (s: string, v?: Record<string, string | number>) => string
+
+// коды причин - notification_store._safe_error: что случилось и что делать оператору
+function reasonGroup(code: string) {
+  if (code === 'PrepareError') return 'prepare'
+  if (code === 'LeaseExpired' || code === 'CancelledError') return 'interrupted'
+  if (['ReadTimeout', 'ReadError', 'WriteTimeout', 'WriteError', 'RemoteProtocolError'].includes(code)) return 'no_answer'
+  if (code === 'DeliveryError') return 'unknown'
+  return 'refused'
+}
+
+function reasonCause(item: AlertDeliveryItem, t: Translate) {
+  const group = reasonGroup(item.reason)
+  if (group === 'prepare') return t('Причина: сообщение не удалось подготовить (текст, правила или получатель). В канал оно не отправлялось.')
+  if (group === 'interrupted') return t('Причина: отправка прервалась до записи ответа канала (перезапуск или зависание панели). Сообщение могло дойти.')
+  if (group === 'no_answer') return t('Причина: канал не ответил после отправки. Сообщение могло дойти.')
+  if (group === 'unknown') return t(item.status === 'rejected' ? 'Причина: получатель изменился в настройках до отправки. Старому получателю сообщение не отправлялось.' : 'Причина не распознана.')
+  return t(item.status === 'rejected' ? 'Причина: канал отказал в приеме (например, бота нет в чате или токен отозван). Сообщение не принято.' : 'Причина: канал вернул ошибку или был недоступен. Сообщение не принято.')
+}
+
+function reasonAction(item: AlertDeliveryItem, t: Translate) {
+  const group = reasonGroup(item.reason)
+  if (item.status === 'rejected') return group === 'refused' ? t('Исправьте бота или чат в настройках алертов, затем повторите доставку.') : ''
+  if (item.status !== 'attention') return ''
+  if (group === 'prepare') return t('Подготовка не удалась 3 раза подряд, автоматические повторы остановлены. Посмотрите «Ошибки панели» за это время и настройки получателя, затем повторите доставку.')
+  if (group === 'interrupted' || group === 'no_answer') return t('Автоматические повторы остановлены. Проверьте чат: если сообщения нет, повторите доставку (может прийти копия), если есть - отметьте рассмотренным.')
+  return t('Автоматические повторы остановлены. Проверьте связь панели с Telegram или вебхуком и настройки бота, затем повторите доставку.')
+}
+
 export function AlertDeliveryStatus({ onUnauthorized, onCount }: {
   onUnauthorized: () => void; onCount?: (count: number) => void
 }) {
@@ -108,7 +137,10 @@ export function AlertDeliveryStatus({ onUnauthorized, onCount }: {
         <p className="muted small">{t('Попыток: {attempts}, без подтверждения: {uncertain}', { attempts: item.attempts, uncertain: item.uncertain_count })}</p>
         {['pending', 'uncertain'].includes(item.status) && <p className="muted small">{t('Следующая попытка не раньше {time}', { time: when(item.next_attempt_at) })}</p>}
         {item.reviewed_at && <p className="muted small">{t('Рассмотрено пользователем {user} · {time}', { user: item.reviewed_by || '—', time: when(item.reviewed_at) })}</p>}
-        {item.status === 'attention' && !item.reviewed_at && <p className="small">{t('Автоматические повторы остановлены. Проверьте канал доставки перед ручным повтором.')}</p>}
+        {item.reason && item.status !== 'sending' && <p className="small">{reasonCause(item, t)}</p>}
+        {item.reason && !item.reviewed_at && reasonAction(item, t) && <p className="small">{reasonAction(item, t)}</p>}
+        {item.status === 'attention' && !item.reviewed_at && !item.reason && <p className="small">{t('Автоматические повторы остановлены. Проверьте канал доставки перед ручным повтором.')}</p>}
+        {item.reason && item.status !== 'sending' && <p className="muted small">{t('Код причины: {code}', { code: item.reason })}</p>}
         {item.can_retry && <>
           {confirm === item.id && <p className="small" style={{ color: 'var(--degraded)' }} role="alert">{t('Предыдущая доставка не подтверждена, повтор может прислать копию')}</p>}
           <button className="ghost small" disabled={busy !== null} onClick={() => void retry(item)}>

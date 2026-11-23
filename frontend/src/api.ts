@@ -1339,6 +1339,8 @@ export type AlertDeliveryItem = {
   can_review: boolean
   can_retry: boolean
   needs_confirmation: boolean
+  // код причины последнего сбоя (PrepareError, LeaseExpired, ReadTimeout...), '' - сбоя нет
+  reason: string
 }
 export type AlertDeliveryOverview = {
   counts: Record<AlertDeliveryState, number>

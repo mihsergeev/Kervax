@@ -84,6 +84,8 @@ async def get_deliveries(_: AdminUser, session: SessionDep,
             and delivery.lease_until is None and not delivery.lease_owner,
             "can_retry": delivery.status in _DELIVERY_PROBLEMS and delivery.reviewed_at is None,
             "needs_confirmation": delivery.uncertain_count > 0 or delivery.status == "uncertain",
+            # код причины последнего сбоя (PrepareError, LeaseExpired...), без текста исключения
+            "reason": notification_store.reason(delivery.last_error),
         })
     return {"counts": counts, "bad_count": sum(bad for _, _, bad in totals),
             "items": items, "more": len(rows) > 50}

@@ -310,6 +310,14 @@ def _safe_error(error: str) -> str:
     return error if error in allowed else ("DeliveryError" if error else "")
 
 
+def reason(error: str | None) -> str:
+    """Причина для окна доставки: код из списка _safe_error, иначе DeliveryError.
+
+    last_error пишется уже очищенным, но старые и чужие записи читаем так же: наружу только код.
+    """
+    return _safe_error(error or "")
+
+
 def _retry_at(now: datetime, delay: int, retry_after) -> datetime:
     at = now + timedelta(seconds=delay)
     if isinstance(retry_after, datetime):
