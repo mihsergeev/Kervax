@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.165] - 2026-11-24
+
+- The Delivery window shows why a notification needs attention or was refused and what to do about it: a message that could not be prepared, sending interrupted before the channel answered, no answer from the channel, a refusal by the channel or a changed recipient. Only a reason code leaves the server.
+- When the scheduler stops during a deployment, notification delivery starts no new sends and no retries, and a send already in progress, including one by the Telegram bot, is finished and recorded instead of being cut off. This removes the uncertain deliveries, the 15-minute transport block and the later "Repeat" duplicate that a deployment could cause. A message prepared but not yet sent goes back to the queue without counting an attempt.
+- Pausing alerts now also stops a delivery pass that is already running, between batches and before each send.
+- A group refusal always gets its copy in the main chat, also when the sender is stopped in the middle of the send.
+
 ## [1.8.164] - 2026-11-24
 
 - Signing in as another user now lasts only while the browser tab that started it is open: the tab confirms it every minute, a closed tab ends it within 30 seconds and a tab that went silent within 5 minutes, with the end recorded in the audit log. A reload keeps it. The one-hour limit stays.
