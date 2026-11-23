@@ -140,6 +140,29 @@ runs the check. Save the monitor and select the server before trying a probe
 from inside with those settings. Automatic inside diagnostics after an
 external failure only run for monitors without these details.
 
+## 3c. Checking through a location: the proxy resolves the name
+
+A monitor checked through a location goes to that location's proxy, and the
+proxy resolves the site name itself. The panel checks the address on its side:
+an internal address through a location passes only with an explicit approval
+from an admin. But the proxy's DNS may answer differently (split DNS, DNS
+rebinding), and then the request lands in the proxy's own internal network: its
+loopback, its LAN, the metadata service of the cloud it runs in. The panel
+cannot verify what the proxy's DNS answers.
+
+Only the proxy itself can close this: make it refuse connections to private
+networks, loopback, link-local and metadata addresses. For squid, above the
+`http_access allow` rules:
+
+```
+acl to_internal dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 ::1 fc00::/7 fe80::/10
+http_access deny to_internal
+```
+
+3proxy, gost and dante need the same deny rules. If anyone besides admins can
+add monitors in the panel, a proxy with access to an internal network is not
+fit for a location.
+
 ## 4. Updates rely on a signature, not on trusting the panel
 
 The agent installs a new binary **only if all three hold**:

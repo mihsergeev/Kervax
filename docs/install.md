@@ -432,6 +432,11 @@ locations, shows how each of them went and picks the one that works. The scheme
 is detected automatically, the TLS certificate and the domain registration are
 tracked on their own, and history and uptime begin with the very first check.
 
+A check through a location goes through its proxy, and the proxy resolves the site name
+itself: the panel cannot see where it actually connects. Make the proxy refuse connections
+to private networks, loopback, link-local and cloud metadata addresses, see
+[Checking through a location](security.en.md#3c-checking-through-a-location-the-proxy-resolves-the-name).
+
 ---
 
 ## Next

@@ -5479,6 +5479,8 @@ const EN: Record<string, string> = {
     'Exit to the internet:',
   'HTTP, HTTPS или SOCKS5, логин и пароль можно в адресе: socks5://user:pass@host:1080.':
     'HTTP, HTTPS or SOCKS5, a login and password can go in the address: socks5://user:pass@host:1080.',
+  'Имена сайтов резолвит сам прокси, и панель проверить его ответ не может. Запретите на нем соединения во внутренние сети и к метаданным облака.':
+    'The proxy resolves site names itself, and the panel cannot verify its answer. Make it refuse connections to internal networks and cloud metadata.',
   'Пустой адрес - проверка с самой панели, это основная проверка всех мониторов.':
     'An empty address means checking from the panel itself, which is the main check of all monitors.',
   'Проверять через нее сайты':

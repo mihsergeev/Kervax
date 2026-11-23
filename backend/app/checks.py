@@ -1377,6 +1377,7 @@ async def _run_http(
             # Внутренний адрес через локацию - это сеть прокси, а не панели: только с явным
             # одобрением админа, старый NULL сюда не пускает. Имя прокси резолвит сам, и ответ его
             # DNS может отличаться от проверенного здесь - это остается риском локации
+            # (закрывается запретом на самом прокси, docs/security.md, раздел 3c)
             hooks.append(net_guard.request_hook(
                 allow_internal=getattr(check, "allow_internal_target", None) is True))
         deadline = _Deadline(timeout * _DEADLINE_TIMEOUTS)
