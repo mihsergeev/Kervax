@@ -79,6 +79,14 @@ export function webUnparsed(r?: ServerReport | null): number {
 
 // --- метрики сервера из последнего снимка (для сортировки/группировки/сводки) ---
 
+// Агент работает пробой новой версии (2.74+): штатный бинарь еще прежний, и если проба сорвется,
+// systemd вернет прежнюю версию. Обновление до этого не закончено - панель держит цель
+export function agentTrialTip(s: Server, t: (k: string, p?: Record<string, string | number>) => string): string {
+  return s.agent_trial_from
+    ? t('Агент {v} работает пробой: штатный бинарь пока {from}. Штатной новая версия станет после трех принятых панелью отчетов и пяти минут работы. Если проба сорвется, systemd вернет {from}, и агент повторит обновление.', { v: s.agent_version, from: s.agent_trial_from })
+    : t('Агент {v} работает пробой: штатный бинарь пока прежний. Штатной новая версия станет после трех принятых панелью отчетов и пяти минут работы. Если проба сорвется, systemd вернет прежнюю версию, и агент повторит обновление.', { v: s.agent_version })
+}
+
 export function srvCpuPct(s: Server): number | null {
   const c = s.last_report?.cpu_percent
   return c != null ? Math.round(c) : null

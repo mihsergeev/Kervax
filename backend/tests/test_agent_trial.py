@@ -33,3 +33,44 @@ async def test_target_survives_agent_trial(client, auth_headers):
     await report("2.75", trial=True)
     await report("2.75")
     assert await target() == ""
+
+
+async def test_trial_shown_in_server(client, auth_headers):
+    """Агент 2.75 сообщает, с какой версии идет проба; панель отдает признак пробы интерфейсу
+    (карточка, список, ход обновления), а цель держит до отчета без trial."""
+    r = await client.post("/api/servers", headers=auth_headers, json={"name": "node-trial-ui"})
+    sid = r.json()["server"]["id"]
+    agent = {"Authorization": f"Bearer {r.json()['token']}"}
+    factory = client._transport.app.state.session_factory
+
+    async def report(ver: str, **extra) -> None:
+        r = await client.post("/api/agent/report", headers=agent, json=dict(REPORT, agent_version=ver, **extra))
+        assert r.status_code == 200, r.text
+
+    async def server() -> dict:
+        r = await client.get(f"/api/servers/{sid}", headers=auth_headers)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    await report("2.75")
+    async with factory() as s:
+        (await s.get(Server, sid)).target_agent_version = "2.76"
+        await s.commit()
+    await report("2.76", trial=True, trial_from="2.75")
+    got = await server()
+    assert (got["agent_version"], got["agent_trial"], got["agent_trial_from"], got["target_agent_version"]) == (
+        "2.76", True, "2.75", "2.76")
+    listed = (await client.get("/api/servers", headers=auth_headers)).json()
+    assert [x["agent_trial"] for x in listed if x["id"] == sid] == [True]
+    # проба агента 2.74 версию, с которой идет, не шлет
+    await report("2.76", trial=True)
+    got = await server()
+    assert (got["agent_trial"], got["agent_trial_from"]) == (True, None)
+    # проба принята
+    await report("2.76")
+    got = await server()
+    assert (got["agent_trial"], got["agent_trial_from"], got["target_agent_version"]) == (False, None, "")
+    # мусор вместо версии в trial_from отчет не проходит
+    r = await client.post("/api/agent/report", headers=agent,
+                          json=dict(REPORT, agent_version="2.76", trial=True, trial_from="x" * 40))
+    assert r.status_code == 422

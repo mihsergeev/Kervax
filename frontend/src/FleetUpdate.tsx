@@ -198,6 +198,11 @@ type NodeState = { s: Server; st: 'done' | 'wait' | 'note' | 'bad'; why: string 
 
 // Где нода сейчас и что делать, если не обновилась: конкретно по ноде, без общих слов
 function nodeState(s: Server, v: string, at: number, t: T): NodeState {
+  // проба еще не стала штатной: упадет - вернется прежняя версия, так что это не "готово"
+  if (s.agent_version === v && s.agent_trial)
+    return { s, st: 'note', why: s.agent_trial_from
+      ? t('{v} на пробе, штатный пока {from}: станет штатной через три отчета и пять минут работы', { v, from: s.agent_trial_from })
+      : t('{v} на пробе: станет штатной через три отчета и пять минут работы', { v }) }
   if (s.agent_version === v) return { s, st: 'done', why: '' }
   if (s.agent_update_error)
     return { s, st: 'bad', why: t('агент отклонил обновление: {err}', { err: s.agent_update_error }) }

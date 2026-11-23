@@ -1843,6 +1843,10 @@ class ServerOut(BaseModel):
     # агент отверг обновление (подпись, место, сеть): причина его словами, иначе None.
     # Главная показывает ее у ноды, которая не обновилась после "Обновить все"
     agent_update_error: str | None = None
+    # агент 2.74+ работает пробой новой версии: штатный бинарь еще прежний (agent_trial_from, 2.75+),
+    # штатной она станет после трех принятых отчетов и пяти минут работы, упадет - вернется прежняя
+    agent_trial: bool = False
+    agent_trial_from: str | None = None
     # устаревшие setup-скрипты (helper'ы) на ноде → переустановить на детали сервера
     helper_advice: list[HelperAdvice] = []
     # Прогон kervax_helpers.yml ноде что-то поменяет: устарел helper или не включен
@@ -2210,6 +2214,8 @@ class AgentReportIn(BaseModel):
     draining: bool = False
     # агент 2.74+: работает проба новой версии, штатный бинарь еще прежний - цель обновления не снимаем
     trial: bool = False
+    # агент 2.75+: с какой версии идет проба - к ней вернется нода, если проба сорвется
+    trial_from: str = Field(default="", max_length=32)
     docker: dict | None = None  # снимок Docker: {present,access,version,compose,containers}
     kube: dict | None = None  # снимок Kubernetes: {present,access,flavor,version,nodes,pods,…}
     backup: dict | None = None  # статус restic-бэкапа: {present,success,last_backup_ts,skipped,…}

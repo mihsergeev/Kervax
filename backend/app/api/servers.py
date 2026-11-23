@@ -348,6 +348,8 @@ def _out(
     if o.agent_can_update and not server.skip_kervax_updates:
         o.agent_update_note = agent_update_note(report) or None
         o.agent_update_error = agent_update_error(report) or None
+        o.agent_trial = bool(report.get("trial"))
+        o.agent_trial_from = (str(report.get("trial_from") or "") or None) if o.agent_trial else None
     else:
         o.target_agent_version = ""
     o.display_external_ip = server.external_ip

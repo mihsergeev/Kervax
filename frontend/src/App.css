@@ -7885,6 +7885,8 @@ button.tl-tile-off .net-tile-value {
 .onb-found { overflow-wrap: anywhere; }
 .onb-foot { display: flex; justify-content: flex-end; }
 .onb-chip { border-color: var(--accent); color: var(--accent); }
+/* агент на пробе новой версии: штатный бинарь еще прежний */
+.trial-chip { border-color: var(--accent); color: var(--accent); }
 /* строки хостов в разделах - без подложки и рамки, как строки главной; подсветка при наведении */
 .loc-res.hs-host { background: transparent; border-color: transparent; }
 .loc-res-btn.hs-host:hover { background: var(--hover); border-color: transparent; }

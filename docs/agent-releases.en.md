@@ -141,6 +141,9 @@ Each agent picks up the "wish" on its next report (within the interval), downloa
 binary, verifies it and re-execs with the same PID. From agent 2.74 the new binary first
 runs next to the installed one and replaces it only after the panel accepts three of its
 reports and it has run for five minutes (until then it reports as a trial and the panel keeps the update target); commands in progress finish before the restart.
+From agent 2.75 the trial is visible in the panel: an "agent on trial" chip in the server
+list, "trial" next to the agent version in the server card, and the node's line in the
+update progress, which is not counted as updated until the trial is accepted.
 
 ---
 

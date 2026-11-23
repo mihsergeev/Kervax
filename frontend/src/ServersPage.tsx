@@ -77,7 +77,7 @@ import {
 } from './api'
 import { StackedAreaChart, type ChartMark, type Series } from './charts/StackedAreaChart'
 import { OnboardBlock } from './OnboardBlock'
-import { diskHealth, diskUsage, fmtSetupVersion, limText, memLimFacts, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, srvMuted, tallyTile, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
+import { agentTrialTip, diskHealth, diskUsage, fmtSetupVersion, limText, memLimFacts, gpuSecLine, shortList, sinceShort, unitsBlock, srvIpHit, srvIssues, srvMuted, tallyTile, type SrvIssue, webLogLabel, webRate, webSeriesName, webUnparsed } from './serverUtils'
 import { OsIcon } from './osIcon'
 import linuxTux from './assets/linux-tux.svg'
 import { CountryFlag } from './CountryFlag'
@@ -6000,6 +6000,9 @@ function ServerRow({
           {s.gpu_sum && (
             <GpuChip sum={s.gpu_sum} bad={issues.some((i) => (i.kind === 'gpu' || i.kind === 'gpu_heat') && i.tone === 't-down')} t={t} />
           )}
+          {s.agent_trial && s.online && (
+            <span className="type-chip trial-chip" title={agentTrialTip(s, t)}>{t('агент на пробе')}</span>
+          )}
           {/* заглушки в списке не показываем: чип со сроком без состава читался как отключенный
               мониторинг сервера, а речь об одном-двух алертах. Что именно заглушено - в карточке */}
           {!s.online && <span className="type-chip off">{t('оффлайн')}</span>}
@@ -7435,6 +7438,7 @@ function ServerDetail({
             </span>
             <span className="srv-meta-item">
               <span className="srv-meta-k">{t('агент')}</span> {s.agent_version || '—'}
+              {s.agent_trial && <span className="type-chip trial-chip" title={agentTrialTip(s, t)}>{t('проба')}</span>}
               {s.skip_kervax_updates && <span className="type-chip">{t('Обновления пропускаются')}</span>}
               {s.agent_can_update && !s.skip_kervax_updates && !isViewer &&
                 (s.target_agent_version && s.target_agent_version !== s.agent_version ? (

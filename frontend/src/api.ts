@@ -2835,6 +2835,8 @@ export type Server = {
   display_external_ip: string
   agent_update_note?: string | null // «обновление докачивается: 59% (3.4 из 5.8 МБ)»
   agent_update_error?: string | null // агент отверг обновление: причина его словами
+  agent_trial?: boolean // агент работает пробой новой версии, штатный бинарь еще прежний
+  agent_trial_from?: string | null // с какой версии проба (агент 2.75+): к ней вернется нода, если проба сорвется
   agent_advice: string[] // чего агенту не хватает в systemd-юните (человекочитаемо)
   agent_fix_command: string | null // команда-фикс для ноды (drop-in) или null
   helper_advice: HelperAdvice[] // устаревшие setup-скрипты (helper'ы) на ноде → переустановить
