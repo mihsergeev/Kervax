@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.161] - 2026-11-23
+
+- The backend image runs on Python 3.15.2 (python:3.15.2-slim-trixie, pinned by digest). CI tests Python 3.12 as the minimum and 3.15 as the runtime version. Locked dependencies are unchanged.
+
 ## [1.8.160] - 2026-11-23
 
 - Update frontend dependencies: React 19.3.1, Vite 8.3.8, @vitejs/plugin-react 6.3.0, flag-icons 7.6.0, oxlint 1.93.0, Playwright Core 1.65.1 and @types/node 26.6.6.
