@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.163] - 2026-11-23
+
+- The backend image no longer gives the panel process write access to its own code, migrations and the agent binaries it serves: they belong to root and are only readable, and only /srv/data stays writable. The image drops a 31 MB ownership layer, and the code is compiled at build time.
+- ops/deploy.sh compresses the upload, no longer ships the README screenshots and the landing page to panels (the first deployment removes them there), checks that the archive arrived intact before touching the panel, works from any directory of the repository and handles non-ASCII file names. With several services it waits less before checking the scheduler.
+
 ## [1.8.162] - 2026-11-23
 
 - The Locations window and the security notes explain that a location proxy resolves site names itself, so the panel cannot verify where it connects: the proxy should refuse connections to private networks, loopback, link-local and cloud metadata addresses. A squid example is in docs/security.en.md, section 3c. Checks behave as before.
