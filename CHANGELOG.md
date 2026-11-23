@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.162] - 2026-11-23
+
+- The Locations window and the security notes explain that a location proxy resolves site names itself, so the panel cannot verify where it connects: the proxy should refuse connections to private networks, loopback, link-local and cloud metadata addresses. A squid example is in docs/security.en.md, section 3c. Checks behave as before.
+
 ## [1.8.161] - 2026-11-23
 
 - The backend image runs on Python 3.15.2 (python:3.15.2-slim-trixie, pinned by digest). CI tests Python 3.12 as the minimum and 3.15 as the runtime version. Locked dependencies are unchanged.
