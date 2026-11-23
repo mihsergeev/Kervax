@@ -1,5 +1,6 @@
 """Synthetic transport fixtures only: permanent group rejection can queue main."""
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -21,8 +22,14 @@ CFG = {"telegram_api": "https://telegram.example.test", "telegram_token": "fixtu
 
 @pytest.fixture
 async def db(tmp_path):
-    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'fallback.db').as_posix()}")
+    # в прогоне -m pg (KERVAX_TEST_PG) - PostgreSQL: страховка копии (_reconcile_rejected) идет каждым
+    # проходом доставки и строит условия по JSON target, на рабочих панелях они исполняются там
+    pg = os.environ.get("KERVAX_TEST_PG", "")
+    engine, factory = create_engine_and_factory(
+        pg or f"sqlite+aiosqlite:///{(tmp_path / 'fallback.db').as_posix()}")
     async with engine.begin() as connection:
+        if pg:
+            await connection.run_sync(Base.metadata.drop_all)
         await connection.run_sync(Base.metadata.create_all)
     async with factory() as session:
         session.add(Server(name="Example", token_hash="fixture-source", enabled=True, group_name="example"))
