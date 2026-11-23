@@ -335,7 +335,10 @@ async def impersonate_alive(
         until = min(left, now + timedelta(seconds=impersonate.IMP_LEAVE_GRACE_SECONDS))
     else:
         until = min(impersonate.hard_cap(row), max(left, now + timedelta(seconds=impersonate.IMP_IDLE_SECONDS)))
+    # истекший между чтением и записью вход не продлевается: deps.py уже мог отказать его токену
     res = await session.execute(update(Impersonation).where(
-        Impersonation.id == row.id, Impersonation.ended_at.is_(None)).values(expires_at=until))
+        Impersonation.id == row.id, Impersonation.ended_at.is_(None),
+        Impersonation.expires_at > datetime.now(timezone.utc),
+    ).values(expires_at=until).execution_options(synchronize_session=False))
     await session.commit()
     return ImpersonateAliveOut(alive=bool(res.rowcount))

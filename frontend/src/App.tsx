@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, forgetImpersonation, getAlertDeliveries, getPanelErrorCount, getToken, impersonating, impersonationAlive, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
+import { ApiError, forgetImpersonation, getAlertDeliveries, getPanelErrorCount, getToken, impersonating, keepImpersonationAlive, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
 import { isCurrentSession, TOKEN_KEY } from './sessionToken'
 import { AuthProvider } from './auth'
 import { useI18n, type Lang } from './i18n'
@@ -354,28 +354,7 @@ export default function App() {
       const id = window.setInterval(loadMe, 60_000)
       return () => window.clearInterval(id)
     }
-    const beat = () => {
-      impersonationAlive().then((alive) => {
-        if (alive === false && !leaving.current) returnToSelf()
-      })
-    }
-    const leave = () => {
-      if (!leaving.current) void impersonationAlive(true)
-    }
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') beat()
-    }
-    beat()
-    const id = window.setInterval(beat, 60_000)
-    window.addEventListener('pagehide', leave)
-    window.addEventListener('pageshow', beat)
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      window.clearInterval(id)
-      window.removeEventListener('pagehide', leave)
-      window.removeEventListener('pageshow', beat)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
+    return keepImpersonationAlive(returnToSelf, () => leaving.current)
   }, [impOn, loadMe, returnToSelf])
 
   useEffect(() => {

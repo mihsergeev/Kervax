@@ -91,6 +91,52 @@ export async function impersonationAlive(leaving = false): Promise<boolean | nul
   }
 }
 
+// Когда вкладка входа подтверждает (App): сразу и раз в IMP_BEAT_MS, при возврате на вкладку - не
+// чаще раза в IMP_VISIBLE_MIN_MS, уходя - leaving. После загрузки и возврата из bfcache - еще раз
+// через IMP_REBEAT_MS: при перезагрузке keepalive "ухожу" старой страницы может дойти до сервера
+// позже первого подтверждения новой и сжать вход до полуминуты, а следующее - только через минуту.
+// pageshow при обычной загрузке (persisted = false) второй раз не подтверждает
+export const IMP_BEAT_MS = 60_000
+export const IMP_REBEAT_MS = 4_000
+export const IMP_VISIBLE_MIN_MS = 15_000
+
+export function keepImpersonationAlive(onEnded: () => void, quitting: () => boolean): () => void {
+  let last = -Infinity
+  let again: number | undefined
+  const beat = () => {
+    last = Date.now()
+    void impersonationAlive().then((alive) => {
+      if (alive === false && !quitting()) onEnded()
+    })
+  }
+  const arrive = () => {
+    beat()
+    window.clearTimeout(again)
+    again = window.setTimeout(beat, IMP_REBEAT_MS)
+  }
+  const onShow = (e: Event) => {
+    if ((e as PageTransitionEvent).persisted) arrive()
+  }
+  const onVisible = () => {
+    if (document.visibilityState === 'visible' && Date.now() - last >= IMP_VISIBLE_MIN_MS) beat()
+  }
+  const leave = () => {
+    if (!quitting()) void impersonationAlive(true)
+  }
+  arrive()
+  const id = window.setInterval(beat, IMP_BEAT_MS)
+  window.addEventListener('pagehide', leave)
+  window.addEventListener('pageshow', onShow)
+  document.addEventListener('visibilitychange', onVisible)
+  return () => {
+    window.clearInterval(id)
+    window.clearTimeout(again)
+    window.removeEventListener('pagehide', leave)
+    window.removeEventListener('pageshow', onShow)
+    document.removeEventListener('visibilitychange', onVisible)
+  }
+}
+
 // Учетка только для просмотра: бэкенд (deps.py) отказывает ей в любом изменении, кроме своей
 // учетки и журнала ошибок. Одна проверка на все запросы: изменение от нее не уходит на сервер
 // вовсе, человек сразу видит понятный отказ. Кнопки изменений при этом не рисуются (canWrite в

@@ -414,3 +414,48 @@ def test_ip_literal_forms():
     assert [_norm_domain(x) for x in ("127.0.0.1./", "127.0.0.1.:443", "127.1./x", "0x7f.1.:80",
                                       "https://Example.test.:8443/a")] == [
         "127.0.0.1", "127.0.0.1", "127.1", "0x7f.1", "example.test"]
+
+
+@pytest.mark.pg
+async def test_settle_ignores_a_resolver_that_is_not_an_ip(client, monkeypatch):
+    """Резолвер-имя в старой записи исполнитель не спрашивает (_run_dns): settle не одобряет по
+    нему внутреннюю сеть и не тратит на него резолв."""
+    lookups = []
+
+    async def resolve(host, timeout):
+        lookups.append(host)
+        return {"example.test": ["8.8.8.8"], "inner-resolver.example.test": ["10.0.0.53"]}.get(host, [])
+
+    monkeypatch.setattr(collector, "_legacy_retry", {})
+    monkeypatch.setattr(collector, "_legacy_inflight", {})
+    monkeypatch.setattr(net_guard, "_resolve", resolve)
+    async with _factory(client)() as s:
+        s.add_all([
+            Check(name="named", type="dns", target="example.test", dns_server="inner-resolver.example.test"),
+            Check(name="ip", type="dns", target="example.test", dns_server="10.0.0.53"),
+        ])
+        await s.commit()
+        due = list(await s.scalars(select(Check).order_by(Check.id)))
+    await collector._settle_legacy_targets(_factory(client), due)
+    async with _factory(client)() as s:
+        got = {c.name: c.allow_internal_target for c in await s.scalars(select(Check))}
+    assert got == {"named": False, "ip": True}
+    assert "inner-resolver.example.test" not in lookups
+
+
+async def test_failed_background_lookup_is_logged(client, monkeypatch, caplog):
+    async def resolve(host, timeout):
+        raise RuntimeError("resolver blew up")
+
+    monkeypatch.setattr(collector, "_legacy_retry", {})
+    monkeypatch.setattr(collector, "_legacy_inflight", {})
+    monkeypatch.setattr(net_guard, "_resolve", resolve)
+    async with _factory(client)() as s:
+        s.add(Check(name="boom", type="http", target="https://boom.example.test/"))
+        await s.commit()
+        due = list(await s.scalars(select(Check)))
+    with caplog.at_level("WARNING", logger="kervax.collector"):
+        await collector._settle_legacy_targets(_factory(client), due)
+    rec = [r for r in caplog.records if "резолв упал" in r.getMessage()]
+    assert rec and rec[0].exc_info and "resolver blew up" in str(rec[0].exc_info[1])
+    assert set(collector._legacy_retry) == {due[0].id}

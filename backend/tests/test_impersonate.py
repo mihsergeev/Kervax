@@ -393,3 +393,48 @@ async def test_end_is_written_once_when_closers_race(client, auth_headers):
         assert await impersonate.close(s, first, "вернулся к себе", now) is True
         assert await impersonate.close(s, second, "начат новый вход", now) is False
     assert [x.detail for x in await _audit(client, "impersonate_stop")] == ["вернулся к себе"]
+
+
+async def test_reload_beat_survives_a_late_leaving(client, auth_headers):
+    """Сервер получает подтверждения в порядке beat -> leaving -> beat: новая страница
+    подтвердила, keepalive старой дошел позже, повтор новой через несколько секунд (фронт)
+    возвращает полное окно."""
+    uid = await _mk(client, auth_headers, "plainview", "viewer")
+    r = await _start(client, auth_headers, uid)
+    imp, imp_id = _h(r.json()["access_token"]), r.json()["imp_id"]
+    assert (await _alive(client, imp_id, auth_headers)).json() == {"alive": True}
+    assert (await _alive(client, imp_id, auth_headers, leaving=True)).json() == {"alive": True}
+    assert _left(await _row(client, imp_id)) <= timedelta(seconds=impersonate.IMP_LEAVE_GRACE_SECONDS)
+    assert (await _alive(client, imp_id, auth_headers)).json() == {"alive": True}
+    assert _left(await _row(client, imp_id)) > timedelta(seconds=impersonate.IMP_IDLE_SECONDS - 5)
+    assert (await client.get("/api/auth/me", headers=imp)).status_code == 200
+
+
+async def test_session_expiring_during_confirmation_is_not_extended(client, auth_headers, monkeypatch):
+    """Вход истек между чтением строки и записью: продления нет, токен входа не оживает."""
+    from app.api import users as users_api
+
+    uid = await _mk(client, auth_headers, "plainview", "viewer")
+    r = await _start(client, auth_headers, uid)
+    imp, imp_id = _h(r.json()["access_token"]), r.json()["imp_id"]
+    real_now = datetime.now(timezone.utc)
+    async with _factory(client)() as s:
+        row = await s.get(Impersonation, imp_id)
+        row.expires_at = real_now - timedelta(seconds=1)
+        await s.commit()
+    before = (await _row(client, imp_id)).expires_at
+    calls = []
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            # первое чтение часов - еще до истечения, дальше - как есть
+            calls.append(1)
+            return real_now - timedelta(seconds=10) if len(calls) == 1 else datetime.now(tz)
+
+    monkeypatch.setattr(users_api, "datetime", Clock)
+    assert (await _alive(client, imp_id, auth_headers)).json() == {"alive": False}
+    monkeypatch.undo()
+    assert len(calls) >= 2
+    assert (await _row(client, imp_id)).expires_at == before
+    assert (await client.get("/api/auth/me", headers=imp)).status_code == 401

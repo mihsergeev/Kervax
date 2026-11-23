@@ -74,3 +74,18 @@ def test_owner_tab_confirms_with_admin_token_and_other_tabs_cannot(result):
     assert result["alive"] == [True, True, False, None]
     # у соседней вкладки токена админа нет: подтверждать нечем, запроса нет
     assert result["otherBeat"] is None
+
+
+def test_owner_tab_confirms_again_after_load_and_throttles_visibility(result):
+    """Перезагрузка: keepalive "ухожу" старой страницы может дойти до сервера позже первого
+    подтверждения новой и сжать вход до полуминуты - поэтому после загрузки и возврата из bfcache
+    подтверждение повторяется через несколько секунд. Обычный pageshow второй раз не подтверждает,
+    возврат на вкладку - не чаще раза в IMP_VISIBLE_MIN_MS."""
+    assert result["schedule"] == {
+        "load": ["beat"],
+        "rebeat": ["beat", "beat"],
+        "minute": ["beat", "beat", "beat"],
+        "visible": ["beat"],
+        "bfcache": ["beat", "beat", "leave"],
+        "stopped": [],
+    }

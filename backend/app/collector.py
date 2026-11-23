@@ -6,6 +6,7 @@
 
 import asyncio
 import html
+import ipaddress
 import json
 import logging
 import random
@@ -1055,9 +1056,13 @@ async def _legacy_internal_target(check: Check, timeout: float = 3.0) -> tuple[b
     hosts = [parents_mod.target_host(check)]
     if check.type == "dns":
         server = (check.dns_server or "").strip()
-        # DoH-адрес (старые записи) исполнитель не спрашивает вовсе (checks._run_dns), поэтому и
-        # здесь не ждем, пока он "разрешится"
-        hosts.append("" if "/" in server else server)
+        # резолвер не IP (DoH-адрес и имена в старых записях) исполнитель не спрашивает вовсе
+        # (checks._run_dns): по нему нечего одобрять и незачем занимать резолвом место
+        try:
+            ipaddress.ip_address(server)
+        except ValueError:
+            server = ""
+        hosts.append(server)
     internal, by_dns = False, []
     for host in filter(None, hosts):
         cls, addresses = await net_guard.classified_addresses(host, timeout)
@@ -1114,8 +1119,10 @@ async def _settle_legacy_targets(session_factory: async_sessionmaker[AsyncSessio
     now_due = {c.id: c for c in due}
     async with session_factory() as session:
         for task, c in finished:
-            failed = task.cancelled() or task.exception() is not None
-            allow, by_dns = (None, []) if failed else task.result()
+            exc = None if task.cancelled() else task.exception()
+            if exc is not None:
+                log.warning("решение по внутренним адресам монитора %s: резолв упал", c.id, exc_info=exc)
+            allow, by_dns = (None, []) if task.cancelled() or exc is not None else task.result()
             if allow is None:
                 _legacy_retry[c.id] = mono + parents_mod.DNS_RETRY
                 continue
