@@ -20,7 +20,8 @@ import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
+from sqlalchemy.orm import aliased
 
 from app import notification_store as store
 from app.models import AlertEvent, AppSetting, Check, CheckIncident, NotificationDelivery, NotificationEvent, NotificationStream, NotificationTransport, Server, TgAlert, User
@@ -32,6 +33,8 @@ _FIELDS = ("section", "group", "kind", "target", "recovery", "ref", "full", "lin
 DELIVERY_STAGE = "доставка уведомлений"
 # сбой пачки до POST, не привязанный к строке: отсрочка всей пачки
 _BUNDLE_DELAY = 120
+# страховка копии отказа группы в основной чат: только отказы не старше этого (_reconcile_rejected)
+_FALLBACK_WINDOW = timedelta(hours=1)
 # Остановка планировщика (SIGTERM, выкладка), ставит collector_loop: и его стадии, и бот (tg_bot)
 # новых POST не начинают и не повторяют, строки остаются в очереди до старта. Отменить уже
 # начатый POST нельзя без риска дубля: Telegram мог принять сообщение. Его доводим и записываем
@@ -806,6 +809,14 @@ def _late(section) -> None:
                   exc_info=section.exception())
 
 
+def _track(coro) -> asyncio.Future:
+    """Запись в очередь, которую отмена вызывающего не обрывает и которую ждет остановка (settle)."""
+    section = asyncio.ensure_future(coro)
+    _in_flight.add(section)
+    section.add_done_callback(_in_flight.discard)
+    return section
+
+
 async def _post(factory, cfg, rows, now):
     """Одна пачка получателя. Ее сбой не трогает остальные и не уходит в сборщик."""
     owner, stage, started = uuid.uuid4().hex, [], _monotonic()
@@ -819,8 +830,13 @@ async def _post(factory, cfg, rows, now):
         if not stage:
             # остановка до POST: попытки не было. Иначе строки дождались бы просрочки аренды,
             # ложного uncertain и дубля "Повтор"
+            # бота при выкладке отменяют с ожиданием 2 с: возврат строк должен дождаться settle,
+            # иначе на медленной базе строка останется sending -> LeaseExpired -> ложный uncertain
+            release = _track(store.defer(factory, ids, owner, at(), at()))
             try:
-                await asyncio.shield(store.defer(factory, ids, owner, at(), at()))
+                await asyncio.shield(release)
+            except asyncio.CancelledError:
+                release.add_done_callback(_late)
             except Exception:  # noqa: BLE001
                 log.exception("доставка уведомлений: аренду при остановке не сняли")
         raise
@@ -904,7 +920,13 @@ async def _post_owned(factory, cfg, rows, now, owner, stage):
     if aid:
         for event_id in event_ids[1:]:
             await store.set_tg_alert(factory, event_id, aid)
-    if await _halted(factory):
+    try:
+        halted = await _halted(factory)
+    except Exception:  # noqa: BLE001 - сбой чтения паузы, а не строки: не PrepareError, просто вернем
+        log.exception("доставка уведомлений: паузу не прочитали, пачка вернется в очередь без попытки")
+        _degraded("чтение паузы")
+        halted = True
+    if halted:
         # остановка или пауза пришла, пока готовили пачку: POST не начинаем, попытки не было (как отмена до POST)
         at = now + timedelta(seconds=max(0, _monotonic() - started))
         await store.defer(factory, ids, owner, at, at)
@@ -942,14 +964,23 @@ async def _post_owned(factory, cfg, rows, now, owner, stage):
                            error="ReadTimeout" if status == "uncertain" else "TransportError" if errors else "",
                            retry_after=getattr(errors, "retry_after", None),
                            target_patch={"editable": len(texts) == 1})
+        if status == "rejected" and finished:
+            # копия в основной чат - под той же защитой от отмены, что и запись отказа: иначе бот,
+            # отмененный при выкладке посреди POST, оставлял отказ группы без копии. Сбой - в лог,
+            # строку допишет _reconcile_rejected следующего прохода
+            from app import alert_delivery_fallback
+            try:
+                await alert_delivery_fallback.enqueue(
+                    factory, cfg, [row for row, _, _ in allowed if row["id"] in set(finished)], completed_at)
+            except Exception:  # noqa: BLE001
+                log.exception("доставка уведомлений: копию отказа в основной чат не поставили, допишет проход")
+                _degraded("копия отказа в основной чат")
         return sent, status, completed_at, finished
 
     # Отмена (остановка, выкладка) не обрывает идущий POST: Telegram мог принять сообщение, а без
     # записи исхода строка ушла бы по просрочке аренды в uncertain и дубль "Повтор". Исход пишет
     # сама секция, остановка ее дожидается (settle)
-    section = asyncio.ensure_future(send())
-    _in_flight.add(section)
-    section.add_done_callback(_in_flight.discard)
+    section = _track(send())
     try:
         sent, status, completed_at, finished = await asyncio.shield(section)
     except asyncio.CancelledError:
@@ -960,9 +991,6 @@ async def _post_owned(factory, cfg, rows, now, owner, stage):
         stage.append("confirmed")
     allowed = [item for item in allowed if item[0]["id"] in actual]
     event_ids = [row["event_id"] for row, _, _ in allowed]
-    if status == "rejected" and actual:
-        from app import alert_delivery_fallback
-        await alert_delivery_fallback.enqueue(factory, cfg, [row for row, _, _ in allowed], completed_at)
     if status == "confirmed" and actual:
         covered = {event for row, _, _ in allowed for event in row["target"].get("covered_events") or []}
         await _history(factory, sorted(set(event_ids) | covered), covered,
@@ -1039,6 +1067,26 @@ async def _reconcile_confirmed(factory, cfg, now):
         await _effects_done(factory, [row["id"]])
 
 
+async def _reconcile_rejected(factory, cfg, now):
+    """Страховка: отказ группы записан (finish), а копия в основной чат нет (процесс упал между ними).
+
+    Только свежие отказы POST (TransportError, не смена получателя) и только события, у которых
+    копии в основной чат нет совсем: enqueue сам проверяет маршрут и вставляет строку один раз.
+    """
+    from app import alert_delivery_fallback
+    copy = aliased(NotificationDelivery)
+    job = NotificationDelivery
+    async with factory() as session:
+        ids = list(await session.scalars(select(job.id).where(
+            job.status == "rejected", job.next_attempt_at >= now - _FALLBACK_WINDOW,
+            job.last_error == "TransportError", job.target["route"].as_string() == "group",
+            job.target["bot"].as_string() == "common",
+            ~exists().where(copy.event_id == job.event_id, copy.target["route"].as_string() == "fallback"),
+        ).order_by(job.id).limit(100)))
+    if ids:
+        await alert_delivery_fallback.enqueue(factory, cfg, [{"id": value} for value in ids], now)
+
+
 def _wall() -> datetime:
     """Реальное время: нижняя граница часов drain (тесты с явными часами в прошлом ее подменяют)."""
     return datetime.now(timezone.utc)
@@ -1079,6 +1127,11 @@ async def _drain(factory, cfg, now, limit):
         log.exception("доставка уведомлений: последствия подтвержденных не дописаны, отправляем дальше")
         _degraded("последствия подтвержденных")
     try:
+        await _reconcile_rejected(factory, cfg, current_time())
+    except Exception:  # noqa: BLE001
+        log.exception("доставка уведомлений: копии отказов в основной чат не проверены, отправляем дальше")
+        _degraded("копии отказов в основной чат")
+    try:
         await _coalesce_closed(factory, current_time())
     except Exception:  # noqa: BLE001
         log.exception("доставка уведомлений: закрытые эпизоды не свернуты, отправляем дальше")
@@ -1088,13 +1141,15 @@ async def _drain(factory, cfg, now, limit):
     groups = defaultdict(list)
     for row in due:
         groups[(row["recipient_key"], row["transport_key"], row["payload"].get("parse_mode"))].append(row)
+    checked = True  # пауза и остановка проверены в начале прохода
     for rows in groups.values():
         alone = {row["id"] for row in rows if _solo(row, now)}
         bundles = [[row] for row in rows if row["id"] in alone] + _group(
             alerts, [row for row in rows if row["id"] not in alone])
         for bundle in bundles:
-            if await _halted(factory):  # остановка или пауза: идущая пачка доведена, следующие ждут нетронутыми
-                return
+            if not checked and await _halted(factory):
+                return  # остановка или пауза: идущая пачка доведена, следующие ждут нетронутыми
+            checked = False
             await _post(factory, cfg, bundle, current_time())
 
 

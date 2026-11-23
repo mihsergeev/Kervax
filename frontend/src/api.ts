@@ -1347,6 +1347,8 @@ export type AlertDeliveryOverview = {
   bad_count: number
   items: AlertDeliveryItem[]
   more: boolean
+  // сколько неудачных подготовок подряд до attention (notification_store.MAX_PREPARE)
+  prepare_limit: number
 }
 
 export function getAlertDeliveries(state: AlertDeliveryFilter = 'problems', summary = false): Promise<AlertDeliveryOverview> {

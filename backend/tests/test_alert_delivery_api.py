@@ -89,6 +89,7 @@ async def test_delivery_reason_is_only_a_safe_code(client, auth_headers):
         await session.commit()
     result = await client.get("/api/alerts/deliveries?state=all", headers=auth_headers)
     reasons = {item["id"]: item["reason"] for item in result.json()["items"]}
+    assert result.json()["prepare_limit"] == store.MAX_PREPARE
     assert [reasons[delivery_id] for delivery_id in ids] == [
         "PrepareError", "LeaseExpired", "DeliveryError", "ReadTimeout", "HTTP_403", "", "DestinationChanged"]
     assert "EXAMPLE-SECRET" not in result.text and "api.example.test" not in result.text

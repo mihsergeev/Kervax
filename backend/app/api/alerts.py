@@ -88,7 +88,7 @@ async def get_deliveries(_: AdminUser, session: SessionDep,
             "reason": notification_store.reason(delivery.last_error),
         })
     return {"counts": counts, "bad_count": sum(bad for _, _, bad in totals),
-            "items": items, "more": len(rows) > 50}
+            "items": items, "more": len(rows) > 50, "prepare_limit": notification_store.MAX_PREPARE}
 
 
 @router.post("/deliveries/review")

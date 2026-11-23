@@ -10529,7 +10529,10 @@ async def _next_tick_in(session_factory: async_sessionmaker[AsyncSession], setti
     return min(max(nearest, tick / 2), tick)
 
 
-# остановка: сколько ждать идущий POST уведомления (таймауты TG_TIMEOUT: соединение 4 с, ответ 10 с)
+# Остановка: сколько самое большее ждать идущую отправку уведомления. Обычно это секунды, но один
+# POST по TG_TIMEOUT - до ~24 с (соединение 4, запись 10, ответ 10), а пачка может сделать несколько:
+# правка сообщения группы, повтор обычным текстом после 400 на разметку, вебхук. Худший случай больше
+# 30 с: тогда исход не дождемся, и его уточнит просрочка аренды (LeaseExpired, uncertain)
 _SETTLE_DELIVERY = 30.0
 # Бюджет остановки от сигнала до отмены планировщика (main._STOP_GRACE, в compose.yml
 # stop_grace_period 60 с) и запас из него на выход и закрытие базы: ожидание POST в него не лезет
@@ -10712,8 +10715,10 @@ async def collector_loop(
         # но не дольше остатка бюджета остановки
         if stop_seen is not None:
             stop_seen.cancel()
-        wait = _settle_timeout(loop.time() - signaled[0] if signaled else None)
-        if not await alert_delivery.settle(wait):
-            log.warning("доставка уведомлений: отправка не завершилась за %.0f с, исход уточнит просрочка аренды",
-                        wait)
-        alert_delivery.STOP.reset(delivery_stop)
+        try:
+            wait = _settle_timeout(loop.time() - signaled[0] if signaled else None)
+            if not await alert_delivery.settle(wait):
+                log.warning("доставка уведомлений: отправка не завершилась за %.0f с, исход уточнит просрочка аренды",
+                            wait)
+        finally:
+            alert_delivery.STOP.reset(delivery_stop)

@@ -849,3 +849,51 @@ async def test_changed_destination_is_recorded_as_its_own_code(database, http):
     assert (job.status, job.last_error, store.reason(job.last_error)) == (
         "rejected", "DestinationChanged", "DestinationChanged")
     assert http.sent() == []
+
+
+async def test_pause_read_failure_before_post_returns_rows_without_prepare_error(database, http, monkeypatch):
+    # база не ответила на чтение паузы: это не сбой подготовки строки, она просто вернется в очередь
+    factory, _url = database
+    await alert_delivery.admit(factory, configuration(), [message()], 0, "HTML", NOW)
+
+    async def broken(*_args):
+        if any(job.status == "sending" for job in await rows(factory, NotificationDelivery)):
+            raise RuntimeError("fixture settings read failure")  # перед POST захваченной пачки
+        return False
+
+    monkeypatch.setattr(alert_delivery, "_halted", broken)
+    await alert_delivery.drain(factory, configuration())
+    job, = await rows(factory, NotificationDelivery)
+    assert (job.status, job.attempts, job.uncertain_count, job.last_error, job.lease_owner) == (
+        "pending", 0, 0, "", "")
+    assert "prepare_failures" not in job.target and http.sent() == []
+
+
+async def test_settle_waits_for_rows_returned_by_a_cancelled_caller(database, http, monkeypatch):
+    # бота отменили до POST, а база медленная: возврат строк в очередь ждет и остановка (settle)
+    factory, _url = database
+    await alert_delivery.admit(factory, configuration(), [message()], 0, "HTML", NOW)
+    entered, gate, slow_db = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    defer = store.defer
+
+    async def slow(*_args):
+        entered.set()
+        await gate.wait()
+
+    async def slow_defer(*args, **kwargs):
+        await slow_db.wait()
+        return await defer(*args, **kwargs)
+
+    monkeypatch.setattr(alert_delivery, "_wanted", slow)
+    monkeypatch.setattr(store, "defer", slow_defer)
+    task = asyncio.create_task(alert_delivery.drain(factory, configuration()))
+    await asyncio.wait_for(entered.wait(), 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert not await alert_delivery.settle(0.05)  # возврат строк еще идет, остановка его ждет
+    slow_db.set()
+    assert await alert_delivery.settle(5)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    job, = await rows(factory, NotificationDelivery)
+    assert (job.status, job.attempts, job.uncertain_count, job.lease_owner) == ("pending", 0, 0, "")

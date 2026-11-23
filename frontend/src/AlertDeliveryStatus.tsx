@@ -26,20 +26,20 @@ function reasonGroup(code: string) {
 
 function reasonCause(item: AlertDeliveryItem, t: Translate) {
   const group = reasonGroup(item.reason)
-  if (group === 'prepare') return t('Причина: сообщение не удалось подготовить (текст, правила или получатель). В канал оно не отправлялось.')
+  if (group === 'prepare') return t('Причина: сообщение не удалось подготовить (текст, правила или получатель). В этот раз в канал оно не отправлялось.')
   if (group === 'interrupted') return t('Причина: отправка прервалась до записи ответа канала (перезапуск или зависание панели). Сообщение могло дойти.')
   if (group === 'no_answer') return t('Причина: канал не ответил после отправки. Сообщение могло дойти.')
   // DeliveryError + rejected - строки до кода DestinationChanged: тогда так писалась смена получателя
-  if (group === 'destination' || (group === 'unknown' && item.status === 'rejected')) return t('Причина: получатель изменился в настройках до отправки. Старому получателю сообщение не отправлялось.')
+  if (group === 'destination' || (group === 'unknown' && item.status === 'rejected')) return t('Причина: получатель изменился в настройках до отправки. В этот раз старому получателю сообщение не отправлялось.')
   if (group === 'unknown') return t('Причина не распознана.')
   return t(item.status === 'rejected' ? 'Причина: канал отказал в приеме (например, бота нет в чате или токен отозван). Сообщение не принято.' : 'Причина: канал вернул ошибку или был недоступен. Сообщение не принято.')
 }
 
-function reasonAction(item: AlertDeliveryItem, t: Translate) {
+function reasonAction(item: AlertDeliveryItem, t: Translate, prepareLimit: number) {
   const group = reasonGroup(item.reason)
   if (item.status === 'rejected') return group === 'refused' ? t('Исправьте бота или чат в настройках алертов, затем повторите доставку.') : ''
   if (item.status !== 'attention') return ''
-  if (group === 'prepare') return t('Подготовка не удалась 3 раза подряд, автоматические повторы остановлены. Посмотрите «Ошибки панели» за это время и настройки получателя, затем повторите доставку.')
+  if (group === 'prepare') return t('Подготовка подряд не удалась несколько раз (предел {n}), автоматические повторы остановлены. Посмотрите «Ошибки панели» за это время и настройки получателя, затем повторите доставку.', { n: prepareLimit })
   if (group === 'interrupted' || group === 'no_answer') return t('Автоматические повторы остановлены. Проверьте чат: если сообщения нет, повторите доставку (может прийти копия), если есть - отметьте рассмотренным.')
   return t('Автоматические повторы остановлены. Проверьте связь панели с Telegram или вебхуком и настройки бота, затем повторите доставку.')
 }
@@ -141,7 +141,7 @@ export function AlertDeliveryStatus({ onUnauthorized, onCount }: {
         {['pending', 'uncertain'].includes(item.status) && <p className="muted small">{t('Следующая попытка не раньше {time}', { time: when(item.next_attempt_at) })}</p>}
         {item.reviewed_at && <p className="muted small">{t('Рассмотрено пользователем {user} · {time}', { user: item.reviewed_by || '—', time: when(item.reviewed_at) })}</p>}
         {item.reason && item.status !== 'sending' && <p className="small">{reasonCause(item, t)}</p>}
-        {item.reason && !item.reviewed_at && reasonAction(item, t) && <p className="small">{reasonAction(item, t)}</p>}
+        {item.reason && !item.reviewed_at && reasonAction(item, t, data.prepare_limit) && <p className="small">{reasonAction(item, t, data.prepare_limit)}</p>}
         {item.status === 'attention' && !item.reviewed_at && !item.reason && <p className="small">{t('Автоматические повторы остановлены. Проверьте канал доставки перед ручным повтором.')}</p>}
         {item.reason && item.status !== 'sending' && <p className="muted small">{t('Код причины: {code}', { code: item.reason })}</p>}
         {item.can_retry && <>

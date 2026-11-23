@@ -146,3 +146,70 @@ async def test_main_change_rejects_obsolete_fallback_destination(db, monkeypatch
     assert calls == []
     async with db() as session:
         assert (await session.get(Delivery, ids[0])).status == "rejected"
+
+
+def gated_http(monkeypatch, entered, release):
+    calls = []
+    real_client = httpx.AsyncClient
+
+    async def handler(request):
+        import json
+        body = json.loads(request.content)
+        calls.append(body["chat_id"])
+        if body["chat_id"] == "group-example":
+            entered.set()
+            await release.wait()
+            return httpx.Response(403, json={"ok": False, "description": "Forbidden: bot was kicked"})
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 73}})
+
+    def client(*args, **kwargs):
+        return real_client(*args, **{**kwargs, "transport": httpx.MockTransport(handler)})
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    return calls
+
+
+async def test_group_403_while_the_caller_is_cancelled_still_falls_back_once(db, monkeypatch):
+    # бота отменили при выкладке посреди POST в группу, группа ответила 403: отказ и копия в основной
+    # чат пишутся вместе, копия уходит один раз
+    row_id, event_id, _ = await source(db, "pending")
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = gated_http(monkeypatch, entered, release)
+    task = asyncio.create_task(alert_delivery.drain(db, CFG, NOW))
+    await asyncio.wait_for(entered.wait(), 5)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await alert_delivery.settle(5)
+    async with db() as session:
+        rows = list(await session.scalars(select(Delivery).order_by(Delivery.id)))
+    assert [(row.status, row.target["route"]) for row in rows] == [("rejected", "group"), ("pending", "fallback")]
+    assert rows[1].event_id == event_id
+    await alert_delivery.drain(db, CFG, NOW + timedelta(seconds=1))
+    await alert_delivery.drain(db, CFG, NOW + timedelta(seconds=2))
+    assert calls == ["group-example", "main-example"]
+
+
+async def test_lost_fallback_after_a_rejection_is_restored_once(db, monkeypatch):
+    # процесс упал между записью отказа группы и постановкой копии: следующий проход ставит копию
+    await source(db, "pending")
+    calls = mock_http(monkeypatch)
+    enqueue = fallback.enqueue
+    lost = []
+
+    async def crash(*args, **kwargs):
+        if not lost:
+            lost.append(True)
+            raise RuntimeError("synthetic crash before the fallback row")
+        return await enqueue(*args, **kwargs)
+
+    monkeypatch.setattr(fallback, "enqueue", crash)
+    await alert_delivery.drain(db, CFG, NOW)
+    async with db() as session:
+        assert await session.scalar(select(func.count()).select_from(Delivery)) == 1
+    for second in (1, 2, 3):
+        await alert_delivery.drain(db, CFG, NOW + timedelta(seconds=second))
+    assert calls == ["group-example", "main-example"]
+    async with db() as session:
+        assert await session.scalar(select(func.count()).select_from(Delivery)) == 2
