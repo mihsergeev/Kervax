@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, forgetImpersonation, getAlertDeliveries, getPanelErrorCount, getToken, impersonating, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
+import { ApiError, forgetImpersonation, getAlertDeliveries, getPanelErrorCount, getToken, impersonating, impersonationAlive, me, revokeSession, setReadOnly, setToken, stopImpersonation, type Role } from './api'
 import { isCurrentSession, TOKEN_KEY } from './sessionToken'
 import { AuthProvider } from './auth'
 import { useI18n, type Lang } from './i18n'
@@ -343,6 +343,41 @@ export default function App() {
     return () => window.clearTimeout(id)
   }, [imp, returnToSelf])
 
+  // вкладка, где начали вход, раз в минуту подтверждает, что жива, а уходя - что уходит (api.ts):
+  // закрыли ее - вход скоро кончается и в соседних вкладках. Сервер ответил, что вход закончен, -
+  // к себе. Пропущенный ответ (нет связи) вход не заканчивает: окно на сервере - несколько минут
+  const impOn = !!imp
+  useEffect(() => {
+    if (!impOn) return
+    if (!impersonating()) {
+      // соседняя вкладка: подтверждать нечем, а что вход кончился, узнает по 401 от /me
+      const id = window.setInterval(loadMe, 60_000)
+      return () => window.clearInterval(id)
+    }
+    const beat = () => {
+      impersonationAlive().then((alive) => {
+        if (alive === false && !leaving.current) returnToSelf()
+      })
+    }
+    const leave = () => {
+      if (!leaving.current) void impersonationAlive(true)
+    }
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') beat()
+    }
+    beat()
+    const id = window.setInterval(beat, 60_000)
+    window.addEventListener('pagehide', leave)
+    window.addEventListener('pageshow', beat)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(id)
+      window.removeEventListener('pagehide', leave)
+      window.removeEventListener('pageshow', beat)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [impOn, loadMe, returnToSelf])
+
   useEffect(() => {
     if (getToken()) loadMe()
     // токен входа стерла соседняя вкладка (вернулась к себе, 401): токен админа лежит в этой
@@ -407,7 +442,7 @@ export default function App() {
           expires={imp.expires}
           onReturn={() => {
             // токен админа - только во вкладке, где начали вход (api.ts): здесь вернуть его некуда
-            if (!impersonating() && !window.confirm(t('Вход под этой учеткой начат в другой вкладке: вернуться к себе можно там. Если ту вкладку закрыли, вход закончится сам по истечении срока. Выйти здесь и войти заново?'))) return
+            if (!impersonating() && !window.confirm(t('Вход под этой учеткой начат в другой вкладке: вернуться к себе можно там. Если ту вкладку закрыли, вход закончится сам через несколько минут. Выйти здесь и войти заново?'))) return
             returnToSelf()
           }}
         />

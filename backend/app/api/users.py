@@ -21,6 +21,8 @@ from app.config import get_settings
 from app.deps import AdminUser, SessionDep
 from app.models import AuditLog, Check, Impersonation, Server, User
 from app.schemas import (
+    ImpersonateAlive,
+    ImpersonateAliveOut,
     ImpersonateOut,
     UserCardOut,
     UserCreate,
@@ -259,11 +261,7 @@ async def _close_open(session, admin: str, why: str, now: datetime) -> None:
     rows = list(await session.scalars(select(Impersonation).where(
         Impersonation.admin == admin, Impersonation.ended_at.is_(None))))
     for r in rows:
-        r.ended_at = now
-    await session.commit()
-    for r in rows:
-        await audit.record(
-            session, admin, "impersonate_stop", r.target, why if _aware(r.expires_at) > now else "истек срок")
+        await impersonate.close(session, r, why, now)
 
 
 @router.post("/{user_id}/impersonate", response_model=ImpersonateOut)
@@ -287,7 +285,10 @@ async def impersonate_start(
     now = datetime.now(timezone.utc)
     await _close_open(session, admin.username, "начат новый вход", now)
     expires = now + timedelta(minutes=impersonate.IMP_TTL_MINUTES)
-    row = Impersonation(admin=admin.username, target=user.username, expires_at=expires, ip=key[:64])
+    # строка живет, пока вкладка входа подтверждает (impersonate_alive), токен - не дольше часа
+    row = Impersonation(
+        admin=admin.username, target=user.username, started_at=now,
+        expires_at=now + timedelta(seconds=impersonate.IMP_IDLE_SECONDS), ip=key[:64])
     session.add(row)
     await session.commit()
     await session.refresh(row)
@@ -305,15 +306,36 @@ async def impersonate_start(
 async def impersonate_stop(imp_id: int, admin: AdminUser, session: SessionDep) -> None:
     """"Вернуться к себе": браузер снова ходит с токеном админа и закрывает вход - токен входа
     под чужой учеткой перестает действовать сразу. Зовется и после истечения срока, тогда в
-    журнале причина "истек срок"."""
+    журнале причина "истек срок" (или что вкладка входа перестала подтверждать)."""
     row = await session.get(Impersonation, imp_id)
     if row is None or row.admin != admin.username:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Вход не найден")
     if row.ended_at is not None:
         return
+    await impersonate.close(session, row, "вернулся к себе", datetime.now(timezone.utc))
+
+
+@router.post("/impersonation/{imp_id}/alive", response_model=ImpersonateAliveOut)
+async def impersonate_alive(
+    imp_id: int, admin: AdminUser, session: SessionDep, body: ImpersonateAlive | None = None,
+) -> ImpersonateAliveOut:
+    """Вкладка, где начали вход, жива (app/impersonate.py): продлить вход на IMP_IDLE_SECONDS, но
+    не дальше часа от начала. leaving - вкладку закрывают или перезагружают: входу остается
+    IMP_LEAVE_GRACE_SECONDS, перезагруженная вкладка сразу подтвердит снова. Только токеном
+    админа, начавшего вход: он есть лишь у той вкладки, токен входа сюда не пускает (AdminUser).
+    Закрытый или истекший вход не оживает - alive: false."""
+    row = await session.get(Impersonation, imp_id)
+    if row is None or row.admin != admin.username:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Вход не найден")
     now = datetime.now(timezone.utc)
-    expired = _aware(row.expires_at) <= now
-    row.ended_at = _aware(row.expires_at) if expired else now
+    left = _aware(row.expires_at)
+    if row.ended_at is not None or left <= now:
+        return ImpersonateAliveOut(alive=False)
+    if body is not None and body.leaving:
+        until = min(left, now + timedelta(seconds=impersonate.IMP_LEAVE_GRACE_SECONDS))
+    else:
+        until = min(impersonate.hard_cap(row), max(left, now + timedelta(seconds=impersonate.IMP_IDLE_SECONDS)))
+    res = await session.execute(update(Impersonation).where(
+        Impersonation.id == row.id, Impersonation.ended_at.is_(None)).values(expires_at=until))
     await session.commit()
-    await audit.record(
-        session, admin.username, "impersonate_stop", row.target, "истек срок" if expired else "вернулся к себе")
+    return ImpersonateAliveOut(alive=bool(res.rowcount))

@@ -83,6 +83,15 @@ class ImpersonateOut(BaseModel):
     expires_at: datetime
 
 
+class ImpersonateAlive(BaseModel):
+    # вкладку входа закрывают или перезагружают (pagehide)
+    leaving: bool = False
+
+
+class ImpersonateAliveOut(BaseModel):
+    alive: bool
+
+
 class UserCreate(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=MIN_PASSWORD_LEN, max_length=128)

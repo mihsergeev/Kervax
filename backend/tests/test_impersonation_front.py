@@ -58,3 +58,19 @@ def test_new_impersonation_keeps_admin_token_in_this_tab_only(result):
     assert s["local"] == {"kervax_token": "imp-new"}
     assert s["session"] == {"kervax_admin_token": "admin-old", "kervax_imp_id": "8"}
     assert result["otherTab"] is False
+
+
+def test_owner_tab_confirms_with_admin_token_and_other_tabs_cannot(result):
+    """Вход живет, пока его вкладка подтверждает (app/impersonate.py): токеном админа из
+    sessionStorage, уходя - keepalive-запросом (sendBeacon не несет Authorization)."""
+    beat = {"url": "/api/users/impersonation/8/alive", "auth": "Bearer admin-old"}
+    assert result["beats"] == [
+        {**beat, "body": '{"leaving":false}', "keepalive": False},
+        {**beat, "body": '{"leaving":true}', "keepalive": True},
+        {**beat, "body": '{"leaving":false}', "keepalive": False},
+        {**beat, "body": '{"leaving":false}', "keepalive": False},
+    ]
+    # вход закончен - false (к себе), сбой сервера - не знаем (вход не заканчивается)
+    assert result["alive"] == [True, True, False, None]
+    # у соседней вкладки токена админа нет: подтверждать нечем, запроса нет
+    assert result["otherBeat"] is None

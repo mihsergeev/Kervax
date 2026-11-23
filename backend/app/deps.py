@@ -125,7 +125,8 @@ def viewer_command_ok(user: User, kind: str, action: str) -> None:
 
 async def _check_impersonation(payload: dict, user: User, session: AsyncSession, unauthorized) -> None:
     """Токен входа под чужой учеткой действует, пока: админ все еще админ и не менял пароль,
-    пользователь не стал админом, а сеанс не закрыт ("Вернуться к себе") и не истек."""
+    пользователь не стал админом, а сеанс не закрыт ("Вернуться к себе"), не истек и его вкладка
+    подтверждает, что жива (app/impersonate.py)."""
     admin = await session.scalar(select(User).where(User.username == payload["imp"]))
     row = await session.get(Impersonation, payload.get("imp_id") or 0)
     if (
@@ -143,9 +144,11 @@ async def _check_impersonation(payload: dict, user: User, session: AsyncSession,
         or row.target != user.username
     ):
         raise unauthorized
-    expires = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=timezone.utc)
-    if expires <= datetime.now(timezone.utc):
+    # строка - пока вкладка входа подтверждает, что жива; срок токена - час от начала
+    alive = row.expires_at if row.expires_at.tzinfo else row.expires_at.replace(tzinfo=timezone.utc)
+    if alive <= datetime.now(timezone.utc):
         raise unauthorized
+    expires = datetime.fromtimestamp(payload["exp"], timezone.utc)
     impersonate.set_acting(impersonate.Acting(row.id, admin.username, user.username, expires))
 
 

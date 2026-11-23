@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from sqlalchemy import select
 
-from app import audit, impersonate
+from app import audit, collector, impersonate
 from app.models import AuditLog, Check, Impersonation, PanelError, Server
 
 def _h(token: str) -> dict[str, str]:
@@ -170,6 +170,8 @@ async def test_expires_after_an_hour(client, auth_headers):
 
     async with _factory(client)() as s:
         row = await s.get(Impersonation, imp_id)
+        # прошел час: вкладка подтверждала, пока не уперлась в потолок
+        row.started_at = datetime.now(timezone.utc) - timedelta(minutes=impersonate.IMP_TTL_MINUTES, seconds=1)
         row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
         await s.commit()
     assert (await client.get("/api/auth/me", headers=imp)).status_code == 401
@@ -233,3 +235,161 @@ async def test_marker_does_not_leak_to_next_request(client, auth_headers):
     assert r.status_code == 200
     ok = [x for x in await _audit(client, "login_ok") if x.username == "plainview"]
     assert len(ok) == 1 and ok[0].as_user == ""
+
+
+async def _row(client, imp_id) -> Impersonation:
+    async with _factory(client)() as s:
+        return await s.get(Impersonation, imp_id)
+
+
+async def _shift(client, imp_id, **delta) -> None:
+    """Сдвигает время входа назад, как будто прошло delta."""
+    async with _factory(client)() as s:
+        row = await s.get(Impersonation, imp_id)
+        row.started_at = impersonate._aware(row.started_at) - timedelta(**delta)
+        row.expires_at = impersonate._aware(row.expires_at) - timedelta(**delta)
+        await s.commit()
+
+
+async def _alive(client, imp_id, headers, leaving=None) -> httpx.Response:
+    body = None if leaving is None else {"leaving": leaving}
+    return await client.post(f"/api/users/impersonation/{imp_id}/alive", headers=headers, json=body)
+
+
+async def _login(client, username) -> httpx.Response:
+    # пароль - как у _mk
+    return await client.post("/api/auth/login", json={"username": username, "password": f"{username}-pass-2026"})
+
+
+def _left(row: Impersonation) -> timedelta:
+    return impersonate._aware(row.expires_at) - datetime.now(timezone.utc)
+
+
+async def test_session_lives_only_while_its_tab_confirms(client, auth_headers):
+    """Закрыли вкладку входа - вход не живет до конца часа в соседних вкладках: строка живет
+    IMP_IDLE_SECONDS от последнего подтверждения, а потолок - час от начала, как и был."""
+    uid = await _mk(client, auth_headers, "plainview", "viewer")
+    r = await _start(client, auth_headers, uid)
+    imp, imp_id = _h(r.json()["access_token"]), r.json()["imp_id"]
+    now = datetime.now(timezone.utc)
+    # токен и плашка - на час, строка - на несколько минут
+    assert datetime.fromisoformat(r.json()["expires_at"]) - now > timedelta(minutes=59)
+    me = (await client.get("/api/auth/me", headers=imp)).json()
+    assert datetime.fromisoformat(me["imp_expires"]) - now > timedelta(minutes=59)
+    left = _left(await _row(client, imp_id))
+    assert timedelta(seconds=impersonate.IMP_IDLE_SECONDS - 5) < left <= timedelta(seconds=impersonate.IMP_IDLE_SECONDS)
+
+    # вкладка подтверждала 45 минут: вход жив, и планировщик его не трогает
+    for _ in range(10):
+        await _shift(client, imp_id, minutes=4, seconds=30)
+        assert (await _alive(client, imp_id, auth_headers)).json() == {"alive": True}
+        assert await impersonate.close_lapsed(_factory(client)) == 0
+    assert (await client.get("/api/auth/me", headers=imp)).status_code == 200
+
+    # вкладку закрыли без pagehide (убили процесс): подтверждений нет - вход кончился
+    await _shift(client, imp_id, seconds=impersonate.IMP_IDLE_SECONDS + 1)
+    assert (await client.get("/api/auth/me", headers=imp)).status_code == 401
+    # и не оживает: ни подтверждением, ни после него
+    assert (await _alive(client, imp_id, auth_headers)).json() == {"alive": False}
+    assert (await client.get("/api/auth/me", headers=imp)).status_code == 401
+
+    # планировщик закрывает его сам и пишет в журнал, второй раз - не пишет
+    assert await impersonate.close_lapsed(_factory(client)) == 1
+    assert await impersonate.close_lapsed(_factory(client)) == 0
+    assert (await client.post(f"/api/users/impersonation/{imp_id}/stop", headers=auth_headers)).status_code == 204
+    stop = await _audit(client, "impersonate_stop")
+    assert [(x.username, x.target, x.detail) for x in stop] == [("admin", "plainview", impersonate.TAB_GONE)]
+    assert (await _row(client, imp_id)).ended_at is not None
+
+
+async def test_closing_the_tab_leaves_a_short_grace_and_reload_restores(client, auth_headers):
+    uid = await _mk(client, auth_headers, "plainview", "viewer")
+    r = await _start(client, auth_headers, uid)
+    imp, imp_id = _h(r.json()["access_token"]), r.json()["imp_id"]
+
+    # pagehide: полминуты, не больше
+    assert (await _alive(client, imp_id, auth_headers, leaving=True)).json() == {"alive": True}
+    assert _left(await _row(client, imp_id)) <= timedelta(seconds=impersonate.IMP_LEAVE_GRACE_SECONDS)
+    # это была перезагрузка: новая страница сразу подтвердила - снова полное окно
+    assert (await _alive(client, imp_id, auth_headers)).json() == {"alive": True}
+    assert _left(await _row(client, imp_id)) > timedelta(seconds=impersonate.IMP_IDLE_SECONDS - 5)
+    assert (await client.get("/api/auth/me", headers=imp)).status_code == 200
+
+    # а это закрытие: через полминуты вход кончился, хотя до конца часа далеко
+    assert (await _alive(client, imp_id, auth_headers, leaving=True)).json() == {"alive": True}
+    await _shift(client, imp_id, seconds=impersonate.IMP_LEAVE_GRACE_SECONDS + 1)
+    assert (await client.get("/api/auth/me", headers=imp)).status_code == 401
+    assert await collector.impersonate_mod.close_lapsed(_factory(client)) == 1
+    assert [x.detail for x in await _audit(client, "impersonate_stop")] == [impersonate.TAB_GONE]
+
+
+async def test_confirmations_never_extend_past_the_hour(client, auth_headers):
+    uid = await _mk(client, auth_headers, "plainview", "viewer")
+    r = await _start(client, auth_headers, uid)
+    imp, imp_id = _h(r.json()["access_token"]), r.json()["imp_id"]
+    await _shift(client, imp_id, minutes=impersonate.IMP_TTL_MINUTES - 1)
+    async with _factory(client)() as s:
+        # окно еще открыто (последнее подтверждение было только что)
+        row = await s.get(Impersonation, imp_id)
+        row.expires_at = datetime.now(timezone.utc) + timedelta(seconds=30)
+        await s.commit()
+    assert (await _alive(client, imp_id, auth_headers)).json() == {"alive": True}
+    row = await _row(client, imp_id)
+    assert impersonate._aware(row.expires_at) <= impersonate.hard_cap(row)
+    assert _left(row) <= timedelta(minutes=1)
+    # потолок пройден: в журнале "истек срок", а не закрытая вкладка
+    await _shift(client, imp_id, minutes=1, seconds=1)
+    assert (await client.get("/api/auth/me", headers=imp)).status_code == 401
+    assert (await _alive(client, imp_id, auth_headers)).json() == {"alive": False}
+    assert await impersonate.close_lapsed(_factory(client)) == 1
+    assert [x.detail for x in await _audit(client, "impersonate_stop")] == [impersonate.EXPIRED]
+
+
+async def test_only_the_admin_who_started_can_confirm(client, auth_headers):
+    uid = await _mk(client, auth_headers, "plainview", "viewer")
+    await _mk(client, auth_headers, "admin2", "admin")
+    r = await _start(client, auth_headers, uid)
+    imp, imp_id = _h(r.json()["access_token"]), r.json()["imp_id"]
+    before = (await _row(client, imp_id)).expires_at
+
+    # токен самого входа (лежит во всех вкладках) ни продлить, ни сократить вход не может
+    assert (await _alive(client, imp_id, imp)).status_code == 403
+    assert (await _alive(client, imp_id, imp, leaving=True)).status_code == 403
+    # другой админ - как будто входа нет; без токена - 401
+    other = (await _login(client, "admin2")).json()
+    assert (await _alive(client, imp_id, _h(other["access_token"]), leaving=True)).status_code == 404
+    assert (await client.post(f"/api/users/impersonation/{imp_id}/alive", json={"leaving": True})).status_code == 401
+    assert (await _alive(client, 9999, auth_headers)).status_code == 404
+    assert (await _row(client, imp_id)).expires_at == before
+    assert (await client.get("/api/auth/me", headers=imp)).status_code == 200
+
+    # после "Вернуться к себе" подтверждение вход не оживляет
+    assert (await client.post(f"/api/users/impersonation/{imp_id}/stop", headers=auth_headers)).status_code == 204
+    assert (await _alive(client, imp_id, auth_headers)).json() == {"alive": False}
+    assert (await client.get("/api/auth/me", headers=imp)).status_code == 401
+    assert await impersonate.close_lapsed(_factory(client)) == 0
+    assert [x.detail for x in await _audit(client, "impersonate_stop")] == ["вернулся к себе"]
+
+
+async def test_regular_login_is_not_affected(client, auth_headers):
+    """Обычный вход ничего не подтверждает и не кончается через минуты."""
+    uid = await _mk(client, auth_headers, "plainview", "viewer")
+    h = _h((await _login(client, "plainview")).json()["access_token"])
+    r = await _start(client, auth_headers, uid)
+    await _shift(client, r.json()["imp_id"], seconds=impersonate.IMP_IDLE_SECONDS + 1)
+    assert await impersonate.close_lapsed(_factory(client)) == 1
+    assert (await client.get("/api/auth/me", headers=h)).json()["username"] == "plainview"
+    assert (await client.get("/api/auth/me", headers=auth_headers)).json()["username"] == "admin"
+
+
+async def test_end_is_written_once_when_closers_race(client, auth_headers):
+    """"Вернуться к себе", новый вход и обход планировщика могут увидеть вход открытым разом:
+    конец в журнале - один."""
+    uid = await _mk(client, auth_headers, "plainview", "viewer")
+    imp_id = (await _start(client, auth_headers, uid)).json()["imp_id"]
+    first, second = await _row(client, imp_id), await _row(client, imp_id)
+    now = datetime.now(timezone.utc)
+    async with _factory(client)() as s:
+        assert await impersonate.close(s, first, "вернулся к себе", now) is True
+        assert await impersonate.close(s, second, "начат новый вход", now) is False
+    assert [x.detail for x in await _audit(client, "impersonate_stop")] == ["вернулся к себе"]

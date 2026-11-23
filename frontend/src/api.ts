@@ -66,6 +66,31 @@ export async function stopImpersonation(): Promise<void> {
   }
 }
 
+// Вкладка, где начали вход, подтверждает серверу, что жива (backend/app/impersonate.py): без
+// этого вход кончается через несколько минут, а не живет час в соседних вкладках, когда ее
+// закрыли. leaving - вкладку закрывают или перезагружают: входу остается полминуты, перезагрузка
+// успевает подтвердить снова. Токен админа нужен в заголовке, поэтому keepalive-fetch, а не
+// sendBeacon: тот заголовков не шлет. false - вход закончен или токен админа уже не годится,
+// null - не узнали (нет связи), вход это не заканчивает
+export async function impersonationAlive(leaving = false): Promise<boolean | null> {
+  const own = sessionStorage.getItem(IMP_ADMIN_KEY)
+  const id = sessionStorage.getItem(IMP_ID_KEY)
+  if (!own || !id) return null
+  try {
+    const res = await fetch(`/api/users/impersonation/${id}/alive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${own}` },
+      body: JSON.stringify({ leaving }),
+      ...(leaving ? { keepalive: true } : { signal: AbortSignal.timeout(15_000) }),
+    })
+    if ([401, 403, 404].includes(res.status)) return false
+    if (!res.ok) return null
+    return !!((await res.json()) as { alive?: boolean }).alive
+  } catch {
+    return null
+  }
+}
+
 // Учетка только для просмотра: бэкенд (deps.py) отказывает ей в любом изменении, кроме своей
 // учетки и журнала ошибок. Одна проверка на все запросы: изменение от нее не уходит на сервер
 // вовсе, человек сразу видит понятный отказ. Кнопки изменений при этом не рисуются (canWrite в

@@ -340,8 +340,8 @@ const EN: Record<string, string> = {
   'Скоро здесь появятся мониторы, дашборды и алерты.':
     'Monitors, dashboards and alerts are coming here soon.',
   'Вы вошли как {user}': 'Signed in as {user}',
-  'Вход под этой учеткой начат в другой вкладке: вернуться к себе можно там. Если ту вкладку закрыли, вход закончится сам по истечении срока. Выйти здесь и войти заново?':
-    'Signing in as this account was started in another tab: return to yourself there. If that tab was closed, the session ends by itself when it expires. Log out here and sign in again?',
+  'Вход под этой учеткой начат в другой вкладке: вернуться к себе можно там. Если ту вкладку закрыли, вход закончится сам через несколько минут. Выйти здесь и войти заново?':
+    'Signing in as this account was started in another tab: return to yourself there. If that tab was closed, the session ends by itself within a few minutes. Log out here and sign in again?',
   'Тема': 'Theme',
   'Язык': 'Language',
   'Меню': 'Menu',

@@ -31,6 +31,7 @@ from app import backup_transfer, bsrv_mirror
 from app import home_mute, kube_coverage, os_support
 from app import mute_watch
 from app import request_watch
+from app import impersonate as impersonate_mod
 from app import panel_errors
 from app import inside_probe
 from app import probe_scope
@@ -10578,6 +10579,8 @@ async def collector_loop(
             await stage("разбор дисков по прогнозу", request_disk_analysis(
                 session_factory, datetime.now(timezone.utc)))
             await stage("зависшие команды", _expire_commands(session_factory))
+            # вход под чужой учеткой, чья вкладка закрыта или истек час: конец - в журнал действий
+            await stage("входы под чужой учеткой", impersonate_mod.close_lapsed(session_factory))
             await stage("вторые копии бэкапов", bsrv_mirror.queue_pulls(
                 session_factory, datetime.now(timezone.utc), seen_online))
             await stage("левые запросы к панели", request_watch.check(
