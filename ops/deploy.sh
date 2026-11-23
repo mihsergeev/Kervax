@@ -46,11 +46,13 @@ while [ $# -gt 0 ]; do
         --attach) ATTACH=1; shift ;;
         --rollback) ROLLBACK=1; shift ;;
         --dir) DIR="$2"; shift 2 ;;
-        -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,9p' "$SELF"; exit 0 ;;
         -*) echo "unknown argument: $1" >&2; exit 2 ;;
         *) if [ -z "$HOST" ]; then HOST="$1"; else REF="$1"; fi; shift ;;
     esac
 done
+# the script by its absolute path: below it changes into the repository root
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 
 # --all: прогоняем этот же скрипт по каждой панели из списка. Именно рекурсией, а не
 # циклом внутри: каждая панель проходит ПОЛНУЮ проверку после выкатки. Первая панель из
@@ -59,7 +61,7 @@ done
 # все время - сборка образов, которой нечего ждать друг друга). Вывод каждой - в свой файл и
 # на экран целиком после, чтобы не перемешивался.
 if [ "$ALL" = "1" ]; then
-    LIST="$(dirname "$0")/prods"
+    LIST="$(dirname "$SELF")/prods"
     [ -f "$LIST" ] || { echo "нет списка панелей: $LIST (по ssh-хосту на строку)" >&2; exit 2; }
     HOSTS=$(grep -vE '^[[:space:]]*(#|$)' "$LIST")
     [ -n "$HOSTS" ] || { echo "список $LIST пуст" >&2; exit 2; }
@@ -71,7 +73,7 @@ if [ "$ALL" = "1" ]; then
     printf '\n\033[1m═══ [1/%s] %s (пробная) ═══\033[0m\n' "$n" "$FIRST"
     set -- "$FIRST" "$REF"
     [ "$DRY" = "1" ] && set -- "$@" --dry-run
-    sh "$0" "$@" || {
+    sh "$SELF" "$@" || {
         printf '\n\033[31m✗ остановились на %s — остальные панели не тронуты\033[0m\n' "$FIRST" >&2
         exit 1
     }
@@ -82,7 +84,7 @@ if [ "$ALL" = "1" ]; then
         for h in $REST; do
             set -- "$h" "$REF"
             [ "$DRY" = "1" ] && set -- "$@" --dry-run
-            sh "$0" "$@" > "$LOGS/$h.log" 2>&1 &
+            sh "$SELF" "$@" > "$LOGS/$h.log" 2>&1 &
             PIDS="$PIDS $h:$!"
         done
         failed=""
@@ -169,7 +171,10 @@ if [ "$ATTACH" = "1" ] || [ "$ROLLBACK" = "1" ]; then
     exit 0
 fi
 
-git rev-parse --git-dir >/dev/null 2>&1 || die "run this from the Kervax repository"
+TOP=$(git rev-parse --show-toplevel 2>/dev/null) || die "run this from the Kervax repository"
+# Everything below works from the root: started from ops/, git archive took only that
+# directory, and the rest of the panel went to the list of files to delete
+cd "$TOP" || die "cannot enter $TOP"
 git rev-parse --verify --quiet "$REF" >/dev/null || die "no such revision: $REF"
 # Exactly what is committed gets deployed: git archive does not see the working tree, and
 # "fixed it, deployed, still broken" is almost always this.
@@ -231,7 +236,8 @@ echo "  to rebuild:             $SERVICES"
 # stay out of the manifest too, so the cleanup below removes copies left by earlier
 # deploys, and a rollback (prev-src.tar) brings back exactly what was there.
 NOT_SHIPPED='^(docs/img|landing)/'
-NEW_LIST=$(git ls-tree -r --name-only "$REF" | grep -vE "$NOT_SHIPPED")
+# quotePath=false: names as they are (tar lists them so); otherwise git escapes non-ASCII
+NEW_LIST=$(git -c core.quotePath=false ls-tree --full-tree -r --name-only "$REF" | grep -vE "$NOT_SHIPPED")
 OLD_LIST=$(ssh "$HOST" "cat '$DIR/.kervax-deployed' 2>/dev/null" || true)
 if [ -z "$OLD_LIST" ]; then
     warn "no manifest from a previous deploy - nothing is removed this time,"
@@ -288,12 +294,14 @@ git archive "$REF" -- . ':(exclude)docs/img' ':(exclude)landing' > "$STAGE/src.t
 printf '%s\n' "$NEW_LIST" > "$STAGE/manifest.txt"
 # The manifest decides what gets deleted on production: it must list exactly what the
 # archive delivers, or a file would be shipped and never cleaned up (or the other way round)
-tar tf "$STAGE/src.tar" | grep -v '/$' | LC_ALL=C sort > "$STAGE/.shipped"
+tar --quoting-style=literal -tf "$STAGE/src.tar" | grep -v '/$' | LC_ALL=C sort > "$STAGE/.shipped"
 LC_ALL=C sort "$STAGE/manifest.txt" | cmp -s - "$STAGE/.shipped" \
     || die "the archive and the manifest list different files - nothing was shipped"
 rm -f "$STAGE/.shipped"
+# run.sh checks it before touching anything: a damaged delivery is not unpacked over the panel
+SRC_SHA256=$(sha256sum "$STAGE/src.tar" | cut -d' ' -f1)
 printf '%s\n' "$STALE" | grep -v '^$' > "$STAGE/stale.txt" || true
-cp "$(dirname "$0")/deploy-remote.sh" "$STAGE/run.sh"
+cp "$(dirname "$SELF")/deploy-remote.sh" "$STAGE/run.sh"
 # DEPS_EPOCH - номер недели: раз в неделю образы пересобирают слой пакетов ОС (apt в backend,
 # apk во frontend), и исправления дистрибутива приезжают без выпуска. Python- и npm-пакеты
 # закреплены lock-файлами: их слои пересобираются только при смене lock (backend/Dockerfile)
@@ -304,6 +312,7 @@ EPOCH='$(date -u +%G-%V)'
 VERSION='$VERSION'
 PREV_VERSION='${PREV_VERSION:-unknown}'
 REV='$REV'
+SRC_SHA256='$SRC_SHA256'
 EOF
 
 # -- The signed agent release -------------------------------------------------
@@ -327,8 +336,12 @@ fi
 say "Shipping the sources and starting the run $RUN"
 # gzip -1: the sources shrink ~2.4x for a fraction of a second of CPU; the link to a far
 # panel is the slow part. A truncated stream fails in tar on production, the run does not start.
-tar -cf - -C "$STAGE" . | gzip -1 | ssh "$HOST" "sudo mkdir -p '$RD' && sudo tar xzf - -C '$RD' \
-    && { sudo sh '$RD/run.sh' start run || { rc=\$?; sudo rm -rf '$RD'; exit \$rc; }; }" \
+# pipefail where the shell has it, in a subshell (other pipes here rely on the usual status):
+# a failed local tar or gzip is not hidden behind the status of ssh
+# shellcheck disable=SC3040  # probed first: a shell without pipefail just skips it
+( if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
+  tar -cf - -C "$STAGE" . | gzip -1 | ssh "$HOST" "sudo mkdir -p '$RD' && sudo tar xzf - -C '$RD' \
+    && { sudo sh '$RD/run.sh' start run || { rc=\$?; sudo rm -rf '$RD'; exit \$rc; }; }" ) \
     || die "the run did not start (another deploy on $HOST? ops/deploy.sh $HOST --attach) - production was not touched"
 
 set +e

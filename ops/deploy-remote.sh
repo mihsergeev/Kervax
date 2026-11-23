@@ -44,7 +44,7 @@ LOG="$RD/$KIND.log"
 STATUS="$RD/$KIND.status"
 
 # shellcheck disable=SC1091
-. "$RD/params"    # FILES SERVICES EPOCH VERSION PREV_VERSION REV
+. "$RD/params"    # FILES SERVICES EPOCH VERSION PREV_VERSION REV SRC_SHA256
 
 step() { printf '\n→ %s\n' "$*"; }
 note() { printf '  %s\n' "$*"; }
@@ -268,6 +268,12 @@ if [ "$MODE" = rollback ]; then
 fi
 
 step "Snapshot of what is running now"
+# exactly what deploy.sh packed, or nothing on the panel is touched
+src_sha=$(sha256sum "$RD/src.tar" 2>/dev/null | cut -d' ' -f1)
+if [ -z "${SRC_SHA256:-}" ] || [ "$src_sha" != "$SRC_SHA256" ]; then
+    note "the delivered sources differ from what was sent (sha256) - nothing was changed"
+    finish failed 1
+fi
 tar tf "$RD/src.tar" > /dev/null 2>&1 || finish failed 1
 migration > "$RD/mig-before" || { note "cannot read the migration - nothing was changed"; finish snapshot-failed 1; }
 note "migration: $(cat "$RD/mig-before")"

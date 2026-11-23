@@ -96,10 +96,11 @@ COPY backend/alembic ./alembic
 # pip нужен только при сборке. Его vendored-библиотеки не участвуют в работе
 # панели, но иначе остаются в образе со своим независимым циклом обновлений.
 # .pyc кода и миграций - здесь же: панель запускается из /srv, а писать туда не может.
+# checked-hash: годность .pyc - по хешу исходника, а не по mtime, который сборка может переписать.
 RUN pip install --no-cache-dir --no-deps --no-build-isolation --no-index . \
  && python -m pip check \
  && python -m pip uninstall --yes pip \
- && python -m compileall -q -j 0 app alembic
+ && python -m compileall -q -j 0 --invalidation-mode checked-hash app alembic
 
 # Код, миграции и раздаваемые агентам файлы принадлежат root, панель их только читает:
 # ее процесс не может подменить ни свой код, ни бинарь, который скачает весь парк.

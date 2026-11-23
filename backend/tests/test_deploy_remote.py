@@ -3,6 +3,7 @@
 Docker is a fault-injecting executable: filesystem changes, tar, flock, process exit
 codes and status files are real. No test needs a production panel or credentials.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -51,7 +52,9 @@ elif a[0] == 'compose':
         if mode in ('changed-schema', 'rollback-db-fail', 'rollback-db-empty'):
             (s/'health').write_text('broken')
 elif a[0] == 'exec':
-    if 'agent_source_guard' in a[-1]:
+    if a[1] == 'kervax-scheduler-1' and a[2] == 'sed':
+        print((s/'health').read_text() if (s/'health').exists() else '1.8.80')
+    elif 'agent_source_guard' in a[-1]:
         print('0' if mode == 'agent-runtime-off' else '1')
     elif 'SELECT id,last_seen FROM servers' in a[-1]:
         if mode == 'agent-baseline-empty': print('[]')
@@ -92,6 +95,27 @@ os.execv(os.environ['DEPLOY_FIXTURE_TAR'], [os.environ['DEPLOY_FIXTURE_TAR']]+a)
 '''
 
 
+# A fake clock for `date +%s` only: each call advances it by DEPLOY_FIXTURE_CLOCK_STEP seconds.
+DATE = r'''#!/usr/bin/env python3
+import os, pathlib, sys
+a = sys.argv[1:]
+if a != ['+%s']:
+    os.execv(os.environ['DEPLOY_FIXTURE_DATE'], [os.environ['DEPLOY_FIXTURE_DATE']]+a)
+s = pathlib.Path(os.environ['DEPLOY_FIXTURE_STATE'])
+clock = s/'clock'
+now = int(clock.read_text()) if clock.exists() else 1000000
+clock.write_text(str(now + int(os.environ.get('DEPLOY_FIXTURE_CLOCK_STEP', '0'))))
+print(now)
+'''
+
+
+SLEEP = r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+s = pathlib.Path(os.environ['DEPLOY_FIXTURE_STATE'])
+with (s/'calls').open('a') as f: f.write(json.dumps(['sleep']+sys.argv[1:])+'\n')
+'''
+
+
 CP = r'''#!/usr/bin/env python3
 import os, pathlib, sys
 a = sys.argv[1:]
@@ -129,9 +153,10 @@ def deployment(tmp_path):
         for p in payload.iterdir(): archive.add(p, arcname=p.name)
     (run / 'manifest.txt').write_text('app.txt\nnew-only.txt\ncompose.yml\n')
     (run / 'stale.txt').write_text('removed.txt\norphan.txt\n')
+    seal(run)
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
-    for name, body in {'docker': DOCKER, 'tar': TAR, 'cp': CP, 'sleep': '#!/bin/sh\nexit 0\n'}.items():
+    for name, body in {'docker': DOCKER, 'tar': TAR, 'cp': CP, 'sleep': SLEEP, 'date': DATE}.items():
         p = bin_dir / name
         p.write_text(body)
         p.chmod(0o755)
@@ -139,17 +164,25 @@ def deployment(tmp_path):
     state.mkdir()
     env = {**os.environ, 'PATH': str(bin_dir)+os.pathsep+os.environ['PATH'],
            'DEPLOY_FIXTURE_STATE': str(state), 'DEPLOY_FIXTURE_TAR': shutil.which('tar'),
-           'DEPLOY_FIXTURE_CP': shutil.which('cp')}
+           'DEPLOY_FIXTURE_CP': shutil.which('cp'), 'DEPLOY_FIXTURE_DATE': shutil.which('date')}
     return panel, run, state, env, old, protected
 
 
-def execute(deployment, mode='', kind='run'):
+def seal(run):
+    """What deploy.sh does: the sha256 of the archive it sent goes into params."""
+    digest = hashlib.sha256((run / 'src.tar').read_bytes()).hexdigest()
+    params = [line for line in (run / 'params').read_text().splitlines() if not line.startswith('SRC_SHA256=')]
+    (run / 'params').write_text('\n'.join(params + [f"SRC_SHA256='{digest}'"]) + '\n')
+
+
+def execute(deployment, mode='', kind='run', **extra):
     panel, run, state, env, *_ = deployment
     result = subprocess.run(['sh', str(run / 'run.sh'), kind],
-                            env={**env, 'DEPLOY_FIXTURE_MODE': mode},
+                            env={**env, 'DEPLOY_FIXTURE_MODE': mode, **extra},
                             text=True, capture_output=True, timeout=20)
     status = (run / f'{kind}.status').read_text().strip()
-    calls = [json.loads(line) for line in (state / 'calls').read_text().splitlines()]
+    log = state / 'calls'
+    calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
     return result, status, calls
 
 
@@ -275,6 +308,7 @@ def enable_guard_fixture(deployment):
         for source in payload.iterdir(): archive.add(source, arcname='ops/' + source.name)
     with (run / 'manifest.txt').open('a') as manifest:
         for source in payload.iterdir(): manifest.write('ops/' + source.name + '\n')
+    seal(run)
     systemctl = Path(env['PATH'].split(os.pathsep)[0]) / 'systemctl'
     systemctl.write_text('#!/bin/sh\necho \'["host-peer-refresh"]\' >> "$DEPLOY_FIXTURE_STATE/calls"\n')
     systemctl.chmod(0o755)
@@ -306,3 +340,37 @@ def test_manual_guarded_rollback_refreshes_restored_container_peers(deployment):
     assert result.returncode == 0 and status == 'rolled-back', result.stdout + result.stderr
     assert sum(call[0] == 'host-peer-refresh' for call in calls) == 2
     assert_old_sources(deployment)
+
+
+@pytest.mark.parametrize('damage', ['changed', 'unsealed'])
+def test_delivery_that_differs_from_what_was_sent_changes_nothing(deployment, damage):
+    panel, run, _, _, _, _ = deployment
+    if damage == 'changed':
+        # a whole, readable archive - just not the one deploy.sh packed
+        other = run.parent / 'other.txt'
+        other.write_text('new application')
+        with tarfile.open(run / 'src.tar', 'w') as archive:
+            archive.add(other, arcname='app.txt')
+    else:
+        (run / 'params').write_text((run / 'params').read_text().replace('SRC_SHA256=', 'NO_SHA256='))
+    result, status, calls = execute(deployment)
+    assert result.returncode != 0 and status == 'failed', result.stdout + result.stderr
+    assert 'differ from what was sent' in result.stdout
+    assert calls == []
+    assert not (run / 'prev-src.tar').exists()
+    assert_old_sources(deployment)
+
+
+@pytest.mark.parametrize('step,sleeps', [(0, [['sleep', '30']]), (12, [['sleep', '18']]), (45, [])])
+def test_scheduler_gets_30_seconds_since_up_including_earlier_checks(deployment, step, sleeps):
+    _, run, _, _, _, _ = deployment
+    (run / 'params').write_text((run / 'params').read_text().replace(
+        "SERVICES='backend frontend'", "SERVICES='backend scheduler frontend'"))
+    result, status, calls = execute(deployment, DEPLOY_FIXTURE_CLOCK_STEP=str(step))
+    assert result.returncode == 0 and status == 'ok', result.stdout + result.stderr
+    assert 'scheduler: 1.8.81' in result.stdout
+    assert [c for c in calls if c[0] == 'sleep'] == sleeps
+    # the version is read after the pause, and the pause starts after the containers are up
+    read = next(i for i, c in enumerate(calls) if c[:3] == ['exec', 'kervax-scheduler-1', 'sed'])
+    up = max(i for i, c in enumerate(calls) if c[0] == 'compose' and 'up' in c)
+    assert all(up < i < read for i, c in enumerate(calls) if c[0] == 'sleep')
