@@ -518,7 +518,7 @@ func TestSwitchToInstalled(t *testing.T) {
 		return errors.New("exec в тесте не нужен")
 	}
 	err := selfUpdate("http://127.0.0.1:1", "98.5")
-	if argv0 != self || !strings.Contains(strings.Join(env, "\n"), switchEnv+"=99.0") {
+	if argv0 != self || !strings.Contains(strings.Join(env, "\n"), fmt.Sprintf("%s=99.0:%d", switchEnv, os.Getpid())) {
 		t.Fatalf("не перешел в штатный: %q %v", argv0, err)
 	}
 	if err == nil || isPermanent(err) || strings.Contains(err.Error(), "отказ") {
@@ -532,8 +532,19 @@ func TestSwitchToInstalled(t *testing.T) {
 	if selfUpdate("http://127.0.0.1:1", "99.1"); argv0 != "" {
 		t.Fatal("переход в штатный, который старше цели")
 	}
-	// после перехода процесс все равно старше метки: второй раз не переходим
+	// переменная чужого процесса (окружение юнита) не учитывается
+	os.Setenv(switchEnv, fmt.Sprintf("99.0:%d", os.Getpid()+1))
+	checkSwitched()
+	if f, _ := switchFailed.Load().(string); f != "" || os.Getenv(switchEnv) != "" {
+		t.Fatalf("учтена переменная другого процесса: %q", f)
+	}
 	os.Setenv(switchEnv, "99.0")
+	checkSwitched()
+	if f, _ := switchFailed.Load().(string); f != "" {
+		t.Fatalf("учтена переменная без pid: %q", f)
+	}
+	// после перехода процесс все равно старше метки: второй раз не переходим
+	os.Setenv(switchEnv, fmt.Sprintf("99.0:%d", os.Getpid()))
 	checkSwitched()
 	if os.Getenv(switchEnv) != "" {
 		t.Fatal("переменная перехода осталась для следующих exec")
@@ -544,10 +555,49 @@ func TestSwitchToInstalled(t *testing.T) {
 	}
 	// переход удался (версия процесса - та, что в метке): ошибки нет
 	switchFailed.Store("")
-	os.Setenv(switchEnv, version)
+	os.Setenv(switchEnv, fmt.Sprintf("%s:%d", version, os.Getpid()))
 	checkSwitched()
 	if f, _ := switchFailed.Load().(string); f != "" {
 		t.Fatalf("удачный переход засчитан как неудача: %q", f)
+	}
+}
+
+// Слив перед переходом идет до 16 минут: если за это время штатный сменили на более старый (или
+// без метки), exec не делаем - временная ошибка, повтор
+func TestSwitchRecheckAfterDrain(t *testing.T) {
+	self, _ := trialSetup(t)
+	oldTick := drainTick
+	defer func() { drainTick = oldTick }()
+	drainTick = 5 * time.Millisecond
+	os.WriteFile(self, []byte(markedBin("committed by A", "99.0")), 0o755)
+	execs := 0
+	execFn = func(string, []string, []string) error {
+		execs++
+		return errors.New("exec в тесте не нужен")
+	}
+	for _, later := range []string{markedBin("older", "98.0"), "pre-2.75 binary"} {
+		release := make(chan struct{})
+		tasks.spawn(func() { <-release; os.WriteFile(self, []byte(later), 0o755) })
+		go func() { time.Sleep(50 * time.Millisecond); close(release) }()
+		err := switchToInstalled(self, "99.0")
+		if execs != 0 || err == nil || isPermanent(err) || !strings.Contains(err.Error(), "за время слива сменился") {
+			t.Fatalf("штатный сменился на %q: exec %d, %v", later, execs, err)
+		}
+		if tasks.isDraining() {
+			t.Fatal("слив не снят")
+		}
+	}
+	// сменился на более новый - переходим в него, с его версией
+	os.WriteFile(self, []byte(markedBin("newer", "99.5")), 0o755)
+	var env []string
+	execFn = func(_ string, _ []string, e []string) error {
+		execs++
+		env = e
+		return errors.New("exec в тесте не нужен")
+	}
+	switchToInstalled(self, "99.0")
+	if execs != 1 || !strings.Contains(strings.Join(env, "\n"), fmt.Sprintf("%s=99.5:%d", switchEnv, os.Getpid())) {
+		t.Fatalf("переход в более новый: exec %d", execs)
 	}
 }
 

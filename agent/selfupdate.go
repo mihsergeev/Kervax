@@ -491,8 +491,9 @@ var stagedSelf = func() (string, error) {
 	return stagedPath(self), nil
 }
 
-// switchEnv - этот процесс запущен exec'ом в штатный бинарь (switchToInstalled); значение - версия
-// из метки штатного, которую ждали
+// switchEnv - этот процесс запущен exec'ом в штатный бинарь (switchToInstalled); значение -
+// "<версия из метки штатного>:<pid>". exec сохраняет PID, поэтому чужая переменная (из окружения
+// юнита, от другого процесса) с этим процессом не совпадет и не учитывается.
 const switchEnv = "KERVAX_AGENT_SWITCHED"
 
 // switchFailed - после exec в штатный версия процесса все равно старше его метки (метка врет или
@@ -502,11 +503,15 @@ var switchFailed atomic.Value // string
 // checkSwitched - на старте: разбор switchEnv. Переменную убираем, чтобы она не ехала в
 // следующие exec (проба, новый переход).
 func checkSwitched() {
-	want := os.Getenv(switchEnv)
-	if want == "" {
+	v := os.Getenv(switchEnv)
+	if v == "" {
 		return
 	}
 	os.Unsetenv(switchEnv)
+	want, pid, ok := strings.Cut(v, ":")
+	if !ok || pid != strconv.Itoa(os.Getpid()) {
+		return
+	}
 	if versionNewer(want, version) {
 		switchFailed.Store(want)
 	}
@@ -525,11 +530,26 @@ func switchToInstalled(staged, inst string) error {
 	if left := tasks.drain(drainMax); left > 0 {
 		fmt.Fprintf(os.Stderr, "kervax-agent: за %s не закончилось команд: %d - перезапуск без них\n", drainMax, left)
 	}
+	// слив шел до 16 минут: штатный могли сменить еще раз - перед exec сверяем заново
+	cur := binaryVersion(staged)
+	if cur == "" || versionNewer(inst, cur) {
+		tasks.resume()
+		return fmt.Errorf("штатный %s за время слива сменился (был %s, стал %s) - не перехожу, повторим",
+			staged, inst, orNone(cur))
+	}
+	inst = cur
 	fmt.Printf("kervax-agent %s: штатный %s уже версии %s (поставил другой экземпляр агента) - перехожу в него\n",
 		version, staged, inst)
-	err := execFn(staged, os.Args, append(os.Environ(), switchEnv+"="+inst))
+	err := execFn(staged, os.Args, append(os.Environ(), fmt.Sprintf("%s=%s:%d", switchEnv, inst, os.Getpid())))
 	tasks.resume()
 	return fmt.Errorf("переход в штатный %s: %w", staged, err)
+}
+
+func orNone(v string) string {
+	if v == "" {
+		return "без метки версии"
+	}
+	return v
 }
 
 // markedVersion ищет метку по префиксу, вырезанному из своей же метки: отдельной строки с
@@ -758,7 +778,9 @@ var clockHelperDeaths atomic.Int32
 
 // clockHelperCmd - запуск помощника; тесты подставляют свой
 var clockHelperCmd = func(ctx context.Context) *exec.Cmd {
-	return exec.CommandContext(ctx, "/proc/self/exe", clockSyncedArg)
+	cmd := exec.CommandContext(ctx, "/proc/self/exe", clockSyncedArg)
+	cmd.Env = cleanEnv() // как у остальных детей: без NOTIFY_SOCKET и прочего от systemd
+	return cmd
 }
 
 // noCoreDump - помощника может убить фильтр системных вызовов (SIGSYS, SCMP_ACT_KILL_PROCESS):
