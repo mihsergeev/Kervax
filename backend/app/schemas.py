@@ -304,6 +304,8 @@ class TryInside(TryResult):
     request_id: int | None = None
     fast: bool = False
     deadline: int = 0
+    # пробу не-админа агент делает без ключевого слова (см. LOCAL_KEYWORD_TEXT в api/checks.py)
+    keyword_skipped: bool = False
 
 
 class CheckTryOut(BaseModel):
@@ -2195,6 +2197,10 @@ class AgentReportIn(BaseModel):
     # Без этого поля отказ виден только в journalctl ноды, а в панели — лишь
     # расхождение «цель X / версия Y» без объяснения.
     update_error: str = Field(default="", max_length=300)
+    # агент 2.74+ перед exec в обновление дорабатывает взятые команды: новых ему не выдаем
+    draining: bool = False
+    # агент 2.74+: работает проба новой версии, штатный бинарь еще прежний - цель обновления не снимаем
+    trial: bool = False
     docker: dict | None = None  # снимок Docker: {present,access,version,compose,containers}
     kube: dict | None = None  # снимок Kubernetes: {present,access,flavor,version,nodes,pods,…}
     backup: dict | None = None  # статус restic-бэкапа: {present,success,last_backup_ts,skipped,…}

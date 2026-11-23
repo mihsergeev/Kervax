@@ -13,7 +13,7 @@ def _src(name: str) -> str:
 
 def test_spool_answers_are_root_only():
     # каталог ответов root (агент только читает), ответ через mktemp, без chmod по имени после mv
-    for name, ver in (("timesync-setup.sh", "0.3"), ("diskusage-setup.sh", "0.7"), ("units-setup.sh", "0.6")):
+    for name, ver in (("timesync-setup.sh", "0.4"), ("diskusage-setup.sh", "0.7"), ("units-setup.sh", "0.6")):
         s = _src(name)
         assert f"KERVAX_SETUP_VERSION={ver}  # " in s
         assert '-m 0750 "$RES_DIR"' in s and '-m 0770 "$RES_DIR"' not in s
@@ -28,6 +28,8 @@ def test_timesync_panel_url_only_from_agent_config():
     s = _src("timesync-setup.sh")
     assert 'grep -lxF "url=$panel" /etc/kervax-agent.conf /etc/kervax-agent-*.conf' in s
     assert "MAX_STEP=21600" in s and 'date -s "@$when"' in s
+    # 0.4: шагами по 6 часов часы больше не отводятся - отметка последнего времени у root
+    assert "FLOOR=/var/lib/kervax/tsync-floor" in s and '[ $((floor - when)) -gt $MAX_STEP ]' in s
 
 
 def test_units_whole_journal_needs_fix_conf_and_is_masked():

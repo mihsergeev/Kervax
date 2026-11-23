@@ -719,6 +719,13 @@ export function AddMonitor({
     if (v.kind === 'offline') return <span className="am-res">{dot('down')}<span>{t('сервер не на связи')}</span></span>
     if (v.kind === 'no_answer')
       return <span className="am-res">{dot('down')}<span>{t('агент не ответил за {n} с', { n: v.deadline })}</span></span>
+    if (v.keyword_skipped)
+      return (
+        <span className="am-res">
+          {resLine(v)}
+          <span className="muted">{' · '}{t('ключевое слово не проверялось: изнутри его задает администратор')}</span>
+        </span>
+      )
     return resLine(v)
   }
   const locLine = () => {

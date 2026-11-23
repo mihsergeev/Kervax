@@ -152,8 +152,16 @@ The agent installs a new binary **only if all three hold**:
    push back an older, possibly vulnerable version).
 3. **sha256 and size** of the downloaded binary match the signed manifest.
 
-The binary swap is atomic (`rename`); the restart is an `exec` of the same binary
-(not an arbitrary command).
+The verified binary is written next to the installed one (fsync of the file and the
+directory); the restart is an `exec` of it (not an arbitrary command) once the panel
+commands in progress have finished and sent their results. The installed file is swapped
+atomically (`rename`) only after the panel accepts three reports of the new binary and it has
+run for five minutes; if it does not start, crashes or restarts before that, systemd brings the
+previous version back up, and after three such failures in a row that version is not installed
+again. If another agent instance replaced the installed file in the meantime, the trial is
+dropped without writing over it. While the agent drains, the panel gives it no new commands. The previous binary stays
+next to it as `kervax-agent.prev`. Freshness of the signed manifest does not rely on the
+node's clock alone: stepping the clock back within one boot does not extend it.
 
 ## 5. Threat model: the panel is compromised
 

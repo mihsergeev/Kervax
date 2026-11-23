@@ -1038,6 +1038,8 @@ export type TryInside = TryResult & {
   request_id: number | null
   fast: boolean
   deadline: number
+  // проба не-админа идет без ключевого слова: его в проверке изнутри задает админ
+  keyword_skipped?: boolean
 }
 export type CheckTryOut = {
   panel: TryPanel | null

@@ -147,11 +147,13 @@ def owns_request(req: ProbeRequest, user: User) -> bool:
 
 
 async def inside(session: AsyncSession, body, servers: list[Server], now: datetime, *, user: User,
-                 trusted_check: Check | None = None) -> dict:
+                 trusted_check: Check | None = None, keyword_skipped: bool = False) -> dict:
     """Задание агенту сервера сайта. Ответ форма забирает опросом (poll)."""
     host = probe_scope.target_host(body.target)
     spec = {k: getattr(body, k) for k in manual_probe.SPEC_FIELDS}
     spec["requester"] = _requester(user)
+    if keyword_skipped:
+        spec["keyword_skipped"] = True
     if probe_scope.requires_trusted_server(body):
         trusted = probe_scope.trusted_server(trusted_check) if trusted_check is not None else None
         servers = [s for s in servers if s.id == trusted
@@ -164,7 +166,7 @@ async def inside(session: AsyncSession, body, servers: list[Server], now: dateti
     if hit is None:
         return {"status": "none", "kind": "no_server"}
     srv, web = hit
-    base = {"server_id": srv.id, "server_name": srv.name, "web": web}
+    base = {"server_id": srv.id, "server_name": srv.name, "web": web, "keyword_skipped": keyword_skipped}
     if not seen_online(srv, now):
         return {**base, "status": "none", "kind": "offline"}
     req = ProbeRequest(
@@ -183,7 +185,7 @@ def inside_answer(req: ProbeRequest, srv: Server | None, now: datetime) -> dict:
     hit = serving_web([srv], probe_scope.target_host(req.url)) if srv is not None else None
     base = {"server_id": req.server_id, "server_name": srv.name if srv else "",
             "web": hit[1] if hit else "", "request_id": req.id,
-            "fast": manual_probe.fast_agent(srv)}
+            "fast": manual_probe.fast_agent(srv), "keyword_skipped": bool((req.spec or {}).get("keyword_skipped"))}
     if req.ts is not None and req.status:
         kind, code = domain_probe._kind(req.status, req.message)
         return {**base, "status": req.status, "message": req.message,

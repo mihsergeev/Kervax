@@ -5846,6 +5846,8 @@ const EN: Record<string, string> = {
     'the server is offline',
   'агент не ответил за {n} с':
     'the agent did not answer within {n} s',
+  'ключевое слово не проверялось: изнутри его задает администратор':
+    'keyword not checked: inside a server it is set by an administrator',
   'открывается из {ok} из {n}':
     'opens from {ok} of {n}',
   'нет: {list}':

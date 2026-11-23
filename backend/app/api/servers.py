@@ -4304,8 +4304,10 @@ async def agent_report(
     # Агент уже новее цели (поставили руками или helper'ом, пока шла раскатка старой версии) -
     # цель снимается: иначе панель вечно просила откат, агент отказывал, и в "Обновлениях"
     # висело "обновление агента отклонено" при всех агентах на свежей версии.
+    # Агент 2.74+ сначала пробует новую версию (trial), а штатным бинарь становится позже: упадет
+    # проба - вернется прежняя версия и повторит обновление, поэтому цель держим до отчета без trial.
     upd = None
-    if (server.target_agent_version and server.agent_version
+    if (server.target_agent_version and server.agent_version and not body.trial
             and _ver_tuple(server.agent_version) >= _ver_tuple(server.target_agent_version)):
         server.target_agent_version = ""
     if (
@@ -4315,10 +4317,15 @@ async def agent_report(
     ):
         upd = {"version": server.target_agent_version}
 
-    # docker/kube/backup-команды из очереди (fallback; основной — быстрый /agent/commands)
-    cmds = await _take_docker_commands(session, server.id)
-    kcmds = await _take_kube_commands(session, server.id)
-    bcmds = await _take_backup_commands(session, server.id)
+    # docker/kube/backup-команды из очереди (fallback; основной — быстрый /agent/commands).
+    # Агент перед exec обновления сливает команды (draining): новые остаются в очереди и
+    # уходят новому процессу, иначе слив тянулся бы до таймаута и обрывал их. Очередь
+    # /agent/commands он в это время не опрашивает.
+    cmds, kcmds, bcmds = [], [], []
+    if not body.draining:
+        cmds = await _take_docker_commands(session, server.id)
+        kcmds = await _take_kube_commands(session, server.id)
+        bcmds = await _take_backup_commands(session, server.id)
     pending = await _store_site_probes(session, server, body.site_probes or [], now)
     # Ручные проверки — первыми: агент проходит задания по порядку, и «Проверить
     # сейчас» не должно ждать, пока он переберёт медленные плановые сайты.

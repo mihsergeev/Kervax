@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.73"
+const version = "2.74"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -229,6 +229,11 @@ type report struct {
 	// собрана НЕ с тем пубключом, которым подписан релиз; на парке в десятки
 	// нод искать это по логам каждой ноды невозможно.
 	UpdateError string `json:"update_error,omitempty"`
+	// 2.74: идет слив перед exec обновления - панель новых команд не выдает (они ждут в очереди)
+	Draining bool `json:"draining,omitempty"`
+	// 2.74: процесс - проба новой версии, штатный бинарь еще прежний. Панель цель обновления не
+	// снимает, пока проба не принята: упадет - прежняя версия повторит
+	Trial bool `json:"trial,omitempty"`
 	// Docker на ноде (nil = не установлен). Present без Access = docker есть, но
 	// агент не видит сокет (нет доступа) → панель подскажет безопасную настройку.
 	Docker *dockerInfo `json:"docker,omitempty"`
@@ -3073,10 +3078,14 @@ func collectSiteProbes(known map[int]bool) []siteProbeResult {
 //  2. версия в манифесте == запрошенной панелью И строго новее текущей (анти-откат);
 //  3. sha256 и размер скачанного бинаря совпали с подписанным манифестом.
 //
-// Иначе — отказ, продолжаем работать на текущей версии. Замена атомарная,
-// перезапуск через exec (тот же PID). Root не нужен: бинарь в каталоге агента-владельца.
+// Иначе — отказ, продолжаем работать на текущей версии. Новый бинарь идет на пробу
+// (startTrial, selfupdate.go): exec в него после слива команд, штатным он станет, когда
+// продержится пробу (trialReportOK). Root не нужен: бинарь в каталоге агента-владельца.
 func selfUpdate(panelURL, want string) error {
 	base := strings.TrimRight(panelURL, "/")
+	if trialPending() {
+		return fmt.Errorf("текущая версия еще на пробе - обновимся, когда она продержится")
+	}
 
 	manBytes, err := httpGetLimited(base+"/api/agent/manifest", 1<<20)
 	if err != nil {
@@ -3108,8 +3117,9 @@ func selfUpdate(panelURL, want string) error {
 	if !versionNewer(m.Version, version) {
 		return permanent(fmt.Errorf("%s не новее текущей %s — отказ (анти-откат)", m.Version, version))
 	}
-	if err := manifestFresh(m, time.Now()); err != nil {
-		return permanent(err)
+	now := otaNow()
+	if err := manifestFresh(m, now); err != nil {
+		return permanent(otaFreshErr(err, now))
 	}
 	art, ok := m.Artifacts[runtime.GOARCH]
 	if !ok {
@@ -3117,9 +3127,16 @@ func selfUpdate(panelURL, want string) error {
 	}
 
 	// Подлинность сжатого та же: распакованный бинарь сверяется с подписанным sha256 ниже.
-	bin, err := downloadBinary(base, m.Version, art)
+	self, err := selfExe()
 	if err != nil {
 		return err
+	}
+	self = stagedPath(self) // процесс снятой пробы работает из пробного файла
+	bin := trialBinary(self, art)
+	if bin == nil {
+		if bin, err = downloadBinary(base, m.Version, art); err != nil {
+			return err
+		}
 	}
 	// Дальше огрызок не нужен ни при каком исходе: либо ставим, либо он битый.
 	if pp := partPath(m.Version, art.Size); pp != "" {
@@ -3133,32 +3150,12 @@ func selfUpdate(panelURL, want string) error {
 		return permanent(fmt.Errorf("размер бинаря не совпал с подписанным — отказ"))
 	}
 
-	self, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	if resolved, e := filepath.EvalSymlinks(self); e == nil {
-		self = resolved
-	}
-	tmp := filepath.Join(filepath.Dir(self), ".kervax-agent.new")
-	if err := os.WriteFile(tmp, bin, 0o755); err != nil {
-		return fmt.Errorf("запись %s: %w (нужны права на каталог агента)", tmp, err)
-	}
-	if err := os.Chmod(tmp, 0o755); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, self); err != nil { // атомарно, лечит ETXTBSY (свап inode)
-		os.Remove(tmp)
-		return fmt.Errorf("замена бинаря: %w", err)
-	}
 	// Огрызок убираем здесь, а не defer'ом: exec заменяет процесс раньше, чем defer
 	// сработает, и докачанный файл оставался рядом с бинарем навсегда, по одному на релиз.
 	if pp := partPath(m.Version, art.Size); pp != "" {
 		os.Remove(pp)
 	}
-	fmt.Printf("kervax-agent: обновлён %s → %s, перезапуск\n", version, m.Version)
-	return syscall.Exec(self, os.Args, os.Environ()) // тот же PID, systemd доволен
+	return startTrial(self, m.Version, bin)
 }
 
 // --- сбор метрик из /proc и statfs ---
@@ -6802,43 +6799,58 @@ func commandLoop(panelURL, token string) {
 			polls = 0
 			tr.CloseIdleConnections()
 		}
-		req, err := http.NewRequest("GET", endpoint, nil)
-		if err != nil {
-			continue
+		// перед exec самообновления очередь не опрашиваем: команды подождут новый процесс
+		if tasks.poll() {
+			pollCommands(cl, endpoint, panelURL, token)
+			tasks.done()
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
-		resp, err := cl.Do(req)
-		if err != nil {
-			continue
-		}
-		var out struct {
-			DockerCommands []dockerCommand `json:"docker_commands"`
-			KubeCommands   []kubeCommand   `json:"kube_commands"`
-			BackupCommands []backupCommand `json:"backup_commands"`
-			// «Проверить сейчас» у сайта, который проверяем изнутри: человек ждёт ответ
-			// на кнопке, поэтому задание берём здесь, а не следующим отчётом (до 15 с).
-			SiteProbes    []siteProbe        `json:"site_probes"`
-			AlertRechecks []alertRecheckTask `json:"alert_rechecks"`
-		}
-		if resp.StatusCode == 200 {
-			_ = json.NewDecoder(resp.Body).Decode(&out)
-		}
-		resp.Body.Close()
-		for _, c := range out.DockerCommands {
-			go runDockerCommand(panelURL, token, c)
-		}
-		for _, c := range out.KubeCommands {
-			go runKubeCommand(panelURL, token, c)
-		}
-		for _, c := range out.BackupCommands {
-			go runBackupCommand(panelURL, token, c)
-		}
-		for _, p := range out.SiteProbes {
-			go runManualSiteProbe(panelURL, token, p)
-		}
-		for _, t := range out.AlertRechecks {
-			go runAlertRecheck(strings.TrimRight(panelURL, "/"), token, t)
-		}
+	}
+}
+
+// pollCommands - один опрос очереди. Взятые команды идут через tasks.spawn: exec
+// самообновления дождется их результатов.
+func pollCommands(cl *http.Client, endpoint, panelURL, token string) {
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := cl.Do(req)
+	if err != nil {
+		return
+	}
+	var out struct {
+		DockerCommands []dockerCommand `json:"docker_commands"`
+		KubeCommands   []kubeCommand   `json:"kube_commands"`
+		BackupCommands []backupCommand `json:"backup_commands"`
+		// «Проверить сейчас» у сайта, который проверяем изнутри: человек ждёт ответ
+		// на кнопке, поэтому задание берём здесь, а не следующим отчётом (до 15 с).
+		SiteProbes    []siteProbe        `json:"site_probes"`
+		AlertRechecks []alertRecheckTask `json:"alert_rechecks"`
+	}
+	if resp.StatusCode == 200 {
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+	}
+	resp.Body.Close()
+	for _, c := range out.DockerCommands {
+		c := c // go 1.21 в go.mod: переменная цикла общая
+		tasks.spawn(func() { runDockerCommand(panelURL, token, c) })
+	}
+	for _, c := range out.KubeCommands {
+		c := c
+		tasks.spawn(func() { runKubeCommand(panelURL, token, c) })
+	}
+	for _, c := range out.BackupCommands {
+		c := c
+		tasks.spawn(func() { runBackupCommand(panelURL, token, c) })
+	}
+	for _, p := range out.SiteProbes {
+		p := p
+		tasks.spawn(func() { runManualSiteProbe(panelURL, token, p) })
+	}
+	for _, t := range out.AlertRechecks {
+		t := t
+		tasks.spawn(func() { runAlertRecheck(strings.TrimRight(panelURL, "/"), token, t) })
 	}
 }
 
@@ -9879,6 +9891,8 @@ func send(url, token string, r report) (config, error) {
 	// wall-clock ставим прямо перед отправкой (не в collect): так панельный сдвиг = только
 	// сетевая задержка, а не «collect занял 2с». Порог алерта её с запасом перекрывает.
 	r.ClockUnix = time.Now().Unix()
+	r.Draining = tasks.isDraining()
+	r.Trial = trialPending()
 	raw, _ := json.Marshal(r)
 	// Тело сжимаем: DPI рубит соединение по счётчику отданных байт (~16-24 КБ,
 	// см. panelTransport). Отчёт в 13 КБ ужимается примерно до 2 КБ, самый жирный
@@ -10324,6 +10338,13 @@ func main() {
 	if len(os.Args) > 1 {
 		cfgPath = os.Args[1]
 	}
+	// первым делом - проба самообновления: пробный процесс узнает, кого заменить, а штатный
+	// считает сорвавшуюся пробу (selfupdate.go). И отметка часов этой загрузки для OTA.
+	instKey = instanceKey(cfgPath)
+	if self, err := selfExe(); err == nil {
+		trialOnStart(self, instKey)
+	}
+	otaNow()
 	url, token := readConfig(cfgPath)
 	if url == "" || token == "" {
 		fmt.Fprintln(os.Stderr, "kervax-agent: в конфиге нужны url= и token=")
@@ -10427,18 +10448,32 @@ func main() {
 		case kick <- struct{}{}:
 		default:
 		}
-		r, cur, cfg, err := collectAndSend(url, token, prev)
+		// слив перед exec самообновления закончен: отчет уже за новым процессом
+		r, cur, cfg, err, ok := reportOnce(url, token, prev)
+		if !ok {
+			time.Sleep(time.Second)
+			continue
+		}
 		prev = cur
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "kervax-agent: отправка не удалась: %v\n", err)
 		} else {
 			lastOK.Store(time.Now().Unix()) // отчёт реально принят панелью
+			trialReportOK()                 // проба, что продержалась, становится штатной
 			pkgEvDrop(len(r.PkgEv))         // события журнала дошли - из очереди их
 			if cfg.WantPkgs && time.Now().Unix() >= pkgRetryAt.Load() && pkgUploading.CompareAndSwap(false, true) {
 				go uploadPkgs(url, token)
 			}
 			if cfg.Interval > 0 {
 				interval = time.Duration(cfg.Interval) * time.Second
+			}
+			// проба версии, которую панель больше не просит, лежала бы рядом с бинарем вечно
+			if !updating.Load() {
+				want := ""
+				if cfg.Update != nil {
+					want = cfg.Update.Version
+				}
+				dropStaleTrial(want)
 			}
 			// Панель просит обновиться? Ставим ТОЛЬКО подписанное и более новое.
 			// Самообновление работает лишь если вшит пубключ (иначе фича выключена).
@@ -10498,15 +10533,19 @@ func main() {
 			runLinks(cfg.Links)
 			// команды из очереди — в отдельных горутинах (не блокируем цикл/вотчдог)
 			for _, c := range cfg.DockerCommands {
-				go runDockerCommand(url, token, c)
+				c := c
+				tasks.spawn(func() { runDockerCommand(url, token, c) })
 			}
 			for _, c := range cfg.KubeCommands {
-				go runKubeCommand(url, token, c)
+				c := c
+				tasks.spawn(func() { runKubeCommand(url, token, c) })
 			}
 			for _, c := range cfg.BackupCommands {
-				go runBackupCommand(url, token, c)
+				c := c
+				tasks.spawn(func() { runBackupCommand(url, token, c) })
 			}
 		}
+		tasks.done()
 		time.Sleep(interval)
 	}
 }

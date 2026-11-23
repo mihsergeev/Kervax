@@ -18,6 +18,13 @@
 # the request and any https:// passed: the agent could set the node's clock to any date from a
 # server of its own. It is taken only if it is the url of an agent config of this node
 # (/etc/kervax-agent*.conf), with its proxy, and a step of more than 6 hours is refused.
+#
+# 0.4: the 6-hour limit held for one request, and the requests could follow one another: the
+# panel stepped the clock back 6 hours at a time as far as it liked, and the agent's check that
+# a signed release is fresh (it uses the node's clock) let through an old release again. The
+# helper keeps the latest time it has seen in $FLOOR (root's file) and the HTTP fallback does
+# not move the clock more than 6 hours behind it. A sync confirmed by the time daemon resets the
+# mark to its time.
 set -euo pipefail
 
 HELPER_DIR=/lib65/kervax
@@ -27,7 +34,7 @@ REQ_DIR="$STATE_DIR/tsync-req"
 RES_DIR="$STATE_DIR/tsync-res"
 AGENT_USER=kervax
 
-KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.4  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node, so it is installed on the first pass too
 if ! getent group "$AGENT_USER" >/dev/null 2>&1; then
   echo "No Kervax agent on this node (group '$AGENT_USER' is missing). Add the node in the panel first." >&2
@@ -63,6 +70,21 @@ set -euo pipefail
 REQ_DIR=/var/lib/kervax/tsync-req
 RES_DIR=/var/lib/kervax/tsync-res
 MAX_STEP=21600  # the HTTP fallback does not move the clock further than 6 hours
+# the latest time this helper has seen (epoch seconds): the HTTP fallback does not step the clock
+# more than MAX_STEP behind it, so repeated requests cannot walk it back step by step
+FLOOR=/var/lib/kervax/tsync-floor
+
+# _floor: the mark, or 0 when there is none (a symlink or anything but a number is ignored)
+_floor() {
+  local f=""
+  [ -f "$FLOOR" ] && [ ! -L "$FLOOR" ] && f=$(head -c 12 "$FLOOR" 2>/dev/null | tr -cd '0-9')
+  echo "${f:-0}"
+}
+_set_floor() {
+  local t
+  t=$(mktemp "$FLOOR.XXXXXX") || return 0
+  echo "$1" > "$t" && chmod 0644 "$t" && mv -fT "$t" "$FLOOR" || rm -f "$t"
+}
 
 # the active time daemon ('' = none is running)
 _active_timed() {
@@ -73,7 +95,7 @@ _active_timed() {
 }
 
 cmd_sync() {
-  local panel="$1" svc method note synced=no i httpdate now when proxy="" c
+  local panel="$1" svc method note synced=no i httpdate now when proxy="" c floor
   # the fallback panel URL: only https:// and only the url of an agent config of this node (the
   # request comes from the agent, the configs are written by the install), with its proxy
   case "$panel" in https://*) ;; *) panel="" ;; esac
@@ -108,18 +130,26 @@ cmd_sync() {
   fi
   now="$(date '+%F %T %Z' 2>/dev/null || date)"
   if [ "$synced" = yes ]; then
+    _set_floor "$(date +%s)"
     echo "OK clock synchronised (${method:-ntp}) - NTPSynchronized=yes, now $now"
     return 0
   fi
   # 4) NTP unreachable (outbound UDP 123 blocked?) -> HTTP fallback to the panel's clock
   if [ -n "$panel" ]; then
+    # the mark moves only with a step that is made: a refused one leaves it as it was
+    floor=$(_floor); [ "$(date +%s)" -gt "$floor" ] && floor=$(date +%s)
     httpdate="$(curl -q -sI --max-time 10 ${proxy:+-x "$proxy"} "$panel/" 2>/dev/null | grep -i '^date:' | head -1 | cut -d' ' -f2- | tr -d '\r')"
     when=""; [ -n "$httpdate" ] && when=$(date -d "$httpdate" +%s 2>/dev/null || echo "")
     if [ -n "$when" ] && [ $((when - $(date +%s))) -gt $MAX_STEP -o $(($(date +%s) - when)) -gt $MAX_STEP ]; then
       echo "the panel's clock differs from this node's by more than 6 hours ($httpdate) - not stepped; set the time by hand (date -s) or open outbound UDP 123" >&2
       return 2
     fi
+    if [ -n "$when" ] && [ $((floor - when)) -gt $MAX_STEP ]; then
+      echo "the panel's time ($httpdate) is more than 6 hours behind the latest time this helper has seen ($(date -d "@$floor" '+%F %T %Z' 2>/dev/null), kept in $FLOOR) - not stepped; set the time by hand (date -s, then remove $FLOOR if it is wrong) or open outbound UDP 123" >&2
+      return 2
+    fi
     if [ -n "$when" ] && date -s "@$when" >/dev/null 2>&1; then
+      _set_floor "$floor"
       echo "OK NTP unreachable - the clock was set from the panel (coarse, to the second): $(date '+%F %T %Z'). For accurate sync open outbound UDP 123 (e.g. ufw allow out 123/udp)"
       return 0
     fi

@@ -452,7 +452,7 @@ async def bulk_update(
     request_edits = {}
     clear_probe_ids = []
     for check in checks:
-        old_local = (check.probe_local, check.target, check.method)
+        old_local = _local_state(check)
         old_request = _request_config(check)
         before = _request_edit_state(check, old_request)
         for name, value in fields.items():
@@ -864,11 +864,17 @@ async def try_check(body: CheckTryIn, user: CurrentUser, session: SessionDep) ->
     if local_port(body.target) not in LOCAL_PORTS and user.role != "admin":
         raise HTTPException(status.HTTP_403_FORBIDDEN,
                             "Проверку изнутри сервера на порт, кроме 80 и 443, задает только администратор")
+    # ключевое слово изнутри задает админ (LOCAL_KEYWORD_TEXT): форма правки сама зовет пробу,
+    # поэтому не-админу - проба без слова и пометка, а не отказ
+    skip_keyword = user.role != "admin" and bool(body.keyword_up or body.keyword_down)
+    if skip_keyword:
+        body = body.model_copy(update={"keyword_up": "", "keyword_down": ""})
     servers = list(await session.scalars(scope_query(user, select(Server), Server)))
     own = await session.get(Check, body.check_id) if body.check_id else None
     if own is not None and (own.type != "http" or not group_allowed(user, own.group_name, "sites")):
         own = None
-    out = await try_probe.inside(session, body, servers, datetime.now(timezone.utc), user=user, trusted_check=own)
+    out = await try_probe.inside(session, body, servers, datetime.now(timezone.utc), user=user, trusted_check=own,
+                                 keyword_skipped=skip_keyword)
     await session.commit()
     return CheckTryOut(inside=out)
 
@@ -1052,7 +1058,8 @@ async def local_probe_apply(
         if not hit:
             continue
         if (check.method or "GET") not in LOCAL_METHODS or (
-                local_port(check.target) not in LOCAL_PORTS and user.role != "admin"):
+                local_port(check.target) not in LOCAL_PORTS and user.role != "admin") or (
+                user.role != "admin" and not check.probe_local and (check.keyword_up or check.keyword_down)):
             continue  # такой монитор изнутри не проверяем (_local_probe_ok)
         if not check.probe_local or check.probe_server_id != hit[0]:
             request_edits[check.id] = _request_edit_state(check, _request_config(check))
@@ -1444,12 +1451,32 @@ def local_port(target: str) -> int | None:
         return -1
 
 
+# Ключевое слово у проверки изнутри - тот же оракул и на 80/443: агент ищет его в странице,
+# которую видно только с ноды, и отдает "есть/нет". Меняя слово (или адрес и пути при том же
+# слове) и глядя на статус монитора, редактор подбирал содержимое закрытого сайта по символу.
+# Задает и меняет его только админ; заведенный раньше монитор работает, пока его запрос не трогают
+LOCAL_KEYWORD_TEXT = "Ключевое слово в проверке изнутри сервера задает только администратор"
+
+
+def _local_state(check) -> tuple:
+    """То, что решает, какой ответ и где агент проверяет изнутри (для before у _local_probe_ok):
+    заголовки (Host, Range), учетные данные, TLS и сервер-родитель тоже уводят слово на другой
+    vhost или участок страницы."""
+    return (check.probe_local, check.target, check.method, check.keyword_up or "",
+            check.keyword_down or "", tuple(check.extra_paths or ()), check.http_headers or "",
+            check.auth_method or "", check.auth_user or "", check.auth_pass or "", bool(check.ignore_tls),
+            check.parent_mode or "", check.parent_server_id)
+
+
 def _local_probe_ok(check: Check, user, before: tuple | None = None) -> None:
-    """Можно ли этой учетке такой монитор с проверкой изнутри. before - (probe_local, target,
-    method) до правки: монитор, который не трогали в этих полях, не перепроверяем."""
+    """Можно ли этой учетке такой монитор с проверкой изнутри. before - _local_state до
+    правки: монитор, который не трогали в этих полях, не перепроверяем."""
     if not check.probe_local or check.type != "http":
         return
-    if before is not None and before == (check.probe_local, check.target, check.method):
+    if user.role != "admin" and (check.keyword_up or check.keyword_down) and (
+            before is None or before != _local_state(check)):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, LOCAL_KEYWORD_TEXT)
+    if before is not None and before[:3] == (check.probe_local, check.target, check.method):
         return
     if (check.method or "GET") not in LOCAL_METHODS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
@@ -1581,7 +1608,7 @@ async def update_check(
     old_type = check.type
     old_paths = list(check.extra_paths or [])
     old_dns = (check.target, check.dns_type, check.dns_server)
-    old_local = (check.probe_local, check.target, check.method)
+    old_local = _local_state(check)
     old_where = (check.type, check.target, check.dns_server)
     old_request = _request_config(check)
     before = _request_edit_state(check, old_request)

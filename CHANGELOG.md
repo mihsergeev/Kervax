@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.159] - 2026-11-23
+
+- Agent 2.74 updates itself through a trial run. The verified new binary is started first while the installed one stays in place, and it replaces the installed binary only after the panel has accepted three of its reports and it has run for five minutes. If it crashes, hangs or restarts in that window, systemd brings back the previous version, which retries later and gives up on that version after three failed trials. The previous binary is kept as `kervax-agent.prev`. Before switching, the agent finishes the commands it is running and delivers their results; the panel holds new commands for an agent that is finishing them and keeps the update target until the trial is accepted. Updates to 2.74 itself are still done by the previous update code.
+- The agent no longer lets a clock moved backwards widen the freshness window of the signed release manifest, and the time sync helper 0.4 refuses to step the clock back repeatedly over its HTTP fallback.
+- Only an administrator can set a keyword, target, paths, headers or authentication of a monitor that is checked from inside a server, so the content of a site reachable only from that server can no longer be guessed through repeated checks. A test check from inside a server by a non-administrator runs without the keyword and says so.
+
 ## [1.8.158] - 2026-11-23
 
 - The one-command install downloads `quickstart.sh` attached to the latest GitHub Release instead of the main branch: `curl -fsSL https://github.com/mihsergeev/Kervax/releases/latest/download/quickstart.sh | sudo sh`. The attached script is exactly the one in the release tag, so a commit in main no longer runs as root on new installations before it is released. The old address keeps working but follows main.

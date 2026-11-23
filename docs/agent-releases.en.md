@@ -138,7 +138,9 @@ curl -s -X POST https://YOUR-PANEL/api/servers/agent-update \
 ```
 
 Each agent picks up the "wish" on its next report (within the interval), downloads the
-binary, verifies it and re-execs with the same PID.
+binary, verifies it and re-execs with the same PID. From agent 2.74 the new binary first
+runs next to the installed one and replaces it only after the panel accepts three of its
+reports and it has run for five minutes (until then it reports as a trial and the panel keeps the update target); commands in progress finish before the restart.
 
 ---
 
