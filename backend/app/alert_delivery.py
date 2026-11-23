@@ -777,6 +777,18 @@ def stopping() -> bool:
     return stop is not None and stop.is_set()
 
 
+async def _halted(factory) -> bool:
+    """Остановка или глобальная пауза "не слать", включенная посреди прохода: новых POST нет.
+
+    Строки остаются в очереди, как при паузе в начале прохода, и уходят после снятия паузы.
+    """
+    if stopping():
+        return True
+    from app import settings_store
+    async with factory() as session:
+        return await settings_store.get_muted(session)
+
+
 async def settle(timeout: float) -> bool:
     """Остановка: дождаться идущих POST и записи их исхода. False - не успели за timeout."""
     loop = asyncio.get_running_loop()
@@ -873,7 +885,7 @@ async def _post_owned(factory, cfg, rows, now, owner, stage):
         await store.defer(factory, ids, owner, checked_at, until)
     if rejected:
         await store.finish(factory, [row["id"] for row, _, _ in rejected], owner, "rejected", checked_at,
-                           error="destination_changed")
+                           error="DestinationChanged")
     if obsolete:
         await store.finish(factory, obsolete, owner, "superseded", checked_at)
     if not allowed:
@@ -892,8 +904,8 @@ async def _post_owned(factory, cfg, rows, now, owner, stage):
     if aid:
         for event_id in event_ids[1:]:
             await store.set_tg_alert(factory, event_id, aid)
-    if stopping():
-        # остановка пришла, пока готовили пачку: POST не начинаем, попытки не было (как отмена до POST)
+    if await _halted(factory):
+        # остановка или пауза пришла, пока готовили пачку: POST не начинаем, попытки не было (как отмена до POST)
         at = now + timedelta(seconds=max(0, _monotonic() - started))
         await store.defer(factory, ids, owner, at, at)
         return
@@ -1081,7 +1093,7 @@ async def _drain(factory, cfg, now, limit):
         bundles = [[row] for row in rows if row["id"] in alone] + _group(
             alerts, [row for row in rows if row["id"] not in alone])
         for bundle in bundles:
-            if stopping():  # остановка: идущая пачка доведена, следующие ждут старта нетронутыми
+            if await _halted(factory):  # остановка или пауза: идущая пачка доведена, следующие ждут нетронутыми
                 return
             await _post(factory, cfg, bundle, current_time())
 

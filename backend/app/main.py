@@ -36,7 +36,7 @@ from app.api import (
     vulns as vulns_api,
 )
 from app.bootstrap import ensure_admin, ensure_default_location
-from app.collector import collector_loop, pause_watch
+from app.collector import STOP_BUDGET, collector_loop, pause_watch
 from app.config import get_settings
 from app.db import create_engine_and_factory
 from app import client_ip, impersonate
@@ -48,7 +48,7 @@ _WEAK_SECRETS = {"", "changeme", "dev-insecure-change-me"}
 _WEAK_PASSWORDS = {"", "changeme", "admin"}
 # остановка: сколько ждать конец идущей стадии планировщика и потом его отмену. Вместе с
 # --timeout-graceful-shutdown uvicorn (HTTP-запросы, до lifespan) меньше stop_grace_period 60 с
-_STOP_GRACE = 45.0
+_STOP_GRACE = STOP_BUDGET  # 45 с, от него же планировщик считает ожидание идущего POST уведомления
 _CANCEL_WAIT = 2.0
 
 

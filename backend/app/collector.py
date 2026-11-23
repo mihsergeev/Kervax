@@ -10531,6 +10531,17 @@ async def _next_tick_in(session_factory: async_sessionmaker[AsyncSession], setti
 
 # остановка: сколько ждать идущий POST уведомления (таймауты TG_TIMEOUT: соединение 4 с, ответ 10 с)
 _SETTLE_DELIVERY = 30.0
+# Бюджет остановки от сигнала до отмены планировщика (main._STOP_GRACE, в compose.yml
+# stop_grace_period 60 с) и запас из него на выход и закрытие базы: ожидание POST в него не лезет
+STOP_BUDGET = 45.0
+_CLOSE_RESERVE = 3.0
+
+
+def _settle_timeout(elapsed: float | None, budget: float = STOP_BUDGET) -> float:
+    """Сколько ждать идущий POST при выходе: остаток бюджета остановки минус запас на закрытие базы,
+    не больше _SETTLE_DELIVERY. elapsed - секунд с сигнала, None - сигнала не было."""
+    left = budget - max(0.0, elapsed or 0.0) - _CLOSE_RESERVE
+    return max(0.0, min(_SETTLE_DELIVERY, left))
 
 
 async def collector_loop(
@@ -10549,6 +10560,12 @@ async def collector_loop(
     # новых POST после сигнала нет, идущий доводится (alert_delivery.STOP)
     from app import alert_delivery
     delivery_stop = alert_delivery.STOP.set(stop)
+    # когда пришел сигнал: от него считается остаток бюджета на ожидание POST (_settle_timeout)
+    loop = asyncio.get_running_loop()
+    signaled: list[float] = []
+    stop_seen = asyncio.ensure_future(stop.wait()) if stop is not None else None
+    if stop_seen is not None:
+        stop_seen.add_done_callback(lambda done: done.cancelled() or signaled.append(loop.time()))
     hb_task = asyncio.create_task(heartbeat.heartbeat_loop(session_factory, settings))
     # кнопки под алертами и команды боту: своя задача, long polling держит запрос до 25 с
     tg_task = asyncio.create_task(tg_bot.poll_loop(session_factory, settings))
@@ -10691,8 +10708,12 @@ async def collector_loop(
         heartbeat.IN_SCHEDULER.reset(in_scheduler)
         # дождаться отмены: иначе бот и пульс доживают до закрытия базы и цикла событий
         await asyncio.wait({hb_task, tg_task, pause_task}, timeout=2)
-        # отмена бота не обрывает его POST в Telegram: исход дописывается, ждем его до закрытия базы
-        if not await alert_delivery.settle(_SETTLE_DELIVERY):
-            log.warning("доставка уведомлений: отправка не завершилась за %s с, исход уточнит просрочка аренды",
-                        _SETTLE_DELIVERY)
+        # отмена бота не обрывает его POST в Telegram: исход дописывается, ждем его до закрытия базы,
+        # но не дольше остатка бюджета остановки
+        if stop_seen is not None:
+            stop_seen.cancel()
+        wait = _settle_timeout(loop.time() - signaled[0] if signaled else None)
+        if not await alert_delivery.settle(wait):
+            log.warning("доставка уведомлений: отправка не завершилась за %.0f с, исход уточнит просрочка аренды",
+                        wait)
         alert_delivery.STOP.reset(delivery_stop)

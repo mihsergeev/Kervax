@@ -306,7 +306,8 @@ def _safe_error(error: str) -> str:
         return error.replace(" ", "_").replace(":", "_")
     allowed = {"ReadTimeout", "ReadError", "WriteTimeout", "WriteError", "ConnectTimeout",
                "ConnectError", "PoolTimeout", "RemoteProtocolError", "LocalProtocolError",
-               "TransportError", "TgRejected", "RuntimeError", "LeaseExpired", "CancelledError", "PrepareError"}
+               "TransportError", "TgRejected", "RuntimeError", "LeaseExpired", "CancelledError", "PrepareError",
+               "DestinationChanged"}
     return error if error in allowed else ("DeliveryError" if error else "")
 
 

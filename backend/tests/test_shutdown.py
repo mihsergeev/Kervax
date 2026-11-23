@@ -90,3 +90,37 @@ async def test_stop_signal_skips_the_rest_of_the_tick(tmp_path, monkeypatch):
     finally:
         await engine.dispose()
     assert ran == ["first"]
+
+
+@pytest.mark.parametrize("elapsed, expected", [
+    (None, 30.0), (-5.0, 30.0), (0.0, 30.0), (12.0, 30.0), (20.0, 22.0), (41.5, 0.5), (42.0, 0.0), (90.0, 0.0)])
+def test_delivery_wait_fits_the_rest_of_the_stop_budget(main, elapsed, expected):
+    # ждем идущий POST не больше 30 с и не дольше остатка 45 с минус запас на закрытие базы
+    from app import collector
+
+    assert main._STOP_GRACE == collector.STOP_BUDGET == 45.0
+    assert collector._settle_timeout(elapsed) == expected
+
+
+async def test_stop_does_not_wait_for_a_send_past_the_budget(tmp_path, monkeypatch):
+    # POST завис: планировщик ждет его только остаток бюджета, а не фиксированные 30 с
+    from app import alert_delivery, collector
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'settle.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    monkeypatch.setattr(collector, "_CLOSE_RESERVE", collector.STOP_BUDGET - 0.5)
+    stuck = asyncio.get_running_loop().create_future()
+    alert_delivery._in_flight.add(stuck)
+    stop = asyncio.Event()
+    stop.set()
+    started = asyncio.get_running_loop().time()
+    try:
+        await asyncio.wait_for(collector.collector_loop(factory, Settings(scheduler_tick=30), stop), 10)
+    finally:
+        alert_delivery._in_flight.discard(stuck)
+        stuck.cancel()
+        await engine.dispose()
+    assert asyncio.get_running_loop().time() - started < 5

@@ -794,3 +794,58 @@ async def test_shutdown_finishes_the_bot_send_and_starts_no_new_one(database, ht
     await alert_delivery.drain(factory, configuration())  # старт после выкладки: без потери и дубля
     assert [job.status for job in await rows(factory, NotificationDelivery)] == ["confirmed", "confirmed"]
     assert len(http.sent()) == 2
+
+
+async def _mute(factory, muted=True):
+    from app import settings_store
+    async with factory() as session:
+        await settings_store.set_muted(session, muted)
+        await session.commit()
+
+
+@pytest.mark.parametrize("when", ["start", "between", "before_post"])
+async def test_pause_mid_pass_leaves_rows_like_a_pause_at_start(database, http, monkeypatch, when):
+    # пауза "не слать" посреди прохода: новых POST нет, идущий доведен. Неотправленные строки - как при
+    # паузе в начале прохода: в очереди, без попытки, uncertain и attention, уходят после снятия паузы
+    factory, _url = database
+    await _two_bundles(factory)
+    wanted = alert_delivery._wanted
+
+    async def answer(_url, _payload):
+        await _mute(factory)
+        return Response({"ok": True, "result": {"message_id": 704}})
+
+    async def muting(*args):
+        await _mute(factory)
+        return await wanted(*args)
+
+    if when == "start":
+        await _mute(factory)
+    elif when == "between":
+        http.answer = answer
+    else:
+        monkeypatch.setattr(alert_delivery, "_wanted", muting)
+    await alert_delivery.drain(factory, configuration())
+    jobs = await rows(factory, NotificationDelivery)
+    sent = 1 if when == "between" else 0
+    assert len(http.sent()) == sent
+    for job in jobs[sent:]:
+        assert (job.status, job.attempts, job.uncertain_count, job.lease_owner, job.last_error) == (
+            "pending", 0, 0, "", "")
+    monkeypatch.setattr(alert_delivery, "_wanted", wanted)
+    http.answer = None
+    await _mute(factory, False)
+    await alert_delivery.drain(factory, configuration())
+    assert [job.status for job in await rows(factory, NotificationDelivery)] == ["confirmed", "confirmed"]
+    assert len(http.sent()) == 2
+
+
+async def test_changed_destination_is_recorded_as_its_own_code(database, http):
+    # основной чат сменили до отправки: отказ с кодом DestinationChanged, а не общий DeliveryError
+    factory, _url = database
+    await alert_delivery.admit(factory, configuration(), [message()], 0, "HTML", NOW)
+    await alert_delivery.drain(factory, configuration(telegram_chat="-200"))
+    job, = await rows(factory, NotificationDelivery)
+    assert (job.status, job.last_error, store.reason(job.last_error)) == (
+        "rejected", "DestinationChanged", "DestinationChanged")
+    assert http.sent() == []

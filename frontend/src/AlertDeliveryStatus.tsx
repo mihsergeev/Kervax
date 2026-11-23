@@ -19,6 +19,7 @@ function reasonGroup(code: string) {
   if (code === 'PrepareError') return 'prepare'
   if (code === 'LeaseExpired' || code === 'CancelledError') return 'interrupted'
   if (['ReadTimeout', 'ReadError', 'WriteTimeout', 'WriteError', 'RemoteProtocolError'].includes(code)) return 'no_answer'
+  if (code === 'DestinationChanged') return 'destination'
   if (code === 'DeliveryError') return 'unknown'
   return 'refused'
 }
@@ -28,7 +29,9 @@ function reasonCause(item: AlertDeliveryItem, t: Translate) {
   if (group === 'prepare') return t('Причина: сообщение не удалось подготовить (текст, правила или получатель). В канал оно не отправлялось.')
   if (group === 'interrupted') return t('Причина: отправка прервалась до записи ответа канала (перезапуск или зависание панели). Сообщение могло дойти.')
   if (group === 'no_answer') return t('Причина: канал не ответил после отправки. Сообщение могло дойти.')
-  if (group === 'unknown') return t(item.status === 'rejected' ? 'Причина: получатель изменился в настройках до отправки. Старому получателю сообщение не отправлялось.' : 'Причина не распознана.')
+  // DeliveryError + rejected - строки до кода DestinationChanged: тогда так писалась смена получателя
+  if (group === 'destination' || (group === 'unknown' && item.status === 'rejected')) return t('Причина: получатель изменился в настройках до отправки. Старому получателю сообщение не отправлялось.')
+  if (group === 'unknown') return t('Причина не распознана.')
   return t(item.status === 'rejected' ? 'Причина: канал отказал в приеме (например, бота нет в чате или токен отозван). Сообщение не принято.' : 'Причина: канал вернул ошибку или был недоступен. Сообщение не принято.')
 }
 
