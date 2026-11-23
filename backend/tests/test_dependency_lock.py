@@ -71,7 +71,7 @@ def test_dev_in_repeats_pyproject_extra():
 def test_locks_pin_exact_versions_with_hashes():
     for name in ("requirements.txt", "requirements-dev.txt"):
         head = (BACKEND / name).read_text(encoding="utf-8")[:600]
-        # один файл на Python 3.12 (CI) и 3.14 (образ): универсальный lock от минимальной версии
+        # один файл на Python 3.12 (CI) и 3.15 (образ): универсальный lock от минимальной версии
         assert "uv pip compile" in head and "--universal" in head and "--python-version 3.12" in head, name
         assert "--generate-hashes" in head, name
         entries = _lock(name)

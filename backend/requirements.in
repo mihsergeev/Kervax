@@ -6,7 +6,7 @@
 # tests/test_dependency_lock.py. Поменял зависимость - поменяй оба места и пересобери lock:
 #     sh backend/lock.sh
 # Генератор - uv, версия закреплена в requirements-dev.in. Lock универсальный
-# (--universal --python-version 3.12): один файл и для Python 3.12 в CI, и для 3.14 в образе.
+# (--universal --python-version 3.12): один файл и для Python 3.12 в CI, и для 3.15 в образе.
 # Свежие версии приносит Dependabot (.github/dependabot.yml), CI проверяет lock: sh lock.sh --check
 fastapi>=0.115
 uvicorn[standard]>=0.30

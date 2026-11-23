@@ -29,14 +29,14 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
 # --only-binary: только колеса, никакого setup.py и непроверенных зависимостей сборки.
 # --prefix: в итоговый образ уходит только установленное. .pyc компилируем с путями
 # /usr/local, куда файлы лягут, иначе трейсбеки ссылались бы на /install.
-FROM python:3.14.10-slim-trixie@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f AS pydeps
+FROM python:3.15.2-slim-trixie@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS pydeps
 COPY backend/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir --no-compile --require-hashes --no-deps --only-binary :all: \
       --prefix=/install -r /tmp/requirements.txt \
  && python -m compileall -q -j 0 -s /install -p /usr/local /install
 
 # --- бэкенд ---
-FROM python:3.14.10-slim-trixie@sha256:9aaa474097d094040649f2162a627c0049b408f52138d980916788d80f04802f
+FROM python:3.15.2-slim-trixie@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
 # Пакеты ОС обновляются без выпуска: ops/deploy.sh передает DEPS_EPOCH - номер недели, и слой
 # apt пересобирается раз в неделю (исправления openssl и т.п. приезжают не позже чем через
@@ -63,7 +63,7 @@ COPY --from=pydeps /install /usr/local
 
 COPY backend/pyproject.toml ./
 COPY backend/app ./app
-# Пакет панели собирает hatchling из того же lock. pip check - lock полон для Python 3.14.
+# Пакет панели собирает hatchling из того же lock. pip check - lock полон для Python 3.15.
 # pip нужен только при сборке. Его vendored-библиотеки не участвуют в работе
 # панели, но иначе остаются в образе со своим независимым циклом обновлений.
 RUN pip install --no-cache-dir --no-deps --no-build-isolation --no-index . \

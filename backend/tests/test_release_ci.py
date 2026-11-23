@@ -49,7 +49,7 @@ def test_exact_commit_reuses_all_eight_successful_main_jobs():
     assert receipt['sha'] == SHA and receipt['run_id'] == 100 and receipt['jobs'] == 8
 
 
-@pytest.mark.parametrize('backend', ['backend (3.12)', 'backend (3.14)'])
+@pytest.mark.parametrize('backend', ['backend (3.12)', 'backend (3.15)'])
 @pytest.mark.parametrize('state', ['missing', 'skipped'])
 def test_host_source_security_checks_cannot_be_omitted(backend, state):
     api = API()

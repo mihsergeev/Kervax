@@ -17,7 +17,7 @@ WORKFLOW = '.github/workflows/ci.yml'
 MAX_AGE = 24 * 3600
 REQUIRED = {
     'backend (3.12)': {'Lock is up to date', 'Tests', 'Agent source host security regression', 'Backup installer security regression', 'Dependency audit (pip-audit)'},
-    'backend (3.14)': {'Lock is up to date', 'Tests', 'Agent source host security regression', 'Backup installer security regression', 'Dependency audit (pip-audit)'},
+    'backend (3.15)': {'Lock is up to date', 'Tests', 'Agent source host security regression', 'Backup installer security regression', 'Dependency audit (pip-audit)'},
     'migrations': {'Upgrade from scratch', 'Models match the schema', 'Downgrade one and upgrade again', 'Tests on PostgreSQL'},
     'selfcheck': {'Consistency selfcheck'},
     'frontend': {'Install', 'Dependency audit (npm audit)', 'Build'},
