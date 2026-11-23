@@ -8,6 +8,7 @@ Credentials are resolved at send time and never copied into the journal.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import html
 import json
@@ -31,6 +32,12 @@ _FIELDS = ("section", "group", "kind", "target", "recovery", "ref", "full", "lin
 DELIVERY_STAGE = "доставка уведомлений"
 # сбой пачки до POST, не привязанный к строке: отсрочка всей пачки
 _BUNDLE_DELAY = 120
+# Остановка планировщика (SIGTERM, выкладка), ставит collector_loop: и его стадии, и бот (tg_bot)
+# новых POST не начинают и не повторяют, строки остаются в очереди до старта. Отменить уже
+# начатый POST нельзя без риска дубля: Telegram мог принять сообщение. Его доводим и записываем
+STOP: contextvars.ContextVar[asyncio.Event | None] = contextvars.ContextVar("kervax_delivery_stop", default=None)
+# POST с записью исхода, которые идут сейчас: остановка ждет их (settle), отмена их не обрывает
+_in_flight: set[asyncio.Future] = set()
 
 
 def _hash(*parts) -> str:
@@ -765,6 +772,28 @@ def _solo(row, now) -> bool:
         return False
 
 
+def stopping() -> bool:
+    stop = STOP.get()
+    return stop is not None and stop.is_set()
+
+
+async def settle(timeout: float) -> bool:
+    """Остановка: дождаться идущих POST и записи их исхода. False - не успели за timeout."""
+    loop = asyncio.get_running_loop()
+    pending = {section for section in _in_flight if section.get_loop() is loop}
+    if not pending:
+        return True
+    _, pending = await asyncio.wait(pending, timeout=timeout)
+    return not pending
+
+
+def _late(section) -> None:
+    """Секция дописала исход уже без вызывающего (его отменили): ее сбой - только в лог."""
+    if not section.cancelled() and section.exception() is not None:
+        log.error("доставка уведомлений: исход отправки после отмены не записан, вернется по просрочке",
+                  exc_info=section.exception())
+
+
 async def _post(factory, cfg, rows, now):
     """Одна пачка получателя. Ее сбой не трогает остальные и не уходит в сборщик."""
     owner, stage, started = uuid.uuid4().hex, [], _monotonic()
@@ -863,37 +892,57 @@ async def _post_owned(factory, cfg, rows, now, owner, stage):
     if aid:
         for event_id in event_ids[1:]:
             await store.set_tg_alert(factory, event_id, aid)
-    sent = []
+    if stopping():
+        # остановка пришла, пока готовили пачку: POST не начинаем, попытки не было (как отмена до POST)
+        at = now + timedelta(seconds=max(0, _monotonic() - started))
+        await store.defer(factory, ids, owner, at, at)
+        return
     stage.append("posted")
+
+    async def send():
+        sent = []
+        try:
+            # Preserve the established transport seam used by integrations. A real
+            # Telegram response without a message id is marked uncertain there.
+            errors = await _edit_group(factory, configuration, allowed, message, aid)
+            if errors is not None:
+                pass
+            elif aid:
+                markup = tg_buttons.keyboard(aid, getattr(message, "kind", ""))
+                errors = await alerts.send_alert(configuration, message,
+                    allowed[0][0]["payload"].get("parse_mode"), markup, sent)
+            else:
+                errors = await alerts.send_alert(configuration, message,
+                    allowed[0][0]["payload"].get("parse_mode"))
+            sent.extend(receipt for receipt in getattr(errors, "receipts", []) if receipt not in sent)
+            if (not errors and isinstance(errors, alerts.SendErrors)
+                    and allowed[0][0]["target"]["type"] == "telegram" and not sent):
+                errors.uncertain = True
+                errors.append("Telegram response did not confirm a message id")
+        except Exception as exc:
+            errors = alerts.SendErrors([type(exc).__name__])
+            errors.uncertain = alerts._tg_uncertain(exc)
+        status = "confirmed" if not errors else "uncertain" if getattr(errors, "uncertain", False) else \
+                 "rejected" if getattr(errors, "rejected", 0) == len(errors) else "retry"
+        completed_at = now + timedelta(seconds=max(0, _monotonic() - started))
+        finished = await store.finish(factory, ids, owner, status, completed_at,
+                           message_id=sent[0]["id"] if sent else None,
+                           error="ReadTimeout" if status == "uncertain" else "TransportError" if errors else "",
+                           retry_after=getattr(errors, "retry_after", None),
+                           target_patch={"editable": len(texts) == 1})
+        return sent, status, completed_at, finished
+
+    # Отмена (остановка, выкладка) не обрывает идущий POST: Telegram мог принять сообщение, а без
+    # записи исхода строка ушла бы по просрочке аренды в uncertain и дубль "Повтор". Исход пишет
+    # сама секция, остановка ее дожидается (settle)
+    section = asyncio.ensure_future(send())
+    _in_flight.add(section)
+    section.add_done_callback(_in_flight.discard)
     try:
-        # Preserve the established transport seam used by integrations. A real
-        # Telegram response without a message id is marked uncertain there.
-        errors = await _edit_group(factory, configuration, allowed, message, aid)
-        if errors is not None:
-            pass
-        elif aid:
-            markup = tg_buttons.keyboard(aid, getattr(message, "kind", ""))
-            errors = await alerts.send_alert(configuration, message,
-                allowed[0][0]["payload"].get("parse_mode"), markup, sent)
-        else:
-            errors = await alerts.send_alert(configuration, message,
-                allowed[0][0]["payload"].get("parse_mode"))
-        sent.extend(receipt for receipt in getattr(errors, "receipts", []) if receipt not in sent)
-        if (not errors and isinstance(errors, alerts.SendErrors)
-                and allowed[0][0]["target"]["type"] == "telegram" and not sent):
-            errors.uncertain = True
-            errors.append("Telegram response did not confirm a message id")
-    except Exception as exc:
-        errors = alerts.SendErrors([type(exc).__name__])
-        errors.uncertain = alerts._tg_uncertain(exc)
-    status = "confirmed" if not errors else "uncertain" if getattr(errors, "uncertain", False) else \
-             "rejected" if getattr(errors, "rejected", 0) == len(errors) else "retry"
-    completed_at = now + timedelta(seconds=max(0, _monotonic() - started))
-    finished = await store.finish(factory, ids, owner, status, completed_at,
-                       message_id=sent[0]["id"] if sent else None,
-                       error="ReadTimeout" if status == "uncertain" else "TransportError" if errors else "",
-                       retry_after=getattr(errors, "retry_after", None),
-                       target_patch={"editable": len(texts) == 1})
+        sent, status, completed_at, finished = await asyncio.shield(section)
+    except asyncio.CancelledError:
+        section.add_done_callback(_late)
+        raise
     actual = {item[0]["id"] for item in allowed} & set(finished)
     if status == "confirmed" and actual:
         stage.append("confirmed")
@@ -1000,6 +1049,8 @@ async def _drain(factory, cfg, now, limit):
     # истекла бы еще до POST: параллельный drain (tg_bot) объявил бы доставку неизвестной,
     # транспорт встал бы на 15 минут, потом ушел бы дубль "Повтор". Аренда и решения о просрочке -
     # не раньше реального времени, дальше монотонно (current_time)
+    if stopping():  # остановка: очередь ждет старта, даже правки сообщений не начинаем
+        return
     now = max(_utc(now or datetime.now(timezone.utc)), _wall())
     started = _monotonic()
 
@@ -1030,6 +1081,8 @@ async def _drain(factory, cfg, now, limit):
         bundles = [[row] for row in rows if row["id"] in alone] + _group(
             alerts, [row for row in rows if row["id"] not in alone])
         for bundle in bundles:
+            if stopping():  # остановка: идущая пачка доведена, следующие ждут старта нетронутыми
+                return
             await _post(factory, cfg, bundle, current_time())
 
 

@@ -671,3 +671,126 @@ async def test_dispatch_from_a_long_stage_keeps_its_lease_against_the_bot(databa
     assert result
     job = (await rows(factory, NotificationDelivery))[0]
     assert job.status == "confirmed" and job.uncertain_count == 0 and len(http.sent()) == 1
+
+
+async def _two_bundles(factory):
+    # два источника одного получателя - две пачки, два POST за проход
+    await alert_delivery.admit(factory, configuration(), [message(1), message(2)], 0, "HTML", NOW)
+
+
+def _stopped(stop):
+    """Проход доставки под сигналом остановки, как в collector_loop."""
+    return alert_delivery.STOP.set(stop)
+
+
+async def test_stop_during_a_pass_starts_no_further_bundle(database, http, monkeypatch):
+    # SIGTERM пришел, пока первый POST в полете: он доводится и записывается, вторая пачка ждет старта
+    factory, _url = database
+    await _two_bundles(factory)
+    stop, claims, repairs = asyncio.Event(), [], []
+    claim, reconcile = store.claim, alert_delivery._reconcile_confirmed
+
+    async def counted_claim(_factory, ids, *args, **kwargs):
+        claims.append(ids)
+        return await claim(_factory, ids, *args, **kwargs)
+
+    async def counted_reconcile(*args):
+        repairs.append(args)
+        return await reconcile(*args)
+
+    monkeypatch.setattr(store, "claim", counted_claim)
+    monkeypatch.setattr(alert_delivery, "_reconcile_confirmed", counted_reconcile)
+
+    def answer(_url, _payload):
+        stop.set()
+        return Response({"ok": True, "result": {"message_id": 702}})
+
+    http.answer = answer
+    token = _stopped(stop)
+    try:
+        await alert_delivery.drain(factory, configuration())
+        assert len(claims) == len(repairs) == 1  # вторую пачку даже не захватывали
+        await alert_delivery.drain(factory, configuration())  # бот после сигнала: прохода нет
+        assert len(claims) == len(repairs) == 1
+    finally:
+        alert_delivery.STOP.reset(token)
+    first, second = await rows(factory, NotificationDelivery)
+    assert (first.status, first.message_id, first.uncertain_count) == ("confirmed", 702, 0)
+    assert (second.status, second.attempts, second.uncertain_count, second.lease_owner) == ("pending", 0, 0, "")
+    assert len(http.sent()) == 1
+    http.answer = None
+    await alert_delivery.drain(factory, configuration())  # старт после выкладки
+    assert [job.status for job in await rows(factory, NotificationDelivery)] == ["confirmed", "confirmed"]
+    assert len(http.sent()) == 2
+
+
+async def test_stop_after_claim_returns_rows_without_post(database, http, monkeypatch):
+    # остановка между захватом и POST: попытки не было, строка в очереди без uncertain и аренды
+    factory, _url = database
+    await alert_delivery.admit(factory, configuration(), [message()], 0, "HTML", NOW)
+    stop, wanted = asyncio.Event(), alert_delivery._wanted
+
+    async def stopping(*args):
+        stop.set()
+        return await wanted(*args)
+
+    monkeypatch.setattr(alert_delivery, "_wanted", stopping)
+    token = _stopped(stop)
+    try:
+        await alert_delivery.drain(factory, configuration())
+    finally:
+        alert_delivery.STOP.reset(token)
+    job, = await rows(factory, NotificationDelivery)
+    assert (job.status, job.attempts, job.uncertain_count, job.lease_owner, job.lease_until) == (
+        "pending", 0, 0, "", None)
+    assert http.sent() == []
+    async with factory() as session:
+        assert not (await session.get(NotificationTransport, job.transport_key)).lease_owner
+    monkeypatch.setattr(alert_delivery, "_wanted", wanted)
+    await alert_delivery.drain(factory, configuration())
+    job, = await rows(factory, NotificationDelivery)
+    assert job.status == "confirmed" and len(http.sent()) == 1
+
+
+@pytest.mark.parametrize("in_flight", [True, False])
+async def test_shutdown_finishes_the_bot_send_and_starts_no_new_one(database, http, monkeypatch, in_flight):
+    # Выкладка, пока бот шлет первую из двух пачек. in_flight: планировщик выходит и отменяет бота
+    # посреди POST - он доводится и записывается (а не sending -> uncertain -> дубль "Повтор").
+    # Иначе бот успевает дойти до следующей пачки, пока планировщик доделывает стадию: ее не шлет
+    from app import collector, tg_bot
+    from app.config import Settings
+    factory, _url = database
+    await _two_bundles(factory)
+    entered, release, stop, drained = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def gated(_url, _payload):
+        entered.set()
+        await release.wait()
+        return Response({"ok": True, "result": {"message_id": 703}})
+
+    async def bot(session_factory, _settings):
+        await alert_delivery.drain(session_factory, configuration())
+        drained.set()
+        await asyncio.Event().wait()  # long polling до отмены
+
+    async def first_stage(*_args):
+        await asyncio.wait_for(entered.wait(), 5)
+        stop.set()  # SIGTERM, пока POST бота в полете
+        if in_flight:
+            asyncio.get_running_loop().call_later(0.3, release.set)
+        else:
+            release.set()
+            await asyncio.wait_for(drained.wait(), 5)
+
+    http.answer = gated
+    monkeypatch.setattr(tg_bot, "poll_loop", bot)
+    monkeypatch.setattr(collector, "rebind_local_probes", first_stage)
+    await asyncio.wait_for(collector.collector_loop(factory, Settings(scheduler_tick=30), stop), 30)
+    first, second = await rows(factory, NotificationDelivery)
+    assert (first.status, first.message_id, first.uncertain_count, first.lease_owner) == ("confirmed", 703, 0, "")
+    assert (second.status, second.attempts, second.lease_owner) == ("pending", 0, "")
+    assert len(http.sent()) == 1
+    http.answer = None
+    await alert_delivery.drain(factory, configuration())  # старт после выкладки: без потери и дубля
+    assert [job.status for job in await rows(factory, NotificationDelivery)] == ["confirmed", "confirmed"]
+    assert len(http.sent()) == 2

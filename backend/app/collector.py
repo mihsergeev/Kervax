@@ -10529,6 +10529,10 @@ async def _next_tick_in(session_factory: async_sessionmaker[AsyncSession], setti
     return min(max(nearest, tick / 2), tick)
 
 
+# остановка: сколько ждать идущий POST уведомления (таймауты TG_TIMEOUT: соединение 4 с, ответ 10 с)
+_SETTLE_DELIVERY = 30.0
+
+
 async def collector_loop(
     session_factory: async_sessionmaker[AsyncSession], settings: Settings,
     stop: asyncio.Event | None = None,
@@ -10541,6 +10545,10 @@ async def collector_loop(
     # падающие проверки) или рестарт контейнера ложно «морили» пульс, и сторож
     # кричал «панель зависла», хотя она просто занята. Реальные отказы (процесс
     # мёртв, цикл событий завис, БД недоступна) по-прежнему валят запись пульса.
+    # остановка видна доставке уведомлений и здесь, и в боте (задачи ниже копируют контекст):
+    # новых POST после сигнала нет, идущий доводится (alert_delivery.STOP)
+    from app import alert_delivery
+    delivery_stop = alert_delivery.STOP.set(stop)
     hb_task = asyncio.create_task(heartbeat.heartbeat_loop(session_factory, settings))
     # кнопки под алертами и команды боту: своя задача, long polling держит запрос до 25 с
     tg_task = asyncio.create_task(tg_bot.poll_loop(session_factory, settings))
@@ -10683,3 +10691,8 @@ async def collector_loop(
         heartbeat.IN_SCHEDULER.reset(in_scheduler)
         # дождаться отмены: иначе бот и пульс доживают до закрытия базы и цикла событий
         await asyncio.wait({hb_task, tg_task, pause_task}, timeout=2)
+        # отмена бота не обрывает его POST в Telegram: исход дописывается, ждем его до закрытия базы
+        if not await alert_delivery.settle(_SETTLE_DELIVERY):
+            log.warning("доставка уведомлений: отправка не завершилась за %s с, исход уточнит просрочка аренды",
+                        _SETTLE_DELIVERY)
+        alert_delivery.STOP.reset(delivery_stop)
