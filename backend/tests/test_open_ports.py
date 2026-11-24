@@ -621,3 +621,48 @@ async def test_scan_remembers_the_check_address(monkeypatch):
     assert {x["port"] for x in ex["ports"] if x.get("allow")} == {2221, 64100}
     assert await open_ports.proxy_ips("socks5://198.51.100.30:1080") == ["198.51.100.30"]
     assert await open_ports.proxy_ips(None) == []
+
+
+# ---- нода за общим NAT ----
+
+def test_nat_gateway_only_when_interfaces_have_no_public_address():
+    lan = {"ips": ["10.20.0.12"], "listen": REP["listen"]}
+    assert open_ports.nat_gateway(_srv(lan, external_ip="198.51.100.7")) == "198.51.100.7"
+    assert open_ports.nat_gateway(_srv(REP, external_ip="198.51.100.7")) == ""  # свой публичный адрес
+    assert open_ports.nat_gateway(_srv({"listen": REP["listen"]}, external_ip="198.51.100.7")) == ""  # без ips
+    assert open_ports.nat_gateway(_srv(lan, external_ip="10.1.1.1")) == ""
+
+
+async def test_shared_nat_counts_other_servers_behind_the_gateway(tmp_path, monkeypatch):
+    """четыре ноды за одним адресом (шлюз пробрасывает каждой свои порты): у каждой отметка
+    nat с адресом шлюза; одиночная нода за NAT 1:1 облака проверяется как раньше - без отметки"""
+    from app.db import Base, create_engine_and_factory
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'n.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    lan = lambda ip: {"ips": [ip], "listen": [{"p": "tcp", "ip": "0.0.0.0", "port": 22, "u": "root"}]}  # noqa: E731
+    async with factory() as s:
+        for i, ip in enumerate(("10.20.0.10", "10.20.0.11", "10.20.0.12")):
+            s.add(Server(name=f"gpu{i}", token_hash=f"t{i}", enabled=True, last_report=lan(ip),
+                         external_ip="198.51.100.7", local_ip=ip))
+        s.add(Server(name="cloud", token_hash="c", enabled=True, last_report=lan("10.0.0.5"),
+                     external_ip="203.0.113.9", local_ip="10.0.0.5"))
+        await s.commit()
+        rows = {r.name: r for r in (await s.execute(select(Server))).scalars()}
+        assert await open_ports.shared_nat(s, rows["gpu2"]) == {"gateway": "198.51.100.7", "n": 2}
+        assert await open_ports.shared_nat(s, rows["cloud"]) is None
+
+        async def closed(ip, port, proxy):
+            return "filtered"
+
+        monkeypatch.setattr(open_ports, "probe", closed)
+        ex = await open_ports.scan_server(rows["gpu2"], "socks5://127.0.0.1:1080", "Казахстан, Алматы", NOW,
+                                          await open_ports.shared_nat(s, rows["gpu2"]))
+        assert ex["nat"] == {"gateway": "198.51.100.7", "n": 2} and ex["ports"][0]["state"] == "filtered"
+        rows["gpu2"].exposure = ex
+        assert open_ports.view(rows["gpu2"])["nat"] == {"gateway": "198.51.100.7", "n": 2}
+        ex = await open_ports.scan_server(rows["cloud"], "socks5://127.0.0.1:1080", "Казахстан, Алматы", NOW,
+                                          await open_ports.shared_nat(s, rows["cloud"]))
+        assert "nat" in ex and ex["nat"] is None  # ключ есть всегда: по его отсутствию перепроверка
+    await engine.dispose()

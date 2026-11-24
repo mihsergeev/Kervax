@@ -2657,6 +2657,8 @@ const EN: Record<string, string> = {
     'Another server answers at {ip}: it runs {o}, while this node runs {n}. Ports at this address are not this node, so they raise no alerts.',
   'Нода ходит в интернет через NAT: панель видит ее с адреса {ip}, а там отвечает сам шлюз ({o}, у ноды {n}). Порты по этому адресу не про ноду, алертов по ним нет. Делать ничего не нужно: входящие идут на другие адреса.':
     'The node reaches the internet through NAT: the panel sees it from {ip}, where the gateway itself answers ({o}, the node runs {n}). Ports at this address are not the node and raise no alerts. Nothing to do: incoming traffic uses other addresses.',
+  'Нода за общим NAT: {ip} - адрес шлюза, через него ходят еще серверов панели: {n}. Проверка стучится на шлюз теми же номерами портов, что слушает нода. Порт, проброшенный на нее под другим номером (например, 8022 на 22), отсюда не виден, а открытый на шлюзе порт может вести на соседний сервер.':
+    'The node is behind a shared NAT: {ip} is the gateway address, {n} more panel servers go out through it. The check knocks on the gateway at the same port numbers the node listens on. A port forwarded to the node under another number (for example 8022 to 22) is not visible from here, and a port open on the gateway may lead to a neighbouring server.',
   'перебор идет с': 'brute force from',
   'SSH: опасный вход': 'SSH: risky login',
   'порт': 'port',
@@ -2718,6 +2720,7 @@ const EN: Record<string, string> = {
     'Sites on this node go through Cloudflare, but the port is open directly too: Cloudflare protection can be bypassed via the node address.',
   'на {ips}': 'on {ips}',
   'ничего не открыто': 'nothing is open',
+  'на шлюзе этими номерами ничего не открыто': 'nothing is open on the gateway at these port numbers',
   'ничего не закрыто': 'nothing is closed',
   'Сайты через Cloudflare': 'Sites behind Cloudflare',
   'проверено {c} из {n}': 'checked {c} of {n}',
@@ -4085,6 +4088,7 @@ const EN: Record<string, string> = {
   'слабые SSH-ключи у {list}': 'weak SSH keys: {list}',
   'снаружи еще не проверяли': 'not checked from outside yet',
   'снаружи ничего не открыто': 'nothing open from outside',
+  'за общим NAT: на шлюзе этими номерами ничего не открыто': 'behind a shared NAT: nothing open on the gateway at these port numbers',
   'снаружи открыто: {list}': 'open from outside: {list}',
   'стоит за {name}': 'behind {name}',
   'стоит за {name}, он не на связи': 'behind {name}, which is offline',

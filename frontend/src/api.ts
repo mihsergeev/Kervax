@@ -2007,6 +2007,8 @@ export type Exposure = {
   own?: boolean // смотрели с адреса самой панели: открытое может быть открыто только для нее
   // по этим внешним адресам отвечает другой сервер: версия SSH снаружи не та, что у ноды
   foreign?: { ip: string; outside: string; node: string; nat?: boolean }[] // nat - адрес исходящего NAT, там сам шлюз
+  // нода за общим NAT (с 1.8.172): адрес шлюза и сколько еще серверов панели ходят через него
+  nat?: { gateway: string; n: number } | null
   ips: string[]
   ports: ExposedPort[]
   new?: ExposedPort[] // открылись с прошлых проверок

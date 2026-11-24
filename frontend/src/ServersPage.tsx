@@ -925,7 +925,7 @@ function serverSecInfo(c: {
     const open = [...new Set(ex.ports.filter((p) => p.state === 'open').map((p) => p.port))].sort((a, b) => a - b)
     ok.ports = open.length
       ? t('снаружи открыто: {list}', { list: shortList(open.map(String), t, 6) })
-      : t('снаружи ничего не открыто')
+      : ex.nat ? t('за общим NAT: на шлюзе этими номерами ничего не открыто') : t('снаружи ничего не открыто')
   } else ok.ports = t('снаружи еще не проверяли')
   const ssh = s.ssh
   ok.access = [
@@ -4380,6 +4380,9 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
             : t('По адресу {ip} отвечает другой сервер: там {o}, а у этой ноды {n}. Порты по этому адресу не про эту ноду, поэтому алертов по ним нет.', { ip: f.ip, o: f.outside, n: f.node })}
         </div>
       ))}
+      {ex?.nat && !(ex.foreign ?? []).some((f) => f.nat) && (
+        <div className="net-note">{t('Нода за общим NAT: {ip} - адрес шлюза, через него ходят еще серверов панели: {n}. Проверка стучится на шлюз теми же номерами портов, что слушает нода. Порт, проброшенный на нее под другим номером (например, 8022 на 22), отсюда не виден, а открытый на шлюзе порт может вести на соседний сервер.', { ip: ex.nat.gateway, n: ex.nat.n })}</div>
+      )}
       {!own && (ex?.realip ?? []).length > 0 && (
         <RealIpBox server={s} items={ex?.realip ?? []} isViewer={isViewer} onChanged={onChanged} />
       )}
@@ -4441,7 +4444,7 @@ function OpenPorts({ server: s, onChanged }: { server: Server; onChanged: () => 
             {opened.length > 0 ? (
               <div className="exp-lst">{opened.map(openRow)}</div>
             ) : (
-              <div className="exp-empty">✓ {t('ничего не открыто')}</div>
+              <div className="exp-empty">{ex?.nat ? t('на шлюзе этими номерами ничего не открыто') : <>✓ {t('ничего не открыто')}</>}</div>
             )}
           </div>
           <div className="exp-col exp-col-closed">

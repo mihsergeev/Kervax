@@ -49,7 +49,7 @@ import struct
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import tg_fmt
@@ -195,6 +195,31 @@ def targets(srv: Server) -> tuple[list[str], dict[int, str]]:
             put(n.get("port"), f"сервис Kubernetes {n.get('ns', '?')}/{n.get('name', '?')} (LoadBalancer)")
     keep = sorted(ports)[:_MAX_PORTS]
     return ips[:_MAX_IPS], {p: ports[p] for p in keep}
+
+
+def nat_gateway(srv: Server) -> str:
+    """Адрес шлюза, если нода за NAT: агент прислал адреса интерфейсов (ips), публичного среди них
+    нет, а отчеты приходят с публичного external_ip. Без ips (агент старше 2.26) - не знаем: ""."""
+    rep = srv.last_report or {}
+    own = rep.get("ips")
+    if not isinstance(own, list) or any(isinstance(ip, str) and _public(ip) for ip in own):
+        return ""
+    ext = str(getattr(srv, "external_ip", "") or "")
+    return ext if _public(ext) else ""
+
+
+async def shared_nat(session: AsyncSession, srv: Server) -> dict | None:
+    """Нода за NAT, через который в интернет ходят и другие серверы панели: адрес у них общий, и
+    шлюз пробрасывает на каждого свои порты. Проверка стучится на шлюз теми же номерами портов,
+    что слушает нода: проброс под другим номером (8022 -> 22) ей не виден, а открытый на шлюзе
+    порт может вести на соседа. Одиночную ноду за NAT 1:1 облака проверка видит верно - для нее
+    None. Имен соседей нет: они могут быть из чужих групп."""
+    gw = nat_gateway(srv)
+    if not gw:
+        return None
+    n = await session.scalar(select(func.count()).select_from(Server).where(
+        Server.external_ip == gw, Server.id != srv.id))
+    return {"gateway": gw, "n": int(n)} if n else None
 
 
 # ss отдает имя процесса не длиннее 15 символов (comm): konnectivity-server -> konnectivity-se
@@ -529,7 +554,8 @@ async def proxy_ips(proxy: str | None) -> list[str]:
     return [host] if _is_ip(host) else await _resolve(host)
 
 
-async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime) -> dict:
+async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime,
+                      nat: dict | None = None) -> dict:
     """Проверить порты ноды снаружи; результат - для servers.exposure. У открытых портов SSH
     заодно читаем баннер: по нему видно, та ли нода отвечает по этому адресу."""
     ips, ports = targets(srv)
@@ -552,7 +578,9 @@ async def scan_server(srv: Server, proxy: str | None, via: str, now: datetime) -
                 banners[f"{x['ip']}:{x['port']}"] = b
     cf = await cf_sites(srv) if any(p in CF_PORTS for p in ports) else None
     mark_allow(srv, rows, via_ips)
-    return merge(prev, rows, ips, via, now, own=proxy is None, banners=banners, cf=cf, via_ips=via_ips)
+    out = merge(prev, rows, ips, via, now, own=proxy is None, banners=banners, cf=cf, via_ips=via_ips)
+    out["nat"] = nat  # общий NAT (shared_nat): ключ есть всегда, по его отсутствию плановая перепроверка
+    return out
 
 
 def merge(prev: dict, rows: list[dict], ips: list[str], via: str, now: datetime, own: bool = False,
@@ -957,7 +985,9 @@ async def _scan_due(session_factory: async_sessionmaker[AsyncSession], now: date
             # правила выбора портов поменялись или проверка не знает своих адресов (до 1.4.263) -
             # проверяем сразу, не дожидаясь 6 часов
             ex = _ex(srv)
-            if last is None or now - last >= SCAN_EVERY or int(ex.get("rules") or 1) < RULES or "via_ips" not in ex:
+            # nat (1.8.172) - тоже сразу: без него карточка ноды за общим NAT обещает "ничего не открыто"
+            if (last is None or now - last >= SCAN_EVERY or int(ex.get("rules") or 1) < RULES or "via_ips" not in ex
+                    or "nat" not in ex):
                 due.append((last or datetime.min.replace(tzinfo=timezone.utc), srv.id))
         due.sort()
         n = 0
@@ -965,7 +995,7 @@ async def _scan_due(session_factory: async_sessionmaker[AsyncSession], now: date
             srv = await s.get(Server, sid)
             if srv is None:
                 continue
-            srv.exposure = await scan_server(srv, proxy, via, datetime.now(timezone.utc))
+            srv.exposure = await scan_server(srv, proxy, via, datetime.now(timezone.utc), await shared_nat(s, srv))
             await s.commit()
             n += 1
         return n

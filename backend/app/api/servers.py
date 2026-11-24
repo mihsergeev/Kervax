@@ -1946,7 +1946,7 @@ async def exposure_scan(server_id: int, user: CurrentUser, session: SessionDep) 
     if last is not None and now - last < timedelta(minutes=1):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Проверка только что была, подождите минуту")
     proxy, via = await open_ports.pick_proxy(session)
-    s.exposure = await open_ports.scan_server(s, proxy, via, now)
+    s.exposure = await open_ports.scan_server(s, proxy, via, now, await open_ports.shared_nat(session, s))
     await session.commit()
     await session.refresh(s)
     await audit.record(session, user.username, "exposure_scan", s.name, via)
