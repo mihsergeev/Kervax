@@ -82,7 +82,7 @@ async def _lockout_alert(session, settings, ban: LoginBan) -> None:
     minutes = round((ban.until - ban.created_at).total_seconds() / 60)
     # Коротко (формат A, app/tg_fmt.py): кто подбирает и что с ним сделали. Сколько попыток,
     # кого еще заблокировали за сутки, белый список - в окне Пользователи, раздел Защита входа
-    lines = ["🚨🔐 Kervax", "Подбирают пароль к панели", f"{ban.key} заблокирован {ban_words(minutes)}"]
+    lines = [f"🚨🔐 {tg_fmt.panel_name()}", "Подбирают пароль к панели", f"{ban.key} заблокирован {ban_words(minutes)}"]
     keys = list(dict.fromkeys(b.key for b in quiet if b.key != ban.key))
     if keys:
         lines.append(f"За сутки еще: {tg_fmt.names(keys)}")
@@ -218,7 +218,7 @@ async def change_password(
     settings = get_settings()
     await alerts.security_alert(
         session, settings,
-        f"⚠️🔑 Kervax\nСменили пароль {username}\nС адреса {_client_key(request)}",
+        f"⚠️🔑 {tg_fmt.panel_name()}\nСменили пароль {username}\nС адреса {_client_key(request)}",
     )
     token = create_access_token(
         username, settings.jwt_secret, settings.jwt_ttl_minutes,
@@ -501,7 +501,7 @@ async def telegram_test(user: CurrentUser, session: SessionDep) -> TelegramOut:
     try:
         await alerts.tg_send(
             api, token, user.tg_chat_id,
-            f"✅ Kervax: проверка связи для {user.username}. "
+            f"✅ {tg_fmt.panel_name()}: проверка связи для {user.username}. "
             "Алерты по вашим серверам и сайтам будут приходить сюда.",
         )
     except Exception as exc:  # noqa: BLE001

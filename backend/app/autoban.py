@@ -465,7 +465,7 @@ async def address_changed(session_factory, name: str, old: str, new: str) -> Non
     всех нод. Если это не переезд ноды, токен агента мог утечь."""
     from app.config import get_settings
 
-    text = "\n".join(["⚠️🛡 Kervax", f"Сменился адрес сервера {name}", f"{old} -> {new}",
+    text = "\n".join(["⚠️🛡 " + tg_fmt.panel_name(), f"Сменился адрес сервера {name}", f"{old} -> {new}",
                       "Новый адрес попал в белый список автобана всех серверов. Не переезд - перевыпустите токен агента"])
     async with session_factory() as session:
         await alerts.security_alert(session, get_settings(), text)

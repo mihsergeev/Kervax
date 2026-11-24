@@ -181,6 +181,20 @@ def split_detail(detail: str) -> tuple[str, list[str]]:
     return cap(what), facts
 
 
+def panel_name() -> str:
+    """Подпись панели в алертах о ней самой (подбор пароля, левые запросы, смена адреса сервера):
+    панелей у владельца бывает несколько, и "Kervax" не говорит, какая. Хост из panel_url
+    (kervax.example.com), без него - "Kervax"."""
+    from urllib.parse import urlsplit
+
+    from app.config import get_settings
+    try:
+        host = urlsplit(get_settings().panel_url or "").hostname or ""
+    except ValueError:
+        host = ""
+    return host or "Kervax"
+
+
 def render(icon: str, name_html: str, what: str, facts: list[str] | None = None) -> str:
     """Формат A в HTML Telegram. name_html - уже готовая ссылка или экранированное имя;
     what и facts - обычный текст, экранируются здесь."""

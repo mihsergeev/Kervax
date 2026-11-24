@@ -96,6 +96,8 @@ def test_hints_name_the_source():
     denied = agg(bad=rw.BAD_LIMIT, paths={"403 /api/agent/commands": rw.BAD_LIMIT}, codes={403: rw.BAD_LIMIT})
     assert "синхронизацию доверенных прокси" in rw.hint(denied, 1)
     assert "токен" not in rw.hint(denied, 1)
+    # адрес ни с кем не сходится: новый сервер за NAT, разрешен только его внутренний адрес
+    assert "добавьте этот адрес в разрешенные адреса агента" in rw.hint(denied, 0)
     # самый частый адрес и так виден списком рядом
     other = agg(total=rw.FLOOD_PER_SERVER, paths={"/api/agent/x": 1, "/api/other": rw.FLOOD_PER_SERVER})
     assert rw.hint(other, 1) == ""
@@ -171,10 +173,10 @@ async def test_flood_from_unknown_address_and_nat_threshold(client: httpx.AsyncC
     await rw.check(f, Settings(alert_webhook="http://hook"), now)
     assert len(sent) == 1
     text = str(sent[0])
-    assert "<b>Левые запросы в панель</b>" in text and "с адреса 198.51.100.20 (не сервер панели)" in text
+    assert "<b>Левые запросы в панель</b>" in text and "с адреса 198.51.100.20 (его нет у серверов панели)" in text
     assert "обычно около" not in text
     full = full_text(sent[0])
-    assert "с адреса 198.51.100.20 (не сервер панели)" in full
+    assert "с адреса 198.51.100.20 (его нет у серверов панели)" in full
     assert "700 запросов за 10 минут, обычно около 150" in full and "несколько его копий" in full
 
 
@@ -195,3 +197,22 @@ async def test_panel_requests_is_admin_only(client: httpx.AsyncClient, auth_head
     await client.post("/api/users", headers=auth_headers, json={"username": "viewer2", "password": "viewer-pass-2026", "role": "viewer"})
     tok = (await client.post("/api/auth/login", json={"username": "viewer2", "password": "viewer-pass-2026"})).json()["access_token"]
     assert (await client.get("/api/panel-requests", headers={"Authorization": f"Bearer {tok}"})).status_code == 403
+
+
+def test_extra_agent_addresses_map_to_the_server():
+    """разрешенные адреса агента (agent_source_ips) тоже связывают адрес с сервером: новый сервер за
+    NAT с внутренним agent_ip, которому добавили внешний адрес, - не "чужой адрес" в алерте"""
+    srv = Server(id=7, name="new-node", token_hash="h", agent_ip="192.0.2.6", agent_source_ips=["198.51.100.40"])
+    by_ip = rw.servers_by_ip([srv])
+    assert [x.name for x in by_ip["198.51.100.40"]] == ["new-node"] and "192.0.2.6" in by_ip
+
+
+def test_panel_alerts_name_the_panel(monkeypatch):
+    """панелей у владельца несколько: алерты о самой панели подписаны ее хостом, без него - Kervax"""
+    from app import tg_fmt
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "panel_url", "https://kervax.example.com/")
+    assert tg_fmt.panel_name() == "kervax.example.com"
+    monkeypatch.setattr(get_settings(), "panel_url", "")
+    assert tg_fmt.panel_name() == "Kervax"

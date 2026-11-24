@@ -185,7 +185,8 @@ def servers_by_ip(servers: list[Server]) -> dict[str, list[Server]]:
     out: dict[str, list[Server]] = {}
     for s in servers:
         rep = s.last_report or {}
-        ips = {s.external_ip, s.agent_ip, s.local_ip, *(rep.get("ips") or [])}
+        extra = s.agent_source_ips if isinstance(getattr(s, "agent_source_ips", None), list) else []
+        ips = {s.external_ip, s.agent_ip, s.local_ip, *(rep.get("ips") or []), *extra}
         for ip in ips:
             if ip and isinstance(ip, str):
                 out.setdefault(ip, []).append(s)
@@ -220,6 +221,12 @@ def hint(a: dict, n_srv: int) -> str:
                 return ("агент шлет неверный токен: сервер переустановили или удалили из панели, а агент на нем "
                         "остался. Переустановите агент или удалите его с сервера")
             if code == "403":
+                if not n_srv:
+                    # новый сервер за NAT: в разрешенных адресах агента его внутренний адрес, а
+                    # приходит он с внешнего - панель его отбивает, и адрес ни с кем не сходится
+                    return ("панель отклонила запрос агента: адреса нет в разрешенных ни у одного сервера. "
+                            "Новый сервер за NAT - добавьте этот адрес в разрешенные адреса агента в его "
+                            "настройках")
                 return ("панель отклонила запрос агента: проверьте разрешенные IP агента и синхронизацию "
                         "доверенных прокси на панели")
         if code == "401" and path.startswith("/api/ansible/"):
@@ -259,7 +266,7 @@ def what(a: dict, n_srv: int) -> str:
 def who(key: str, srvs: list[Server]) -> tuple[str, str]:
     """Текст "с кого" для алерта и короткое имя для истории."""
     if not srvs:
-        return f"с адреса {key} (не сервер панели)", key
+        return f"с адреса {key} (его нет у серверов панели)", key
     names = sorted(s.name or f"#{s.id}" for s in srvs)
     if len(names) == 1:
         return f"с сервера {names[0]} ({key})", names[0]
@@ -336,7 +343,7 @@ async def check(session_factory, settings, now: datetime) -> None:
         if tpl == default:
             # коротко (app/tg_fmt.py): кто шлет; что именно и сколько - в полном тексте
             top = w_txt.partition("чаще всего ")[2]
-            short = tg_fmt.render("⚠️🧟", "<b>Kervax</b>", "Левые запросы в панель",
+            short = tg_fmt.render("⚠️🧟", f"<b>{html.escape(tg_fmt.panel_name())}</b>", "Левые запросы в панель",
                                   [w_who] + ([tg_fmt.fact("Чаще всего", top)] if top else []))
             fires.append((key, short, target, full))
         else:
@@ -355,7 +362,8 @@ async def check(session_factory, settings, now: datetime) -> None:
         if cur.get("notified"):
             srvs = [x for x in servers if x.id in set(cur.get("servers") or [])]
             w_who, target = who(key, srvs)
-            recs.append((key, tg_fmt.recovery("<b>Kervax</b>", f"левые запросы {w_who} прекратились"), target))
+            recs.append((key, tg_fmt.recovery(f"<b>{html.escape(tg_fmt.panel_name())}</b>",
+                                              f"левые запросы {w_who} прекратились"), target))
     can_send = bool(rule.get("enabled", True)) and not muted and alerts.alerts_enabled(cfg)
     msgs = [alerts.Msg(t, "servers", "", kind=KIND, target=tg, recovery=False, full=f) for _k, t, tg, f in fires]
     msgs += [alerts.Msg(t, "servers", "", kind=KIND, target=tg, recovery=True) for _k, t, tg in recs]
