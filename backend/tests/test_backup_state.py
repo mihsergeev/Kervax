@@ -287,9 +287,9 @@ def test_helper_writes_why_the_last_run_failed(tmp_path):
     out = _run(tmp_path, r'''
 systemctl() {
   case "$*" in
-    *"-p Result"*) echo exit-code ;;
-    *"-p InvocationID"*) echo inv1 ;;
-    *"-p ExecMainExitTimestamp"*) echo "" ;;
+    *"-p Result"*) echo Result=exit-code ;;
+    *"-p InvocationID"*) echo InvocationID=inv1 ;;
+    *"-p ExecMainExitTimestamp"*) echo "ExecMainExitTimestamp=" ;;
   esac
 }
 journalctl() {
@@ -346,9 +346,9 @@ def test_helper_reason_is_the_fatal_line_not_the_retries(tmp_path):
     out = _run(tmp_path, r'''
 systemctl() {
   case "$*" in
-    *"-p Result"*) echo exit-code ;;
-    *"-p InvocationID"*) echo inv1 ;;
-    *"-p ExecMainExitTimestamp"*) echo "" ;;
+    *"-p Result"*) echo Result=exit-code ;;
+    *"-p InvocationID"*) echo InvocationID=inv1 ;;
+    *"-p ExecMainExitTimestamp"*) echo "ExecMainExitTimestamp=" ;;
   esac
 }
 journalctl() {
@@ -399,9 +399,9 @@ timeout() { shift; "$@"; }
 systemd-run() { echo "RUN $*" >&2; }
 systemctl() {
   case "$*" in
-    "show -p User --value systemd-rest.service") echo bx231 ;;
-    "show -p EnvironmentFiles --value systemd-rest.service")
-      printf '/etc/systemd-resta.conf (ignore_errors=no)\n/etc/backup-extra.env (ignore_errors=yes)\n' ;;
+    "show systemd-rest.service -p User") echo User=bx231 ;;
+    "show systemd-rest.service -p EnvironmentFiles")
+      printf 'EnvironmentFiles=/etc/systemd-resta.conf (ignore_errors=no)\nEnvironmentFiles=/etc/backup-extra.env (ignore_errors=yes)\n' ;;
   esac
 }
 unit_restic_check
@@ -414,3 +414,30 @@ unit_restic_check
     assert runs[0].endswith("-- /usr/local/lib/.restic/restic --no-cache --no-lock cat config")
     assert "--cacert" not in runs[0] and "RuntimeMaxSec=150" in runs[0]
     assert "User=" not in runs[1] and "-p EnvironmentFile=/etc/systemd-resta.conf --" in runs[1]
+
+
+def test_helper_reads_unit_properties_on_systemd_219(tmp_path):
+    """CentOS 7 (systemd 219): нет `show --value` и `--timestamp=unix` - свойства читаются из Key=value,
+    неизвестная опция дает пустое значение, а не остановку под set -e"""
+    out = _run(tmp_path, r"""
+set -euo pipefail
+systemctl() {
+  for a in "$@"; do case "$a" in --value|--timestamp=*) echo "systemctl: unrecognized option '$a'" >&2; return 1 ;; esac; done
+  case "$*" in
+    "show b.service -p Result") echo Result=success ;;
+    "show b.service -p EnvironmentFiles") printf 'EnvironmentFiles=/etc/a.env (ignore_errors=no)\nEnvironmentFiles=/etc/b.env (ignore_errors=yes)\n' ;;
+    "show b.timer -p TimersCalendar") echo 'TimersCalendar={ OnCalendar=*-*-* 03:00:00 ; next_elapse=Tue 2026-11-25 03:00:00 MSK }' ;;
+  esac
+}
+echo "result=[$(sd_prop b.service Result)]"
+echo "files=[$(sd_prop b.service EnvironmentFiles | tr '\n' ' ')]"
+ts="$(sd_prop b.timer TimersCalendar --timestamp=unix)"
+echo "ts=[$ts] still running"
+echo "cal=[$(sd_prop b.timer TimersCalendar)]"
+echo "missing=[$(sd_prop b.service InvocationID)]"
+""")
+    assert "result=[success]" in out
+    assert "files=[/etc/a.env (ignore_errors=no) /etc/b.env (ignore_errors=yes) ]" in out
+    assert "ts=[] still running" in out
+    assert "cal=[{ OnCalendar=*-*-* 03:00:00 ; next_elapse=Tue 2026-11-25 03:00:00 MSK }]" in out
+    assert "missing=[]" in out

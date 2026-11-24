@@ -45,7 +45,7 @@ import (
 	"time"
 )
 
-const version = "2.75"
+const version = "2.76"
 
 // Публичный ключ для проверки подписи релизов агента (Ed25519, base64).
 // ПУСТО по умолчанию → самообновление ВЫКЛЮЧЕНО (агент никогда не заменяет себя).
@@ -8622,8 +8622,11 @@ func firstLine(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// systemctlShow - значение одного свойства юнита. Без --value: его нет в systemd до 230
+// (219 на CentOS 7), там вызов падал и значение всегда было пустым
 func systemctlShow(unit, prop string) string {
-	return cmdOut(3*time.Second, "systemctl", "show", unit, "-p", prop, "--value")
+	v, _ := strings.CutPrefix(firstLine(cmdOut(3*time.Second, "systemctl", "show", unit, "-p", prop)), prop+"=")
+	return v
 }
 
 // backupFromSystemd — фолбэк, когда prom-метрики нет (ноды со старой ансибл-раскладкой,

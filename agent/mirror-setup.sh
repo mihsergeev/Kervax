@@ -887,7 +887,7 @@ cmd_report() {
   fi
   [ "$(systemctl is-active "$PULL_UNIT.service" 2>/dev/null || true)" = activating ] && running=true
   [ -f "$CURRENT" ] && cur="$(head -n1 "$CURRENT" | cut -d' ' -f1)"
-  next="$(systemctl show "$PULL_UNIT.timer" -p NextElapseUSecRealtime --value 2>/dev/null || true)"
+  next="$(systemctl show "$PULL_UNIT.timer" -p NextElapseUSecRealtime 2>/dev/null | sed -n 's/^NextElapseUSecRealtime=//p' || true)"
   next="$(date -d "$next" +%s 2>/dev/null || echo 0)"
   for src in $(sources); do
     f="$SRC_D/$src"

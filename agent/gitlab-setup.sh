@@ -122,9 +122,9 @@ for f in $CRON_FILES; do
   done >> "$SCHED"
 done
 for t in $(systemctl list-unit-files --type=timer --no-legend 2>/dev/null | awk '{print $1}' | grep -v '^gitlab-autoupgrade'); do
-  svc=$(systemctl show -p Unit --value "$t" 2>/dev/null)
+  svc=$(systemctl show -p Unit "$t" 2>/dev/null | sed -n 's/^Unit=//p')
   [ -n "$svc" ] || continue
-  ex=$(systemctl show -p ExecStart --value "$svc" 2>/dev/null | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p' | head -3)
+  ex=$(systemctl show -p ExecStart "$svc" 2>/dev/null | sed -n 's/^ExecStart=//p' | sed -n 's/.*argv\[\]=\([^;]*\);.*/\1/p' | head -3)
   [ -n "$ex" ] || continue
   text="$ex"$'\n'"$(script_lines "$ex")"
   printf '%s' "$text" | grep -qE "$BK_RE" || continue
@@ -259,12 +259,12 @@ while IFS= read -r info <&3; do
     extra=""
     if [ "${src#timer:}" != "$src" ]; then
       t=${src#timer:}
-      u=$(systemctl show -p Unit --value "$t" 2>/dev/null)
+      u=$(systemctl show -p Unit "$t" 2>/dev/null | sed -n 's/^Unit=//p')
       extra=$(printf ',"enabled":%s,"last":%s,"next":%s,"result":%s' \
         "$(js "$(systemctl is-enabled "$t" 2>/dev/null)" 20)" \
-        "$(sd_ts "$(systemctl show -p LastTriggerUSec --value "$t" 2>/dev/null)")" \
-        "$(sd_ts "$(systemctl show -p NextElapseUSecRealtime --value "$t" 2>/dev/null)")" \
-        "$(js "$(systemctl show -p Result --value "$u" 2>/dev/null)" 30)")
+        "$(sd_ts "$(systemctl show -p LastTriggerUSec "$t" 2>/dev/null | sed -n 's/^LastTriggerUSec=//p')")" \
+        "$(sd_ts "$(systemctl show -p NextElapseUSecRealtime "$t" 2>/dev/null | sed -n 's/^NextElapseUSecRealtime=//p')")" \
+        "$(js "$(systemctl show -p Result "$u" 2>/dev/null | sed -n 's/^Result=//p')" 30)")
     fi
     sch="$sch${sch:+,}$(printf '{"how":%s,"src":%s,"when":%s,"db":%d,"skip":%s,"etc":%d%s}' \
       "$(js "${src%%:*}" 10)" "$(js "${src#*:}" 120)" "$(js "$when" 60)" "$db" "$(js "$skip" 80)" "$etc" "$extra")"
@@ -301,9 +301,9 @@ while IFS= read -r info <&3; do
       au=$(printf ',"au":{"conf":%s,"timer":%s,"next":%s,"svc":%s,"result":%s,"blocked":%s,"broken":%s,"behind_since":%s,"last_result":%s,"history":[%s],"gitlab_backup":%s,"skip":%s,"allow_major":%s,"stale_days":%s}' \
         "$(js "$aconf" 120)" \
         "$(js "$(systemctl is-enabled gitlab-autoupgrade.timer 2>/dev/null)" 20)" \
-        "$(sd_ts "$(systemctl show -p NextElapseUSecRealtime --value gitlab-autoupgrade.timer 2>/dev/null)")" \
-        "$(js "$(systemctl show -p ActiveState --value gitlab-autoupgrade.service 2>/dev/null)" 20)" \
-        "$(js "$(systemctl show -p Result --value gitlab-autoupgrade.service 2>/dev/null)" 30)" \
+        "$(sd_ts "$(systemctl show -p NextElapseUSecRealtime gitlab-autoupgrade.timer 2>/dev/null | sed -n 's/^NextElapseUSecRealtime=//p')")" \
+        "$(js "$(systemctl show -p ActiveState gitlab-autoupgrade.service 2>/dev/null | sed -n 's/^ActiveState=//p')" 20)" \
+        "$(js "$(systemctl show -p Result gitlab-autoupgrade.service 2>/dev/null | sed -n 's/^Result=//p')" 30)" \
         "$(js "$(st blocked)" 300)" "$(js "$(st broken)" 300)" "$(num "$(st behind_since)")" "$(js "$(st last_result)" 300)" \
         "$hist" "$(js "${agb:-yes}" 10)" "$(js "${askip:-artifacts,registry}" 80)" "$(js "${amaj:-no}" 10)" "$(num "${astale:-7}")")
     fi

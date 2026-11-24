@@ -263,7 +263,8 @@ process_spool() {
         systemctl reset-failed -- "$unit" > "$tmp" 2>&1; rc=$?
       fi
       state=$(systemctl is-active -- "$unit" 2>/dev/null)
-      result=$(systemctl show -p Result --value -- "$unit" 2>/dev/null)
+      # not the value-only flag: systemd older than 230 (CentOS 7) rejects it
+      result=$(systemctl show -p Result -- "$unit" 2>/dev/null | sed -n 's/^Result=//p')
       [ "$rc" -eq 0 ] && [ "$state" != failed ] && ok=true
       unit_log "$unit" "$tmp"
       out="{\"op\":\"$op\",\"unit\":\"$(esc "$unit")\",\"state\":\"$(esc "$state")\",\"result\":\"$(esc "$result")\",\"rc\":$rc,\"log\":[$(json_lines "$tmp")]}"

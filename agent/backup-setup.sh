@@ -2076,6 +2076,12 @@ env_cacert_set() {
     && chown root:root "$tmp" && chmod 0600 "$tmp" && mv -f "$tmp" "$PROV_ENV" || { rm -f "$tmp"; return 1; }
 }
 
+# one property of a unit, the value only. Not the value-only flag of `systemctl show`: systemd
+# older than 230 (219 on CentOS 7) rejects it and every such read came back empty. Options
+# after the property go to systemctl as they are (--timestamp=unix). Never fails: an unknown
+# option on old systemd gives an empty value, not a stop under set -e.
+sd_prop() { local u="$1" p="$2"; shift 2; { systemctl show "$u" "$@" -p "$p" 2>/dev/null || true; } | sed -n "s/^$p=//p"; }
+
 # restic as the backup service runs it: a transient unit with the service's User and EnvironmentFile,
 # reading the repository config (no lock, no cache). 150 s at most: on a certificate error restic
 # retries for a quarter of an hour.
@@ -2083,11 +2089,11 @@ unit_restic_check() {
   local svc user f props=()
   svc="$(find_timer)" || true
   svc="${svc:-$PROV_TIMER}"; svc="${svc%.timer}.service"
-  user="$(systemctl show -p User --value "$svc" 2>/dev/null)" || true
+  user="$(sd_prop "$svc" User)" || true
   [ -n "$user" ] && props+=(-p "User=$user")
   while read -r f _; do
     [ -n "$f" ] && props+=(-p "EnvironmentFile=$f")
-  done < <(systemctl show -p EnvironmentFiles --value "$svc" 2>/dev/null || true)
+  done < <(sd_prop "$svc" EnvironmentFiles || true)
   # a unit without EnvironmentFile: the runner reads the env itself
   printf '%s\n' "${props[@]}" | grep -q '^EnvironmentFile=' || props+=(-p "EnvironmentFile=$PROV_ENV")
   timeout 180 systemd-run --wait --pipe --collect -q -p RuntimeMaxSec=150 "${props[@]}" -- \
@@ -3320,7 +3326,7 @@ cmd_custom_scan() {
   while IFS= read -r t; do
     [ -n "$t" ] || continue
     [[ "${t,,}" =~ $CB_SKIP_RE ]] && continue
-    svc="$(systemctl show "$t" -p Unit --value 2>/dev/null)"; [ -n "$svc" ] || continue
+    svc="$(sd_prop "$t" Unit)"; [ -n "$svc" ] || continue
     props="$(systemctl show "$svc" --timestamp=unix -p Result -p ExecMainStatus -p ExecMainExitTimestamp -p ActiveState -p ExecStart -p Description 2>/dev/null)"
     err=$?
     # systemd older than 247 has no --timestamp=unix: monotonic time plus boot time instead
@@ -3340,10 +3346,11 @@ cmd_custom_scan() {
        && ! cb_writes_metrics "$execs"$'\n'"$body"; then continue; fi
     cb_maintenance_only "$t $svc $desc" "$body" && continue
     cb_updater_only "$t $svc $desc $script" && continue
-    cal="$(systemctl show "$t" --timestamp=unix -p TimersCalendar --value 2>/dev/null)"
+    cal="$(sd_prop "$t" TimersCalendar --timestamp=unix)"
+    [ -n "$cal" ] || cal="$(sd_prop "$t" TimersCalendar)"  # systemd < 247: no --timestamp, no next run time
     next="$(printf '%s' "$cal" | sed -n 's/.*next_elapse=@\([0-9]*\).*/\1/p' | head -1)"
     cal="$(printf '%s' "$cal" | sed -n 's/.*OnCalendar=\([^;]*\);.*/\1/p' | sed 's/[[:space:]]*$//' | head -1)"
-    last_mono="$(systemctl show "$t" -p LastTriggerUSecMonotonic --value 2>/dev/null)"
+    last_mono="$(sd_prop "$t" LastTriggerUSecMonotonic)"
     last_ts=0; [[ "$last_mono" =~ ^[0-9]+$ ]] && [ "$last_mono" -gt 0 ] && last_ts=$(( $(cb_boot_ts) + last_mono / 1000000 ))
     ok=-1; ok_ts=0
     if [ "$exit_ts" -gt 0 ]; then
@@ -3551,8 +3558,8 @@ backup_runs_parse() {
 # URL masked, control characters dropped - it goes to the panel as is.
 backup_last_fail() {
   local svc="$1" inv end msg
-  [ "$(systemctl show -p Result --value "$svc" 2>/dev/null)" = success ] && return 0
-  inv="$(systemctl show -p InvocationID --value "$svc" 2>/dev/null)"
+  [ "$(sd_prop "$svc" Result)" = success ] && return 0
+  inv="$(sd_prop "$svc" InvocationID)"
   [ -n "$inv" ] || return 0
   # restic retries a failing request for minutes ("... returned error, retrying after 1.3s: ...")
   # before it gives up: those lines are the same error again and again, the Fatal line says it once
@@ -3562,8 +3569,8 @@ backup_last_fail() {
     | grep -a -v 'retrying after' || true)"
   msg="$( { printf '%s\n' "$lines" | grep -a -m1 '^Fatal: ' || printf '%s\n' "$lines" | head -n 2; } \
     | tr '\n\t' '  ' | tr -d '\000-\037' | sed -E 's#//[^/@ ]*@#//***@#g; s/ +$//' | cut -c1-300)"
-  [ -n "$msg" ] || msg="the backup service ended with $(systemctl show -p Result --value "$svc" 2>/dev/null)"
-  end="$(date -d "$(systemctl show -p ExecMainExitTimestamp --value "$svc" 2>/dev/null)" +%s 2>/dev/null || date +%s)"
+  [ -n "$msg" ] || msg="the backup service ended with $(sd_prop "$svc" Result)"
+  end="$(date -d "$(sd_prop "$svc" ExecMainExitTimestamp)" +%s 2>/dev/null || date +%s)"
   printf '{"ts":%s,"msg":"%s"}' "$end" "$(json_escape "$msg")"
 }
 
@@ -3584,8 +3591,10 @@ backup_runs_maybe() {
   timer="$(find_timer)" || true
   [ -n "$timer" ] || return 0
   svc="${timer%.timer}.service"
-  [ "$(systemctl show -p ActiveState --value "$svc" 2>/dev/null)" = activating ] && return 0
-  inv="$(systemctl show -p InvocationID --value "$svc" 2>/dev/null)"
+  [ "$(sd_prop "$svc" ActiveState)" = activating ] && return 0
+  inv="$(sd_prop "$svc" InvocationID)"
+  # systemd older than 232 has no InvocationID: the exit time of the last run tells runs apart
+  [ -n "$inv" ] || inv="exit:$(sd_prop "$svc" ExecMainExitTimestampMonotonic)"
   if [ -f "$RUNS_JSON" ] && [ "$inv" = "$(cat "$RUNS_JSON.inv" 2>/dev/null)" ]; then return 0; fi
   install -d -m 0755 "$CUSTOM_DIR"
   (
@@ -3642,12 +3651,12 @@ verify_ctx() {
   VENV=""; VUSER=""; VHOME=""; VSCRIPT=""
   timer="$(find_timer)" || true
   svc=""; [ -n "$timer" ] && svc="${timer%.timer}.service"
-  for f in $( [ -n "$svc" ] && systemctl show -p EnvironmentFiles --value "$svc" 2>/dev/null \
+  for f in $( [ -n "$svc" ] && sd_prop "$svc" EnvironmentFiles \
                 | sed 's/ *([a-z_]*=[a-z]*)//g' ) "$PROV_ENV"; do
     [ -f "$f" ] && grep -qE '^(export )?RESTIC_REPOSITORY(_FILE)?=' "$f" && { VENV=$f; break; }
   done
   [ -n "$VENV" ] || return 1
-  u=""; [ -n "$svc" ] && u=$(systemctl show -p User --value "$svc" 2>/dev/null)
+  u=""; [ -n "$svc" ] && u=$(sd_prop "$svc" User)
   u=${u:-root}
   id "$u" >/dev/null 2>&1 || return 1
   VUSER=$u
@@ -3844,9 +3853,9 @@ verify_maybe() {
   timer="$(find_timer)" || true
   [ -n "$timer" ] || return 0
   svc="${timer%.timer}.service"
-  [ "$(systemctl show -p ActiveState --value "$svc" 2>/dev/null)" = activating ] && return 0
-  res=$(systemctl show -p Result --value "$svc" 2>/dev/null)
-  last=$(systemctl show -p ExecMainExitTimestampMonotonic --value "$svc" 2>/dev/null)
+  [ "$(sd_prop "$svc" ActiveState)" = activating ] && return 0
+  res=$(sd_prop "$svc" Result)
+  last=$(sd_prop "$svc" ExecMainExitTimestampMonotonic)
   [ "$res" = success ] && [ "${last:-0}" != 0 ] || return 0
   install -d -m 0755 "$CUSTOM_DIR"
   (
