@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.168] - 2026-11-24
+
+- Agent 2.76 reads systemd unit properties on systemd older than 230, for example CentOS 7. There every such read came back empty, so the backup card lost the time and result of the last run taken from systemd.
+- The backup, failed units, GitLab, mirror and time sync helpers read unit properties the same way. On CentOS 7 the backup helper again sees the user, environment files and results of the backup service and tells finished runs apart without InvocationID, a restarted failed unit reports its result, and the one-click time sync recognises a synchronised clock without `timedatectl show`. Helper versions stay: on current systemd nothing changes, and the playbook can reinstall them on the affected servers with `-e kervax_install=...`.
+
 ## [1.8.167] - 2026-11-24
 
 - The agent watchdog helper installs on systemd older than 230, for example CentOS 7. It used an option of `systemctl show` that such systemd lacks and stopped after enabling the watchdog and the private /tmp but before recording its version, so the panel kept listing the server for the helper playbook. Its version stays 1.1: servers where it already succeeded are not affected, and the playbook finishes the others.
