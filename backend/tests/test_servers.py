@@ -586,6 +586,8 @@ async def test_legacy_agent_leaves_an_existing_rollout_and_cannot_be_retargeted(
     created = (await client.post("/api/servers", json={"name": "legacy-fixture"}, headers=auth_headers)).json()
     sid = created["server"]["id"]
     agent = {"Authorization": f"Bearer {created['token']}"}
+    assert (await client.post("/api/agent/report", json={"platform": "linux", "agent_version": "2.61"},
+                              headers=agent)).status_code == 200
     request = {"version": "2.62", "server_ids": [sid], "track": True}
     assert (await client.post("/api/servers/agent-update", json=request, headers=auth_headers)).json()[0]["target_agent_version"] == "2.62"
     assert (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()["agent"]["ids"] == [sid]
@@ -598,6 +600,30 @@ async def test_legacy_agent_leaves_an_existing_rollout_and_cannot_be_retargeted(
     assert server["agent_update_error"] is None and not server["agent_advice"]
     assert (await client.post("/api/servers/agent-update", json=request, headers=auth_headers)).json() == []
     assert (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()["agent"] is None
+
+
+async def test_update_all_skips_a_server_whose_agent_never_reported(client, auth_headers, monkeypatch):
+    """сервер добавили, а агент не поставили: "Обновить все" его не трогает, раскатка его не ждет"""
+    monkeypatch.setattr("app.api.servers._available_agent_version", lambda: "2.76")
+    ids = {}
+    for name in ("with-agent", "no-agent"):
+        r = (await client.post("/api/servers", json={"name": name}, headers=auth_headers)).json()
+        ids[name] = (r["server"]["id"], {"Authorization": f"Bearer {r['token']}"})
+    await client.post("/api/agent/report", json={"platform": "linux", "agent_version": "2.75"},
+                      headers=ids["with-agent"][1])
+    r = await client.post("/api/servers/agent-update", json={"version": "2.76", "server_ids": None, "track": True},
+                          headers=auth_headers)
+    assert r.status_code == 200 and [s["name"] for s in r.json()] == ["with-agent"]
+    tgt = {s["name"]: (s["target_agent_version"], s["agent_can_update"])
+           for s in (await client.get("/api/servers", headers=auth_headers)).json()}
+    assert tgt == {"with-agent": ("2.76", True), "no-agent": ("", False)}
+    assert (await client.get("/api/servers/fleet-rollout", headers=auth_headers)).json()["agent"]["ids"] == [ids["with-agent"][0]]
+    # агент поставили позже - со своим первым отчетом сервер снова доступен для обновления
+    await client.post("/api/agent/report", json={"platform": "linux", "agent_version": "2.75"},
+                      headers=ids["no-agent"][1])
+    r = await client.post("/api/servers/agent-update", json={"version": "2.76", "server_ids": [ids["no-agent"][0]]},
+                          headers=auth_headers)
+    assert [s["target_agent_version"] for s in r.json()] == ["2.76"]
 
 
 async def test_fleet_rollout_kept_on_panel(client, auth_headers, monkeypatch):
@@ -2027,7 +2053,7 @@ def test_slow_agent_download_is_progress_not_a_rejection():
 
     slow = ("2.10: скачивание бинаря: не уложились в 10m0s, "
             "взято 3407872 из 5779591 байт (продолжим с этого места)")
-    srv = Server(name="web-a", token_hash="x", enabled=True,
+    srv = Server(name="web-a", token_hash="x", enabled=True, agent_version="2.9",
                  last_report={"update_error": slow})
     assert agent_update_note(srv.last_report) == "докачивается 59% (3.4 из 5.8 МБ)"
     assert agent_update_error(srv.last_report) == ""
@@ -2035,7 +2061,7 @@ def test_slow_agent_download_is_progress_not_a_rejection():
     assert advice == []  # в «Требует действий» такое не попадает
 
     # настоящий отказ (чужая подпись, нет места) по-прежнему требует человека
-    bad = Server(name="node", token_hash="x", enabled=True,
+    bad = Server(name="node", token_hash="x", enabled=True, agent_version="2.9",
                  last_report={"update_error": "подпись манифеста не сошлась"})
     assert agent_update_note(bad.last_report) == ""
     assert agent_update_error(bad.last_report) == "подпись манифеста не сошлась"

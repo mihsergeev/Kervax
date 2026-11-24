@@ -256,8 +256,12 @@ def agent_update_error(rep: dict) -> str:
     return err
 
 
-def _agent_can_update(version: str, platform: str | None) -> bool:
+def _agent_can_update(version: str | None, platform: str | None) -> bool:
     # Legacy builds have their own installation path and are outside the signed Linux rollout.
+    # No version - the agent never reported (a server added without an installed agent): there is
+    # nothing to update, "Update all" must not target it and the rollout must not wait for it.
+    if not version:
+        return False
     return platform != "windows" and not version.endswith("-legacy")
 
 
