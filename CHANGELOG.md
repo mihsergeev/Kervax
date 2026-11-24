@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.167] - 2026-11-24
+
+- The agent watchdog helper installs on systemd older than 230, for example CentOS 7. It used an option of `systemctl show` that such systemd lacks and stopped after enabling the watchdog and the private /tmp but before recording its version, so the panel kept listing the server for the helper playbook. Its version stays 1.1: servers where it already succeeded are not affected, and the playbook finishes the others.
+
 ## [1.8.166] - 2026-11-24
 
 - Agent 2.75. When several agent instances on one server (one per panel) update the shared binary, the newest version wins: a trial run no longer replaces a newer installed binary, a trial does not start when the installed binary is already at the target, and an instance whose installed binary is newer than the running process switches to it after finishing its commands instead of staying on old code or refusing the update.
