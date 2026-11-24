@@ -949,7 +949,7 @@ function serverSecInfo(c: {
   ok.vpn = vpnSecLine(s, t)
   const top = r.top_cpu?.[0]
   ok.proc = top ? t('больше всех CPU: {name}, {p}', { name: top.comm, p: `${top.cpu.toFixed(1)}%` }) : ''
-  const last = s.changes?.log[0]
+  const last = s.changes?.log?.[0]
   ok.changes = last
     ? t('последнее: {text}, {d}', { text: last.text, d: new Date(last.ts).toLocaleDateString() })
     : t('изменений не было')
@@ -3864,9 +3864,11 @@ function ChangesFeed({ server: s, onChanged }: { server: Server; onChanged: () =
   const [all, setAll] = useState(false)
   const ch = s.changes
   if (!ch) return null
+  // log может не прийти (старый бэкенд вырезал пустую ленту у учетки без логов) - как пустая
+  const log = ch.log ?? []
   const ack = ch.ack_ts ?? ''
-  const fresh = ch.log.filter((e) => e.alert && e.ts > ack && Date.now() - Date.parse(e.ts) < 24 * 3600_000)
-  const shown = all ? ch.log : ch.log.slice(0, 12)
+  const fresh = log.filter((e) => e.alert && e.ts > ack && Date.now() - Date.parse(e.ts) < 24 * 3600_000)
+  const shown = all ? log : log.slice(0, 12)
   const doAck = async () => {
     setBusy(true)
     try {
@@ -3897,7 +3899,7 @@ function ChangesFeed({ server: s, onChanged }: { server: Server; onChanged: () =
         })}
       </div>
       {fresh.length > 0 && <div className="net-prob">{t('Изменился доступ: проверьте, что это свои.')}</div>}
-      {ch.log.length === 0 && <div className="muted small">{t('Изменений пока не было.')}</div>}
+      {log.length === 0 && <div className="muted small">{t('Изменений пока не было.')}</div>}
       {shown.length > 0 && (
         <div className="ch-list small">
           {shown.map((e, i) => {
@@ -3913,9 +3915,9 @@ function ChangesFeed({ server: s, onChanged }: { server: Server; onChanged: () =
           })}
         </div>
       )}
-      {ch.log.length > 12 && (
+      {log.length > 12 && (
         <button className="ghost small row-act exp-more" onClick={() => setAll(!all)}>
-          {all ? t('свернуть') : t('все изменения: {n}', { n: ch.log.length })}
+          {all ? t('свернуть') : t('все изменения: {n}', { n: log.length })}
         </button>
       )}
     </div>

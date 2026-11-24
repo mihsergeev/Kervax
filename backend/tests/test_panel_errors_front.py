@@ -94,3 +94,15 @@ async def test_stale_tab_knows_panel_was_updated(client, auth_headers, bundle, t
     # та же сборка, dev-сервер и непонятный ответ (502 во время выкладки) - не старая вкладка
     assert r["same"] is None and r["same_abs"] is None
     assert r["dev"] is None and r["broken_answer"] is None
+
+
+def test_viewer_keeps_an_empty_change_feed():
+    """учетка без права на логи: пустая лента изменений остается пустым списком, а не пропадает -
+    без "log" карточка сервера падала на log[0] (журнал ошибок панели 24.11, версия 1.8.169)"""
+    from app.api.servers import _strip_logs
+
+    assert _strip_logs({"changes": {"log": [], "ack_ts": None}}) == {"changes": {"log": [], "ack_ts": None}}
+    assert _strip_logs({"log": ["GET /x 500"], "lines": [], "keep": 1}) == {"lines": [], "keep": 1}
+    assert _strip_logs({"log": "/var/log/nginx/access.log", "n": 2}) == {"n": 2}
+    events = [{"ts": "2026-11-24T20:00:00Z", "text": "ключ добавлен"}]
+    assert _strip_logs({"log": events}) == {"log": events}

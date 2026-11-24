@@ -315,8 +315,10 @@ def _strip_logs(v, depth: int = 0):
     if isinstance(v, dict):
         out = {}
         for k, x in v.items():
+            # an empty list holds no log text: dropping it took "log" from the change feed of a
+            # server without changes, and the interface of a viewer broke on log[0]
             if k in _LOG_KEYS and (isinstance(x, str) or (
-                    isinstance(x, list) and all(isinstance(i, str) for i in x))):
+                    isinstance(x, list) and x and all(isinstance(i, str) for i in x))):
                 continue
             out[k] = _strip_logs(x, depth + 1)
         if isinstance(out.get("sources"), list):
