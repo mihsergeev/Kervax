@@ -63,7 +63,9 @@ def test_agent_private_tmp_and_child_home():
             assert "\nProtectHome=true\n" in body and "\nPrivateTmp=yes\n" in body, (name, unit)
     wd = _src("agent-watchdog.sh")
     assert "KERVAX_SETUP_VERSION=1.1  # " in wd and "[Service]\nPrivateTmp=yes\n" in wd
-    assert '"$(cat "$MARK" 2>/dev/null)" = "$KERVAX_SETUP_VERSION"' in wd and "-p PrivateTmp --value" in wd
+    assert '"$(cat "$MARK" 2>/dev/null)" = "$KERVAX_SETUP_VERSION"' in wd and 'prop "$1" PrivateTmp' in wd
+    # у systemd 219 (CentOS 7) нет `show --value`: с ним скрипт падал, не записав маркер
+    assert "--value" not in wd
     # причина без PrivateTmp - в отдельном файле не *.ver: маркер остается чистой версией для панели
     assert "NOTE=$VERDIR/agent-watchdog.private-tmp" in wd and 'echo "$KERVAX_SETUP_VERSION" > "$MARK"' in wd
     assert "TPLDROP=$TPLDIR/private-tmp.conf" in wd and '/proc/$pid/root/tmp' in wd

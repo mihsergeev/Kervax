@@ -43,11 +43,14 @@ if ! systemctl cat "$UNIT" >/dev/null 2>&1; then
 fi
 
 instances() { systemctl list-units --plain --no-legend --state=active 'kervax-agent@*.service' 2>/dev/null | awk '{print $1}'; }
+# one property of a unit, the value only. Not the value-only flag of `systemctl show`: systemd
+# older than 230 (219 on CentOS 7) rejects it, and the script stopped with the drop-ins in place
+prop() { systemctl show "$1" -p "$2" | sed -n "s/^$2=//p"; }
 # PrivateTmp is in effect: the main process sees a /tmp other than the host one
 private_tmp() {
   local pid t
-  [ "$(systemctl show "$1" -p PrivateTmp --value)" = yes ] || return 1
-  pid=$(systemctl show "$1" -p MainPID --value)
+  [ "$(prop "$1" PrivateTmp)" = yes ] || return 1
+  pid=$(prop "$1" MainPID)
   [ -n "$pid" ] && [ "$pid" != 0 ] || return 1
   t=$(stat -Lc %d:%i "/proc/$pid/root/tmp" 2>/dev/null) && [ "$t" != "$(stat -Lc %d:%i /tmp)" ]
 }
@@ -67,7 +70,7 @@ note() {
 # already on Type=notify, the marker of this version and the private /tmp in effect (or the
 # reason why not) - do nothing (idempotent)
 if [ "$(cat "$MARK" 2>/dev/null)" = "$KERVAX_SETUP_VERSION" ] \
-   && systemctl show "$UNIT" -p Type --value | grep -qx notify; then
+   && prop "$UNIT" Type | grep -qx notify; then
   if [ -f "$NOTE" ]; then
     echo "· the systemd watchdog is active ($UNIT), the private /tmp is not: $(tr '\n' ' ' < "$NOTE")(delete $NOTE to retry)."
     exit 0
@@ -103,7 +106,7 @@ DROPIN
 if started "$UNIT"; then
   if ! private_tmp "$UNIT"; then
     # another drop-in or the unit sets PrivateTmp itself: that is someone's decision, ours goes
-    why="PrivateTmp=$(systemctl show "$UNIT" -p PrivateTmp --value), drop-ins: $(systemctl show "$UNIT" -p DropInPaths --value)"
+    why="PrivateTmp=$(prop "$UNIT" PrivateTmp), drop-ins: $(prop "$UNIT" DropInPaths)"
     rm -f "$PTDROP"
     systemctl daemon-reload
     note "$UNIT runs without a private /tmp ($why) - left as is."
@@ -144,6 +147,6 @@ fi
 install -d -m 0755 /var/lib/kervax "$VERDIR"  # parent explicitly 0755: the unprivileged agent must enter it
 echo "$KERVAX_SETUP_VERSION" > "$MARK"
 chmod 0644 "$MARK"
-wd=$(systemctl show "$UNIT" -p WatchdogUSec --value)
+wd=$(prop "$UNIT" WatchdogUSec)
 pt=yes; [ -f "$NOTE" ] && pt="no, see $NOTE"
 echo "✓ systemd watchdog enabled for $UNIT (WatchdogUSec=$wd), private /tmp: $pt."
