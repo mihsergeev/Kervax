@@ -22,7 +22,7 @@ REQUIRED = {
     'selfcheck': {'Consistency selfcheck'},
     'frontend': {'Install', 'Dependency audit (npm audit)', 'Build'},
     'agent': {'Vet', 'Tests', 'Build'},
-    'image-scan (backend, backend/Dockerfile, .)': {'Build image', 'Trivy scan (image)'},
+    'image-scan (backend, backend/Dockerfile, .)': {'Build image', 'Image smoke', 'Trivy scan (image)'},
     'image-scan (frontend, frontend/Dockerfile, ./frontend)': {'Build image', 'Trivy scan (image)'},
 }
 

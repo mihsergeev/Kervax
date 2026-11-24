@@ -191,6 +191,15 @@ jobs:
       # agent-dist/. С контекстом ./backend сборка падает на первом же COPY.
       - name: Build image
         run: docker build -f "${{ matrix.dockerfile }}" -t "kervax-${{ matrix.image }}" "${{ matrix.context }}"
+      # Образ бэкенда запускается как на проде, но с read-only корнем: код в /srv только
+      # читается, миграции на настоящем PostgreSQL, отдельный scheduler, логи без трейсбеков.
+      # И раздаваемый агент совпадает с подписанным манифестом (инцидент 1.90): ключа подписи
+      # здесь нет, скрипт подписывает одноразовым ключом из временного каталога.
+      # Локально то же самое: bash ops/image-smoke.sh <образ>.
+      - name: Image smoke
+        if: matrix.image == 'backend'
+        timeout-minutes: 15
+        run: bash ops/image-smoke.sh "kervax-${{ matrix.image }}"
       - name: Trivy scan (image)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

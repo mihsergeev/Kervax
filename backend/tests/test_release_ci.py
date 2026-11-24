@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import importlib.util
 from pathlib import Path
+import re
 
 import pytest
 
@@ -165,3 +166,13 @@ def test_workflow_keeps_full_ci_and_release_image_scans_without_a_second_suite()
         for step in steps:
             assert 'name: ' + step in ci
     assert 'cancel-in-progress: true' in ci
+
+
+def test_backend_image_smoke_is_required_and_runs_on_the_ci_postgres():
+    ci = (ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+    smoke = (ROOT / 'ops/image-smoke.sh').read_text(encoding='utf-8')
+    assert 'Image smoke' in gate.REQUIRED['image-scan (backend, backend/Dockerfile, .)']
+    assert 'Image smoke' not in gate.REQUIRED['image-scan (frontend, frontend/Dockerfile, ./frontend)']
+    assert "if: matrix.image == 'backend'" in ci and 'run: bash ops/image-smoke.sh ' in ci
+    pg = re.search(r'image: (postgres:\S+@sha256:[0-9a-f]{64})', ci).group(1)
+    assert f'\nPG_IMAGE={pg}\n' in smoke
