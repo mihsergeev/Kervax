@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.171] - 2026-11-25
+
+- A server card no longer breaks for a read-only account without access to logs when the server has no recent changes ("Cannot read properties of undefined (reading '0')"): the empty change feed was removed from the answer together with log text.
+
 ## [1.8.170] - 2026-11-24
 
 - The GRE tunnel helper runs on python 3.6, so Ubuntu 18.04 and CentOS 7 with the python3 package can use GRE to the panel. It needed python 3.7 only for one subprocess option.
