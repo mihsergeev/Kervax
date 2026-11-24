@@ -36,8 +36,9 @@ if [ "$(id -u)" != 0 ]; then echo "Root required." >&2; exit 1; fi
 if [ ! -r /etc/kervax-agent.conf ]; then echo "No Kervax agent on this node (/etc/kervax-agent.conf)." >&2; exit 1; fi
 PY=$(command -v python3 || true)
 [ -z "$PY" ] && [ -x /usr/libexec/platform-python ] && PY=/usr/libexec/platform-python   # RHEL 8 minimal
-if [ -z "$PY" ] || ! "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 7))'; then
-  echo "python3 3.7 or newer is required for the GRE tunnel (apt/dnf install python3)." >&2; exit 1
+# 3.6 is enough (Ubuntu 18.04, the python3 package of CentOS 7): the sync uses nothing newer
+if [ -z "$PY" ] || ! "$PY" -c 'import sys; sys.exit(sys.version_info < (3, 6))'; then
+  echo "python3 3.6 or newer is required for the GRE tunnel (apt/dnf/yum install python3)." >&2; exit 1
 fi
 command -v ip >/dev/null 2>&1 || { echo "The ip command (iproute2) is required for the GRE tunnel." >&2; exit 1; }
 
@@ -97,7 +98,7 @@ def public4(ip):
 
 
 def run(*args):
-    return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
+    return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, timeout=60)
 
 
 def agent_conf():
