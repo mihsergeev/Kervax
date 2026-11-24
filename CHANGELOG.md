@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.173] - 2026-11-25
+
+- Alerts about the panel itself (bogus requests, password guessing, a changed password, the Telegram link test, a changed server address) are signed with the panel's host from panel_url instead of "Kervax", so it is clear which panel sent them.
+- Agent requests refused from an address that no server has are no longer called "not a panel server": usually it is a new server behind NAT whose agent is allowed only its internal address, and the hint says to add the address to the allowed agent addresses. Extra allowed agent addresses now link such requests to their server.
+
 ## [1.8.172] - 2026-11-25
 
 - The "Open to the internet" card of a node behind a NAT shared with other panel servers says what the check really saw: it knocks on the gateway at the node's own port numbers, so a port forwarded under another number is not visible and an open port there may lead to a neighbour. Instead of "nothing is open" it shows that nothing is open on the gateway at these numbers. A single node behind a cloud 1:1 NAT is checked as before. Nodes get the mark on their next check, which runs at once after the update.
