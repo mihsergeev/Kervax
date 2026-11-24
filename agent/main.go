@@ -8625,7 +8625,10 @@ func firstLine(s string) string {
 // systemctlShow - значение одного свойства юнита. Без --value: его нет в systemd до 230
 // (219 на CentOS 7), там вызов падал и значение всегда было пустым
 func systemctlShow(unit, prop string) string {
-	v, _ := strings.CutPrefix(firstLine(cmdOut(3*time.Second, "systemctl", "show", unit, "-p", prop)), prop+"=")
+	v, ok := strings.CutPrefix(firstLine(cmdOut(3*time.Second, "systemctl", "show", unit, "-p", prop)), prop+"=")
+	if !ok {
+		return ""
+	}
 	return v
 }
 

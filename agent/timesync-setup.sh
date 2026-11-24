@@ -126,7 +126,7 @@ cmd_sync() {
     for i in $(seq 1 20); do
       [ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" = yes ] && { synced=yes; break; }
       # systemd older than 239 (CentOS 7) has no "timedatectl show": read the status text
-      timedatectl status 2>/dev/null | grep -iE '^ *(NTP|System clock) synchronized: yes' >/dev/null && { synced=yes; break; }
+      LC_ALL=C timedatectl status 2>/dev/null | grep -iE '^ *(NTP|System clock) synchronized: yes' >/dev/null && { synced=yes; break; }
       sleep 1
     done
   fi
