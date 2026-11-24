@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.169] - 2026-11-24
+
+- Updating all agents no longer targets a server that was added but never got an agent installed, and the update progress no longer waits for it. Such a server shows no update button until its agent sends the first report.
+
 ## [1.8.168] - 2026-11-24
 
 - Agent 2.76 reads systemd unit properties on systemd older than 230, for example CentOS 7. There every such read came back empty, so the backup card lost the time and result of the last run taken from systemd.
