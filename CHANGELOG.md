@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.172] - 2026-11-25
+
+- The "Open to the internet" card of a node behind a NAT shared with other panel servers says what the check really saw: it knocks on the gateway at the node's own port numbers, so a port forwarded under another number is not visible and an open port there may lead to a neighbour. Instead of "nothing is open" it shows that nothing is open on the gateway at these numbers. A single node behind a cloud 1:1 NAT is checked as before. Nodes get the mark on their next check, which runs at once after the update.
+
 ## [1.8.171] - 2026-11-25
 
 - A server card no longer breaks for a read-only account without access to logs when the server has no recent changes ("Cannot read properties of undefined (reading '0')"): the empty change feed was removed from the answer together with log text.
