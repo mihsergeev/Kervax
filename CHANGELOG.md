@@ -6,6 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [1.8.174] - 2026-11-25
 
+- The backend image takes the Debian security update of zstd (CVE-2026-124851) instead of the version in the base image.
 - When the panel refuses a server's own agent because it comes from an address not in the allowed agent addresses (a new server behind NAT added with its internal address), the bogus requests alert and the server's problems name that server instead of an unknown address, with a hint: if the address is yours, add it in the server settings, if not, the agent token has leaked and should be reissued.
 
 ## [1.8.173] - 2026-11-25

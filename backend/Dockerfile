@@ -49,8 +49,9 @@ ARG DEPS_EPOCH=
 RUN set -eu; \
     echo "runtime packages, week ${DEPS_EPOCH:-none}"; \
     apt-get update; \
-    apt-get install -y --no-install-recommends apt libapt-pkg7.0 gosu zlib1g libssl3t64 openssl; \
+    apt-get install -y --no-install-recommends apt libapt-pkg7.0 gosu zlib1g libssl3t64 openssl libzstd1; \
     dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libssl3t64)" ge '3.5.7-1~deb13u3'; \
+    dpkg --compare-versions "$(dpkg-query -W -f='${Version}' libzstd1)" ge '1.5.7+dfsg-1+deb13u1'; \
     rm -rf /var/lib/apt/lists/*; \
     groupadd -r -g 10001 kervax; \
     useradd -r -u 10001 -g kervax -d /srv -s /usr/sbin/nologin kervax; \
