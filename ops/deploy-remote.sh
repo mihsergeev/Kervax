@@ -48,14 +48,14 @@ STATUS="$RD/$KIND.status"
 
 # Секунды от начала прогона у каждого шага: по ним видно, что занимает время выкладки
 # (сборка, остановка старого планировщика, приемка агентов), а не гадать по общему итогу.
-T0=$(date +%s)
-step() { printf '\n→ %s  [+%ss]\n' "$*" "$(( $(date +%s) - T0 ))"; }
+T0=$(date -u +%s)  # date -u: отдельно от date +%s в отсчете паузы планировщика (тесты подменяют его часами с шагом)
+step() { printf '\n→ %s  [+%ss]\n' "$*" "$(( $(date -u +%s) - T0 ))"; }
 note() { printf '  %s\n' "$*"; }
 
 finish() {
     # status is written last and atomically: follow treats its appearance as "the run is over"
     printf '%s\n' "$1" > "$STATUS.tmp" && mv "$STATUS.tmp" "$STATUS"
-    note "result: $1 in $(( $(date +%s) - T0 )) s"
+    note "result: $1 in $(( $(date -u +%s) - T0 )) s"
     exit "${2:-1}"
 }
 
