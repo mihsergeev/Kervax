@@ -265,3 +265,52 @@ async def test_fleet_key_is_silent_unknown_key_alerts(tmp_path, monkeypatch):
     await collector.evaluate_servers(factory, cfg, now + timedelta(minutes=12))
     assert len(_access(sent)) == 1, sent
     await engine.dispose()
+
+
+def test_sudoers_hash_method_change_is_not_a_change():
+    """changes-setup 0.8 хеширует sudoers по действующим строкам (fh 2): первый снимок нового
+    helper'а дает другие хеши всем файлам, и это не "изменился доступ"; дальше сравнение как раньше"""
+    old = _snap(T)
+    new = _snap(T + 600, sudo={"groups": {"sudo": ["ops"]}, "files": {"/etc/sudoers": "9999"}, "fh": 2})
+    assert [e for e in changes.diff(old, new) if e["kind"] == "sudo"] == []
+    later = _snap(T + 1200, sudo={"groups": {"sudo": ["ops"]}, "files": {"/etc/sudoers": "aaaa"}, "fh": 2})
+    assert [(e["act"], e["text"]) for e in changes.diff(new, later) if e["kind"] == "sudo"] == [
+        ("mod", "изменен /etc/sudoers")]
+    # новый файл - всегда событие, даже при смене способа хеширования
+    added = _snap(T + 600, sudo={"groups": {"sudo": ["ops"]}, "fh": 2,
+                                 "files": {"/etc/sudoers": "9999", "/etc/sudoers.d/deploy": "3333"}})
+    assert [(e["act"], e["text"]) for e in changes.diff(old, added) if e["kind"] == "sudo"] == [
+        ("add", "добавлен /etc/sudoers.d/deploy")]
+
+
+def test_helper_hashes_only_the_acting_sudoers_lines(tmp_path):
+    """обновление пакета sudo переписывает комментарии README: хеш не меняется. #includedir и правила
+    действуют: их правка меняет хеш"""
+    import re
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    bash = shutil.which("bash")
+    if not bash or not shutil.which("sha256sum"):
+        import pytest
+        pytest.skip("нет bash или sha256sum")
+    src = (Path(__file__).resolve().parents[2] / "agent" / "changes-setup.sh").read_text(encoding="utf-8")
+    fn = re.search(r"^sudo_h16\(\) \{.*?^\}", src, re.M | re.S).group(0)
+    files = {
+        "readme1": "#\n# As of Debian version 1.7.2p1-1, the default /etc/sudoers file created on\n#\n",
+        "readme2": "#\n# The default /etc/sudoers file created on installation of the sudo package now\n\n",
+        "inc": "# header\n#includedir /etc/sudoers.d\n",
+        "inc2": "# other header\n#includedir /etc/sudoers.d\n",
+        "rule": "deploy ALL=(ALL) NOPASSWD: ALL\n",
+        "rule2": "# deploy\ndeploy ALL=(ALL) ALL\n",
+    }
+    out = {}
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8", newline="\n")
+        r = subprocess.run([bash, "-c", fn + f'\nsudo_h16 "$1"', "x", (tmp_path / name).as_posix()],
+                           capture_output=True, text=True, timeout=30)
+        out[name] = r.stdout.strip()
+    assert out["readme1"] == out["readme2"] and len(out["readme1"]) == 16
+    assert out["inc"] == out["inc2"] != out["readme1"]
+    assert out["rule"] != out["rule2"]

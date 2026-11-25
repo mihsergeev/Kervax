@@ -43,7 +43,7 @@
 # contents, no password hashes (only "set", "locked" or "empty"). The helper changes nothing.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.7  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.8  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads files and systemctl
 
 HELPER_DIR=/lib65/kervax
@@ -72,6 +72,13 @@ MAX=200
 # character makes the agent drop the whole file.
 esc() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 h16() { sha256sum -- "$1" 2>/dev/null | cut -c1-16; }
+# A sudoers file by the lines that act: comments and blank lines do not change who gets sudo,
+# and a sudo package update rewords them (/etc/sudoers.d/README) - every node raised "sudo
+# rights changed" after an upgrade. #include, #includedir and @include act and stay.
+sudo_h16() {
+  [ -r "$1" ] || return 0
+  sed -e '/^[[:space:]]*#include/b' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' -- "$1" 2>/dev/null     | sha256sum | cut -c1-16
+}
 
 # Where sshd looks for keys (AuthorizedKeysFile): %h - home, %u - user, %% - percent;
 # a relative path is relative to the home directory.
@@ -179,13 +186,14 @@ sudo_info() {
   done
   for f in /etc/sudoers /etc/sudoers.d/*; do
     [ -f "$f" ] || continue
-    files="$files${files:+,}\"$(esc "$f")\":\"$(h16 "$f")\""
+    files="$files${files:+,}\"$(esc "$f")\":\"$(sudo_h16 "$f")\""
   done
   # who gets sudo without a password: the first word of every NOPASSWD rule (user or %group)
   local nopw
   nopw=$(cat /etc/sudoers /etc/sudoers.d/* 2>/dev/null | grep -E '^[^#]*NOPASSWD' | grep -vE '^[[:space:]]*Defaults' \
     | awk '{ print $1 }' | sort -u | head -50 | while read -r m; do printf '"%s",' "$(esc "$m")"; done | sed 's/,$//')
-  printf '{"groups":{%s},"files":{%s},"nopasswd":[%s]}' "$groups" "$files" "$nopw"
+  # fh 2: files hashed by the acting lines (sudo_h16); the panel does not compare them with fh 1
+  printf '{"groups":{%s},"files":{%s},"fh":2,"nopasswd":[%s]}' "$groups" "$files" "$nopw"
 }
 
 # Crontabs: system, cron.d, per-user spools and the run-parts directories - hashes only

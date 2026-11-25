@@ -89,10 +89,14 @@ def diff(old: dict, new: dict) -> list[dict]:
             add("sudo", "del", f"{m} убран из группы {g}", False)
     of = ((old.get("sudo") or {}).get("files") or {})
     nf = ((new.get("sudo") or {}).get("files") or {})
+    # fh 2 (changes-setup 0.8): файлы sudoers хешируются по действующим строкам, без
+    # комментариев (обновление пакета sudo переписывало README, и алерт шел с каждой ноды).
+    # Хеши разных способов не сравниваем: иначе первое обновление helper'а "изменило" бы все файлы
+    same_hash = ((old.get("sudo") or {}).get("fh") or 1) == ((new.get("sudo") or {}).get("fh") or 1)
     for path, h in nf.items():
         if path not in of:
             add("sudo", "add", f"добавлен {path}", True)
-        elif of[path] != h:
+        elif same_hash and of[path] != h:
             add("sudo", "mod", f"изменен {path}", True)
     for path in of:
         if path not in nf:
