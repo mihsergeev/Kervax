@@ -308,7 +308,7 @@ def test_helper_hashes_only_the_acting_sudoers_lines(tmp_path):
     out = {}
     for name, text in files.items():
         (tmp_path / name).write_text(text, encoding="utf-8", newline="\n")
-        r = subprocess.run([bash, "-c", fn + f'\nsudo_h16 "$1"', "x", (tmp_path / name).as_posix()],
+        r = subprocess.run([bash, "-c", fn + '\nsudo_h16 "$1"', "x", (tmp_path / name).as_posix()],
                            capture_output=True, text=True, timeout=30)
         out[name] = r.stdout.strip()
     assert out["readme1"] == out["readme2"] and len(out["readme1"]) == 16
