@@ -12,7 +12,13 @@ WORKDIR /build
 COPY --from=deps /d/package.json /d/package-lock.json ./
 COPY scripts/restrict-build-globs.mjs ./scripts/
 RUN npm ci
-COPY . .
+# Без package.json и lock: в них версия панели, и с ними каждый выпуск заново собирал фронтенд,
+# даже если его код не менялся (1.8.174 - только backend). Скрипты сборки те же, они уже в
+# package.json из стадии deps (там версия 0.0.0), а версию фронтенд берет у API.
+COPY index.html vite.config.ts tsconfig.json tsconfig.app.json tsconfig.node.json ./
+COPY scripts/copy-flags.mjs ./scripts/
+COPY public ./public
+COPY src ./src
 RUN npm run build
 
 # Официальный nginx запускает мастер-процесс от root — только ради права занять
