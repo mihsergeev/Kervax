@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.174] - 2026-11-25
+
+- When the panel refuses a server's own agent because it comes from an address not in the allowed agent addresses (a new server behind NAT added with its internal address), the bogus requests alert and the server's problems name that server instead of an unknown address, with a hint: if the address is yours, add it in the server settings, if not, the agent token has leaked and should be reissued.
+
 ## [1.8.173] - 2026-11-25
 
 - Alerts about the panel itself (bogus requests, password guessing, a changed password, the Telegram link test, a changed server address) are signed with the panel's host from panel_url instead of "Kervax", so it is clear which panel sent them.
