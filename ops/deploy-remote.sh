@@ -46,13 +46,16 @@ STATUS="$RD/$KIND.status"
 # shellcheck disable=SC1091
 . "$RD/params"    # FILES SERVICES EPOCH VERSION PREV_VERSION REV SRC_SHA256
 
-step() { printf '\n→ %s\n' "$*"; }
+# Секунды от начала прогона у каждого шага: по ним видно, что занимает время выкладки
+# (сборка, остановка старого планировщика, приемка агентов), а не гадать по общему итогу.
+T0=$(date +%s)
+step() { printf '\n→ %s  [+%ss]\n' "$*" "$(( $(date +%s) - T0 ))"; }
 note() { printf '  %s\n' "$*"; }
 
 finish() {
     # status is written last and atomically: follow treats its appearance as "the run is over"
     printf '%s\n' "$1" > "$STATUS.tmp" && mv "$STATUS.tmp" "$STATUS"
-    note "result: $1"
+    note "result: $1 in $(( $(date +%s) - T0 )) s"
     exit "${2:-1}"
 }
 
