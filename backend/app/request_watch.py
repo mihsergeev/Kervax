@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app import alerts, client_ip, settings_store, tg_fmt
+from app import agent_auth, alerts, client_ip, settings_store, tg_fmt
 from app.models import AppSetting, RequestStat, Server
 
 log = logging.getLogger(__name__)
@@ -44,6 +44,10 @@ WRITE_FLOOR = 60  # минута без отказов пишется, толь�
 QUIET_MIN = 30
 KEEP = timedelta(days=2)
 STATE_KEY = "request_watch"
+# свой агент с адреса, которого нет в разрешенных (agent_auth._remember_denied): что делать
+DENIED_HINT = ("агент этого сервера приходит с адреса, которого нет в его разрешенных адресах агента: "
+               "сервер ваш (например, новый за NAT) - добавьте адрес в настройках сервера, нет - токен "
+               "агента утек, перевыпустите его")
 KIND = "bogus_requests"
 _PATHS_KEPT = 5
 _KEYS_MAX = 5000  # адресов за минуту в памяти: перебор адресов не съест память процесса
@@ -309,6 +313,7 @@ async def check(session_factory, settings, now: datetime) -> None:
         if not rows and not state:
             return
         servers = list(await s.scalars(select(Server)))
+        denied = await agent_auth.denied_sources(s, _aware(now).timestamp(), (WINDOW_MIN + QUIET_MIN) * 60)
         cfg = await settings_store.get_alert_config(s, settings)
         muted = await settings_store.get_muted(s)
         rule = (await settings_store.get_server_alert_rules(s)).get(KIND) or {}
@@ -321,10 +326,13 @@ async def check(session_factory, settings, now: datetime) -> None:
     tpl = rule.get("text") or default
     for key, a in agg.items():
         srvs = by_ip.get(key, [])
+        # адрес ни с кем не сходится, но панель отказала с него агенту с верным токеном: это тот сервер
+        own = [x for x in servers if x.id in set(denied.get(key) or [])] if not srvs else []
+        srvs = srvs or own
         if not _over(a, len(srvs)):
             continue
         cur = state.get(key) or {}
-        w_txt, h_txt = what(a, len(srvs)), hint(a, len(srvs))
+        w_txt, h_txt = what(a, len(srvs)), (DENIED_HINT if own else hint(a, len(srvs)))
         item = {"since": cur.get("since") or now.isoformat(), "last_over": now.isoformat(),
                 "notified": bool(cur.get("notified")), "servers": [x.id for x in srvs],
                 "what": w_txt, "hint": h_txt}

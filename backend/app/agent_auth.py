@@ -20,6 +20,12 @@ PROXY_MAX_AGE = 180
 PROXY_FUTURE_SKEW = 30
 _MAX_FILE = 65536
 _DENIED = "Источник запроса агента не разрешен"
+# Какой сервер и откуда пришел с верным токеном, но не с разрешенного адреса (app_settings):
+# request_watch по этому называет сервер в алерте "левые запросы", а не "чужой адрес"
+DENIED_KEY = "agent_denied"
+_DENIED_EVERY = 60.0
+_DENIED_KEEP = 86400
+_denied_mem: dict[int, tuple[str, float]] = {}
 
 
 def _ip(value) -> str | None:
@@ -105,6 +111,49 @@ def _configured_ips(server: Server) -> set[str]:
     return ips
 
 
+async def _remember_denied(session, server: Server, source: str) -> None:
+    """Запомнить отказ своему агенту: сервер и адрес. Новый сервер за NAT, которому разрешили
+    внутренний адрес, иначе выглядел в алерте как чужой адрес. Не чаще раза в минуту на сервер в
+    процессе (агент стучится раз в несколько секунд); запись подсказки не меняет ответ агенту."""
+    # set_raw коммитит сессию: с несохраненными изменениями запроса не пишем, чтобы не сохранить их
+    if session is None or any(getattr(session, attr, None) for attr in ("new", "dirty", "deleted")):
+        return
+    now = time.time()
+    last = _denied_mem.get(server.id)
+    # раз в минуту на сервер, даже если адрес другой: с утекшим токеном адреса можно менять
+    if last and now - last[1] < _DENIED_EVERY:
+        return
+    _denied_mem[server.id] = (source, now)
+    from app import settings_store
+    try:
+        raw = await settings_store.get_raw(session, DENIED_KEY)
+        data = json.loads(raw) if raw else {}
+        data = {k: v for k, v in (data if isinstance(data, dict) else {}).items()
+                if isinstance(v, dict) and isinstance(v.get("t"), (int, float)) and now - v["t"] < _DENIED_KEEP}
+        data[str(server.id)] = {"ip": source, "t": int(now)}
+        await settings_store.set_raw(session, DENIED_KEY, json.dumps(data, sort_keys=True))
+    except Exception:  # noqa: BLE001
+        try:
+            await session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+async def denied_sources(session, now: float, within: float) -> dict[str, list[int]]:
+    """Адрес -> серверы, чьему агенту с этого адреса отказали за последние within секунд."""
+    from app import settings_store
+    try:
+        data = json.loads(await settings_store.get_raw(session, DENIED_KEY) or "{}")
+    except ValueError:
+        return {}
+    out: dict[str, list[int]] = {}
+    for sid, v in (data if isinstance(data, dict) else {}).items():
+        if (isinstance(v, dict) and isinstance(v.get("t"), (int, float)) and now - v["t"] < within
+                and isinstance(v.get("ip"), str) and str(sid).isdigit()):
+            out.setdefault(v["ip"], []).append(int(sid))
+    return out
+
+
 async def require_agent_source(server: Server, request: Request, session) -> str | None:
     """Вызывать после проверки токена, до изменения БД или выдачи очереди команд.
 
@@ -131,4 +180,5 @@ async def require_agent_source(server: Server, request: Request, session) -> str
         if relay is not None and relay.enabled and relay.relay_enabled:
             if source in _configured_ips(relay):
                 return source
+    await _remember_denied(session, server, source)
     raise HTTPException(403, _DENIED)

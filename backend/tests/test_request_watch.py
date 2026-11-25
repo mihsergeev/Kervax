@@ -216,3 +216,32 @@ def test_panel_alerts_name_the_panel(monkeypatch):
     assert tg_fmt.panel_name() == "kervax.example.com"
     monkeypatch.setattr(get_settings(), "panel_url", "")
     assert tg_fmt.panel_name() == "Kervax"
+
+
+async def test_own_agent_from_an_address_not_allowed_is_named(client: httpx.AsyncClient, monkeypatch):
+    """новый сервер за NAT: агенту разрешили внутренний адрес, а он приходит с внешнего. Панель
+    отказывает ему, и алерт называет этот сервер с подсказкой, а не "адреса нет у серверов панели"."""
+    from app import agent_auth, settings_store
+
+    sent = _fake_dispatch(monkeypatch)
+    f = client._transport.app.state.session_factory  # type: ignore[attr-defined]
+    now = datetime.now(timezone.utc)
+    async with f() as s:
+        srv = Server(name="new-node", token_hash="hash-new-node", agent_ip="192.0.2.6")
+        s.add(srv)
+        await s.commit()
+        sid = srv.id
+        agent_auth._denied_mem.clear()
+        await agent_auth._remember_denied(s, srv, "198.51.100.40")
+        first = await settings_store.get_raw(s, agent_auth.DENIED_KEY)
+        await agent_auth._remember_denied(s, srv, "198.51.100.40")  # агент стучится раз в 4 с
+        assert await settings_store.get_raw(s, agent_auth.DENIED_KEY) == first
+    await _rows(f, now, "198.51.100.40", 5, 15, {"403": 15}, {"403 /api/agent/commands": 15})
+    await rw.check(f, Settings(alert_webhook="http://hook"), now)
+    assert len(sent) == 1
+    assert "с сервера new-node (198.51.100.40)" in str(sent[0])
+    full = full_text(sent[0])
+    assert "нет в его разрешенных адресах агента" in full and "перевыпустите его" in full
+    async with f() as s:
+        issues = await rw.server_issues(s)
+    assert sid in issues
