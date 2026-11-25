@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.175] - 2026-11-25
+
+- Notification delivery: a failure to read the "do not send" pause between bundles no longer ends the whole delivery pass, and switching alerts off in the middle of a pass stops new sends the same way as the pause. A Telegram answer without a message id is shown in the Delivery window as "the channel answered without a message number, receipt not confirmed" instead of "the channel did not answer".
+- On shutdown the scheduler waits for a send already in progress for the rest of the stop budget (42 s instead of 30), and always clears the delivery stop even if it is cancelled again while finishing.
+- Deploy: the frontend is no longer rebuilt when only the release version changed, and every deploy step shows the seconds since the start of the run.
+
 ## [1.8.174] - 2026-11-25
 
 - The backend image takes the Debian security update of zstd (CVE-2026-124851) instead of the version in the base image.
