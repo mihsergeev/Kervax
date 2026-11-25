@@ -93,12 +93,14 @@ async def test_stop_signal_skips_the_rest_of_the_tick(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("elapsed, expected", [
-    (None, 30.0), (-5.0, 30.0), (0.0, 30.0), (12.0, 30.0), (20.0, 22.0), (41.5, 0.5), (42.0, 0.0), (90.0, 0.0)])
+    (None, 42.0), (-5.0, 42.0), (0.0, 42.0), (12.0, 30.0), (20.0, 22.0), (41.5, 0.5), (42.0, 0.0), (90.0, 0.0)])
 def test_delivery_wait_fits_the_rest_of_the_stop_budget(main, elapsed, expected):
-    # ждем идущий POST не больше 30 с и не дольше остатка 45 с минус запас на закрытие базы
+    # худшая пачка (правка группы, повтор после 400, вебхук) идет ~42 с: ждем ее весь остаток 45 с
+    # минус запас на закрытие базы, но не дольше - после 45 с main отменяет планировщик
     from app import collector
 
     assert main._STOP_GRACE == collector.STOP_BUDGET == 45.0
+    assert collector._SETTLE_DELIVERY == collector.STOP_BUDGET - collector._CLOSE_RESERVE
     assert collector._settle_timeout(elapsed) == expected
 
 
@@ -124,3 +126,55 @@ async def test_stop_does_not_wait_for_a_send_past_the_budget(tmp_path, monkeypat
         stuck.cancel()
         await engine.dispose()
     assert asyncio.get_running_loop().time() - started < 5
+
+
+async def test_repeated_cancel_during_shutdown_still_resets_the_delivery_stop(tmp_path, monkeypatch):
+    # отмену планировщика повторили, пока он ждет выхода бота: сигнал остановки доставки все равно снят
+    from app import alert_delivery, collector, tg_bot
+    from app.config import Settings
+    from app.db import Base, create_engine_and_factory
+
+    engine, factory = create_engine_and_factory(f"sqlite+aiosqlite:///{(tmp_path / 'reset.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    for name in ("rebind_local_probes", "run_due_checks", "evaluate_servers", "_maybe_auto_backup",
+                 "_deliver_pending"):
+        monkeypatch.setattr(collector, name, _idle)
+    cancelled, bots = asyncio.Event(), []
+
+    async def slow_bot(*_args, **_kwargs):
+        bots.append(asyncio.current_task())
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await asyncio.sleep(30)  # выход бота затянулся: планировщик ждет его в finally
+
+    monkeypatch.setattr(tg_bot, "poll_loop", slow_bot)
+    seen = []
+
+    async def run():
+        try:
+            await collector.collector_loop(factory, Settings(scheduler_tick=30), asyncio.Event())
+        finally:
+            seen.append(alert_delivery.STOP.get())
+
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.sleep(0.2)
+        task.cancel()
+        await asyncio.wait_for(cancelled.wait(), 5)
+        await asyncio.sleep(0.05)
+        task.cancel()  # повторная отмена посреди ожидания бота
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+    finally:
+        for bot in bots:
+            bot.cancel()
+        await asyncio.gather(*bots, return_exceptions=True)
+        await engine.dispose()
+    assert seen == [None]
+
+
+async def _idle(*_args, **_kwargs):
+    return 0

@@ -10529,15 +10529,17 @@ async def _next_tick_in(session_factory: async_sessionmaker[AsyncSession], setti
     return min(max(nearest, tick / 2), tick)
 
 
-# Остановка: сколько самое большее ждать идущую отправку уведомления. Обычно это секунды, но один
-# POST по TG_TIMEOUT - до ~24 с (соединение 4, запись 10, ответ 10), а пачка может сделать несколько:
-# правка сообщения группы, повтор обычным текстом после 400 на разметку, вебхук. Худший случай больше
-# 30 с: тогда исход не дождемся, и его уточнит просрочка аренды (LeaseExpired, uncertain)
-_SETTLE_DELIVERY = 30.0
 # Бюджет остановки от сигнала до отмены планировщика (main._STOP_GRACE, в compose.yml
 # stop_grace_period 60 с) и запас из него на выход и закрытие базы: ожидание POST в него не лезет
 STOP_BUDGET = 45.0
 _CLOSE_RESERVE = 3.0
+# Остановка: сколько самое большее ждать идущую отправку уведомления - весь бюджет остановки без
+# запаса, 42 с. Обычно это секунды, но один POST по TG_TIMEOUT - до ~24 с (соединение 4, запись 10,
+# ответ 10), а пачка может сделать несколько: правка сообщения группы, повтор обычным текстом после
+# 400 на разметку, вебхук - около 42 с и больше. Не уложилась в бюджет: исход не дождемся, его
+# уточнит просрочка аренды (LeaseExpired, uncertain). Сверх бюджета ждать нельзя: main отменяет
+# планировщик через _STOP_GRACE после сигнала и ждет отмену только _CANCEL_WAIT
+_SETTLE_DELIVERY = STOP_BUDGET - _CLOSE_RESERVE
 
 
 def _settle_timeout(elapsed: float | None, budget: float = STOP_BUDGET) -> float:
@@ -10709,13 +10711,14 @@ async def collector_loop(
         pause_task.cancel()
         logging.getLogger("kervax").removeHandler(err_handler)
         heartbeat.IN_SCHEDULER.reset(in_scheduler)
-        # дождаться отмены: иначе бот и пульс доживают до закрытия базы и цикла событий
-        await asyncio.wait({hb_task, tg_task, pause_task}, timeout=2)
-        # отмена бота не обрывает его POST в Telegram: исход дописывается, ждем его до закрытия базы,
-        # но не дольше остатка бюджета остановки
-        if stop_seen is not None:
-            stop_seen.cancel()
+        # STOP снимаем и при повторной отмене посреди ожиданий ниже
         try:
+            # дождаться отмены: иначе бот и пульс доживают до закрытия базы и цикла событий
+            await asyncio.wait({hb_task, tg_task, pause_task}, timeout=2)
+            # отмена бота не обрывает его POST в Telegram: исход дописывается, ждем его до закрытия базы,
+            # но не дольше остатка бюджета остановки
+            if stop_seen is not None:
+                stop_seen.cancel()
             wait = _settle_timeout(loop.time() - signaled[0] if signaled else None)
             if not await alert_delivery.settle(wait):
                 log.warning("доставка уведомлений: отправка не завершилась за %.0f с, исход уточнит просрочка аренды",
