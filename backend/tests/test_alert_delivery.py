@@ -1,6 +1,7 @@
 """Exercise durable delivery through the real dispatcher and fake HTTP only."""
 import asyncio
 import inspect
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -387,6 +388,8 @@ async def test_http_200_without_message_id_is_uncertain_not_history(database, ht
     assert accepted == {0} and finished == set()
     job = (await rows(factory, NotificationDelivery))[0]
     assert job.status == "uncertain" and job.message_id is None and job.uncertain_count == 1
+    # канал ответил, но без номера: свой код, а не ReadTimeout ("канал не ответил")
+    assert job.last_error == store.reason(job.last_error) == "NoMessageId"
     assert await rows(factory, AlertEvent) == []
     await dispatch(factory, message(at=NOW + timedelta(seconds=1)), NOW + timedelta(seconds=1))
     assert len(http.sent()) == 1
@@ -869,6 +872,52 @@ async def test_pause_read_failure_before_post_returns_rows_without_prepare_error
     assert "prepare_failures" not in job.target and http.sent() == []
 
 
+async def test_pause_read_failure_between_bundles_does_not_end_the_pass(database, http, monkeypatch, caplog):
+    # база не ответила на чтение паузы между пачками: паузу считаем не установленной, проход не обрывается
+    factory, _url = database
+    await _two_bundles(factory)
+
+    async def broken(*_args):
+        if not any(job.status == "sending" for job in await rows(factory, NotificationDelivery)):
+            raise RuntimeError("fixture settings read failure")  # между пачками, не перед POST
+        return False
+
+    monkeypatch.setattr(alert_delivery, "_halted", broken)
+    await alert_delivery.drain(factory, configuration())
+    assert [job.status for job in await rows(factory, NotificationDelivery)] == ["confirmed", "confirmed"]
+    assert len(http.sent()) == 2
+    assert any(record.levelname == "WARNING" and "паузу между пачками" in record.getMessage()
+               for record in caplog.records)
+
+
+async def _store_alerts(factory, cfg):
+    from app import settings_store
+    async with factory() as session:
+        await settings_store.set_raw(session, settings_store.ALERTS_KEY, json.dumps(cfg))
+
+
+async def test_alerts_switched_off_mid_pass_leave_rows_like_a_pause(database, http, monkeypatch):
+    # алерты выключили посреди прохода (в настройках нет ни бота, ни вебхука): cfg прохода - снимок,
+    # но новых POST нет, как при паузе. Неотправленная строка в очереди без попытки
+    factory, _url = database
+    from app import config
+    clean = config.Settings(alert_telegram_token="", alert_telegram_chat="", alert_webhook="")
+    monkeypatch.setattr(config, "get_settings", lambda: clean)  # каналы только из базы, не из env
+    await _store_alerts(factory, configuration())
+    await _two_bundles(factory)
+
+    async def answer(_url, _payload):
+        await _store_alerts(factory, configuration(telegram_token="", telegram_chat=""))
+        return Response({"ok": True, "result": {"message_id": 705}})
+
+    http.answer = answer
+    await alert_delivery.drain(factory, configuration())
+    first, second = await rows(factory, NotificationDelivery)
+    assert len(http.sent()) == 1 and first.status == "confirmed"
+    assert (second.status, second.attempts, second.uncertain_count, second.lease_owner, second.last_error) == (
+        "pending", 0, 0, "", "")
+
+
 async def test_settle_waits_for_rows_returned_by_a_cancelled_caller(database, http, monkeypatch):
     # бота отменили до POST, а база медленная: возврат строк в очередь ждет и остановка (settle)
     factory, _url = database
@@ -897,3 +946,15 @@ async def test_settle_waits_for_rows_returned_by_a_cancelled_caller(database, ht
         await task
     job, = await rows(factory, NotificationDelivery)
     assert (job.status, job.attempts, job.uncertain_count, job.lease_owner) == ("pending", 0, 0, "")
+
+
+def test_delivery_window_tells_a_missing_message_id_from_no_answer():
+    # 200 без message_id (NoMessageId) - своя причина в окне доставки, а не "канал не ответил" (ReadTimeout)
+    from pathlib import Path
+
+    front = Path(__file__).resolve().parents[2] / "frontend" / "src"
+    source = (front / "AlertDeliveryStatus.tsx").read_text(encoding="utf-8")
+    text = "Причина: канал ответил без номера сообщения, прием не подтвержден. Сообщение могло дойти."
+    assert "if (code === 'NoMessageId') return 'no_receipt'" in source
+    assert f"if (group === 'no_receipt') return t('{text}')" in source
+    assert f"'{text}':" in (front / "i18n.tsx").read_text(encoding="utf-8")

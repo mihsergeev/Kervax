@@ -48,6 +48,7 @@ const EN: Record<string, string> = {
   'Причина: сообщение не удалось подготовить (текст, правила или получатель). В этот раз в канал оно не отправлялось.': 'Reason: the message could not be prepared (text, rules or recipient). It was not sent to the channel this time.',
   'Причина: отправка прервалась до записи ответа канала (перезапуск или зависание панели). Сообщение могло дойти.': 'Reason: sending was interrupted before the channel response was recorded (panel restart or hang). The message may have been delivered.',
   'Причина: канал не ответил после отправки. Сообщение могло дойти.': 'Reason: the channel did not respond after sending. The message may have been delivered.',
+  'Причина: канал ответил без номера сообщения, прием не подтвержден. Сообщение могло дойти.': 'Reason: the channel answered without a message ID, so acceptance is not confirmed. The message may have been delivered.',
   'Причина: получатель изменился в настройках до отправки. В этот раз старому получателю сообщение не отправлялось.': 'Reason: the recipient changed in the settings before sending. The message was not sent to the old recipient this time.',
   'Причина не распознана.': 'The reason is not recognized.',
   'Причина: канал отказал в приеме (например, бота нет в чате или токен отозван). Сообщение не принято.': 'Reason: the channel refused the message (for example, the bot is not in the chat or the token was revoked). The message was not accepted.',

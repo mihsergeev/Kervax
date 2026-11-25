@@ -783,15 +783,23 @@ def stopping() -> bool:
 
 
 async def _halted(factory) -> bool:
-    """Остановка или глобальная пауза "не слать", включенная посреди прохода: новых POST нет.
+    """Остановка, глобальная пауза "не слать" или выключение алертов (нет ни бота, ни вебхука)
+    посреди прохода: новых POST нет.
 
     Строки остаются в очереди, как при паузе в начале прохода, и уходят после снятия паузы.
+    cfg прохода - снимок с его начала, поэтому каналы перечитываем из базы. Пока настройки
+    алертов в базе не сохранялись, каналы берутся из env и посреди прохода не меняются.
     """
     if stopping():
         return True
-    from app import settings_store
+    from app import alerts, settings_store
+    from app.config import get_settings
     async with factory() as session:
-        return await settings_store.get_muted(session)
+        if await settings_store.get_muted(session):
+            return True
+        if await settings_store.get_raw(session, settings_store.ALERTS_KEY) is None:
+            return False
+        return not alerts.alerts_enabled(await settings_store.get_alert_config(session, get_settings()))
 
 
 async def settle(timeout: float) -> bool:
@@ -954,6 +962,7 @@ async def _post_owned(factory, cfg, rows, now, owner, stage):
             if (not errors and isinstance(errors, alerts.SendErrors)
                     and allowed[0][0]["target"]["type"] == "telegram" and not sent):
                 errors.uncertain = True
+                errors.code = "NoMessageId"  # канал ответил, но без номера: не "не ответил" (ReadTimeout)
                 errors.append("Telegram response did not confirm a message id")
         except Exception as exc:
             errors = alerts.SendErrors([type(exc).__name__])
@@ -963,7 +972,8 @@ async def _post_owned(factory, cfg, rows, now, owner, stage):
         completed_at = now + timedelta(seconds=max(0, _monotonic() - started))
         finished = await store.finish(factory, ids, owner, status, completed_at,
                            message_id=sent[0]["id"] if sent else None,
-                           error="ReadTimeout" if status == "uncertain" else "TransportError" if errors else "",
+                           error=getattr(errors, "code", "") or (
+                               "ReadTimeout" if status == "uncertain" else "TransportError" if errors else ""),
                            retry_after=getattr(errors, "retry_after", None),
                            target_patch={"editable": len(texts) == 1})
         if status == "rejected" and finished:
@@ -1157,10 +1167,21 @@ async def _drain(factory, cfg, now, limit):
         bundles = [[row] for row in rows if row["id"] in alone] + _group(
             alerts, [row for row in rows if row["id"] not in alone])
         for bundle in bundles:
-            if not checked and await _halted(factory):
+            if not checked and await _paused_between(factory):
                 return  # остановка или пауза: идущая пачка доведена, следующие ждут нетронутыми
             checked = False
             await _post(factory, cfg, bundle, current_time())
+
+
+async def _paused_between(factory) -> bool:
+    """Пауза между пачками. Сбой ее чтения (база) не обрывает проход: считаем паузу не
+    установленной, а пачку перед POST проверит _post_owned и при сбое вернет в очередь без попытки."""
+    try:
+        return await _halted(factory)
+    except Exception:  # noqa: BLE001
+        log.warning("доставка уведомлений: паузу между пачками не прочитали, проход продолжен",
+                    exc_info=True)
+        return False
 
 
 def _group(alerts, rows):

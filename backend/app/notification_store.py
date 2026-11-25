@@ -307,7 +307,7 @@ def _safe_error(error: str) -> str:
     allowed = {"ReadTimeout", "ReadError", "WriteTimeout", "WriteError", "ConnectTimeout",
                "ConnectError", "PoolTimeout", "RemoteProtocolError", "LocalProtocolError",
                "TransportError", "TgRejected", "RuntimeError", "LeaseExpired", "CancelledError", "PrepareError",
-               "DestinationChanged"}
+               "DestinationChanged", "NoMessageId"}
     return error if error in allowed else ("DeliveryError" if error else "")
 
 

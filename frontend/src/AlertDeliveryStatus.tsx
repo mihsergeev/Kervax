@@ -19,6 +19,7 @@ function reasonGroup(code: string) {
   if (code === 'PrepareError') return 'prepare'
   if (code === 'LeaseExpired' || code === 'CancelledError') return 'interrupted'
   if (['ReadTimeout', 'ReadError', 'WriteTimeout', 'WriteError', 'RemoteProtocolError'].includes(code)) return 'no_answer'
+  if (code === 'NoMessageId') return 'no_receipt'
   if (code === 'DestinationChanged') return 'destination'
   if (code === 'DeliveryError') return 'unknown'
   return 'refused'
@@ -29,6 +30,7 @@ function reasonCause(item: AlertDeliveryItem, t: Translate) {
   if (group === 'prepare') return t('Причина: сообщение не удалось подготовить (текст, правила или получатель). В этот раз в канал оно не отправлялось.')
   if (group === 'interrupted') return t('Причина: отправка прервалась до записи ответа канала (перезапуск или зависание панели). Сообщение могло дойти.')
   if (group === 'no_answer') return t('Причина: канал не ответил после отправки. Сообщение могло дойти.')
+  if (group === 'no_receipt') return t('Причина: канал ответил без номера сообщения, прием не подтвержден. Сообщение могло дойти.')
   // DeliveryError + rejected - строки до кода DestinationChanged: тогда так писалась смена получателя
   if (group === 'destination' || (group === 'unknown' && item.status === 'rejected')) return t('Причина: получатель изменился в настройках до отправки. В этот раз старому получателю сообщение не отправлялось.')
   if (group === 'unknown') return t('Причина не распознана.')
@@ -40,7 +42,7 @@ function reasonAction(item: AlertDeliveryItem, t: Translate, prepareLimit: numbe
   if (item.status === 'rejected') return group === 'refused' ? t('Исправьте бота или чат в настройках алертов, затем повторите доставку.') : ''
   if (item.status !== 'attention') return ''
   if (group === 'prepare') return t('Подготовка подряд не удалась несколько раз (предел {n}), автоматические повторы остановлены. Посмотрите «Ошибки панели» за это время и настройки получателя, затем повторите доставку.', { n: prepareLimit })
-  if (group === 'interrupted' || group === 'no_answer') return t('Автоматические повторы остановлены. Проверьте чат: если сообщения нет, повторите доставку (может прийти копия), если есть - отметьте рассмотренным.')
+  if (group === 'interrupted' || group === 'no_answer' || group === 'no_receipt') return t('Автоматические повторы остановлены. Проверьте чат: если сообщения нет, повторите доставку (может прийти копия), если есть - отметьте рассмотренным.')
   return t('Автоматические повторы остановлены. Проверьте связь панели с Telegram или вебхуком и настройки бота, затем повторите доставку.')
 }
 
