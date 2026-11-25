@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.176] - 2026-11-25
+
+- No more "sudo rights changed" alerts when a sudo package update rewrites the comments of /etc/sudoers.d/README: changes-setup 0.8 hashes sudoers files by the lines that act (comments and blank lines left out, include directives kept). The first snapshot after the helper update does not report the files as changed; new and removed sudoers files are reported as before. The helper is updated with the playbook.
+
 ## [1.8.175] - 2026-11-25
 
 - Notification delivery: a failure to read the "do not send" pause between bundles no longer ends the whole delivery pass, and switching alerts off in the middle of a pass stops new sends the same way as the pause. A Telegram answer without a message id is shown in the Delivery window as "the channel answered without a message number, receipt not confirmed" instead of "the channel did not answer".
