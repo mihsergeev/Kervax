@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.181] - 2026-11-26
+
+- Grouped issues on the home page now list affected resources in compact rows. Each row shows the resource name and its details together, with individual actions available on demand. Resource links follow the panel theme and highlight on hover or keyboard focus.
+- Long issue cards scroll within the available space. Switching between groups keeps the desktop queue height stable, and the queue remains within reach on narrow screens.
+
 ## [1.8.180] - 2026-11-26
 
 - The home issue queue now shows individual and grouped issues in compact, equal-height rows. Selecting a row opens its full description, affected resources and available actions in a side panel.

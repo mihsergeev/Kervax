@@ -1004,7 +1004,7 @@ button.home-queue-filter[aria-pressed="true"] { background: color-mix(in srgb, v
 .home-queue-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-end; }
 .home-queue-split {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.95fr);
   grid-template-areas: 'list inspector';
   border-block-start: 1px solid var(--border);
 }
@@ -1135,6 +1135,12 @@ button.home-queue-inspector-close { display: none; }
 }
 .home-queue-inspector-meta dd { margin: 0; color: var(--text); text-align: end; }
 .home-queue-inspector-empty { margin: 0; }
+.home-queue-group-summary {
+  margin: 0.35rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
 .home-queue-inspector-body {
   margin-block: 0.7rem 0;
   color: var(--text-muted);
@@ -1167,24 +1173,6 @@ button.home-queue-inspector-close { display: none; }
 .home-queue-inspector-actions button.home-recheck { box-shadow: none; }
 .home-queue-inspector-actions button.quick-mute { margin-inline-start: 0; opacity: 1; }
 .home-queue-inspector-actions button.quick-mute:disabled { opacity: 0.6; }
-.home-queue-inspector-members { display: grid; gap: 0.55rem; margin: 0.75rem 0 0; padding: 0; list-style: none; }
-.home-queue-inspector-member {
-  min-width: 0;
-  padding: 0.55rem;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-}
-.home-queue-inspector-member-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.45rem;
-  font-size: 0.86rem;
-  font-weight: 600;
-}
-.home-queue-inspector-member-head button { min-width: 0; text-align: start; white-space: normal; overflow-wrap: anywhere; }
-.home-queue-inspector-member-head > .muted { flex: none; }
-.home-queue-inspector-member .home-queue-inspector-actions { margin-block-start: 0.5rem; padding-block-start: 0.45rem; }
 .home-queue-entry > .home-queue-row {
   align-items: center;
   flex-wrap: wrap;
@@ -1333,11 +1321,27 @@ button.home-queue-target > .home-attention-txt { flex: 1 1 0; }
   .home-queue-entry > .home-queue-row > .home-queue-target { flex-basis: 100%; }
   .home-queue-entry > .home-queue-row > .home-queue-target + * { margin-inline-start: auto; }
 }
+/* On desktop the list sets the height. A long selection scrolls within its column. */
+@container home-queue (width > 720px) {
+  .home-queue-inspector:has(.home-queue-inspector-title) {
+    align-self: stretch;
+    contain: size;
+    min-block-size: min(13rem, 60dvh);
+    max-block-size: min(38rem, 74dvh);
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+  }
+  .home-queue-split[data-with-groups] .home-queue-inspector {
+    min-block-size: min(19rem, 64dvh);
+  }
+}
 @container home-queue (max-width: 720px) {
   .home-queue-split { grid-template-columns: minmax(0, 1fr); grid-template-areas: 'inspector' 'list'; }
   .home-queue-list { border-inline-end: 0; }
   .home-queue-inspector {
     position: static;
+    max-block-size: 70dvh;
+    overflow-y: auto;
     border-block-end: 1px solid var(--border);
     background: var(--bg-card);
   }
@@ -1451,9 +1455,6 @@ label.home-sel-all { display: inline-flex; flex-direction: row; align-items: cen
 /* полный список пакетов под человеческим текстом пункта "Обновления ОС" */
 .osupd-adv-pkgs { display: block; font-size: 0.78rem; overflow-wrap: anywhere; }
 .home-sel-foot .linklike:hover { color: var(--text); }
-/* текст, одинаковый у нескольких серверов группы: один раз над ними, в строках только имена */
-.home-grp-common { padding: 0.3rem 0.4rem 0.1rem; font-size: 0.84rem; color: var(--text-muted); overflow-wrap: anywhere; }
-.home-grp-common ~ .home-attention-subrow { padding-left: 1rem; }
 /* 🔕 у строки группы - по наведению, иначе десяток колокольчиков в столбик; без мыши видно всегда */
 .home-attention-subrow .quick-mute { opacity: 0; }
 .home-attention-subrow:hover .quick-mute, .home-attention-subrow:focus-within .quick-mute { opacity: 0.6; }

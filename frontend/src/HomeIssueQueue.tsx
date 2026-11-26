@@ -51,7 +51,7 @@ function QueueRows({ rows, selectedKey, inspectorId, onSelect, onCollapse }: {
             aria-current={row.key === selectedKey ? true : undefined} onClick={() => onSelect(row.key)}>
             <span className="home-queue-row-icon" aria-hidden="true">{row.icon}</span>
             <span className="home-queue-row-content">
-              <strong className="home-queue-row-title">{row.title}</strong>
+              <strong className="home-queue-row-title" title={row.title}>{row.title}</strong>
               {(row.name || row.context) && <span className="home-queue-row-meta muted">
                 {row.country && <><CountryFlag code={row.country} />{' '}</>}
                 {row.name}{row.context}
@@ -88,6 +88,7 @@ export function HomeIssueQueue({ rows, criticalRows, warningRows, severity, load
   const [warningsOpen, setWarningsOpen] = useState(false)
   const [selection, setSelection] = useState<Selection | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const inspectorRef = useRef<HTMLElement>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
   const mobileWasOpen = useRef(false)
   const restoreFocus = useRef(false)
@@ -113,6 +114,9 @@ export function HomeIssueQueue({ rows, criticalRows, warningRows, severity, load
     setSelection({ ...selection, opened: false })
   }
   useLayoutEffect(() => {
+    if (inspectorRef.current) inspectorRef.current.scrollTop = 0
+  }, [selected?.key])
+  useLayoutEffect(() => {
     const button = closeRef.current
     const open = !!selection?.opened && !!button?.getClientRects().length
     if (open) button?.focus()
@@ -131,7 +135,7 @@ export function HomeIssueQueue({ rows, criticalRows, warningRows, severity, load
   }
   const actions = selected?.actions?.()
   return (
-    <div className="home-queue-split">
+    <div className="home-queue-split" data-with-groups={visible.some((row) => row.members) || undefined}>
       <div className="home-queue-list" ref={listRef}>
         <QueueRows rows={severity === 'all' ? criticalRows : rows} {...rowProps} />
         {severity === 'all' && warningRows.length > 0 && (
@@ -141,9 +145,10 @@ export function HomeIssueQueue({ rows, criticalRows, warningRows, severity, load
           </details>
         )}
       </div>
-      <aside id={id} className="home-queue-inspector" aria-label={t('Карточка проблемы')}
+      <aside ref={inspectorRef} id={id} className="home-queue-inspector" aria-label={t('Карточка проблемы')}
         data-mobile-open={mobileOpen} onKeyDownCapture={(event) => {
-          if (event.key === 'Escape' && closeRef.current?.getClientRects().length) {
+          if (event.key === 'Escape' && closeRef.current?.getClientRects().length &&
+              !(event.target as Element).closest('.home-queue-inspector-member[data-expanded]')) {
             event.preventDefault()
             event.stopPropagation()
             close()
@@ -161,15 +166,21 @@ export function HomeIssueQueue({ rows, criticalRows, warningRows, severity, load
             <div key={selected.key}>
               <h3 className="home-queue-inspector-title">{selected.title}</h3>
               {selected.details && <div className="home-queue-inspector-body">{selected.details}</div>}
-              <dl className="home-queue-inspector-meta">
-                <div><dt>{t('Раздел')}</dt><dd>{selected.sectionLabel}</dd></div>
-                {selected.name && <div>
-                  <dt>{t(selected.members ? 'Группа' : 'Объект')}</dt>
-                  <dd>{selected.country && <><CountryFlag code={selected.country} />{' '}</>}{selected.name}</dd>
-                </div>}
+              {selected.members && <p className="home-queue-group-summary">
+                {selected.name && selected.sectionLabel === t('Серверы')
+                  ? selected.name : [selected.sectionLabel, selected.name].filter(Boolean).join(' · ')}
+              </p>}
+              {(!selected.members || selected.age || selected.note) && <dl className="home-queue-inspector-meta">
+                {!selected.members && <>
+                  <div><dt>{t('Раздел')}</dt><dd>{selected.sectionLabel}</dd></div>
+                  {selected.name && <div>
+                    <dt>{t('Объект')}</dt>
+                    <dd>{selected.country && <><CountryFlag code={selected.country} />{' '}</>}{selected.name}</dd>
+                  </div>}
+                </>}
                 {selected.age && <div><dt>{t('Длительность')}</dt><dd>{selected.age}</dd></div>}
                 {selected.note && <div><dt>{t('Заметка')}</dt><dd>{selected.note}</dd></div>}
-              </dl>
+              </dl>}
               {(selected.onOpen || actions) && <div className="home-queue-inspector-actions">
                 {selected.onOpen && <button type="button" className="ghost small" onClick={selected.onOpen}>
                   {t('Открыть объект')} <span aria-hidden="true">→</span>

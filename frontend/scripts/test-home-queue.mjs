@@ -124,6 +124,7 @@ const inspector = (queue) => queue.locator('aside[aria-label="Карточка �
 const severity = (page, name) => page.getByRole('group', { name: 'Фильтр по важности' })
   .getByRole('button', { name: new RegExp('^' + name + '(?:\\s|$)') })
 const recheck = (scope) => scope.getByRole('button', { name: 'Исправил: перепроверить', exact: true })
+const memberActions = (card, name) => card.getByRole('button', { name: `Действия — ${name}`, exact: true })
 const warningDetails = (queue) => queue.locator('details.home-queue-warnings')
 const snapshot = async (page, file) => {
   if (!out) return
@@ -283,7 +284,7 @@ async function mobileLayout() {
       assert(await fits(queue), 'The mobile queue must fit its container')
       assert(await fits(card), 'The mobile inspector must fit its container')
       assert(await fits(checkout), 'The mobile issue row must fit its container')
-      await close.press('Escape')
+      await recheck(card).press('Escape')
       await card.waitFor({ state: 'hidden' })
       assert.equal(await checkout.evaluate(element => document.activeElement === element), true, 'Escape returns focus to the selected issue')
       await expiry.click()
@@ -397,6 +398,7 @@ async function groupedActions() {
     assert.equal(await checkbox('worker-02').isChecked(), false)
     await card.getByRole('button', { name: 'заглушить выбранные (1)', exact: true }).click()
     await card.getByRole('button', { name: 'заглушено 1, показать', exact: true }).click()
+    await memberActions(card, 'worker-01').click()
     await card.getByRole('button', { name: 'вернуть', exact: true }).click()
     await checkbox('worker-01').waitFor()
     assert.deepEqual(writes, [
@@ -413,6 +415,210 @@ async function groupedActions() {
     })))
   }, { activeChecks: [], activeServers, role: 'editor', sections: ['servers', 'docker'] })
   console.log('PASS scoped editor, grouped server details, member selection, restore and bulk recheck')
+}
+
+const longServer = 'app-worker-' + 'archival'.repeat(6) + '-02'
+const longPackages = ['PostgreSQL 12', 'PHP 7.4', 'Node.js 16', 'Python 3.8', 'Redis 5',
+  'Debian Security Tools 2.0', 'MariaDB 10.3', 'OpenJDK 8', 'Fixture' + 'dbconnector'.repeat(8)]
+const softwareServers = [
+  ['app-01', ['PostgreSQL 12']],
+  [longServer, longPackages],
+  ['app-03', ['PHP 7.3']],
+].map(([name, packages], i) => {
+  const mute = `home:sw-eol@fixture-${i}`
+  return server(51 + i, name, {
+    sw_advice: packages.map(what => ({ what, level: 2 })),
+    home_mutes: { 'sw-eol': mute }, alert_mutes: i === 2 ? [mute] : [],
+    last_report: { caps: { alert_recheck: true } },
+  })
+})
+const backupServers = [server(54, 'backup-node-01', {
+  backup_growth: { ts: Date.parse(time(120)) / 1000, text: 'Бэкап вырос - 12 ГиБ' },
+}), server(55, 'backup-node-02', {
+  backup_growth: { ts: Date.parse(time(180)) / 1000, text: 'Бэкап вырос - 18 ГиБ' },
+})]
+const manyServers = Array.from({ length: 18 }, (_, i) => server(60 + i, `memory-node-${100 + i}`, {
+  problems: [{ kind: 'mem', level: 1, sec: 'mem', text: `Заканчивается память - ${100 + i} МиБ` }],
+  last_report: { caps: { alert_recheck: true } },
+}))
+const warningChecks = Array.from({ length: 6 }, (_, i) =>
+  check(80 + i, `slow-${i + 1}.example.test`, { last_status: 'degraded' }))
+
+async function denseWarningGroups() {
+  await fixture(async (page, queue, { jobs, writes }) => {
+    const card = inspector(queue)
+    const software = row(queue, 'ПО без поддержки')
+    const backup = row(queue, 'Бэкап вырос')
+    const memory = row(queue, 'Заканчивается память')
+    const warnings = warningDetails(queue).locator('summary')
+    await warnings.waitFor()
+    assert.match(await warnings.innerText(), /9$/)
+    await warnings.press('Enter')
+    await queue.getByRole('button', { name: 'Показать еще 4', exact: true }).click()
+    assert.equal(await rows(queue).count(), 9)
+
+    const height = async () => (await queue.locator('.home-queue-split').boundingBox()).height
+    await backup.click()
+    await card.getByText('18 ГиБ', { exact: true }).waitFor()
+    const shortGroupHeight = await height()
+    const stableHeight = async () => Math.abs(await height() - shortGroupHeight) <= 40
+    await memory.click()
+    const last = card.getByRole('button', { name: 'memory-node-117', exact: true })
+    assert(await stableHeight(), 'A long group should not push down the queue')
+    await last.scrollIntoViewIfNeeded()
+    assert(await card.evaluate(element => element.scrollTop > 0), 'Long groups scroll within the desktop inspector')
+    assert(await last.evaluate(element => {
+      const cardBox = element.closest('aside').getBoundingClientRect()
+      const target = element.getBoundingClientRect()
+      return target.top >= cardBox.top && target.bottom <= cardBox.bottom
+    }), 'The last member must be reachable inside the inspector')
+
+    await software.press('Enter')
+    const disclosure = memberActions(card, longServer)
+    await disclosure.waitFor()
+    assert(await stableHeight(), 'Package details should fit the bounded split')
+    assert.equal(await card.evaluate(element => element.scrollTop), 0, 'Switching groups shows the start of the new inspector')
+    const packages = card.getByText(longPackages.join(', '), { exact: true })
+    await packages.waitFor()
+    assert((await packages.boundingBox()).height <= 60, 'The collapsed package preview stays compact')
+    assert.equal(await recheck(card).count(), 1, 'The bulk action is available while member actions are collapsed')
+    assert.equal(await card.getByRole('button', { name: 'Не алертить', exact: true }).count(), 0)
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'false')
+    await disclosure.press('Enter')
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'true')
+    assert.equal(await disclosure.evaluate(el => el === document.activeElement), true)
+    assert(await packages.evaluate(el => el.scrollHeight <= el.clientHeight + 1), 'The expanded list shows every package')
+    const member = card.locator('.home-queue-inspector-member').filter({ has: memberActions(page, longServer) })
+    assert.equal(await recheck(card).count(), 2)
+    assert.equal(await card.getByRole('button', { name: 'Не алертить', exact: true }).count(), 1)
+    if (out) await card.screenshot({ path: path.join(out, 'queue-dense-inspector.png'), animations: 'disabled' })
+    await recheck(member).click()
+    await member.getByText('Проблема осталась').waitFor()
+    assert.deepEqual(jobs.map(({ object_type, object_id, kind }) => ({ object_type, object_id, kind })), [
+      { object_type: 'server', object_id: 52, kind: 'home:sw-eol' },
+    ])
+
+    await backup.click()
+    await card.getByRole('button', { name: 'backup-node-02', exact: true }).waitFor()
+    assert.equal(await disclosure.count(), 0)
+    await software.click()
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'false')
+    assert.equal(await recheck(card).count(), 1)
+    const muted = card.getByRole('button', { name: 'заглушено 1, показать', exact: true })
+    await muted.click()
+    const restoreDisclosure = memberActions(card, 'app-03')
+    assert.equal(await card.getByRole('button', { name: 'вернуть', exact: true }).count(), 0)
+    await restoreDisclosure.press('Enter')
+    await card.getByRole('button', { name: 'вернуть', exact: true }).click()
+    await card.getByRole('checkbox', { name: 'app-03', exact: true }).waitFor()
+    assert.deepEqual(writes, [{
+      pathname: '/api/servers/53/alert-mutes', body: { add: [], remove: ['home:sw-eol@fixture-2'], replace_same_group: false },
+    }])
+    assert(await stableHeight(), 'Restoring a member should keep the summary height stable')
+    await snapshot(page, 'queue-dense-warnings')
+  }, { activeChecks: warningChecks, activeServers: [...softwareServers, ...backupServers, ...manyServers] })
+  console.log('PASS nine warnings, stable desktop layout, reachable long group, member recheck and restoration')
+}
+
+async function mobileGroupActions() {
+  await fixture(async (page, queue) => {
+    const software = row(queue, 'ПО без поддержки')
+    const card = inspector(queue)
+    const close = card.getByRole('button', { name: 'Закрыть подробности', exact: true })
+    await severity(page, 'Предупреждения').click()
+    await software.press('Enter')
+    await close.waitFor()
+    assert.equal(await close.evaluate(el => el === document.activeElement), true)
+    const packages = card.getByText(longPackages.join(', '), { exact: true })
+    await packages.waitFor()
+    assert((await packages.boundingBox()).height <= 60, 'The collapsed package preview stays compact at 320px')
+    assert(await fits(card), 'Long member content and actions must fit the mobile inspector')
+    const disclosure = memberActions(card, longServer)
+    await disclosure.press('Enter')
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'true')
+    for (const text of [packages, card.getByText(longServer, { exact: true })]) {
+      assert(await text.evaluate(el => el.scrollWidth <= el.clientWidth + 1 && el.scrollHeight <= el.clientHeight + 1),
+        'The complete host name and package list must wrap without clipping at 320px')
+    }
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1))
+    const recheckMember = recheck(card.locator('.home-queue-inspector-member').filter({ has: memberActions(page, longServer) }))
+    await recheckMember.press('Escape')
+    assert.equal(await disclosure.getAttribute('aria-expanded'), 'false')
+    assert.equal(await disclosure.evaluate(el => el === document.activeElement), true)
+    assert(await card.isVisible(), 'Escape closes the member actions first')
+    await page.keyboard.press('Escape')
+    await card.waitFor({ state: 'hidden' })
+    assert.equal(await software.evaluate(el => el === document.activeElement), true)
+  }, { activeChecks: [], activeServers: softwareServers, viewport: { width: 320, height: 960 } })
+  console.log('PASS full group details, member disclosure and focus return at 320px')
+}
+
+// Resolve CSS colors and composite transparent backgrounds before measuring contrast.
+const memberColors = (target) => target.evaluate(async (element) => {
+  const style = getComputedStyle(element)
+  void style.color
+  await Promise.all(element.getAnimations().filter(animation => animation instanceof CSSTransition)
+    .map(animation => animation.finished.catch(() => {})))
+  const context = document.createElement('canvas').getContext('2d', { willReadFrequently: true })
+  const paint = (color) => {
+    context.fillStyle = color
+    context.fillRect(0, 0, 1, 1)
+  }
+  const pixel = () => Array.from(context.getImageData(0, 0, 1, 1).data).slice(0, 3)
+  const backgrounds = []
+  for (let node = element; node; node = node.parentElement) backgrounds.unshift(getComputedStyle(node).backgroundColor)
+  backgrounds.forEach(paint)
+  const background = pixel()
+  paint(style.color)
+  const text = pixel()
+  paint(style.outlineColor)
+  const outline = pixel()
+  paint(getComputedStyle(document.documentElement).getPropertyValue('--accent').trim())
+  return { text, background, outline, accent: pixel(), decoration: style.textDecorationLine,
+    focusRing: style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0 }
+})
+
+const contrast = (foreground, background) => {
+  const luminance = (rgb) => rgb.map(channel => channel / 255)
+    .map(srgb => srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4)
+    .reduce((value, channel, i) => value + channel * [0.2126, 0.7152, 0.0722][i], 0)
+  const values = [luminance(foreground), luminance(background)]
+  return (Math.max(...values) + 0.05) / (Math.min(...values) + 0.05)
+}
+
+async function groupMemberThemes() {
+  await fixture(async (page, queue) => {
+    const card = inspector(queue)
+    const verifyMember = async (title, name, theme) => {
+      await row(queue, title).click()
+      const link = card.getByRole('button', { name, exact: true })
+      await link.waitFor()
+      await page.mouse.move(0, 0)
+      const normal = await memberColors(link)
+      assert.notDeepEqual(normal.text, normal.accent, `${theme}: group member target should use a dedicated text color`)
+      assert(contrast(normal.text, normal.background) >= 4.5, `${theme}: ${name} text contrast`)
+      await link.hover()
+      const hover = await memberColors(link)
+      assert(contrast(hover.text, hover.background) >= 4.5, `${theme}: ${name} hover text contrast`)
+      assert(hover.decoration.includes('underline'), `${theme}: hovering identifies the navigation control`)
+      await page.mouse.move(0, 0)
+      await link.press('Tab')
+      await page.keyboard.press('Shift+Tab')
+      assert(await link.evaluate(element => element.matches(':focus-visible')))
+      const focus = await memberColors(link)
+      assert(contrast(focus.text, focus.background) >= 4.5, `${theme}: ${name} keyboard focus text contrast`)
+      assert(focus.focusRing && contrast(focus.outline, focus.background) >= 3, `${theme}: ${name} keyboard focus ring contrast`)
+    }
+
+    await severity(page, 'Предупреждения').click()
+    for (const theme of ['dark', 'light']) {
+      if (theme === 'light') await page.getByRole('button', { name: 'Тема', exact: true }).click()
+      assert.equal(await page.locator('html').evaluate(element => getComputedStyle(element).colorScheme), theme)
+      await verifyMember('Бэкап вырос', 'backup-node-01', theme)
+      await verifyMember('ПО без поддержки', 'app-01', theme)
+    }
+  }, { activeChecks: [], activeServers: [...backupServers, ...softwareServers] })
+  console.log('PASS grouped backup and software navigation controls in dark and light themes')
 }
 
 async function markKnown() {
@@ -443,7 +649,7 @@ async function markKnown() {
 try {
   const results = await Promise.allSettled([
     queueFilters(), desktopLayout(), mobileLayout(), scopedViewer(), loadingAndEmpty(),
-    criticalPagination(), groupedActions(), markKnown(),
+    criticalPagination(), groupedActions(), denseWarningGroups(), mobileGroupActions(), groupMemberThemes(), markKnown(),
   ])
   const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
   if (failures.length) throw new AggregateError(failures, 'Home queue regressions')

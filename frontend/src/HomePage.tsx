@@ -34,6 +34,7 @@ import { useAuth } from './auth'
 import { IconBackups, IconDocker, IconKube, IconServers, IconSites } from './icons'
 import { CountryFlag } from './CountryFlag'
 import { ActGroup } from './ActGroup'
+import { HomeIssueMember } from './HomeIssueMember'
 import { grpLabel, grpMuteTip } from './homeGroups'
 import { HomeIssueQueue, type QueueIssue, type QueueRow, type QueueSeverity } from './HomeIssueQueue'
 import { HomeDomainSuggestions } from './HomeDomainSuggestions'
@@ -723,6 +724,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
         !!ov?.checks.find((c) => c.id === r.object_id)?.probe_local)
       return reason ? [[recheckKey(r), reason]] : []
     }))
+    if (refs.every((ref) => blocked[recheckKey(ref)])) return null
     return <RecheckButton refs={refs} jobs={rechecks.jobs} run={rechecks.run} blocked={blocked} />
   }
   const actRef = (it: ActItem): RecheckRef[] => it.id && it.grp
@@ -937,6 +939,8 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     ({ object_type: it.section === 'sites' ? 'check' : 'server', object_id: it.id, kind: it.kind })
   const brokenActions = (it: Broken) => {
     if (isViewer) return null
+    const recheck = recheckAction([brokenRef(it)])
+    if (!recheck && !it.markable && !it.mute && !(it.listenPort && it.since)) return null
     const pinLabel = t('Известная проблема: алерт молчит, пока не станет хуже')
     const muteLabel = it.mute ? oomMuteText(it.mute) ?? t('Не алертить') : ''
     const pickerKey = JSON.stringify([it.key, it.mute])
@@ -947,7 +951,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
             ...s, problems: s.problems?.filter((p) => !(p.kind === 'listen_gone' && p.listen_port === port && p.since === since)),
           } : s))} />
       )}
-      {recheckAction([brokenRef(it)])}
+      {recheck}
       {it.markable && (
         <button type="button" className="ghost small" title={pinLabel}
           onClick={() => setKnownFor({ id: it.id, kind: it.kind, title: `${it.name} - ${it.text}` })}>
@@ -990,21 +994,12 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     }
   }
   const brokenMembers = (items: Broken[]) => (
-    <ul className="home-queue-inspector-members" aria-label={t('Серверы группы')}>
+    <ul className="home-queue-inspector-members" role="list" aria-label={t('Серверы группы')}>
       {items.map((it) => {
-        const [, details] = splitHead(it.text)
-        const age = sinceShort(it.since, t)
-        return <li key={it.key} className="home-queue-inspector-member">
-          <div className="home-queue-inspector-member-head">
-            <button type="button" className="linklike" onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
-              <CountryFlag code={it.cc} /> {it.name} <span aria-hidden="true">→</span>
-            </button>
-            {age && <span className="muted small">{age}</span>}
-          </div>
-          {details && <div className="home-queue-inspector-body">{details}</div>}
-          {it.note && <div className="home-queue-inspector-body muted small">{it.note}</div>}
-          {!isViewer && <div className="home-queue-inspector-actions">{brokenActions(it)}</div>}
-        </li>
+        const [, detail] = splitHead(it.text)
+        return <HomeIssueMember key={it.key} name={it.name} country={it.cc} detail={detail}
+          age={sinceShort(it.since, t)} extra={it.note} actions={brokenActions(it)}
+          onOpen={() => onOpen(it.section, it.id, it.srv, it.sec)} />
       })}
     </ul>
   )
