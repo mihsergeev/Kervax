@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.180] - 2026-11-26
+
+- The home issue queue now shows individual and grouped issues in compact, equal-height rows. Selecting a row opens its full description, affected resources and available actions in a side panel.
+- On narrow screens, selecting an issue opens its card above the list. Closing the card returns keyboard focus to the selected row.
+
 ## [1.8.179] - 2026-11-26
 
 - Local website monitors keep earlier external WordPress version findings visible as historical evidence. A fresh report from the assigned server can confirm the version for the exact site. Missing or ambiguous evidence requests a local recheck without announcing a recovery.

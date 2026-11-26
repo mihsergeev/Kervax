@@ -93,12 +93,12 @@ export function ExpirySnoozePick({
     <span className="home-mute-pick exp-snooze-pick" onClick={(e) => e.stopPropagation()}>
       {short && <span className="muted">{t('напомнить:')}</span>}
       {expModes(daysOf(check, kind)).map((m) => (
-        <span key={m} className={`home-mute-opt${busy ? ' muted' : ''}`} role="button" title={modeTip(m, kind, t)}
-          onClick={() => !busy && pick(m)}>
+        <button type="button" key={m} className="home-mute-opt" disabled={busy} title={modeTip(m, kind, t)}
+          onClick={() => pick(m)}>
           {modeLabel(m, kind, t, short)}
-        </span>
+        </button>
       ))}
-      {onClose && <span className="home-mute-opt muted" role="button" onClick={onClose}>✕</span>}
+      {onClose && <button type="button" className="home-mute-opt muted" aria-label={t('Закрыть')} onClick={onClose}>✕</button>}
       {err && <span className="form-error small">{err}</span>}
     </span>
   )

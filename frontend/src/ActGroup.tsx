@@ -1,60 +1,37 @@
-// Группа "Требует действий": одна проблема на нескольких серверах одной строкой, по клику - строки
-// серверов. Заглушка до нового общая для всех групп: галки у строк, "выбрать все", "заглушить
-// выбранные (N)", 🔕 у строки по наведению, внизу "заглушено N, показать" с "вернуть". Ключ заглушки
+// Карточка проблемы, которая требует действий на нескольких серверах. Заглушка до нового общая
+// для всех групп: галки у строк, "выбрать все", "заглушить выбранные (N)", индивидуальная
+// заглушка, внизу "заглушено N, показать" с "вернуть". Ключ заглушки
 // пункта (mute) дает бэкенд: osupd:<вид>@ у ОС, home:<группа>@ у остальных (app/home_mute.py), тот же,
 // что видит карточка сервера.
-import { useState, type ReactNode } from 'react'
+import { Fragment, useState, type ReactNode } from 'react'
 import { CountryFlag } from './CountryFlag'
-import { grpLabel, grpMuteNote, grpMuteTip } from './homeGroups'
+import { grpMuteNote, grpMuteTip } from './homeGroups'
 import { useI18n } from './i18n'
-import { shortList } from './serverUtils'
-import { activateHomeRow } from './homeKeyboard'
 
 export type ActGroupItem = {
   key: string
-  icon: string
   name?: string
   cc?: string
   detail?: string // что на этом сервере, без имени и без самой проблемы
   tip?: string // всплывашка строки
   mute?: string // ключ заглушки до нового; нет - пункт не глушится
-  muted?: boolean
-}
-
-// 🔕 у строки: по наведению (CSS), глушит один пункт
-export function QuickMute({ tip, busy, onMute }: { tip: string; busy: boolean; onMute: () => void }) {
-  return (
-    <span className="quick-mute" title={tip} role="button"
-      onClick={(e) => {
-        e.stopPropagation()
-        if (!busy) onMute()
-      }}>
-      🔕
-    </span>
-  )
 }
 
 export function ActGroup<I extends ActGroupItem>({
   grp,
   items,
   muted,
-  open,
   canMute,
-  onToggle,
   onOpen,
   onMute,
-  recheckHeader,
   recheckItem,
 }: {
   grp: string
   items: I[] // живые, не заглушенные
   muted: I[]
-  open: boolean
   canMute: boolean
-  onToggle: () => void
   onOpen: (it: I) => void
   onMute: (list: I[], on: boolean) => Promise<unknown>
-  recheckHeader?: ReactNode
   recheckItem?: (it: I) => ReactNode
 }) {
   const { t } = useI18n()
@@ -81,36 +58,30 @@ export function ActGroup<I extends ActGroupItem>({
     })
   }
   // Одинаковый текст у нескольких строк (6 серверов на Ubuntu 20.04 с одним и тем же сроком) - одной
-  // строкой над ними, в строках серверов только имя. Свой текст - в строке, как было
+  // строкой над ними, в строках серверов только имя. Свой текст и подсказки остаются у сервера.
   const row = (it: I, low = false, bare = false) => {
-    const go = () => onOpen(it)
-    // галка нужна, когда есть из чего выбирать; одну строку глушит кнопка над ней или 🔕
-    const box = mutable.length > 1 && mutable.includes(it)
+    const canMuteItem = mutable.includes(it)
+    const actions = !low ? recheckItem?.(it) : null
+    const details = [!bare && it.detail, it.tip && it.tip !== it.detail && it.tip].filter(Boolean).join('\n')
     return (
-      <div key={it.key} role="button" tabIndex={0} title={it.tip}
-        className={`home-attention-row home-attention-subrow${low ? ' home-attention-muted' : ''}`}
-        onClick={go} onKeyDown={(e) => activateHomeRow(e, go)}>
-        {box && (
-          <input type="checkbox" className="home-sel-box" checked={sel.has(it.key)} aria-label={it.name}
-            onClick={(e) => e.stopPropagation()} onChange={(e) => pick([it.key], e.target.checked)} />
-        )}
-        <span className="home-attention-txt">
-          <CountryFlag code={it.cc} /> <b>{it.name}</b>
-          {it.detail && !bare ? <span className="muted"> - {it.detail}</span> : null}
-        </span>
-        {!low && recheckItem?.(it)}
-        {low
-          ? canMute && (
-              <button className="linklike small" disabled={busy}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  run([it], false)
-                }}>
-                {t('вернуть')}
-              </button>
-            )
-          : mutable.includes(it) && <QuickMute tip={tip} busy={busy} onMute={() => run([it], true)} />}
-        <span className="home-open">→</span>
+      <div key={it.key} className={`home-queue-inspector-member${low ? ' home-attention-muted' : ''}`}>
+        <div className="home-queue-inspector-member-head">
+          {canMuteItem && mutable.length > 1 && (
+            <input type="checkbox" className="home-sel-box" checked={sel.has(it.key)} aria-label={it.name}
+              onChange={(e) => pick([it.key], e.target.checked)} />
+          )}
+          <button type="button" className="linklike" onClick={() => onOpen(it)}>
+            <CountryFlag code={it.cc} /> {it.name} <span aria-hidden="true">→</span>
+          </button>
+        </div>
+        {details && <div className="home-queue-inspector-body">{details}</div>}
+        {(actions || canMuteItem || (low && canMute)) && <div className="home-queue-inspector-actions">
+          {actions}
+          {canMuteItem && <button type="button" className="ghost small" title={tip} disabled={busy}
+            onClick={() => run([it], true)}>{t('Не алертить')}</button>}
+          {low && canMute && <button type="button" className="linklike small" disabled={busy}
+            onClick={() => run([it], false)}>{t('вернуть')}</button>}
+        </div>}
       </div>
     )
   }
@@ -127,15 +98,13 @@ export function ActGroup<I extends ActGroupItem>({
       const head = !heads.has(d)
       heads.add(d)
       return (
-        <div key={`d-${low ? 'm' : 'l'}-${xs[0].key}`}>
+        <Fragment key={`d-${low ? 'm' : 'l'}-${xs[0].key}`}>
           {head && <div className="home-grp-common">{d}</div>}
           {xs.map((x) => row(x, low, true))}
-        </div>
+        </Fragment>
       )
     })
   }
-  const names = shortList(items.map((x) => x.name ?? ''), t, 4)
-  const icon = items.some((x) => x.icon === '⛔') ? '⛔' : items[0].icon
   let bar: ReactNode = null
   if (mutable.length > 1)
     bar = (
@@ -162,38 +131,22 @@ export function ActGroup<I extends ActGroupItem>({
       </div>
     )
   return (
-    <div className={`home-attention-grpbox${open ? ' open' : ''}`}>
-      <div role="button" tabIndex={0} className="home-attention-row" onClick={onToggle}
-        onKeyDown={(e) => activateHomeRow(e, onToggle)}>
-        <span className="lk-dot lk-dot-warn" />
-        <span className="home-attention-ico">{icon}</span>
-        <span className="home-attention-txt">
-          {grpLabel(grp, t)}
-          <span className="muted"> · {t('серверов: {n}', { n: items.length })} ({names})</span>
-          {muted.length > 0 && <span className="muted"> · {t('заглушено {n}', { n: muted.length })}</span>}
-        </span>
-        {recheckHeader}
-        <span className="home-open">{open ? '▾' : '▸'}</span>
-      </div>
-      {open && (
-        <div className="home-attention-sub">
-          {bar}
-          {rows(items, false)}
-          {muted.length > 0 && (
-            <div className="home-sel-foot">
-              <button className="linklike muted small" onClick={() => setMOpen(!mOpen)}>
-                {mOpen ? t('скрыть заглушенные') : t('заглушено {n}, показать', { n: muted.length })}
-              </button>
-              {mOpen && canMute && muted.length > 1 && (
-                <button className="linklike muted small" disabled={busy} onClick={() => run(muted, false)}>
-                  {t('вернуть все')}
-                </button>
-              )}
-            </div>
+    <div className="home-queue-inspector-members" role="group" aria-label={t('Серверы группы')}>
+      {bar}
+      {rows(items, false)}
+      {muted.length > 0 && (
+        <div className="home-sel-foot">
+          <button type="button" className="linklike muted small" aria-expanded={mOpen} onClick={() => setMOpen(!mOpen)}>
+            {mOpen ? t('скрыть заглушенные') : t('заглушено {n}, показать', { n: muted.length })}
+          </button>
+          {mOpen && canMute && muted.length > 1 && (
+            <button type="button" className="linklike muted small" disabled={busy} onClick={() => run(muted, false)}>
+              {t('вернуть все')}
+            </button>
           )}
-          {mOpen && rows(muted, true)}
         </div>
       )}
+      {mOpen && rows(muted, true)}
     </div>
   )
 }

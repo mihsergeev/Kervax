@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import {
   ApiError,
   checksOverview,
@@ -24,7 +24,6 @@ import {
 import type { Section } from './App'
 import { backupAlive, backupDest, backupDestWhere, backupWindowNote, dbAuditNames, knownText, dockRiskText, knownActive, proxyBuilt, shortList, sinceShort, srvIssues, srvKnown, knownMeta, tallyTile, type TallyTile } from './serverUtils'
 import { RecheckButton, RecheckSummary, recheckKey, recheckUnavailable, useAlertRechecks, type RecheckRef } from './AlertRecheck'
-import { activateHomeRow } from './homeKeyboard'
 import { KnownDialog } from './KnownDialog'
 import { LEAK_MUTE, LISTEN_MUTE, RESTARTS_MUTE, OOM_MUTE, collectMutes, isDecision, kindLabel, liftMute, muteDate, muteLiveText, muteQuiet, oomCulpritLabel, withLive, type MuteItem } from './mutes'
 import { useI18n } from './i18n'
@@ -35,46 +34,15 @@ import { useAuth } from './auth'
 import { IconBackups, IconDocker, IconKube, IconServers, IconSites } from './icons'
 import { CountryFlag } from './CountryFlag'
 import { ActGroup } from './ActGroup'
-import { grpMuteTip } from './homeGroups'
+import { grpLabel, grpMuteTip } from './homeGroups'
+import { HomeIssueQueue, type QueueIssue, type QueueRow, type QueueSeverity } from './HomeIssueQueue'
 import { HomeDomainSuggestions } from './HomeDomainSuggestions'
 import { backupProblems, dockerProblems, type ProbItem } from './sectionIssues'
 import { AgentUpdRow, HelperUpdRow, UpdateAllButton, agentBehind, rolloutHosts as fleetHosts, useFleetRollout } from './FleetUpdate'
 
 const ATTENTION_LIMIT = 15
-const QUEUE_LIMIT = 5
 const QUEUE_PREVIEW_LIMIT = 110
 const SIGNAL_PREVIEW_LIMIT = 82
-
-type QueueSeverity = 'all' | 'critical' | 'warnings'
-
-type QueueRow = {
-  key: string
-  area: TallyTile
-  critical: boolean
-  render: () => ReactNode
-}
-
-function HomeQueueRows({ rows }: { rows: QueueRow[] }) {
-  const { t } = useI18n()
-  const [expanded, setExpanded] = useState(false)
-  const id = useId()
-  if (!rows.length) return null
-  return (
-    <>
-      <div id={id} className="home-attention-list home-queue-rows">
-        {(expanded ? rows : rows.slice(0, QUEUE_LIMIT)).map((row) => (
-          <Fragment key={row.key}>{row.render()}</Fragment>
-        ))}
-      </div>
-      {rows.length > QUEUE_LIMIT && (
-        <button type="button" className="ghost small home-queue-more" aria-expanded={expanded} aria-controls={id}
-          onClick={() => setExpanded((open) => !open)}>
-          {expanded ? t('свернуть') : t('Показать еще {n}', { n: rows.length - QUEUE_LIMIT })}
-        </button>
-      )}
-    </>
-  )
-}
 
 function queuePreview(text: string, limit = QUEUE_PREVIEW_LIMIT): string {
   const chars = Array.from(text.replace(/\s+/g, ' ').trim())
@@ -720,16 +688,10 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const [mutes, setMutes] = useState<MuteWarning[]>([])
   const [queueSeverity, setQueueSeverity] = useState<QueueSeverity>('all')
   const [queueArea, setQueueArea] = useState<TallyTile | null>(null)
-  const [openGrps, setOpenGrps] = useState<Set<string>>(() => new Set())
+  const queueHeading = useRef<HTMLHeadingElement>(null)
+  const focusQueueHeading = useCallback(() => queueHeading.current?.focus(), [])
   // идет заглушка одиночной строки (у групп свое, ActGroup.tsx)
   const [actBusy, setActBusy] = useState(false)
-  const toggleGrp = (g: string) =>
-    setOpenGrps((prev) => {
-      const n = new Set(prev)
-      if (n.has(g)) n.delete(g)
-      else n.add(g)
-      return n
-    })
 
   useEffect(() => {
     getAgentRelease()
@@ -877,20 +839,25 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const broken: Broken[] = [
     // проблемы сервера ведут в его карточку, а то, что чинится в другом разделе (сроки и Flux,
     // очереди, дампы), - туда, и видно тем, кому этот раздел открыт
-    ...srvList.flatMap((s) =>
-      srvIssues(s, t)
-        .map((i, n) => ({
-          key: i.listenPort ? `${s.id}-listen-${i.listenPort}-${i.since}` : `${s.id}-${n}`,
-          id: s.id, name: s.name, cc: s.country, tone: i.tone,
-          text: i.kind === 'offline' && behindSilent(s)
-            ? `${i.text} · ⛓ ${t('за {srv}, он тоже молчит', { srv: behindSilent(s) })}`
-            : i.text,
-          kind: i.kind ?? 'server', section: (i.section ?? 'servers') as Section, srv: i.srv ?? true,
+    ...srvList.flatMap((s) => {
+      const seen = new Map<string, number>()
+      return srvIssues(s, t).map((i): Broken => {
+        // Polling can insert or remove earlier problems. Identify signals by scope, not by their array index.
+        const muteScope = i.mute?.replace(/^([a-z_]+)@\d$/, '$1')
+        const subject = i.kind === 'disk_health' || i.kind === 'gpu' ? splitHead(i.text)[0] : undefined
+        const scope = JSON.stringify([s.id, i.kind, muteScope, i.listenPort, i.listenPort ? i.since : null, subject])
+        const duplicate = seen.get(scope) ?? 0
+        seen.set(scope, duplicate + 1)
+        const parent = i.kind === 'offline' && behindSilent(s)
+        return {
+          key: `${scope}-${duplicate}`, id: s.id, name: s.name, cc: s.country, tone: i.tone,
+          text: parent ? `${i.text} · ⛓ ${t('за {srv}, он тоже молчит', { srv: parent })}` : i.text,
+          kind: i.kind ?? 'server', section: i.section ?? 'servers', srv: i.srv ?? true,
           sec: i.sec, mute: i.mute, since: i.since, note: s.note, listenPort: i.listenPort,
           markable: !!i.kind && i.kind !== 'offline' && !!s.alert_since?.[i.kind],
-        }))
-        .filter((i) => canSee(i.section)),
-    ),
+        }
+      }).filter((i) => canSee(i.section))
+    }),
     ...fromProbs(dockerProbs, 'docker'),
     // кубер (поды, NotReady-ноды, сроки, Flux) приходит с бэкенда строками problems (section kuber)
     // по тем же правилам, что алерт: здесь его второй раз не считаем
@@ -966,30 +933,28 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const helperRowOn = showSrv && (rolloutHosts.length > 0 || !!fleetRun.helpers)
   const updN = fleet.length + (agentRowOn ? 1 : 0) + (helperRowOn ? 1 : 0)
   // У нескольких строк одного сервера может быть общий ключ заглушки, например disk_health.
-  const mutePickerKey = (it: Broken) => JSON.stringify([it.id, it.kind, it.mute, it.sec, it.text])
-  // В раскрытой группе шапка проблемы общая, у каждого сервера свои подробности.
-  const brokenRow = (it: Broken, sub = false) => {
-    const text = sub ? splitHead(it.text)[1] : it.text
-    const preview = sub ? queuePreview(text) : queueSignalPreview(text, it.kind, t)
-    const duration = sinceShort(it.since, t)
+  const brokenRef = (it: Broken): RecheckRef =>
+    ({ object_type: it.section === 'sites' ? 'check' : 'server', object_id: it.id, kind: it.kind })
+  const brokenActions = (it: Broken) => {
+    if (isViewer) return null
     const pinLabel = t('Известная проблема: алерт молчит, пока не станет хуже')
     const muteLabel = it.mute ? oomMuteText(it.mute) ?? t('Не алертить') : ''
-    const note = it.note && <span className="note-chip" title={it.note}>{' '}📝</span>
-    const actions = <>
-      {!isViewer && it.listenPort && it.since && (
+    const pickerKey = JSON.stringify([it.key, it.mute])
+    return <>
+      {!!it.listenPort && it.since && (
         <RetirePortButton id={it.id} port={it.listenPort} since={it.since} onUnauthorized={onUnauthorized}
           onDone={(port, since) => replaceServers((prev) => prev.map((s) => s.id === it.id ? {
             ...s, problems: s.problems?.filter((p) => !(p.kind === 'listen_gone' && p.listen_port === port && p.since === since)),
           } : s))} />
       )}
-      {recheckAction([{ object_type: it.section === 'sites' ? 'check' : 'server', object_id: it.id, kind: it.kind }])}
-      {it.markable && !isViewer && (
-        <button type="button" className="quick-mute" title={pinLabel} aria-label={pinLabel}
+      {recheckAction([brokenRef(it)])}
+      {it.markable && (
+        <button type="button" className="ghost small" title={pinLabel}
           onClick={() => setKnownFor({ id: it.id, kind: it.kind, title: `${it.name} - ${it.text}` })}>
-          📌
+          <span aria-hidden="true">📌 </span>{t('Отметить как известную')}
         </button>
       )}
-      {it.mute && !isViewer && mutePick === mutePickerKey(it) && (
+      {it.mute && mutePick === pickerKey && (
         <span className="home-mute-pick">
           <span className="muted">{oomMuteText(it.mute) ? `${oomMuteText(it.mute)}:` : t('не алертить:')}</span>
           {[
@@ -1005,101 +970,77 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           <button type="button" className="home-mute-opt muted" aria-label={t('Закрыть')} onClick={() => setMutePick(null)}>✕</button>
         </span>
       )}
-      {it.mute && !isViewer && mutePick !== mutePickerKey(it) && (
-        <button type="button" className="quick-mute" title={muteLabel} aria-label={muteLabel}
+      {it.mute && mutePick !== pickerKey && (
+        <button type="button" className="ghost small"
           onClick={() => {
-            if (snoozable(it.mute!)) setMutePick(mutePickerKey(it))
+            if (snoozable(it.mute!)) setMutePick(pickerKey)
             else quickMute(it.id, [it.mute!])
           }}>
-          🔕
+          <span aria-hidden="true">🔕 </span>{muteLabel}
         </button>
       )}
     </>
-    return (
-      <HomeQueueEntry key={it.key} name={it.name}
-        onOpen={() => onOpen(it.section, it.id, it.srv, it.sec)}
-        className={sub ? 'home-attention-subrow' : ''}
-        dot={sub ? undefined : it.tone === 't-down' ? 'lk-dot-bad' : 'lk-dot-warn'}
-        icon={sub ? undefined : ISSUE_ICON[it.kind] ?? '⚠️'} actions={actions}
-        details={preview !== text || it.note ? [it.text, duration, it.note].filter(Boolean).join('\n') : undefined}>
-        {sub ? (
-          <>
-            <CountryFlag code={it.cc} /> <b>{it.name}</b>
-            {preview && <span className="muted"> - {preview}</span>}
-            {duration && <span className="muted"> · {duration}</span>}
-            {note}
-          </>
-        ) : (
-          <HomeQueueSignal signal={preview} name={it.name} country={it.cc} age={duration} context={note}
-            fullSignal={preview !== text ? text : undefined} />
-        )}
-      </HomeQueueEntry>
-    )
   }
-  const brokenGrpRow = (r: BrokenRow) => {
-    if ('one' in r) return brokenRow(r.one)
-    const open = openGrps.has(`b-${r.grp}`)
-    const head = queuePreview(r.head)
-    const names = shortList([...new Set(r.items.map((x) => x.name))], t, 4)
-    return (
-      <div key={`bg-${r.grp}`} className={`home-attention-grpbox${open ? ' open' : ''}`}>
-        <div role="button" tabIndex={0} aria-expanded={open} className="home-attention-row" onClick={() => toggleGrp(`b-${r.grp}`)}
-          onKeyDown={(e) => activateHomeRow(e, () => toggleGrp(`b-${r.grp}`))}>
-          <span className="lk-dot lk-dot-warn" />
-          <span className="home-attention-ico">{ISSUE_ICON[r.items[0].kind] ?? '⚠️'}</span>
-          <span className="home-attention-txt">
-            {head}
-            <span className="muted"> · {t('серверов: {n}', { n: new Set(r.items.map((x) => x.id)).size })} ({names})</span>
-          </span>
-          {recheckAction(r.items.map((it) => ({ object_type: it.section === 'sites' ? 'check' : 'server', object_id: it.id, kind: it.kind })))}
-          <span className="home-open">{open ? '▾' : '▸'}</span>
-        </div>
-        {open && (
-          <div className="home-attention-sub">
-            {head !== r.head && <div className="home-grp-common">{r.head}</div>}
-            {r.items.map((x) => brokenRow(x, true))}
+  const brokenIssue = (it: Broken): QueueIssue => {
+    const title = queueSignalPreview(it.text, it.kind, t)
+    return {
+      icon: ISSUE_ICON[it.kind] ?? '⚠️', title, name: it.name, country: it.cc, age: sinceShort(it.since, t),
+      details: title !== it.text ? it.text : undefined, note: it.note, actions: () => brokenActions(it),
+      onOpen: () => onOpen(it.section, it.id, it.srv, it.sec),
+    }
+  }
+  const brokenMembers = (items: Broken[]) => (
+    <ul className="home-queue-inspector-members" aria-label={t('Серверы группы')}>
+      {items.map((it) => {
+        const [, details] = splitHead(it.text)
+        const age = sinceShort(it.since, t)
+        return <li key={it.key} className="home-queue-inspector-member">
+          <div className="home-queue-inspector-member-head">
+            <button type="button" className="linklike" onClick={() => onOpen(it.section, it.id, it.srv, it.sec)}>
+              <CountryFlag code={it.cc} /> {it.name} <span aria-hidden="true">→</span>
+            </button>
+            {age && <span className="muted small">{age}</span>}
           </div>
-        )}
-      </div>
-    )
-  }
-  const actRow = (it: ActItem) => {
+          {details && <div className="home-queue-inspector-body">{details}</div>}
+          {it.note && <div className="home-queue-inspector-body muted small">{it.note}</div>}
+          {!isViewer && <div className="home-queue-inspector-actions">{brokenActions(it)}</div>}
+        </li>
+      })}
+    </ul>
+  )
+  const actContent = (it: ActItem) => {
     const name = it.name ?? ''
     const namePrefix = name + ': '
     const text = name && it.text.startsWith(namePrefix) ? it.text.slice(namePrefix.length) : it.text
-    const preview = queuePreview(text)
+    return { name, text, preview: queuePreview(text) }
+  }
+  const actActions = (it: ActItem, useLabel = false) => {
+    if (isViewer) return null
     const tip = it.grp ? grpMuteTip(it.grp, t) : ''
-    const actions = <>
+    return <>
       {recheckAction(actRef(it))}
-      {it.mute && !isViewer && it.grp && (
-        <button type="button" className="quick-mute" title={tip} aria-label={tip} disabled={actBusy}
+      {it.mute && it.grp && (
+        <button type="button" className={useLabel ? 'ghost small' : 'quick-mute'} title={tip} aria-label={tip} disabled={actBusy}
           onClick={() => {
             setActBusy(true)
             muteActs([it], true).finally(() => setActBusy(false))
           }}>
-          🔕
+          <span aria-hidden="true">🔕</span>{useLabel && ` ${t('Не алертить')}`}
         </button>
       )}
     </>
+  }
+  const actRow = (it: ActItem) => {
+    const { name, text, preview } = actContent(it)
     return (
       <HomeQueueEntry key={it.key} name={name} onOpen={() => onOpen(it.section, it.id, it.srv, it.sec)}
-        dot={it.fleet ? 'lk-dot-info' : 'lk-dot-warn'} icon={it.icon} actions={actions}
+        dot={it.fleet ? 'lk-dot-info' : 'lk-dot-warn'} icon={it.icon} actions={actActions(it)}
         details={preview !== text || it.tip ? [text, it.tip].filter(Boolean).join('\n') : undefined}>
         <CountryFlag code={it.cc} /> {text !== it.text && <b>{name}</b>}
         {text !== it.text ? <span className="muted"> - {preview}</span> : preview}
       </HomeQueueEntry>
     )
   }
-  // группа - общий компонент с галками и заглушкой (ActGroup.tsx)
-  const grpRow = (r: ActRow) =>
-    'one' in r ? (
-      actRow(r.one)
-    ) : (
-      <ActGroup key={`g-${r.grp}`} grp={r.grp} items={r.items} muted={r.muted} open={openGrps.has(r.grp)}
-        canMute={!isViewer} onToggle={() => toggleGrp(r.grp)} onMute={muteActs}
-        recheckHeader={recheckAction(r.items.flatMap(actRef))} recheckItem={(it) => recheckAction(actRef(it))}
-        onOpen={(it) => onOpen(it.section, it.id, it.srv, it.sec)} />
-    )
   // заглушено на время целиком (wideMutes): строка на сервер, ведет в его карточку
   const wideRows = canSee('servers')
     ? srvList.map((s) => ({ s, items: wideMutes(s, t) })).filter((x) => x.items.length > 0)
@@ -1144,9 +1085,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
   const late = canSee('backups')
     ? srvList.map((s) => ({ s, note: backupWindowNote(s) })).filter((x) => x.note)
     : []
-  // строка срока сертификата/домена: 🔕 - напомнить за 7/1 дней или не следить (ExpirySnooze.tsx);
-  // off - отложенная, в раскрытой строке внизу блока, с "вернуть"
-  const warnRow = (w: Warn, off = false) => {
+  const expiryIssue = (w: Warn, off = false): QueueIssue => {
     const key = `${w.kind}-${w.id}`
     const e = expEntry(w.check, w.kind)
     const what = t(w.kind === 'ssl' ? 'TLS-сертификат' : 'Срок регистрации домена')
@@ -1157,32 +1096,36 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     const muteLabel = t(w.kind === 'domain'
       ? 'Напомнить позже или не следить за доменом'
       : 'Напомнить позже или не следить за сертификатом')
-    const actions = (
+    const actions = () => (!isViewer || off) && (
       <span className="home-site-alert-actions">
         {!off && recheckAction(w.members.map((id) => ({ object_type: 'check', object_id: id, kind: w.kind })))}
         {off ? (
           <ExpirySnoozeState check={w.check} kind={w.kind} canEdit={!isViewer} onDone={load} />
         ) : !isViewer && warnPick === key ? (
-          <ExpirySnoozePick check={w.check} kind={w.kind} short onDone={load} onClose={() => setWarnPick(null)} />
+          <ExpirySnoozePick check={w.check} kind={w.kind} onDone={load}
+            onClose={() => setWarnPick((current) => current === key ? null : current)} />
         ) : !isViewer && (
-          <button type="button" className="quick-mute" title={muteLabel} aria-label={muteLabel}
-            onClick={() => setWarnPick(key)}>
-            🔕
+          <button type="button" className="ghost small" onClick={() => setWarnPick(key)}>
+            <span aria-hidden="true">🔕 </span>{muteLabel}
           </button>
         )}
       </span>
     )
-    return (
-      <HomeQueueEntry key={key} name={w.name} onOpen={() => onOpen('sites', w.id, false, 'exp')}
-        className={`home-site-alert${off ? ' home-attention-subrow home-attention-muted' : ''}`}
-        dot={off ? '' : w.days <= 3 ? 'lk-dot-bad' : 'lk-dot-warn'} icon={w.kind === 'ssl' ? '🔐' : '🌐'}
-        actions={actions} details={extra || undefined}>
-        <HomeQueueSignal signal={signal} name={w.name} fullSignal={extra || undefined}
-          context={w.more ? ` · ${t('мониторов: {n}', { n: w.more + 1 })}` : undefined} />
-      </HomeQueueEntry>
-    )
+    return {
+      icon: w.kind === 'ssl' ? '🔐' : '🌐', title: signal, name: w.name, details: extra, actions,
+      context: w.more ? ` · ${t('мониторов: {n}', { n: w.more + 1 })}` : undefined,
+      onOpen: () => onOpen('sites', w.id, false, 'exp'),
+    }
   }
-  const siteStatusRow = (c: Check) => {
+  const mutedExpiryRow = (w: Warn) => {
+    const issue = expiryIssue(w, true)
+    return <HomeQueueEntry key={`${w.kind}-${w.id}`} name={w.name} onOpen={() => onOpen('sites', w.id, false, 'exp')}
+      className="home-site-alert home-attention-subrow home-attention-muted"
+      dot="" icon={issue.icon} actions={issue.actions?.()} details={issue.details}>
+      <HomeQueueSignal signal={issue.title} name={w.name} fullSignal={issue.details} context={issue.context} />
+    </HomeQueueEntry>
+  }
+  const siteStatusIssue = (c: Check): QueueIssue => {
     const status = t(c.last_status === 'down' ? 'Недоступно' : c.last_status === 'degraded' ? 'Деградация' : 'Отвечает через раз')
     const message = c.last_status !== 'up' ? c.last_message ?? '' : ''
     const signal = [status, message].filter(Boolean).join(' · ')
@@ -1190,51 +1133,70 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
     const age = c.last_status === 'up' ? sinceShort(c.flaky_since, t) : ''
     const parents = (c.parents ?? []).filter((p) => p.silent)
     const parentWarning = t('сервер не на связи, алерты монитора ждут его')
-    const actions = (
-      <span className="home-site-alert-actions">
-        {recheckAction([{ object_type: 'check', object_id: c.id, kind: 'status' }])}
-      </span>
-    )
-    const details = preview !== signal || parents.length > 0
-      ? [signal, ...parents.map((p) => `${p.name} - ${parentWarning}`)].join('\n')
-      : undefined
-    const parentContext = parents.length > 0 && (
+    const details = [preview !== signal && signal, ...parents.map((p) => `${p.name} - ${parentWarning}`)]
+      .filter(Boolean).join('\n')
+    const context = parents.length > 0 && (
       <span className="type-chip parent-chip" title={parentWarning}>
         ⛓ {shortList(parents.map((p) => p.name), t, 1)}
       </span>
     )
-    return (
-      <HomeQueueEntry key={c.id} name={c.name} onOpen={() => onOpen('sites', c.id)} className="home-site-alert"
-        dot={c.last_status === 'down' ? 'lk-dot-bad' : 'lk-dot-warn'} icon="🌐" actions={actions} details={details}>
-        <HomeQueueSignal signal={preview} name={c.name} age={age} context={parentContext} fullSignal={details} />
-      </HomeQueueEntry>
-    )
+    return {
+      icon: '🌐', title: preview, name: c.name, age, context, details,
+      actions: () => recheckAction([{ object_type: 'check', object_id: c.id, kind: 'status' }]),
+      onOpen: () => onOpen('sites', c.id),
+    }
   }
 
+  const sectionLabels: Partial<Record<Section, string>> = {
+    sites: t('Сайты'), servers: t('Серверы'), services: t('Сервисы'),
+    docker: 'Docker', kuber: 'Kubernetes', backups: t('Бэкапы'),
+  }
+  const queueRow = (key: string, section: Section, critical: boolean, issue: QueueIssue, members?: QueueRow['members']): QueueRow =>
+    ({ ...issue, key, area: tallyTile(section), critical, sectionLabel: sectionLabels[section] ?? section, members })
   const queueRows: QueueRow[] = [
-    ...brokenRows.map((row): QueueRow => {
-      const item = 'one' in row ? row.one : row.items[0]
+    ...brokenRows.map((row) => {
+      if ('one' in row) {
+        return queueRow(`broken-${row.one.key}`, row.one.section, row.one.tone === 't-down', brokenIssue(row.one))
+      }
+      const first = row.items[0]
+      const sections = [...new Set(row.items.map((it) => sectionLabels[it.section] ?? it.section))]
+      const title = queuePreview(row.head)
       return {
-        key: 'one' in row ? 'broken-' + item.key : 'broken-group-' + row.grp,
-        area: tallyTile(item.section),
-        critical: item.tone === 't-down',
-        render: () => brokenGrpRow(row),
+        ...queueRow(`broken-group-${row.grp}`, first.section, false, {
+          icon: ISSUE_ICON[first.kind] ?? '⚠️', title,
+          name: t('серверов: {n}', { n: new Set(row.items.map((it) => it.id)).size }),
+          details: title !== row.head ? row.head : undefined,
+          actions: () => recheckAction(row.items.map(brokenRef)),
+        }, () => brokenMembers(row.items)),
+        sectionLabel: sections.join(' · '),
       }
     }),
     ...(canSee('sites') ? [
-      ...downChecks.map((c): QueueRow => ({
-        key: 'check-' + c.id, area: 'sites', critical: c.last_status === 'down', render: () => siteStatusRow(c),
-      })),
-      ...warns.map((w): QueueRow => ({
-        key: w.kind + '-' + w.id, area: 'sites', critical: w.days <= 3, render: () => warnRow(w),
-      })),
+      ...downChecks.map((c) => queueRow(`check-${c.id}`, 'sites', c.last_status === 'down', siteStatusIssue(c))),
+      ...warns.map((w) => queueRow(`${w.kind}-${w.id}`, 'sites', w.days <= 3, expiryIssue(w))),
     ] : []),
-    ...actionRows.map((row): QueueRow => ({
-      key: 'one' in row ? 'action-' + row.one.key : 'action-group-' + row.grp,
-      area: tallyTile('one' in row ? row.one.section : row.items[0].section),
-      critical: false,
-      render: () => grpRow(row),
-    })),
+    ...actionRows.map((row) => {
+      if ('one' in row) {
+        const it = row.one
+        const { name, text, preview } = actContent(it)
+        return queueRow(`action-${it.key}`, it.section, false, {
+          icon: it.icon, title: preview, name, country: it.cc, actions: () => actActions(it, true),
+          details: [preview !== text && text, it.tip && it.tip !== text && it.tip].filter(Boolean).join('\n'),
+          onOpen: () => onOpen(it.section, it.id, it.srv, it.sec),
+        })
+      }
+      const label = grpLabel(row.grp, t)
+      const title = queuePreview(label)
+      return queueRow(`action-group-${row.grp}`, row.items[0].section, false, {
+        icon: row.items.some((it) => it.icon === '⛔') ? '⛔' : row.items[0].icon, title,
+        name: t('серверов: {n}', { n: row.items.length }),
+        context: row.muted.length ? ` · ${t('заглушено {n}', { n: row.muted.length })}` : undefined,
+        details: title !== label ? label : undefined,
+        actions: () => recheckAction(row.items.flatMap(actRef)),
+      }, () => <ActGroup grp={row.grp} items={row.items} muted={row.muted} canMute={!isViewer}
+        onMute={muteActs} recheckItem={(it) => recheckAction(actRef(it))}
+        onOpen={(it) => onOpen(it.section, it.id, it.srv, it.sec)} />)
+    }),
   ]
   const loadingText = t('загрузка…')
   const unavailableText = t('Данные недоступны')
@@ -1331,7 +1293,9 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
             </section>
             <section id="home-issue-queue" className="chart-card home-queue home-triage__queue" aria-labelledby="home-issue-queue-title">
               <div className="home-queue-head">
-                <h2 id="home-issue-queue-title">{activeFilter.title} <span className="net-n">{issueCount(activeFilter.rows.length)}</span></h2>
+                <h2 id="home-issue-queue-title" ref={queueHeading} tabIndex={-1}>
+                  {activeFilter.title} <span className="net-n">{issueCount(activeFilter.rows.length)}</span>
+                </h2>
                 {selectedArea && (
                   <div className="home-queue-actions">
                     <button type="button" className="ghost small" onClick={() => setQueueArea(null)}>{t('Все разделы')}</button>
@@ -1354,19 +1318,11 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
                   <button type="button" className="ghost small" onClick={source.refresh}>{t('Повторить запрос')}</button>
                 </div>
               })}
-              {activeFilter.rows.length > 0 ? (
-                <Fragment key={`${selectedArea}-${queueSeverity}`}>
-                  <HomeQueueRows rows={queueSeverity === 'all' ? criticalRows : activeFilter.rows} />
-                  {queueSeverity === 'all' && warningRows.length > 0 && (
-                    <details className="home-queue-warnings">
-                      <summary><span>{t('Предупреждения')}</span><span className="net-n">{warningRows.length}</span></summary>
-                      <HomeQueueRows rows={warningRows} />
-                    </details>
-                  )}
-                </Fragment>
-              ) : (queueLoading || !queueIncomplete) && (
-                <p className="muted small home-queue-empty" role="status">{queueLoading ? loadingText : activeFilter.empty}</p>
-              )}
+              <HomeIssueQueue key={`${selectedArea}-${queueSeverity}`} rows={activeFilter.rows} criticalRows={criticalRows}
+                warningRows={warningRows} severity={queueSeverity} loading={queueLoading} focusEmpty={focusQueueHeading}
+                empty={(queueLoading || !queueIncomplete) && (
+                  <p className="muted small home-queue-empty" role="status">{queueLoading ? loadingText : activeFilter.empty}</p>
+                )} />
             </section>
           </div>
           <div className="home-queue-filters" role="group" aria-label={t('Фильтр по разделам')}>
@@ -1445,7 +1401,7 @@ export function HomePage({ onNavigate, onOpen, onUnauthorized }: Props) {
           )}
           {canSee('sites') && warnsOff.length > 0 && (
             <HomeDisclosure title={t('Заглушенные сроки сайтов')} count={warnsOff.length}>
-              <div className="home-attention-list">{warnsOff.map((w) => warnRow(w, true))}</div>
+              <div className="home-attention-list">{warnsOff.map(mutedExpiryRow)}</div>
             </HomeDisclosure>
           )}
         </div>

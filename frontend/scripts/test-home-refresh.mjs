@@ -24,6 +24,10 @@ const defaults = {
 
 const selectWarnings = (page) => page.getByRole('group', { name: 'Фильтр по важности' })
   .getByRole('button', { name: /^Предупреждения/ }).click()
+const rows = (queue) => queue.locator('button.home-queue-row')
+const issue = (queue, text) => rows(queue).filter({ hasText: text })
+const inspector = (queue) => queue.locator('.home-queue-inspector')
+const recheck = (queue) => inspector(queue).getByRole('button', { name: 'Исправил: перепроверить', exact: true })
 
 async function fixture(handler, verify) {
   const page = await browser.newPage({ viewport: { width: 1400, height: 950 } })
@@ -75,7 +79,8 @@ async function staleRecheck() {
     fixed = true
     return route.fulfill({ json: [{ ...fresh, status: 'fixed' }] })
   }, async (page, queue) => {
-    const button = queue.getByRole('button', { name: 'Исправил: перепроверить', exact: true })
+    await issue(queue, check.name).click()
+    const button = recheck(queue)
     const summary = page.locator('.home-recheck-summary')
     await button.getByText('Проблема осталась').waitFor()
     const readsBefore = overviewReads
@@ -94,6 +99,7 @@ async function staleRecheck() {
     finishNext.resolve()
     await summary.getByText('подтверждено исправление: 1', { exact: false }).waitFor()
     await queue.getByText('Нет активных проблем').waitFor()
+    await button.waitFor({ state: 'hidden' })
   })
   console.log('PASS stale recheck result discarded and current job confirmed')
 }
@@ -114,13 +120,16 @@ async function missingRecheck() {
     }
     return route.fulfill({ json: [] })
   }, async (page, queue) => {
-    const button = queue.getByRole('button', { name: 'Исправил: перепроверить', exact: true })
+    const row = issue(queue, check.name)
+    await row.click()
+    const button = recheck(queue)
     await button.click()
     await page.locator('.home-recheck-summary').getByText('Проверяю свежие данные…', { exact: false }).waitFor()
     await page.clock.runFor(2100)
     await button.getByText('Не удалось проверить').waitFor()
     assert(await button.isEnabled(), 'An inaccessible job must not block retries')
-    assert(await queue.getByText(check.name, { exact: true }).isVisible(), 'No result cannot clear the alert')
+    assert(await row.isVisible(), 'No result cannot clear the alert')
+    assert.equal(await row.getAttribute('aria-current'), 'true', 'No result must keep the inspected issue selected')
     await page.clock.runFor(4500)
     assert.equal(exactPolls, 1, 'The terminal unavailable job must stop polling')
   })
@@ -134,6 +143,7 @@ async function overviewErrors() {
     : fallback(), async (page, queue) => {
     const sites = page.getByRole('button', { name: /Сайты.*Данные недоступны/ })
     const siteError = queue.getByRole('status').filter({ hasText: 'Не удалось обновить данные о сайтах' })
+    const row = issue(queue, check.name)
     await siteError.waitFor()
     await sites.waitFor()
     assert.equal(await queue.getByText('Нет активных проблем').count(), 0)
@@ -145,14 +155,15 @@ async function overviewErrors() {
     await siteError.waitFor()
     failing = ''
     await queue.getByRole('button', { name: 'Повторить запрос' }).click()
-    await queue.getByText(check.name, { exact: true }).waitFor()
+    await row.click()
     await siteError.waitFor({ state: 'detached' })
 
     failing = '/api/checks/overview'
     await page.clock.fastForward(15_000)
     await siteError.waitFor()
     assert.match(await siteError.innerText(), /Данные на /)
-    assert(await queue.getByText(check.name, { exact: true }).isVisible(), 'The last good result must stay visible')
+    assert(await row.isVisible(), 'The last good result must stay visible')
+    assert.equal(await row.getAttribute('aria-current'), 'true', 'A failed refresh must preserve the selected issue')
     await page.getByRole('button', { name: /Сайты.*данные устарели/ }).waitFor()
 
     failing = '/api/servers'
@@ -160,7 +171,7 @@ async function overviewErrors() {
     await siteError.waitFor({ state: 'detached' })
     const serverError = queue.getByRole('status').filter({ hasText: 'Не удалось обновить данные о серверах' })
     await serverError.waitFor()
-    assert(await queue.getByText(check.name, { exact: true }).isVisible(), 'Server failure must preserve the site queue')
+    assert(await row.isVisible(), 'Server failure must preserve the site queue')
     failing = ''
     await queue.getByRole('button', { name: 'Повторить запрос' }).click()
     await serverError.waitFor({ state: 'detached' })
@@ -170,7 +181,7 @@ async function overviewErrors() {
 
 async function retireRace() {
   const id = 42, port = 1443, since = '2026-01-01T10:00:00Z'
-  const problem = { kind: 'listen_gone', level: 1, text: 'Demo listener missing', sec: 'exposure', since, listen_port: port }
+  const problem = { kind: 'listen_gone', level: 1, text: 'Primary demo listener missing', sec: 'exposure', since, listen_port: port }
   const other = { ...problem, text: 'Second demo listener missing', listen_port: 2443 }
   const old = {
     id, name: 'Demo TCP host', online: true, group_name: '', agent_version: '9.9.0',
@@ -199,25 +210,28 @@ async function retireRace() {
     return route.fulfill({ json: [old] })
   }, async (page, queue) => {
     await selectWarnings(page)
-    const button = queue.getByRole('button', { name: 'Порт больше не нужен', exact: true })
-    await button.first().waitFor()
+    const first = issue(queue, problem.text)
+    const second = issue(queue, other.text)
+    const button = inspector(queue).getByRole('button', { name: 'Порт больше не нужен', exact: true })
+    await first.click()
     phase = 'stale'
     await page.clock.fastForward(15_000)
     await staleStarted.promise
-    await button.first().click()
+    await button.click()
     await retireStarted.promise
-    await button.last().click()
-    await queue.getByText(other.text, { exact: false }).waitFor({ state: 'detached' })
+    await second.click()
+    await button.click()
+    await second.waitFor({ state: 'detached' })
     finishRetire.resolve()
-    await button.first().waitFor({ state: 'detached' })
+    await first.waitFor({ state: 'detached' })
     const staleResponse = page.waitForResponse((r) => r.url().endsWith('/api/servers'))
     finishStale.resolve()
     await (await staleResponse).finished()
     await page.clock.runFor(500)
-    assert.equal(await button.count(), 0, 'Neither a preceding refresh nor an out-of-order retirement may restore a retired alert')
+    assert.equal(await first.count() + await second.count(), 0, 'Neither a stale refresh nor an out-of-order retirement may restore a retired alert')
     phase = 'recurred'
     await page.clock.fastForward(15_000)
-    await queue.getByText('Demo listener stopped again', { exact: false }).waitFor()
+    await issue(queue, 'Demo listener stopped again').waitFor()
   })
   console.log('PASS retirement with a stale refresh, out-of-order responses and a later incident')
 }
@@ -247,18 +261,27 @@ async function parallelMutes() {
     return route.fulfill({ json: { ...host, alert_mutes: mutes } })
   }, async (page, queue) => {
     await selectWarnings(page)
-    const problem = (i) => queue.locator('.home-attention-row').filter({ hasText: problems[i].text })
-    const mute = (i) => problem(i).getByTitle('Не алертить', { exact: true })
-    await mute(0).click()
+    const problem = (i) => issue(queue, problems[i].text)
+    const mute = inspector(queue).getByRole('button', { name: 'Не алертить', exact: true })
+    const permanent = inspector(queue).getByRole('button', { name: 'постоянно', exact: true })
+    await problem(0).click()
+    await mute.click()
     await firstStarted.promise
-    await mute(1).click()
+    await problem(1).click()
+    await mute.click()
     await problem(1).waitFor({ state: 'detached' })
-    await mute(2).click()
-    assert.equal(await problem(3).getByText('постоянно', { exact: true }).count(), 0, 'One mute key may be shared by separate rows')
+    await problem(2).click()
+    await mute.click()
+    await permanent.waitFor()
+    await problem(3).click()
+    await mute.waitFor()
+    assert.equal(await permanent.count(), 0, 'One mute key may be shared by separate rows')
+    await problem(2).click()
+    await permanent.waitFor()
     finishFirst.resolve()
     await problem(0).waitFor({ state: 'detached' })
     assert.equal(await problem(1).count(), 0, 'A completed mute must survive the other response')
-    assert(await problem(2).getByText('постоянно', { exact: true }).isVisible(), 'A refresh must keep the mute picker on the same problem')
+    assert(await permanent.isVisible(), 'A refresh must keep the selected issue and its mute picker')
     assert.deepEqual(mutes, ['offline', problems[1].mute, problems[0].mute])
     assert.deepEqual(writes, problems.slice(0, 2).map(({ mute }) => ({ add: [mute], remove: [], replace_same_group: false })))
   })
@@ -277,8 +300,8 @@ async function servicesScope() {
     if (pathname === '/api/checks/overview' || pathname === '/api/checks/local-probe-suggestions') siteReads++
     return fallback()
   }, async (page, queue) => {
-    await queue.getByText(problem.text, { exact: false }).waitFor()
-    assert.equal(await queue.getByText(hidden.text, { exact: false }).count(), 0)
+    await issue(queue, problem.text).waitFor()
+    assert.equal(await issue(queue, hidden.text).count(), 0)
     const filter = page.locator('.home-queue-filter').getByText('Сервисы', { exact: true })
     await filter.click()
     await queue.getByRole('button', { name: /Открыть раздел/ }).click()

@@ -40,6 +40,7 @@ const servers = [{
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PW_CHROME })
 try {
   const page = await browser.newPage({ viewport: { width: 850, height: 900 } })
+  page.setDefaultTimeout(8000)
   const errors = [], posts = [], jobs = [], changes = []
   page.on('pageerror', (error) => errors.push(error.message))
   await page.addInitScript(() => {
@@ -92,29 +93,34 @@ try {
   })
 
   await page.goto(base)
-  const card = page.locator('#home-issue-queue')
-  const row = (name) => card.locator('.home-attention-row').filter({ has: page.getByText(name, { exact: true }) })
+  const queue = page.locator('#home-issue-queue')
+  const card = queue.locator('.home-queue-inspector')
+  const row = (name) => queue.locator('button.home-queue-row').filter({ hasText: name })
   const grouped = row(domain)
   const status = row(statusName)
   const ssl = row(sslName)
-  const snapshot = async (name) => { if (out) await card.screenshot({ path: path.join(out, `${name}.png`) }) }
-  const recheck = (item) => item.getByRole('button', { name: 'Исправил: перепроверить', exact: true })
+  const snapshot = async (name) => { if (out) await queue.screenshot({ path: path.join(out, `${name}.png`) }) }
+  const recheck = card.getByRole('button', { name: 'Исправил: перепроверить', exact: true })
+  const snooze = card.getByRole('button', { name: 'Напомнить позже или не следить за сертификатом', exact: true })
 
-  await card.locator('details.home-queue-warnings > summary').click()
-  await grouped.getByText('доступно 1 из 9').waitFor()
+  await queue.locator('details.home-queue-warnings > summary').click()
+  await grouped.waitFor()
   await ssl.waitFor()
-  assert.equal(await recheck(ssl).count(), 0, 'Unavailable recheck button must be absent')
   for (const width of [850, 1440, 390, 320]) {
     await page.setViewportSize({ width, height: 900 })
+    await grouped.click()
+    await card.getByText('доступно 1 из 9').waitFor()
+    await card.getByText(domain, { exact: true }).waitFor()
     await snapshot(`sites-${width}`)
-    const name = await grouped.getByText(domain, { exact: true }).evaluate((element) => {
+    const name = await grouped.locator('.home-queue-row-meta').evaluate((element) => {
       const range = document.createRange()
       range.selectNodeContents(element)
-      return range.getClientRects().length
+      return new Set([...range.getClientRects()].map(rect => rect.y)).size
     })
-    assert(name <= (width === 320 ? 2 : 1), `Domain name breaks into ${name} lines at ${width}px`)
+    assert.equal(name, 1, `The queue must keep the domain metadata on one line at ${width}px`)
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `Page overflow at ${width}px`)
-    assert(await card.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), `Site card overflow at ${width}px`)
+    assert(await queue.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), `Site queue overflow at ${width}px`)
+    assert(await card.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), `Site inspector overflow at ${width}px`)
     for (const item of [grouped, status, ssl]) {
       assert(await item.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), `Site alert overflow at ${width}px`)
     }
@@ -123,24 +129,32 @@ try {
   await snapshot('sites-320-light')
   await page.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
 
-  await recheck(grouped).click()
-  await grouped.getByText('Проблема осталась').waitFor()
+  await recheck.click()
+  await card.getByText('Проблема осталась').waitFor()
   assert.deepEqual(posts[0], { pathname: '/api/alert-rechecks', body: { object_type: 'check', object_id: 1, kind: 'domain' } })
-  await recheck(status).click()
-  await status.getByText('Проблема осталась').waitFor()
+  await status.click()
+  await recheck.click()
+  await card.getByText('Проблема осталась').waitFor()
   assert.deepEqual(posts[1], { pathname: '/api/alert-rechecks', body: { object_type: 'check', object_id: 10, kind: 'status' } })
 
-  await ssl.getByRole('button', { name: 'Напомнить позже или не следить за сертификатом', exact: true }).press('Enter')
+  await ssl.click()
+  await snooze.waitFor()
+  assert.equal(await recheck.count(), 0, 'Unavailable recheck button must be absent')
+  await snooze.press('Enter')
   await snapshot('sites-320-snooze')
-  assert(await ssl.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), 'Open snooze options overflow')
-  await ssl.getByRole('button', { name: 'за 7 дн.', exact: true }).click()
+  assert(await card.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), 'Open snooze options overflow')
+  await card.getByRole('button', { name: 'напомнить за 7 дней', exact: true }).click()
+  await ssl.waitFor({ state: 'detached' })
+  await card.waitFor({ state: 'hidden' })
   const snoozed = page.locator('.home-disclosure').filter({ has: page.locator('summary', { hasText: 'Заглушенные сроки сайтов' }) })
   await snoozed.locator('summary').click()
   await snoozed.locator('.home-attention-row').filter({ hasText: sslName }).getByRole('button', { name: 'вернуть', exact: true }).click()
-  await ssl.locator('.quick-mute').waitFor()
+  await ssl.click()
+  await snooze.waitFor()
   assert.deepEqual(posts.slice(2), [7, null].map(mode => ({ pathname: '/api/checks/11/expiry-snooze', body: { kind: 'ssl', mode } })))
 
-  await grouped.locator('.home-open').click()
+  await grouped.click()
+  await card.getByRole('button', { name: 'Открыть объект', exact: true }).click()
   await page.waitForURL((url) => url.searchParams.get('check') === '1')
   assert.deepEqual(errors, [], 'Browser runtime errors')
 
@@ -160,7 +174,7 @@ try {
     assert.equal(await page.locator('.note-chip[title*="Demo upcoming window"]').count(), 0)
   }
   await page.getByTitle('На главную', { exact: true }).click()
-  await card.waitFor()
+  await queue.waitFor()
   for (const { title } of maintenance) {
     assert.equal(await page.getByText(title, { exact: false }).count(), 0, 'Maintenance windows must stay off the home page')
   }
@@ -192,7 +206,7 @@ try {
   await page.locator('.alerts-modal').getByRole('button', { name: 'Закрыть', exact: true }).click()
   await page.locator('.detail-server').getByTitle('Закрыть', { exact: true }).click()
   await page.getByTitle('На главную', { exact: true }).click()
-  await card.waitFor()
+  await queue.waitFor()
   assert.equal(await updates.count(), 0, 'An excluded server must not keep a pending update')
   await page.goto(new URL('/?server=42', base).href)
   await editSettings()

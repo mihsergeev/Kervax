@@ -29,7 +29,6 @@ try {
     throw new Error(message)
   }
   const control = async (data) => assert.equal((await page.request.post(`${base}/lab/control`, { data })).status(), 200)
-  const click = async (row) => row.getByRole('button', { name: 'Исправил: перепроверить', exact: true }).click()
   const screenshot = async (name) => {
     if (!screenshots) return
     await fs.mkdir(screenshots, { recursive: true })
@@ -41,17 +40,26 @@ try {
   await page.evaluate((t) => localStorage.setItem('kervax_token', t), token)
   await page.reload()
   const queue = page.locator('#home-issue-queue')
-  const group = queue.locator('.home-attention-grpbox').filter({ hasText: 'WordPress 6.0.0' })
-  await group.waitFor()
-  await click(group)
+  const card = queue.locator('.home-queue-inspector')
+  const row = (label) => queue.locator('button.home-queue-row').filter({ hasText: label })
+  const recheck = async (target) => {
+    await target.click()
+    await card.locator(':scope > div > .home-queue-inspector-actions')
+      .getByRole('button', { name: 'Исправил: перепроверить', exact: true }).click()
+  }
+  await queue.locator('details.home-queue-warnings > summary').click()
+  const remaining = row('Demo site B')
+  await recheck(row('WordPress 6.0.0'))
   await wait(async () => {
     const rows = (await jobs()).filter((x) => x.kind === 'tamper')
     return rows.length === 2 && rows.some((x) => x.status === 'fixed') && rows.some((x) => x.status === 'remains')
   }, 'Partial CMS group result missing')
-  await wait(async () => !(await queue.innerText()).includes('Demo site A') &&
-    (await queue.innerText()).includes('Demo site B'), 'Fixed group member remained on home page')
+  await remaining.waitFor()
+  assert.equal(await row('Demo site A').count(), 0, 'Fixed group member remained on home page')
   await screenshot('recheck-desktop-partial')
   await page.setViewportSize({ width: 390, height: 844 })
+  await remaining.click()
+  await card.waitFor()
   await screenshot('recheck-mobile-partial')
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Mobile horizontal overflow')
   await page.setViewportSize({ width: 1440, height: 1000 })
@@ -59,22 +67,22 @@ try {
 
   await control({ b: 'failed' })
   await page.waitForTimeout(5200)
-  const remaining = queue.locator('.home-attention-row').filter({ hasText: 'Demo site B' }).first()
-  await click(remaining)
+  await recheck(remaining)
   await wait(async () => (await jobs()).some((x) => x.kind === 'tamper' && x.status === 'unavailable'), 'HTTP failure falsely treated as recovery')
-  await wait(async () => (await remaining.innerText()).includes('Не удалось проверить'), 'Unavailable result absent in the row')
+  await card.getByText('Не удалось проверить', { exact: false }).waitFor()
+  assert(await remaining.isVisible(), 'An unavailable result must keep the alert visible')
   await screenshot('recheck-desktop-unavailable')
   console.log('PASS unavailable HTTP observation keeps the alert visible')
 
   await control({ b: '6.0.1' })
   await page.waitForTimeout(5200)
-  await click(remaining)
+  await recheck(remaining)
   await wait(async () => (await jobs()).filter((x) => x.kind === 'tamper').every((x) => x.status === 'fixed'), 'CMS recovery not verified')
   await wait(async () => !(await queue.innerText()).includes('Demo site'), 'CMS alert did not clear')
 
   await control({ cert_days: 365 })
-  const cert = queue.locator('.home-attention-row').filter({ hasText: 'Demo cluster' }).first()
-  await click(cert)
+  const cert = row('Demo cluster')
+  await recheck(cert)
   await wait(async () => (await jobs()).some((x) => x.kind === 'kube_expiry' && x.status === 'fixed'), 'Sandboxed agent did not verify renewed certificate', 60000)
   await cert.waitFor({ state: 'detached' })
   await screenshot('recheck-desktop-recovered')
