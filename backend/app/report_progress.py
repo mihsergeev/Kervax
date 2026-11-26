@@ -33,12 +33,12 @@ def _age(at, now):
         return None
 
 
-def _candidate(old, clock, uptime, now):
+def _candidate(old, clock, uptime, now, max_gap):
     previous = old.get("candidate")
     previous = previous if isinstance(previous, dict) else {}
     age = _age(previous.get("at"), now)
     old_clock, old_up = _number(previous.get("clock")) or 0, _number(previous.get("up")) or 0
-    if age is not None and 0 <= age <= MAX_SAME_SECONDS:
+    if age is not None and 0 <= age <= max_gap:
         if clock == old_clock and uptime == old_up:
             return old, False, False
         ordered = clock > old_clock and uptime > old_up
@@ -51,7 +51,7 @@ def _candidate(old, clock, uptime, now):
     return {**old, "candidate": {**point, "n": count}}, False, False
 
 
-def step(previous, report: dict, now: datetime) -> tuple[dict | None, bool, bool]:
+def step(previous, report: dict, now: datetime, *, max_gap: float = MAX_SAME_SECONDS) -> tuple[dict | None, bool, bool]:
     """(stored progress, usable observation, continuity break).
 
     A new report is usable after a scheduler gap, but the gap cannot satisfy a
@@ -72,12 +72,12 @@ def step(previous, report: dict, now: datetime) -> tuple[dict | None, bool, bool
     epoch = not old_clock or old_clock is None or old_up is None
     old_clock, old_up = old_clock or 0, old_up or 0
     age = _age(old.get("at"), now)
-    if age is None or not 0 <= age <= MAX_SAME_SECONDS:
+    if age is None or not 0 <= age <= max_gap:
         epoch = True
     if old_clock:
         if clock < old_clock:
             if uptime and old_up and uptime < old_up:
-                return _candidate(old, clock, uptime, now)
+                return _candidate(old, clock, uptime, now, max_gap)
             if not (uptime and old_up and uptime > old_up):
                 return old, False, False
             epoch = True  # advancing uptime proves progress across a clock correction
@@ -89,5 +89,5 @@ def step(previous, report: dict, now: datetime) -> tuple[dict | None, bool, bool
             if age is None:
                 # Missing/corrupt legacy progress cannot confirm an elapsed hold.
                 return {"clock": clock, "up": uptime, "at": now.isoformat()}, True, True
-            return {k: v for k, v in old.items() if k != "candidate"}, 0 <= age <= MAX_SAME_SECONDS, False
+            return {k: v for k, v in old.items() if k != "candidate"}, 0 <= age <= max_gap, False
     return {"clock": clock, "up": uptime, "at": now.isoformat()}, True, epoch

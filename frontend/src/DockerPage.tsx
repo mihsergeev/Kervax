@@ -513,6 +513,7 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
   const { t } = useI18n()
   const [busy, setBusy] = useState('')
   const items = s.docker_risk ?? []
+  const pending = s.docker_risk_pending ?? []
   const live = items.filter((x) => !x.muted && !x.note)
   const muted = items.filter((x) => x.muted)
   // блок шагов общий у контейнеров одного проекта: показать один раз
@@ -566,6 +567,13 @@ function RiskWarning({ server: s, canAct, onChanged }: { server: Server; canAct:
             </div>
           ))}
         </>
+      )}
+      {pending.length > 0 && (
+        <div className="net-foot">
+          {t('Ожидаем подтверждения по отчетам агента: {list}', {
+            list: pending.map((x) => `${x.name} (${dockRiskText(x, t)})`).join(', '),
+          })}
+        </div>
       )}
       {muted.length > 0 && (
         <div className="net-foot hs-muted-list">
@@ -1051,8 +1059,10 @@ function DockerHostModal({
   { live: (p) => !p.muted, on: cur.id === 'proxy' })
   const sockDone = useFixDone(watch ? exposed : null, (e) => e.name, (e) => goneText(e.name, () =>
     t('{name}: docker-сокет больше не смонтирован, замечание закрыто', { name: e.name })), { on: cur.id === 'host' })
-  const riskDone = useFixDone(watch ? s.docker_risk : null, (x) => x.name, (x) => goneText(x.name, () =>
-    t('{name}: ключей от хоста больше нет (было: {what}), замечание закрыто', { name: x.name, what: dockRiskText(x, t) })),
+  const riskKnown = s.docker_risk_observed ?? !!s.docker_risk
+  const riskDone = useFixDone(watch && riskKnown && !s.docker_risk_pending?.length ? s.docker_risk : null,
+    (x) => x.name, (x) => goneText(x.name, () =>
+      t('{name}: ключей от хоста больше нет (было: {what}), замечание закрыто', { name: x.name, what: dockRiskText(x, t) })),
   { live: (x) => !x.muted, on: cur.id === 'host' })
   const bootDone = useFixDone(watch ? s.noboot?.docker : null, (x) => x.name, (x) => goneText(x.name, (c) => c.unit
     ? t('{name}: его запускает юнит {unit}, замечание закрыто', { name: x.name, unit: c.unit })
@@ -1121,7 +1131,8 @@ function DockerHostModal({
       ? [t('запущено {a} из {b}', { a: running, b: cs.length }), stopped ? t('остановлено: {n}', { n: stopped }) : '']
           .filter(Boolean).join(', ')
       : t('Контейнеров нет'),
-    host: s.docker_risk ? t('ключей от хоста ни у кого нет') : t('нет данных'),
+    host: s.docker_risk_pending?.length ? t('риск проверяется')
+      : riskKnown ? t('ключей от хоста ни у кого нет') : t('нет данных'),
     proxy: oldLive.length
       ? ''
       : outdated.length
@@ -1136,7 +1147,7 @@ function DockerHostModal({
   // unhealthy - не авария, но и не "все в порядке": желтым на карте, без числа в меню
   if (live && unhealthy.length && !info.containers.level)
     info.containers = { ...info.containers, level: 1, line: t('unhealthy: {list}', { list: shortList(unhealthy.map((c) => c.name), t, 3) }) }
-  if (!s.docker_risk && !info.host.level) info.host.idle = true
+  if (!riskKnown && !info.host.level) info.host.idle = true
   if (!policyKnown && !info.boot.level) info.boot.idle = true
   if (live) {
     const riskAll = (s.docker_risk ?? []).filter((x) => !x.muted && !x.note)
@@ -1311,13 +1322,15 @@ function DockerHostModal({
                   {sockDone.bars}
                   {riskDone.bars}
                   {exposed.length > 0 && <SockWarning items={exposed} server={s} />}
-                  {(s.docker_risk ?? []).some((x) => x.muted || !x.note) && <RiskWarning server={s} canAct={canAct} onChanged={onChanged} />}
+                  {((s.docker_risk ?? []).some((x) => x.muted || !x.note) || !!s.docker_risk_pending?.length) && (
+                    <RiskWarning server={s} canAct={canAct} onChanged={onChanged} />
+                  )}
                   {(s.docker_risk ?? []).some((x) => x.note && !x.muted) && <DindNote server={s} canAct={canAct} onChanged={onChanged} />}
-                  {!exposed.length && !(s.docker_risk?.length ?? 0) && !sockDone.done.length && !riskDone.done.length && (
+                  {!exposed.length && !s.docker_risk?.length && !s.docker_risk_pending?.length && !sockDone.done.length && !riskDone.done.length && (
                     <div className="srv-empty">
-                      {s.docker_risk
+                      {riskKnown
                         ? t('Ни у одного контейнера нет ключей от хоста: ни docker-сокета, ни privileged, ни опасных capabilities, ни корня хоста на запись.')
-                        : t('Агент этой ноды еще не отдает ключи контейнеров от хоста: обновите агент.')}
+                        : t('Нет свежего отчета о ключах контейнеров от хоста.')}
                     </div>
                   )}
                   {(s.docker_risk_start?.length ?? 0) > 0 && <StartCapsNote items={s.docker_risk_start ?? []} />}

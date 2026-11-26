@@ -382,7 +382,8 @@ def _out(
     o.country = geoip.country_of(server.external_ip) or geoip.country_of(server.agent_ip)
     o.docker_alerts = _docker_alerts(server)
     o.docker_exposed = docker_exposure.view(server.last_report or {}, _fresh_node(server, now))
-    o.docker_risk = docker_risk.view(server, fix=True)
+    o.docker_risk, o.docker_risk_pending = docker_risk.split(server, fix=True)
+    o.docker_risk_observed = docker_risk.complete(report)
     o.docker_risk_start = docker_risk.start_caps(server)
     o.exposure = open_ports.view(server)
     if o.exposure is not None:
@@ -4290,6 +4291,7 @@ async def agent_report(
         report_dict["clock_skew_sec"] = cw["win"][0][1]
     # каким путем пришел отчет (туннель GRE или напрямую) и с каких пор этим путем: для пометки в карточке
     gre_mod.track_path(server, prev_rep, report_dict, via_gre, now)
+    docker_risk.observe(server, report_dict, now, interval=get_settings().server_report_interval)
     server.last_report = report_dict
     server.last_seen = now
     if body.pkg_ev:

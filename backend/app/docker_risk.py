@@ -27,6 +27,8 @@ cgroup контейнера, containerd-shim - контейнеры внутри
 
 Контейнер, который так устроен намеренно, глушится точечно (alert_mutes "dockrisk:<имя>"), весь
 пункт - ключом "docker_risk".
+Предупреждение появляется после 10 минут свежих наблюдений одного экземпляра. До этого
+текущий риск виден в карточке Docker в ожидании подтверждения.
 
 Как исправить (fix): копия compose, правка строки в блоке сервиса, пересоздать сервис, откат. Папка,
 файлы и сервис - из меток compose (агент 2.41, compose_cmd); контейнеры одного проекта с одними
@@ -36,12 +38,16 @@ from __future__ import annotations
 
 import re
 import shlex
+from datetime import datetime, timezone
 
-from app import compose_cmd, docker_exposure, docker_origin, tg_fmt
+from app import compose_cmd, docker_exposure, docker_origin, report_progress, tg_fmt
 from app.models import Server
 
 MUTE_PREFIX = "dockrisk:"
 MUTE_ALL = "docker_risk"
+OBSERVATIONS = "docker_risk_observations"
+CONFIRM_SECONDS = 10 * 60
+MIN_REPORTS = 3
 
 _SOCK_FILES = ("/docker.sock", "/containerd.sock", "/podman.sock")
 _SOCK_DIRS = frozenset({"/run", "/var/run"})
@@ -186,20 +192,21 @@ def view(srv: Server, fix: bool = False) -> list[dict]:
     muted=True. dind - docker внутри у privileged (dind()). Живой docker внутри - privileged не
     ключ: других ключей нет - заметка (note=True, flags ["priv"]), есть - privileged из flags убран.
     fix - незаглушенным ключам еще "fix": блок шагов (fixes), один на контейнеры одного проекта."""
-    rep = srv.last_report or {}
-    dk = rep.get("docker") or {}
+    return _view(srv.last_report or {}, srv.alert_mutes or [], fix)
+
+
+def _view(rep: dict, mutes: list[str], fix: bool = False) -> list[dict]:
+    dk = rep.get("docker")
+    if not isinstance(dk, dict):
+        return []
     if not dk.get("access"):
         return []
     new = _new_agent(rep)
     edge = {e["name"] for e in docker_exposure.exposed(rep)}
-    mutes = set(srv.alert_mutes or [])
+    mutes = set(mutes)
     out = []
-    cs: dict[str, dict] = {}
-    for c in dk.get("containers") or []:
-        if not isinstance(c, dict):
-            continue
-        name = str(c.get("name") or "")
-        cs[name] = c
+    cs = _containers(rep)
+    for name, c in cs.items():
         if c.get("state") != "running":
             continue
         ok = allowed(name, str(c.get("image") or ""))
@@ -224,12 +231,181 @@ def view(srv: Server, fix: bool = False) -> list[dict]:
             if note:
                 out[-1]["note"] = True
     if fix:
-        live = [x for x in out if not x["muted"] and not x.get("note")]
-        for blk in fixes(live, cs):
-            for x in live:
-                if x["name"] in blk["names"]:
-                    x["fix"] = blk
+        _attach_fixes(out, cs)
     return out
+
+
+def _attach_fixes(items: list[dict], containers: dict[str, dict]) -> None:
+    live = {x["name"]: x for x in items if not x["muted"] and not x.get("note")}
+    for block in fixes(list(live.values()), containers):
+        for name in block["names"]:
+            live[name]["fix"] = block
+
+
+def _inventory(rep: dict) -> list[dict] | None:
+    dk = rep.get("docker")
+    if not isinstance(dk, dict) or not dk.get("access") or dk.get("containers_complete") is False:
+        return None
+    # Go omits an empty list, but still emits containers_complete=true. Older
+    # agents did not mark failed listings and retain their empty-list contract.
+    containers = dk.get("containers", [])
+    if not isinstance(containers, list) or not all(isinstance(c, dict) and c.get("name") and c.get("state")
+            and all(c.get(key) is None or (isinstance(c[key], list) and all(isinstance(x, str) for x in c[key]))
+                    for key in ("binds", "ro", "caps")) for c in containers):
+        return None
+    return containers
+
+
+def _containers(rep: dict) -> dict[str, dict]:
+    dk = rep.get("docker")
+    raw = dk.get("containers") if isinstance(dk, dict) else None
+    return {str(c.get("name") or ""): c for c in raw if isinstance(c, dict)} if isinstance(raw, list) else {}
+
+
+def signature(item: dict) -> str:
+    return f"{item['name']}:{','.join(item['flags'])}"
+
+
+def _identity(name: str, container: dict) -> str:
+    cid = container.get("id")
+    return f"id:{cid}" if isinstance(cid, str) and cid else f"name:{name}:{container.get('image') or ''}"
+
+
+def _instance(item: dict, container: dict) -> str:
+    return f"{_identity(item['name'], container)}:{','.join(item['flags'])}"
+
+
+_UP_TIME = re.compile(r"^Up (\d{1,5}|(?:About )?an?) (second|minute|hour|day|week|month|year)s?\b")
+_UP_UNITS = {"second": 1, "minute": 60, "hour": 3600, "day": 86400,
+             "week": 604800, "month": 2592000, "year": 31536000}
+
+
+def _legacy_old_enough(container: dict) -> bool:
+    # До агента 2.46 ID в отчете не было. Docker Status позволяет отличить
+    # запущенный давно контейнер от новой копии с тем же именем и образом.
+    status = str(container.get("status") or "")
+    if container.get("id") or not status.startswith("Up "):
+        return True
+    m = _UP_TIME.match(status)
+    if not m:
+        return False
+    n, unit = m.groups()
+    return (int(n) if n.isdigit() else 1) * _UP_UNITS[unit] >= CONFIRM_SECONDS
+
+
+def _legacy_active(srv: Server) -> set[str]:
+    state = srv.alert_state or {}
+    return set(state.get(f"{MUTE_ALL}_sig") or state.get(f"{MUTE_ALL}_told") or []) if state.get(MUTE_ALL) else set()
+
+
+def _progress_input(rep: dict) -> dict:
+    # Uptime also distinguishes retries when a legacy agent has no wall clock.
+    return rep if rep.get("clock_unix") else {**rep, "clock_unix": rep.get("uptime_seconds") or 0}
+
+
+def observe(srv: Server, rep: dict, now: datetime, *, interval: int = 15) -> None:
+    """Вызывается на приеме каждого отчета под блокировкой строки сервера."""
+    prev = srv.last_report or {}
+    old = prev.get(OBSERVATIONS) or {}
+    complete = _inventory(rep) is not None
+    if not complete and not old and _inventory(prev) is None:
+        return
+
+    prior = old.get("progress")
+    if not old and srv.last_seen is not None:
+        seen = srv.last_seen
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        prior, _, _ = report_progress.step(None, _progress_input(prev), seen)
+    members = old.get("members") or {}
+    if not old and _inventory(prev) is not None and (active := _legacy_active(srv)):
+        previous_containers = _containers(prev)
+        members = {_instance(item, previous_containers[item["name"]]): {"ready": True}
+                   for item in _view(prev, []) if signature(item) in active and not item.get("note")}
+    max_gap = max(report_progress.MAX_SAME_SECONDS, interval + 60)
+    progress, fresh, epoch = report_progress.step(prior, _progress_input(rep), now, max_gap=max_gap)
+    # step() допускает повтор снимка для чтения, но повтор не подтверждает длительность.
+    if not fresh or (progress and prior and progress.get("at") == prior.get("at")):
+        rep[OBSERVATIONS] = {**old, "valid": False, "progress": progress, "members": members}
+        return
+
+    stamp = now.timestamp()
+    old_at = old.get("at")
+    continuous = (not epoch and bool(progress) == bool(prior)
+                  and isinstance(old_at, (int, float)) and 0 < stamp - old_at <= max_gap)
+    if progress and prior and not 0 < progress["clock"] - prior["clock"] <= max_gap:
+        continuous = False
+    updated = {}
+    unknown = set()
+    active = False
+    if complete:
+        containers = _containers(rep)
+        # With the modern inventory marker, inspect always emits compose={} on
+        # success, even for docker run. A failed inspect of a formerly unsafe
+        # running container cannot prove it lost host access.
+        if rep["docker"].get("containers_complete") is True:
+            uninspected = {_identity(name, c) for name, c in containers.items()
+                           if c["state"] == "running" and not isinstance(c.get("compose"), dict)}
+            unknown = {key for key, item in members.items()
+                       if item.get("ready") and key.rpartition(":")[0] in uninspected}
+        mutes = set(srv.alert_mutes or [])
+        for item in _view(rep, []):
+            if item.get("note"):
+                continue
+            c = containers[item["name"]]
+            key = _instance(item, c)
+            last = members.get(key) or {}
+            first = last.get("first", stamp) if continuous else stamp
+            count = min(MIN_REPORTS, last.get("n", 0) + 1) if continuous else 1
+            ready = _legacy_old_enough(c) and (
+                last.get("ready") or (count >= MIN_REPORTS and stamp - first >= CONFIRM_SECONDS))
+            updated[key] = {"ready": True} if ready else {"first": first, "n": count}
+            if ready and MUTE_ALL not in mutes and MUTE_PREFIX + item["name"] not in mutes:
+                active = True
+            unknown.discard(key)
+        updated.update((key, members[key]) for key in unknown)
+    else:
+        # Нет снимка: объявленный риск не восстановился, но выдержку нового не засчитываем.
+        updated = {key: item for key, item in members.items() if item.get("ready")}
+
+    clean = None
+    if complete and not unknown and not active:
+        clean = (old.get("clean_since") or stamp) if continuous else stamp
+    rep[OBSERVATIONS] = {"valid": complete, "progress": progress, "at": stamp, "members": updated,
+                         "unknown": bool(unknown), "clean_since": clean}
+
+
+def observed(rep: dict) -> bool:
+    return bool((rep.get(OBSERVATIONS) or {}).get("valid"))
+
+
+def complete(rep: dict) -> bool:
+    return observed(rep) and not rep[OBSERVATIONS].get("unknown")
+
+
+def recovered(rep: dict, seconds: float) -> bool:
+    obs = rep.get(OBSERVATIONS) or {}
+    since = obs.get("clean_since")
+    return complete(rep) and since is not None and obs["at"] - since >= max(0, seconds)
+
+
+def split(srv: Server, fix: bool = False) -> tuple[list[dict], list[dict]]:
+    """Подтвержденные риски и заметки отдельно от текущих фактов на выдержке."""
+    rep = srv.last_report or {}
+    obs = rep.get(OBSERVATIONS) or {}
+    members = obs.get("members") or {}
+    old_sig = _legacy_active(srv) if not obs else set()
+    containers = _containers(rep)
+    confirmed, pending = [], []
+    for item in view(srv):
+        key = _instance(item, containers[item["name"]])
+        if item.get("note") or signature(item) in old_sig or (members.get(key) or {}).get("ready"):
+            confirmed.append(item)
+        else:
+            pending.append(item)
+    if fix:
+        _attach_fixes(confirmed, containers)
+    return confirmed, pending
 
 
 def start_caps(srv: Server) -> list[dict]:
@@ -251,11 +427,11 @@ def start_caps(srv: Server) -> list[dict]:
     return out
 
 
-def advice(srv: Server) -> list[dict]:
+def advice(srv: Server, confirmed: list[dict] | None = None) -> list[dict]:
     """Для "Требует действий": незаглушенные, пока не заглушен весь пункт. Заметки (note) - нет."""
     if MUTE_ALL in set(srv.alert_mutes or []):
         return []
-    return [x for x in view(srv) if not x["muted"] and not x.get("note")]
+    return [x for x in (split(srv)[0] if confirmed is None else confirmed) if not x["muted"] and not x.get("note")]
 
 
 def text(items: list[dict]) -> str:

@@ -320,6 +320,108 @@ def test_script_cause_steps_use_its_policy():
     assert _ids(fx) == ["script_log", "script_dry", "script_run"]
     assert "--dry-run --no-lock --group-by host,tags --keep-last 3 --keep-daily 7 --keep-weekly 4 --keep-monthly 6" in fx[1]["cmd"]
     assert ". /app/rest-server/system/envs/repo-d.env" in fx[1]["cmd"]
+    fx = bsrv_cleanup.script_fix("repo-d", {}, (0, 44))
+    assert fx[1] == {"id": "prune_preview", "cmd": f"{bsrv_cleanup.HELPER} prune-preview repo-d"}
+
+
+def test_repository_card_preview_for_healthy_managed_repositories():
+    now = datetime.now(timezone.utc)
+    s = _server(now, helper="0.44")
+    reports = s.last_report["backup_server"]["repos"]
+    obs = s.last_report["extras"]["backup-server"]["repos"]
+    ts = int(now.timestamp())
+    repos = {
+        "healthy": ("script", True),
+        "legacy": ("legacy", True),
+        "no-policy": ("", True),
+        "unknown": (None, True),
+        "invalid": ("script", False),
+        "archived": ("script", True),
+        "-invalid-name": ("script", True),
+    }
+    for name, (cleaner, valid) in repos.items():
+        reports.append(dict(POL, name=name, valid=valid, snapshots=2, oldest_snapshot=ts - DAY, last_activity=ts,
+                            rotation_ts=ts - 3600, rotation_ok=1, rotation_removed=1))
+        if cleaner is not None:
+            obs[name] = {"cleaner": cleaner, "removed_ts": ts - 3600}
+    s.backup_repo_archive["archived"] = {"note": "в архиве"}
+    view = bsrv_cleanup.view(s, now)
+    assert not any(row["repo"] == "healthy" for row in view["rotation"] + view["prune"] + view["off"])
+    assert view["previews"] == {"healthy": {"id": "prune_preview", "cmd": f"{bsrv_cleanup.HELPER} prune-preview healthy"}}
+    s.last_report["setup_versions"]["backupserver-setup"] = "0.43"
+    assert bsrv_cleanup.view(s, now)["previews"] == {}
+
+
+def test_prune_preview_dry_run_and_old_restic_fallback(tmp_path):
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash is required")
+    source = HELPER.read_text(encoding="utf-8")
+    name_check = source.split("\nvalid_name() {", 1)[1].split("\n}\n", 1)[0]
+    version_check = source[source.index("\nrestic_ver()"):source.index("\n# every restic the server runs")]
+    preview = source[source.index("\ncmd_prune_preview()"):source.index("\ncmd_regen_prune()")]
+    harness = tmp_path / "preview-test.sh"
+    harness.write_bytes(('set -euo pipefail\nPRUNE_DIR="$1"\nENV_DIR="$1"\n'
+                         'python_exe="$2"\npython3() { "$python_exe" "$@"; }\nshift 2\n'
+                         f"valid_name() {{{name_check}\n}}\n{version_check}\n{preview}\n"
+                         'cmd_prune_preview "$@"\n').encode())
+    # Bash itself is an executable on Windows too. Each restic subcommand loads a fixture script.
+    fake = Path(bash).as_posix()
+    (tmp_path / "version").write_bytes(b'echo "restic $FAKE_VERSION"\n')
+    (tmp_path / "forget").write_bytes(b"""set -euo pipefail
+test "$RESTIC_PASSWORD" = fixture-password
+printf '%s\n' forget "$@" > "$FAKE_ARGS"
+cat "$FAKE_OUTPUT"
+exit "$FAKE_EXIT"
+""")
+    prune_script = tmp_path / "restic-prune-repo.sh"
+    prune_script.write_bytes(f'BIN={fake}\nKEEP=(--keep-last 0 --keep-daily=2)\nexit 55\n'.encode())
+    args, output = tmp_path / "args", tmp_path / "output"
+    (tmp_path / "repo.env").write_bytes(f'RESTIC_PASSWORD=fixture-password\nFAKE_ARGS={args.as_posix()}\n'
+                                       f'FAKE_OUTPUT={output.as_posix()}\n'.encode())
+
+    def run(version, *, status=0, repo="repo", extra=()):
+        with (tmp_path / "repo.env").open("ab") as env:
+            env.write(f"FAKE_VERSION={version}\nFAKE_EXIT={status}\n".encode())
+        return subprocess.run([bash, "--noprofile", "--norc", harness.as_posix(), tmp_path.as_posix(),
+                               Path(sys.executable).as_posix(), repo, *extra],
+                              cwd=tmp_path, capture_output=True, text=True, timeout=20)
+
+    summary = {"message_type": "summary", "bytes": {"remove_total": 8192, "repack": 1024}}
+    output.write_text(json.dumps([{"remove": [{"short_id": "abcdabcd"}]}]) + "\n" + json.dumps(summary), encoding="utf-8")
+    got = run("0.20.0")
+    assert got.returncode == 0, got.stderr
+    assert "remove 1 snapshot" in got.stdout and "abcdabcd" in got.stdout
+    assert "Estimated space to reclaim: 8,192 bytes" in got.stdout and "Data to repack: 1,024 bytes" in got.stdout
+    expected = ["forget", "--dry-run", "--no-lock", "--prune", "--group-by", "host,tags"]
+    assert args.read_text(encoding="utf-8").splitlines() == expected + ["--json", "--keep-daily", "2"]
+    got = run("0.20.0", status=12)
+    assert got.returncode == 12 and not got.stdout
+
+    output.write_text('[{"remove": null}]\n', encoding="utf-8")
+    got = run("0.20.0")
+    assert got.returncode == 0 and "remove 0 snapshot" in got.stdout and "when this policy removes" in got.stdout
+    output.write_text('[{"remove": [{"short_id": "abcdabcd"}]}]\n', encoding="utf-8")
+    got = run("0.20.0")
+    assert got.returncode != 0 and not got.stdout
+    output.write_text('{"message_type":"unexpected"}\n', encoding="utf-8")
+    got = run("0.20.0")
+    assert got.returncode != 0 and not got.stdout
+    output.write_text("", encoding="utf-8")
+    got = run("0.20.0")
+    assert got.returncode == 0 and "remove 0 snapshot" in got.stdout
+
+    output.write_text("native preview\n", encoding="utf-8")
+    got = run("0.19.1")
+    assert got.returncode == 0 and got.stdout == "native preview\n"
+    assert args.read_text(encoding="utf-8").splitlines() == expected + ["--keep-daily", "2"]
+
+    args.unlink()
+    assert run("0.20.0", extra=("--apply",)).returncode == 2
+    assert run("0.20.0", repo="../repo").returncode == 2
+    prune_script.write_bytes(f'BIN={fake}\nKEEP=(--keep-last 0)\n'.encode())
+    got = run("0.20.0")
+    assert got.returncode == 0 and "every retention count is zero" in got.stdout and not args.exists()
 
 
 def test_not_a_backup_server():
@@ -392,6 +494,9 @@ def test_cleanup_off_rows_and_steps():
     assert "restic-prune-repo-g.sh" in hx[0]["cmd"]
     # в архиве выключенная - тоже спокойная строка
     s = _off(now)
+    s.last_report["setup_versions"]["backupserver-setup"] = "0.44"
+    upgraded = {x["repo"]: x for x in bsrv_cleanup.view(s, now)["off"]}
+    assert upgraded["repo-e"]["fix"][0] == {"id": "prune_preview", "cmd": f"{bsrv_cleanup.HELPER} prune-preview repo-e"}
     s.backup_repo_archive["repo-e"] = {"note": "заморожен"}
     assert not {x["repo"]: x for x in bsrv_cleanup.view(s, now)["off"]}["repo-e"]["live"]
 
@@ -399,7 +504,7 @@ def test_cleanup_off_rows_and_steps():
 def test_helper_turns_cleanup_off_and_keeps_it_off():
     """helper 0.34: prune-off / prune-on, regen-prune и adopt-legacy сохраняют выключенное состояние."""
     src = HELPER.read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.43" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.44" in src and "\r" not in src
     assert 'prune-off)        shift; with_storage cmd_prune_switch off "$@" ;;' in src
     assert 'prune-on)         shift; with_storage cmd_prune_switch on "$@" ;;' in src
     regen = src[src.index("cmd_regen_prune() {"):]

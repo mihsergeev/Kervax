@@ -155,7 +155,8 @@ AGENT_USER=kervax
 # 0.51: scheduled, standalone Qdrant snapshots via the container-local API.
 # 0.52: standalone Qdrant snapshots from a single Kubernetes pod.
 # 0.53: verify the latest snapshot of this host across changes to backup paths.
-KERVAX_SETUP_VERSION=0.53  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.54: install and update Restic from the verified 0.20.0 release.
+KERVAX_SETUP_VERSION=0.54  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 KERVAX_SETUP_ALWAYS=1  # safe on any node: installs only its own helper and spool and does not
                        # touch the backup configuration until the panel sends a command
 install -d -m 0755 "$HELPER_DIR" "$STATE_DIR" /var/lib/kervax/versions
@@ -2461,10 +2462,10 @@ restic_fetch() {
 
 # The target restic version for the whole fleet plus its sha256 (verification is MANDATORY).
 # Older nodes (0.13/0.14/0.15) are updated to it. Repository formats are backward compatible -
-# 0.19 reads and writes repositories created by older versions, so the update is safe.
-RESTIC_TARGET_VER="0.19.1"
-RESTIC_SHA_amd64="f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c"
-RESTIC_SHA_arm64="a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465"
+# updating the binary does not migrate the repository format.
+RESTIC_TARGET_VER="0.20.0"
+RESTIC_SHA_amd64="0ccd9fa7885074a24603b051e01bf9bd8b5e45d6a1791e9d9887e9e9372107f7"
+RESTIC_SHA_arm64="1188daded239bccb5952a01d2ad33e77a0d3dc34f9d9fc1e7fdda618d44938ef"
 
 # cmd_restic_update updates the restic binary (or binaries) to RESTIC_TARGET_VER. It updates
 # both the panel's own ($RESTIC_BIN) and the system one (from PATH) if that is actually in use.
@@ -2688,7 +2689,7 @@ cmd_deprovision() {
 # (heartbeat, telegram) are not carried over - by the operator's decision alerting is taken over
 # by the panel.
 cmd_adopt() {
-  local ver="${1:-0.19.1}"   # which restic version to raise to during the migration
+  local ver="${1:-$RESTIC_TARGET_VER}"
   # 1) find the backup service
   local svc="" s
   for s in systemd-rest.service restic-backup.service restic.service; do

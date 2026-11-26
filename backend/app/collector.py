@@ -2694,6 +2694,8 @@ def _recovery_short(key: str, st: dict, ctx: dict, s=None) -> str:
         return "больше не алертим: проверка шла с адреса панели, нужна локация в другой сети"
     if key == "backup_missing" and getattr(s, "backup_not_required", False):
         return "бэкап больше не требуется"
+    if key == "docker_risk" and ctx.get("pending"):
+        return "ранее подтвержденных контейнеров с root на хосте больше нет"
     if key in ("kube_restarts", "docker_restarts"):
         # "частых перезапусков нет" при 45 за сутки противоречило счетчику: перезапуски
         # прекратились, а сутки их еще помнят. Число - по объявленному
@@ -5505,6 +5507,9 @@ def _sig_all_quiet(s: Server, key: str, sig: set[str], now: datetime) -> bool:
     if key == "queue_stuck":
         muted = set(s.alert_mutes or [])
         return all(queue_watch.MUTE_PREFIX + k in muted for k in sig)
+    if key == "docker_risk":
+        muted = set(s.alert_mutes or [])
+        return key in muted or all(docker_risk.MUTE_PREFIX + k.rsplit(":", 1)[0] in muted for k in sig)
     if key == "queue_failed":
         return all(k in queue_watch.failed_muted(s, now) for k in sig)
     if key == "workers":
@@ -7433,12 +7438,14 @@ def _server_conditions(s: Server, now: datetime,
         ex = docker_exposure.exposed(rep)
         out["docker_sock"] = (1 if ex else 0, {"detail": docker_exposure.text(ex), "items": ex,
                                                "sig": sorted(e["name"] for e in ex)})
-        # Контейнер с ключами от хоста сверх положенного по назначению (privileged, опасные
-        # capabilities, docker-сокет, корень хоста на запись). Пункт - в "Требует действий",
-        # заглушенные точечно ("dockrisk:<имя>") не в счет; sig - контейнер и его ключи.
-        dr = docker_risk.advice(s)
+    # Подтверждение на приеме отчета видит и исчезновения между тиками сборщика.
+    if online and docker_risk.observed(rep):
+        confirmed, pending = docker_risk.split(s)
+        dr = docker_risk.advice(s, confirmed)
         out["docker_risk"] = (1 if dr else 0, {"detail": docker_risk.text(dr), "items": dr,
-                                               "sig": sorted(f"{x['name']}:{','.join(x['flags'])}" for x in dr)})
+                                               "sig": sorted(docker_risk.signature(x) for x in dr),
+                                               "pending": bool(pending),
+                                               "_complete": docker_risk.complete(rep)})
 
     # Сдвиг часов: локальное время ноды (clock_unix) vs время панели на приёме. По модулю;
     # порог warn 5с / проблема 30с / крит 5мин. Дебаунс (как sustain): разовый спайк —
@@ -8677,7 +8684,9 @@ async def _evaluate_servers_serial(
                 if level and calm is not None:
                     apply(s.id, f"{key}_calm", None)  # вернулось до отбоя: все та же тревога
                 if prev and not level:
-                    if _SETTLE_S > 0 and key not in _OWN_SETTLE:
+                    if key == "docker_risk" and not docker_risk.recovered(rep, _SETTLE_S) and not policy_close:
+                        continue
+                    if _SETTLE_S > 0 and key not in _OWN_SETTLE and key != "docker_risk":
                         if calm is None:
                             apply(s.id, f"{key}_calm", now.isoformat())
                             continue

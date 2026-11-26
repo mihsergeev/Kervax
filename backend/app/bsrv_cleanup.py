@@ -42,6 +42,7 @@ _NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 ADOPT_VER = (0, 25)   # adopt-legacy: перенос со старого скрипта, блоки на удаленные репозитории
 GROUP_VER = (0, 42)   # точные теги для forget-group и merge-group
 OFF_VER = (0, 34)     # prune-off / prune-on; adopt-legacy переносит и "чистка выключена"
+PREVIEW_VER = (0, 44)  # пробный прогон с оценкой места по действующей политике
 
 
 def _ver(rep: dict) -> tuple[int, ...]:
@@ -146,19 +147,27 @@ def group_fix(repo: str, host: str, tags: list[str], to: str, ver: tuple[int, ..
     return out
 
 
-def script_fix(repo: str, r: dict) -> list[dict]:
+def _preview_step(repo: str) -> dict:
+    return {"id": "prune_preview", "cmd": f"{HELPER} prune-preview {repo}"}
+
+
+def script_fix(repo: str, r: dict, ver: tuple[int, ...] = ()) -> list[dict]:
     """Своя чистка идет, а старье не уходит: что она делала и что удалит политика сейчас (forget
     --dry-run без блокировки репозитория, тем же restic и с той же группировкой, что и чистка)."""
-    if not _NAME.match(repo):
+    if not _NAME.fullmatch(repo):
         return []
-    keep = " ".join(f"--keep-{k} {int(r.get(f'keep_{k}') or 0)}"
-                    for k in ("last", "daily", "weekly", "monthly") if int(r.get(f"keep_{k}") or 0) > 0)
-    script = f"{PRUNE_DIR}/restic-prune-{repo}.sh"
+    if ver >= PREVIEW_VER:
+        preview = _preview_step(repo)
+    else:
+        keep = " ".join(f"--keep-{k} {int(r.get(f'keep_{k}') or 0)}"
+                        for k in ("last", "daily", "weekly", "monthly") if int(r.get(f"keep_{k}") or 0) > 0)
+        script = f"{PRUNE_DIR}/restic-prune-{repo}.sh"
+        preview = {"id": "script_dry", "cmd": f"sudo bash -c 'set -a; . {ENV_DIR}/{repo}.env; set +a; "
+                                               f"B=$(sed -n \"s/^BIN=//p\" {script}); "
+                                               f"\"$B\" forget --dry-run --no-lock --group-by host,tags {keep}'"}
     return [
         {"id": "script_log", "cmd": f"sudo grep -E '^=== |^(Fatal|ERROR|SAFETY|BUSY)' {LOG_DIR}/restic-prune-{repo}.log | tail -n 12"},
-        {"id": "script_dry", "cmd": f"sudo bash -c 'set -a; . {ENV_DIR}/{repo}.env; set +a; "
-                                    f"B=$(sed -n \"s/^BIN=//p\" {script}); "
-                                    f"\"$B\" forget --dry-run --no-lock --group-by host,tags {keep}'"},
+        preview,
         {"id": "script_run", "cmd": _run([repo])},
     ]
 
@@ -184,12 +193,16 @@ def prune_fix(repo: str, kind: str) -> list[dict]:
     return []
 
 
-def off_fix(repo: str, r: dict) -> list[dict]:
+def off_fix(repo: str, r: dict, ver: tuple[int, ...]) -> list[dict]:
     """Чистку репозитория выключили (prune-off, закомментированная строка cron): как включить.
     Сначала что удалит первая чистка (без удаления), потом prune-on, проверка, откат prune-off."""
-    if not _NAME.match(repo):
+    steps = script_fix(repo, r, ver)
+    if not steps:
         return []
-    return [{**script_fix(repo, r)[1], "id": "off_dry"},
+    preview = steps[1]
+    if preview["id"] == "script_dry":
+        preview["id"] = "off_dry"
+    return [preview,
             {"id": "off_on", "cmd": f"{HELPER} prune-on {repo}"},
             {"id": "off_check", "cmd": f"cat /etc/cron.d/kervax-prune-{repo}"},
             {"id": "off_undo", "undo": True, "cmd": f"{HELPER} prune-off {repo}"}]
@@ -216,7 +229,8 @@ def view(s, now: datetime) -> dict | None:
     вычищается, одна строка на репозиторий со всеми причинами и тем, отчего так (cause); prune -
     где не работает своя чистка; groups - шаги по старым группам: repo -> [host, tags] ->
     {forget, merge}; off - где чистку выключили (live - бэкапы при этом идут); hand - где чистка
-    идет, хотя ее строку в crontab root закомментировали руками."""
+    идет, хотя ее строку в crontab root закомментировали руками. previews - пробные команды
+    для карточек репозиториев с собственным скриптом чистки."""
     rep = s.last_report or {}
     bs = rep.get("backup_server") or {}
     if not bs.get("present"):
@@ -231,7 +245,15 @@ def view(s, now: datetime) -> dict | None:
     scheduled = bool(leg and leg.get("where"))
     stats = {str(r.get("name") or ""): r for r in bs.get("repos") or [] if isinstance(r, dict)}
     reasons = rotation_reasons(s, now)
-    out: dict = {"legacy": None, "dead": None, "rotation": [], "prune": [], "groups": {}, "off": [], "hand": []}
+    out: dict = {"legacy": None, "dead": None, "rotation": [], "prune": [], "groups": {}, "off": [], "hand": [], "previews": {}}
+    if ver >= PREVIEW_VER:
+        out["previews"] = {
+            name: _preview_step(name)
+            for name, stat in stats.items()
+            if stat.get("valid") and re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,127}", name)
+            and isinstance(obs.get(name), dict) and obs[name].get("cleaner") == "script"
+            and not archived_repo(arch, name)
+        }
     if leg:
         script = str(leg.get("script") or LEGACY)
         on = sorted(n for n, o in obs.items() if isinstance(o, dict) and o.get("cleaner") == "legacy")
@@ -258,7 +280,7 @@ def view(s, now: datetime) -> dict | None:
         elif cleaner == "legacy":
             cause, fix = ("legacy" if scheduled else "legacy_off"), adopt_fix([name], ver, scheduled)
         elif cleaner == "script":
-            cause, fix = "script", script_fix(name, stats.get(name) or {})
+            cause, fix = "script", script_fix(name, stats.get(name) or {}, ver)
         elif cleaner == "":
             cause, fix = "none", [{"id": "none_setup"}]
         else:
@@ -292,7 +314,7 @@ def view(s, now: datetime) -> dict | None:
         live = not archived_repo(arch, name) and last > 0 and nowts - last <= _BACKUP_REPO_STALE_SECONDS
         out["off"].append({"repo": name, "live": live, "since": int(o.get("prune_off_ts") or 0),
                            "why": str(o.get("prune_off_why") or "")[:200], "last": last,
-                           "snaps": int(st.get("snapshots") or 0), "fix": off_fix(name, st)})
+                           "snaps": int(st.get("snapshots") or 0), "fix": off_fix(name, st, ver)})
     # чистка идет, хотя ее строку в crontab выключили руками: вопрос, а не поломка
     for name in sorted(n for n, o in obs.items() if isinstance(o, dict) and int(o.get("prune_hand_off") or 0) == 1):
         if _NAME.match(name):

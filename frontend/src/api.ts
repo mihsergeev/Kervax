@@ -2473,6 +2473,7 @@ export type BsrvCleanup = {
   rotation: BsrvCleanupRot[]
   prune: { repo: string; kind: string; why: string; fix: OsFixStep[] }[] // своя чистка не работает
   groups: Record<string, Record<string, { forget?: OsFixStep[]; merge?: OsFixStep[] }>> // repo -> JSON [host, tags] -> шаги
+  previews?: Record<string, OsFixStep>
   // чистку выключили руками (helper 0.34): live - бэкапы при этом идут, since - с какого времени,
   // why - причина из шапки cron.d. Решение, а не поломка: в ротацию и алерты не идет
   off?: BsrvCleanupOff[]
@@ -2639,6 +2640,8 @@ export type Server = {
   // контейнеры с ключами от хоста сверх положенного по назначению: privileged, опасные
   // capabilities, docker-сокет, корень хоста на запись; muted - заглушен точечно
   docker_risk?: DockerRisk[]
+  docker_risk_pending?: DockerRisk[]
+  docker_risk_observed?: boolean
   // опасные caps только на старт: главный процесс работает без них (агент 2.57) - заметка, не тревога
   docker_risk_start?: DockerRiskStart[]
   // что открыто в интернет: внешняя проверка портов раз в 6 часов

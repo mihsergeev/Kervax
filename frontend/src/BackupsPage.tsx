@@ -499,7 +499,8 @@ function ManageSection({ server: s, backup: b, onChanged }: { server: Server; ba
 }
 
 // целевая версия restic для всего парка (совпадает с RESTIC_TARGET_VER в helper)
-const RESTIC_TARGET = '0.19.1'
+const RESTIC_TARGET = '0.20.0'
+const RESTIC_UPDATE_HELPER = '0.54'
 // целевая версия образа rest-server (совпадает с REST_IMAGE в backupserver-setup.sh).
 // Тег «latest» когда-то застрял на 0.11.0 (docker не перекачивал) — держим фиксированный.
 const RESTSRV_TARGET = '0.14.0'
@@ -977,8 +978,10 @@ function BackupModal({
     ok: t('свежий'), failed: t('ошибка'), stale: t('не свежий'),
     skipped: t('пропущен'), unknown: t('нет метрики'),
   }
-  const resticVer = (b.restic_version || '').match(/restic\s+(\S+)/i)?.[1] ?? ''
-  const resticOld = !!resticVer && resticVer !== RESTIC_TARGET
+  const resticVer = (b.restic_version || '').match(/restic\s+(\d+\.\d+\.\d+)/i)?.[1] ?? ''
+  const resticOld = !!resticVer && verLt(resticVer, RESTIC_TARGET)
+  const resticUpdateReady = !verLt(String(s.last_report?.setup_versions?.['backup-setup'] ?? ''), RESTIC_UPDATE_HELPER)
+  const resticUpdateBlocked = canManage && b.manageable && resticOld && !resticUpdateReady
   const updateRestic = async () => {
     if (!window.confirm(t('Обновить restic до {v}? Скачает с github, сверит sha256, заменит бинарь. Конфиг бэкапа не трогается.', { v: RESTIC_TARGET }))) return
     setRbusy(true); setRmsg(null)
@@ -1036,7 +1039,7 @@ function BackupModal({
   const runFailed = b.metric_present ? b.success === 0
     : b.ts_source === 'systemd' && !!b.service_result && b.service_result !== 'success'
   const v = s.backup_verify
-  const helperOld = canManage && b.manageable && (b.helper_version || 0) < CURRENT_BACKUP_HELPER
+  const helperOld = resticUpdateBlocked || (canManage && b.manageable && (b.helper_version || 0) < CURRENT_BACKUP_HELPER)
   const audit = (s.backup_audit ?? []).filter((x) => !x.muted)
   const own = s.custom_backups ?? []
   const ownBad = ownBackupProblems(s)
@@ -1348,7 +1351,7 @@ function BackupModal({
                   {row('restic', (
                     <span className="restic-row">
                       {b.restic_found ? (shortRestic(b.restic_version) || t('найден')) : t('не найден')}
-                      {canManage && resticOld && !rdone && (
+                      {canManage && resticOld && resticUpdateReady && !rdone && (
                         <button className="restic-update-btn" disabled={rbusy} onClick={updateRestic}>
                           {rbusy ? '…' : `⬆ ${t('обновить до {v}', { v: RESTIC_TARGET })}`}
                         </button>
@@ -1360,7 +1363,9 @@ function BackupModal({
                 </div>
                 {s.backup_target && <BackupHttp server={s} canManage={canManage} onChanged={onChanged} />}
                 {helperOld && (
-                  <div className="net-note">{t('helper на ноде устарел — переустановите, чтобы подхватить новые фичи/фиксы:')}</div>
+                  <div className="net-note">{resticUpdateBlocked
+                    ? t('Для обновления Restic нужен backup-setup {v} или новее.', { v: RESTIC_UPDATE_HELPER })
+                    : t('helper на ноде устарел — переустановите, чтобы подхватить новые фичи/фиксы:')}</div>
                 )}
                 {helperOld && <EnableManage />}
                 {canManage && b.manageable ? (
@@ -1961,6 +1966,8 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
   const [busy, setBusy] = useState(false)
   // что раскрыто под кнопками: форма архива, команда удаления или снятия лока
   const [open, setOpen] = useState<'' | 'archive' | 'rm' | 'unlock'>('')
+  const previews = s.bsrv_cleanup?.previews
+  const preview = canAct && previews && Object.hasOwn(previews, r.name) ? previews[r.name] : undefined
   const st = repoState(r, ctx)
   const isMuted = st === 'muted'
   const tone = repoTone(s, r, ctx)
@@ -2138,6 +2145,7 @@ function RepoDetail({ server: s, r, ctx, canAct, onChanged, growth, unmonitored,
         <dt>{t('Каталог')}</dt>
         <dd className="mono">{`${dataDir}/${r.name}`}</dd>
       </dl>
+      {preview && <RowFix steps={[preview]} label={t('Предпросмотр чистки')} />}
       <RepoMirrorBlock server={s} repo={r.name} servers={servers} canAct={isAdmin} onChanged={onChanged} />
       <RepoGroups server={s} repo={r.name} ext={bsrvExtra(s)} canAct={canAct} onChanged={onChanged} />
     </>

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from app import (access_audit, changes, docker_exposure, docker_risk, listen_watch, netlinks, open_ports,
                  ssh_audit, traffic)
 from app.models import Server
+from tests.test_docker_risk import _confirmed
 
 NOW = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
 _NOT_KEYBOARD = re.compile("[—–«»…·≥≤↳→ёЁ ]")
@@ -187,7 +188,7 @@ def _tc(n):
 
 def test_docker_risk_short_from_advice():
     rep = {"agent_version": "2.41", "docker": {"access": True, "containers": [_tc(2), _tc(3), _tc(1)]}}
-    dr = docker_risk.advice(_srv(last_report=rep))
+    dr = docker_risk.advice(_confirmed(_srv(last_report=rep)))
     assert [x["svc"] for x in dr] == ["teamcity-agent-2", "teamcity-agent-3", "teamcity-agent-1"]
     assert _ok(docker_risk.tg_short(dr)) == ("Контейнеры с root на хосте", ["teamcity-agent 1, 2, 3 (privileged)"])
 

@@ -1657,6 +1657,9 @@ class ServerOut(BaseModel):
     # [{"name", "image", "flags", "caps", "text", "muted", "fix"?, "dind"?, "note"?}], fix - шаги, общие у
     # контейнеров проекта; note - privileged ради живого docker внутри (dind): заметка, не тревога
     docker_risk: list[dict] = Field(default_factory=list)
+    # Текущие признаки на выдержке и полнота последнего наблюдения.
+    docker_risk_pending: list[dict] = Field(default_factory=list)
+    docker_risk_observed: bool = False
     # опасные caps только на старт: главный процесс без них (docker_risk.start_caps, агент 2.57):
     # [{"name", "image", "caps", "uid"}] - заметка, не тревога
     docker_risk_start: list[dict] = Field(default_factory=list)

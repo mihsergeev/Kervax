@@ -108,7 +108,8 @@ fi
 # 0.41: the mirror reader rejects symlinks and uses descriptor-relative reads
 # 0.42: exact tag groups and explicit snapshot IDs for manual cleanup
 # 0.43: create-only provisioning cannot rotate an existing repository's credentials
-KERVAX_SETUP_VERSION=0.43  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
+# 0.44: Restic 0.20.0 and a dry-run estimate for the configured retention policy.
+KERVAX_SETUP_VERSION=0.44  # MAJOR.MINOR; compared component-wise (0.13 > 0.2!)
 # Which nodes need this helper at all. Read by the ansible playbook on the
 # CONTROL machine and evaluated as a shell condition ON THE NODE, so a new
 # helper lands where it belongs without anyone editing the playbook.
@@ -255,9 +256,9 @@ RESTIC_BIN="$(command -v restic || true)"
 # runs it too). The one from the distribution is old: Debian 12 ships 0.14, and before 0.16
 # restic cannot wait for a lock by itself. The sha256 of the .bz2 from github is BAKED in here,
 # the same version and sums as in backup-setup.sh.
-RESTIC_TARGET_VER="0.19.1"
-RESTIC_SHA_amd64="f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c"
-RESTIC_SHA_arm64="a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465"
+RESTIC_TARGET_VER="0.20.0"
+RESTIC_SHA_amd64="0ccd9fa7885074a24603b051e01bf9bd8b5e45d6a1791e9d9887e9e9372107f7"
+RESTIC_SHA_arm64="1188daded239bccb5952a01d2ad33e77a0d3dc34f9d9fc1e7fdda618d44938ef"
 restic_ver() { "$1" version 2>/dev/null | grep -oE '^restic [0-9]+\.[0-9]+\.[0-9]+' | awk '{ print $2 }' || true; }
 ver_lt() { [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]; }
 # every restic the server runs: the one new prune scripts get plus whatever the existing scripts
@@ -1014,6 +1015,97 @@ cmd_prune_switch() {
   fi
   refresh_stats || true
 }
+
+# Use the repository's configured retention. Read the KEEP array without executing the cleanup script.
+cmd_prune_preview() (
+  local name="${1:-}" script env bin policy i flag count version
+  local -a keep retention=() options=(forget --dry-run --no-lock --prune --group-by host,tags)
+  local -A seen=()
+  [ "$#" -eq 1 ] && valid_name "$name" || { echo "usage: $0 prune-preview <repo>" >&2; exit 2; }
+  script="$PRUNE_DIR/restic-prune-$name.sh"
+  env="$ENV_DIR/$name.env"
+  [ -f "$script" ] && [ -f "$env" ] || { echo "repository cleanup script or environment is missing" >&2; exit 2; }
+  bin="$(sed -n 's/^BIN=//p' "$script")"
+  [ -x "$bin" ] || { echo "the cleanup script's restic binary is unavailable" >&2; exit 2; }
+  policy="$(sed -n 's/^KEEP=(\(.*\))$/\1/p' "$script")"
+  [[ "$policy" != *$'\n'* ]] || { echo "cannot read the cleanup policy" >&2; exit 2; }
+  read -r -a keep <<< "${policy//=/ }"
+  if [ "${#keep[@]}" -eq 0 ] || [ "$((${#keep[@]} % 2))" -ne 0 ]; then
+    echo "cannot read the cleanup policy" >&2; exit 2
+  fi
+  for ((i=0; i<${#keep[@]}; i+=2)); do
+    flag="${keep[i]}"; count="${keep[i+1]}"
+    case "$flag" in
+      --keep-last|--keep-daily|--keep-weekly|--keep-monthly) ;;
+      *) echo "cannot read the cleanup policy" >&2; exit 2 ;;
+    esac
+    [[ "$count" =~ ^[0-9]+$ && ! ${seen[$flag]:-} ]] || { echo "cannot read the cleanup policy" >&2; exit 2; }
+    seen[$flag]=1
+    [[ "$count" =~ ^0+$ ]] || retention+=("$flag" "$count")
+  done
+  if [ "${#retention[@]}" -eq 0 ]; then
+    echo "Cleanup is skipped because every retention count is zero."
+    exit 0
+  fi
+
+  set -a; . "$env"; set +a
+  version="$(restic_ver "$bin")"
+  if [ -z "$version" ] || ver_lt "$version" 0.20.0 || ! command -v python3 >/dev/null 2>&1; then
+    exec "$bin" "${options[@]}" "${retention[@]}"
+  fi
+
+  python3 -c '
+import json
+import subprocess
+import sys
+
+removed = []
+sizes = None
+seen_output = seen_groups = invalid = False
+try:
+    restic = subprocess.Popen(sys.argv[1:], stdout=subprocess.PIPE)
+except OSError as exc:
+    sys.exit(f"could not run Restic: {exc}")
+with restic:
+    try:
+        for line in restic.stdout:
+            seen_output = True
+            message = json.loads(line)
+            if isinstance(message, list):
+                if seen_groups:
+                    raise ValueError
+                seen_groups = True
+                for group in message:
+                    removed.extend(snap["short_id"] for snap in (group["remove"] or []))
+            elif message.get("message_type") == "summary":
+                if sizes is not None:
+                    raise ValueError
+                sizes = message["bytes"]
+                if not all(type(sizes[key]) is int and sizes[key] >= 0 for key in ("remove_total", "repack")):
+                    raise ValueError
+    except (AttributeError, KeyError, TypeError, ValueError):
+        invalid = True
+        for _ in restic.stdout:
+            pass
+    code = restic.wait()
+if code:
+    sys.exit(code if code > 0 else 128 - code)
+# Restic emits no groups or summary for an empty repository.
+if invalid or (seen_output and not seen_groups) or bool(removed) != (sizes is not None):
+    sys.exit("could not read the Restic cleanup preview")
+
+print(f"Dry run would remove {len(removed)} snapshot(s).")
+for snap in removed:
+    print(f"  {snap}")
+if sizes is None:
+    print("Restic estimates data cleanup when this policy removes snapshots.")
+else:
+    reclaim = sizes["remove_total"]
+    repack = sizes["repack"]
+    print(f"Estimated space to reclaim: {reclaim:,} bytes")
+    print(f"Data to repack: {repack:,} bytes")
+' "$bin" "${options[@]}" --json "${retention[@]}"
+)
 
 # Regenerates the scripts of already provisioned clients from the current template. Retention
 # is read from the script itself (the KEEP=(...) line, the same source the panel reads) and the
@@ -2384,6 +2476,7 @@ case "${1:-}" in
   deploy-server)    shift; cmd_deploy_server "$@" ;;
   update-image)     with_storage cmd_update_image ;;
   restic-update)    cmd_restic_update ;;
+  prune-preview)    shift; with_storage cmd_prune_preview "$@" ;;
   forget-group)     shift; with_storage cmd_forget_group "$@" ;;
   merge-group)      shift; with_storage cmd_merge_group "$@" ;;
   dedup-cron)       cmd_dedup_cron ;;
@@ -2397,7 +2490,7 @@ case "${1:-}" in
   mirror-allow)     shift; with_storage cmd_mirror_allow "$@" ;;
   ensure-mirror-python) ensure_mirror_python ;;  # installer preflight for existing keys
   process-spool)    cmd_process_spool ;;
-  *) echo "usage: $0 {stats|storage-dir|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port] [storage-mount]|update-image|restic-update|forget-group <repo> <host> --group <selector> [--apply <plan>]|merge-group <repo> <old-host> <new-host> [--group <selector>] [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|allow-tls <ip>|get-client-creds <name>|mirror-allow <mirror> <ip> <pubkey> [repo...]|process-spool}" >&2; exit 2 ;;
+  *) echo "usage: $0 {stats|storage-dir|regen-prune|adopt-legacy [--apply] [name...]|deploy-server [port] [storage-mount]|update-image|restic-update|prune-preview <repo>|forget-group <repo> <host> --group <selector> [--apply <plan>]|merge-group <repo> <old-host> <new-host> [--group <selector>] [--apply]|dedup-cron|prune-off <repo>|prune-on <repo>|provision-client <name> <hpass> <repopass> <ip> [kl kd kw km]|deploy-tls-front <ip> [dns]|get-cert|allow-tls <ip>|get-client-creds <name>|mirror-allow <mirror> <ip> <pubkey> [repo...]|process-spool}" >&2; exit 2 ;;
 esac
 HELPER_EOF
 # Existing mirror keys must keep working through upgrades. Without keys, install

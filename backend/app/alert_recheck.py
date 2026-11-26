@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import HTTPException
 from sqlalchemy import select, update
 
-from app import fixed, home_mute, probe_scope, tamper
+from app import docker_risk, fixed, home_mute, probe_scope, tamper
 from app.collector import _ALERT_SECTION, _aware, seen_online
 from app.models import AlertRecheck, Check, Server
 
@@ -240,6 +240,9 @@ def apply_snapshot(server, job, snapshot: dict) -> None:
     if current != job.spec.get("baseline") and current != incoming:
         raise ValueError("автоматический сбор уже изменил нужный блок; его нельзя затирать")
     rep = dict(server.last_report or {})
+    if "docker" in allowed and rep.get("docker") != snapshot["docker"] and rep.get(docker_risk.OBSERVATIONS):
+        # Разовый ручной снимок не продлевает выдержку периодических отчетов.
+        rep[docker_risk.OBSERVATIONS] = {**rep[docker_risk.OBSERVATIONS], "valid": False}
     for k in allowed:
         if k == "extras":
             keys = ("changes",) if src == "changes" else ("custom-backups",)

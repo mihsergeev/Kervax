@@ -1500,6 +1500,8 @@ const EN: Record<string, string> = {
   'адрес ноды': 'node address',
   'helper на ноде устарел — переустановите, чтобы подхватить новые фичи/фиксы:':
     'the helper on the node is outdated — reinstall it to pick up new features/fixes:',
+  'Для обновления Restic нужен backup-setup {v} или новее.':
+    'Updating Restic requires backup-setup {v} or later.',
   'Данные для восстановления': 'Restore credentials',
   'Это ключ дешифровки бэкапа. Сохраните в vault и никому не передавайте.':
     'This is the backup decryption key. Store it in a vault and never share it.',
@@ -4039,6 +4041,9 @@ const EN: Record<string, string> = {
   'не поднимутся после перезагрузки: {list}': 'will not come back after a reboot: {list}',
   'запущено {a} из {b}': '{a} of {b} running',
   'ключей от хоста ни у кого нет': 'no container has host keys',
+  'риск проверяется': 'checking risk',
+  'Нет свежего отчета о ключах контейнеров от хоста.': 'No fresh report on container access to the host.',
+  'Ожидаем подтверждения по отчетам агента: {list}': 'Waiting for confirmation from agent reports: {list}',
   '{list}, образ моложе года': '{list}, image younger than a year',
   'все контейнеры поднимутся после перезагрузки': 'all containers come back after a reboot',
   'контейнеров': 'containers',
@@ -7222,6 +7227,9 @@ const EN: Record<string, string> = {
     'What the cleanup did in its last runs: snapshots before and after, restic errors.',
   'Что удалит политика сейчас, без удаления и без блокировки репозитория. Если remove 0, а снапшотов больше политики, они в разных группах (хост, теги), и снапшоты старой группы держатся.':
     'What the policy would remove now, without removing and without locking the repository. If it says remove 0 while there are more snapshots than the policy keeps, they are in different groups (host, tags) and the old group\'s snapshots stay.',
+  'Пробный прогон по текущей политике хранения. Если политика выбрала снапшоты для удаления, Restic оценит, сколько места освободится и сколько данных придется переупаковать. Снапшоты остаются в репозитории.':
+    'Preview the current retention policy. If the policy selects snapshots for removal, Restic estimates how much space would be reclaimed and how much data would be repacked. The snapshots stay in the repository.',
+  'Предпросмотр чистки': 'Preview cleanup',
   'Запустить чистку сейчас: она удалит снапшоты сверх политики, это необратимо.':
     'Run the cleanup now: it removes snapshots beyond the policy, and that cannot be undone.',
   'Что ответил restic в последнем прогоне чистки.':

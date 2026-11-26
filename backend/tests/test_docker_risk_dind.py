@@ -1,7 +1,7 @@
 """privileged ради docker внутри (dind, агент 2.60): живой docker внутри - заметка, а не совет убрать
 privileged; dockerd без дела и privileged без docker - совет как раньше."""
 from app import docker_risk, home_mute
-from tests.test_docker_risk import _c, _rep, _srv
+from tests.test_docker_risk import _c, _confirmed, _rep, _srv
 from tests.test_docker_risk_fix import AGENT, _blocks, _cm, _ids
 
 DAY = 86400
@@ -16,7 +16,7 @@ def _ci(name, dind, svc=None, **kw):
 
 
 def test_live_dind_is_a_note_not_advice():
-    s = _srv(_rep(_ci("ci-agent-1", BUSY), _ci("ci-agent-2", IDLE)))
+    s = _confirmed(_srv(_rep(_ci("ci-agent-1", BUSY), _ci("ci-agent-2", IDLE))))
     v = {x["name"]: x for x in docker_risk.view(s, fix=True)}
     busy, idle = v["ci-agent-1"], v["ci-agent-2"]
     assert busy["note"] and busy["flags"] == ["priv"] and "fix" not in busy
@@ -42,7 +42,7 @@ def test_note_alone_clears_alert_and_home():
     s = _srv(_rep(_ci("ci-agent-1", BUSY)))
     assert docker_risk.advice(s) == []
     assert home_mute._dockrisk(s, None, {}) == ""
-    assert home_mute._dockrisk(_srv(_rep(_ci("ci-agent-1", IDLE))), None, {}) == "ci-agent-1:priv:"
+    assert home_mute._dockrisk(_confirmed(_srv(_rep(_ci("ci-agent-1", IDLE)))), None, {}) == "ci-agent-1:priv:"
 
 
 def test_live_dind_with_other_keys_keeps_only_them():

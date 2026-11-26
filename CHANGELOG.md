@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.185] - 2026-11-27
+
+- The backup helpers now install restic 0.20.0 on supported Linux systems. Managed repositories now offer a read-only retention preview with snapshot IDs, estimated space to reclaim, and data to repack. The same preview is available in cleanup guidance. Older restic versions show the text preview.
+- Alerts for Docker containers with host-level access now require repeated fresh observations of the same running container over ten minutes. Short-lived checks still appear in Docker details while running and do not generate an alert and recovery pair.
+
 ## [1.8.184] - 2026-11-27
 
 - Each user can choose Narrow, Medium, or Wide in the settings menu. Medium remains the default. The choice applies across panel pages and is remembered for that account in the current browser.
