@@ -1,6 +1,6 @@
 // Run against the built frontend on loopback with PW_CHROME set to a local browser executable.
 import assert from 'node:assert/strict'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { chromium } from 'playwright-core'
 
@@ -264,6 +264,77 @@ async function desktopLayout() {
     await snapshot(page, 'queue-light')
   })
   console.log('PASS desktop inspector, layout and theme')
+}
+
+async function fluidPanelLayout() {
+  const offline = server(201, 'edge-recovery-01', {
+    online: false, last_seen: time(8), offline_probe: { state: 'silent', was: '198.51.100.10:443' },
+    offline_before: 'перед потерей связи сервер отвечал на проверки HTTPS, а затем пропали ответы агента',
+    note: 'Дежурный проверяет маршрут. Окно обслуживания согласовано на вечер.',
+  })
+  const activeChecks = Array.from({ length: 14 }, (_, i) =>
+    check(202 + i, `service-${i + 1}.example.test`, { last_status: i < 2 ? 'down' : 'degraded' }))
+  await fixture(async (page, queue) => {
+    const header = page.locator('.app > .header')
+    const card = inspector(queue)
+    const target = row(queue, offline.name)
+    const metrics = []
+    const alignment = (panel) => panel.evaluate((element) => {
+      const headerBox = document.querySelector('.app > .header').getBoundingClientRect()
+      const panelBox = element.getBoundingClientRect()
+      return {
+        viewport: [innerWidth, innerHeight], documentWidth: document.documentElement.scrollWidth,
+        width: panelBox.width, widthFraction: panelBox.width / innerWidth,
+        leftDifference: panelBox.left - headerBox.left, rightDifference: panelBox.right - headerBox.right,
+      }
+    })
+    await queue.getByRole('heading', { name: /^Все проблемы\s+15$/ }).waitFor()
+    assert.equal(await queue.locator('.home-queue-split').evaluate(el => getComputedStyle(el).display), 'grid',
+      'Measure the loaded layout')
+    assert.equal(await rows(queue).count(), 3)
+    assert.equal(await warningDetails(queue).evaluate(element => element.open), false)
+    assert.match(await warningDetails(queue).locator('summary').innerText(), /12$/)
+    for (const [width, height] of [[2150, 800], [1440, 900], [320, 800]]) {
+      await page.setViewportSize({ width, height })
+      if (width === 320) await target.press('Enter')
+      const heading = card.getByRole('heading', { name: /^оффлайн/i })
+      assert((await heading.innerText()).length > 50, 'The offline case includes a long title')
+      await card.getByRole('button', { name: 'Открыть объект', exact: true }).waitFor()
+      await card.getByRole('button', { name: 'Не алертить', exact: true }).waitFor()
+      const inspectorMetrics = await card.evaluate((element) => {
+        const { top } = element.getBoundingClientRect()
+        const bottom = Math.min(innerHeight, top + element.clientTop + element.clientHeight)
+        const actions = Array.from(element.querySelectorAll('.home-queue-inspector-actions button'))
+          .filter(button => button.getClientRects().length)
+          .map(button => ({ name: button.textContent.trim(), belowFold: button.getBoundingClientRect().bottom - bottom }))
+        return { clientHeight: element.clientHeight, scrollHeight: element.scrollHeight,
+          scrollTop: element.scrollTop, pageScrollTop: scrollY, actions }
+      })
+      metrics.push({ section: 'home', ...await alignment(page.locator('.home-triage')), inspector: inspectorMetrics })
+      if (out && width !== 1440) {
+        await page.screenshot({ path: path.join(out, `fluid-home-${width}.png`), fullPage: width === 320, animations: 'disabled' })
+      }
+    }
+    await page.setViewportSize({ width: 2150, height: 800 })
+    for (const [nav, heading] of [['Сайты', 'Мониторы'], ['Серверы', 'Серверы']]) {
+      await header.getByRole('button', { name: nav, exact: true }).click()
+      await page.getByRole('heading', { name: heading, exact: true }).waitFor()
+      metrics.push({ section: heading, ...await alignment(page.locator('.checks-head')) })
+    }
+    if (out) await writeFile(path.join(out, 'fluid-layout.json'), JSON.stringify(metrics, null, 2) + '\n')
+    for (const measured of metrics) {
+      const [width] = measured.viewport
+      const label = `${measured.section} at ${width}px`
+      assert(measured.documentWidth <= width + 1, `${label}: no horizontal page overflow`)
+      assert(Math.abs(measured.leftDifference) <= 2 && Math.abs(measured.rightDifference) <= 2, `${label}: header and content align`)
+      if (width === 2150) assert(measured.widthFraction > .85, `${label}: content should use over 85% of the viewport`)
+      if (!measured.inspector || width === 320) continue
+      const { clientHeight, scrollHeight, scrollTop, pageScrollTop, actions } = measured.inspector
+      assert(actions.length >= 2 && actions.every(action => action.belowFold <= 1), `${label}: all standard actions fit in the inspector`)
+      assert(pageScrollTop === 0 && scrollTop === 0 && scrollHeight <= clientHeight + 1, `${label}: a standard offline inspector needs no scroll`)
+    }
+  }, { activeChecks, activeServers: [offline], viewport: { width: 2150, height: 800 } })
+  console.log('PASS fluid panel widths, navigation alignment and unclipped offline actions')
 }
 
 async function mobileLayout() {
@@ -648,7 +719,7 @@ async function markKnown() {
 
 try {
   const results = await Promise.allSettled([
-    queueFilters(), desktopLayout(), mobileLayout(), scopedViewer(), loadingAndEmpty(),
+    queueFilters(), desktopLayout(), fluidPanelLayout(), mobileLayout(), scopedViewer(), loadingAndEmpty(),
     criticalPagination(), groupedActions(), denseWarningGroups(), mobileGroupActions(), groupMemberThemes(), markKnown(),
   ])
   const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])

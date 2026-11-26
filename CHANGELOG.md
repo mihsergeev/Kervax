@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.182] - 2026-11-27
+
+- Panel pages and their shared header now use a fluid width on wide screens, leaving more room for lists and details. The home summary column stays compact as the window grows.
+- The home issue card now grows to fit a standard alert and its actions when first opened. Long details and large resource groups still scroll inside the card.
+
 ## [1.8.181] - 2026-11-26
 
 - Grouped issues on the home page now list affected resources in compact rows. Each row shows the resource name and its details together, with individual actions available on demand. Resource links follow the panel theme and highlight on hover or keyboard focus.
