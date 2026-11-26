@@ -51,12 +51,14 @@ def _candidate(old, clock, uptime, now, max_gap):
     return {**old, "candidate": {**point, "n": count}}, False, False
 
 
-def step(previous, report: dict, now: datetime, *, max_gap: float = MAX_SAME_SECONDS) -> tuple[dict | None, bool, bool]:
+def step(previous, report: dict, now: datetime, *, max_gap: float | None = None) -> tuple[dict | None, bool, bool]:
     """(stored progress, usable observation, continuity break).
 
     A new report is usable after a scheduler gap, but the gap cannot satisfy a
     recovery hold. The first ordered observation also starts a new confirmation.
     """
+    if max_gap is None:
+        max_gap = MAX_SAME_SECONDS
     old = previous if isinstance(previous, dict) else {}
     if not isinstance(report, dict):
         return old or None, False, False
