@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.178] - 2026-11-26
+
+- The home dashboard now puts critical issues first. Use the severity filters to focus the queue. Each row shows the issue, the affected resource and its age, with diagnostics and available actions in the details.
+- The dark theme adds a soft red glow when critical issues are present and a green accent to the summary. Warnings, known issues and updates start collapsed to keep the overview compact on desktop and mobile.
+
 ## [1.8.177] - 2026-11-26
 
 - New alert "CPU frequency capped": the CPU is busy (30% or more, iowait excluded) while its frequency stays at half of the node's own peak or lower for 20 minutes. It catches a power or BMC cap, for example a server that lost one of its two power feeds and runs at 800 MHz instead of 3.9 GHz, when the thermal throttling counter stays at zero and the CPU is cold. The peak is learned per node from its reports; VMs with a constant frequency and idle hardware at the minimum frequency stay quiet. The alert clears once the frequency comes back up, not when the load drops while the frequency is still capped.
