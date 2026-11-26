@@ -401,7 +401,7 @@ class Check(Base):
     def tamper(self) -> dict | None:
         """Признаки взлома для ответов API: уровень, строки с конкретикой (app/tamper.py)."""
         from app import tamper as tamper_mod
-        return tamper_mod.view(self.tamper_state)
+        return tamper_mod.check_view(self)
 
 
 class IgnoredDomain(Base):

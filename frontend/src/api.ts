@@ -3546,6 +3546,7 @@ export interface WebRoot {
   edits?: WebChange | null
   // WordPress: версия ядра и что он обновил сам за неделю; checking - файлов ждут эталона wordpress.org
   wp?: string
+  wp_at_root?: boolean
   wp_events?: WpEvent[]
   checking?: number
   // рабочая копия git: ветка и файлы, записанные заново тем же содержимым (git - тем же, что в HEAD; за неделю)
@@ -4515,7 +4516,7 @@ export interface TamperSign {
   items?: WebFile[]
 }
 export interface TamperView {
-  level: 'none' | 'one' | 'hack'
+  level: 'none' | 'one' | 'hack' | 'review'
   summary: string
   since?: string | null
   signs: TamperSign[]
@@ -4523,6 +4524,8 @@ export interface TamperView {
   last_at?: string | null
   size?: number | null
   engine: { wp?: string; php?: string; gen?: string }
+  wp_review?: { what: string; observed_at?: string | null }[]
+  wp_local?: { version: string; at: string; vulnerable: boolean; fresh: boolean } | null
   domains: string[]
   err: string
   // главная за JS-проверкой анти-бота: чья проверка (или кука), с какого времени

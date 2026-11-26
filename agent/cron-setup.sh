@@ -25,7 +25,7 @@
 # etimes past the uptime is a copy that just started; such durations are dropped from the cache.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.2  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.3  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: without a cron daemon it runs one ps and exits
 
 HELPER_DIR=/lib65/kervax
@@ -56,7 +56,8 @@ FIRST_S=86400  # the first journal read looks a day back
 exec 9>/run/kervax-cron.lock
 flock -n 9 || exit 0
 NOW=$(date +%s)
-TMPD=$(mktemp -d /tmp/kervax-cron.XXXXXX) || exit 0
+# Keep the staged cache on the same filesystem so publishing it is a rename.
+TMPD=$(mktemp -d -- "$(dirname -- "$CACHE")/.cron.XXXXXX") || exit 0
 trap 'rm -rf "$TMPD"' EXIT
 
 # -- cron daemons and the jobs they run now: one ps. A daemon is a cron process whose parent is
@@ -199,24 +200,62 @@ while IFS=$'\t' read -r tag P KIND ARGS; do
 done < "$TMPD/tree"
 
 # -- the journal of the host cron: starts of each job and outputs thrown away, by cursor --
+cron_journal() {
+  local limit=$1 rc=0
+  shift
+  timeout "$limit" journalctl -t CRON -t CROND "$@" -o short-unix --no-pager --show-cursor \
+    > "$TMPD/j" 2> "$TMPD/j.err" || rc=$?
+  # Older systemd versions can exit 1 with only the journal header or an empty-selection marker.
+  if [ ! -s "$TMPD/j.err" ]; then
+    [ "$rc" != 0 ] || return 0
+    if [ "$rc" = 1 ] && awk '
+      !/^-- Logs begin at .*, end at .*[.] --$/ && $0 != "-- No entries --" { bad = 1 }
+      END { exit (bad || NR == 0) }' "$TMPD/j"; then return 0; fi
+  fi
+  return "$((rc == 0 ? 1 : rc))"
+}
+
 [ -f "$CACHE" ] || : > "$CACHE"
 : > "$TMPD/j"
 JRAN=0
+JRESET=0
+JCAP=0
+JFAST=0
+JMAX=1000
 if [ "$HOSTCRON" = 1 ] && command -v journalctl >/dev/null 2>&1; then
   cts=$(awk -F'	' '$1 == "C" { print $2; exit }' "$CACHE")
   cur=$(awk -F'	' '$1 == "C" { print $3; exit }' "$CACHE")
   cts=${cts:-0}
-  # after a failed cursor (the journal was wiped) - from the previous read, not a day back again:
-  # the starts already counted would be counted twice
+  # If the journal rejects the saved cursor, resume from the last successful read.
   since=$((NOW - FIRST_S)); [ "$cts" -gt "$since" ] && since=$cts
-  if [ -n "$cur" ] && [ "$cts" -gt $((NOW - FIRST_S)) ]      && timeout 60 journalctl -t CRON -t CROND --after-cursor="$cur" -o short-unix -q --no-pager --show-cursor           > "$TMPD/j" 2>/dev/null; then
-    JRAN=1
-  else
-    # no entries at all is exit status 1 too; only a timeout means the journal was not read
-    timeout 60 journalctl -t CRON -t CROND --since "@$since" -o short-unix -q --no-pager --show-cursor       > "$TMPD/j" 2>/dev/null
-    [ $? -ne 124 ] && JRAN=1
+  if [ -n "$cur" ] && [ "$cts" -gt $((NOW - FIRST_S)) ]; then
+    JCAP=$(awk -F'\t' -v max="$JMAX" '$1 == "B" && $2 ~ /^[1-9][0-9]*$/ && $2 <= max { print $2; exit }' "$CACHE")
+    JCAP=${JCAP:-0}
+    args=(); limit=60
+    # With --after-cursor, --lines reads the first N matches after the cursor.
+    if [ "$JCAP" -gt 0 ]; then args+=(--lines="$JCAP"); limit=20; fi
+    began=$SECONDS; rc=0
+    cron_journal "$limit" --after-cursor="$cur" "${args[@]}" || rc=$?
+    if [ "$rc" = 0 ]; then
+      JRAN=1
+      if [ "$((SECONDS - began))" -lt 10 ]; then JFAST=1; fi
+    elif [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+      if [ "$JCAP" = 0 ]; then JCAP=$JMAX
+      elif [ "$JCAP" -gt 1 ]; then JCAP=$((JCAP / 2)); fi
+    elif grep -q '^Failed to seek to cursor:' "$TMPD/j.err" && cron_journal 60 --since "@$since"; then
+      JRAN=1; JRESET=1; JCAP=0
+    fi
+  elif cron_journal 60 --since "@$since"; then
+    JRAN=1; JRESET=1
   fi
 fi
+# A bounded successful read with entries must have an advancing cursor before it can be counted.
+if [ "$JRAN" = 1 ] && [ "$JCAP" -gt 0 ] && grep -Eq '^[0-9]+\.[0-9]+ ' "$TMPD/j"; then
+  next_cursor=$(sed -n 's/^-- cursor: //p' "$TMPD/j" | tail -1)
+  if [ -z "$next_cursor" ] || [ "$next_cursor" = "$cur" ]; then JRAN=0; fi
+fi
+# A timeout or read error can leave valid-looking entries in stdout.
+[ "$JRAN" = 1 ] || : > "$TMPD/j"
 
 AWKFN='
 function e(s,   _jp, _jn, _ji) { gsub(/[[:cntrl:]]/, "", s); _jn = split(s, _jp, "\\"); s = _jp[1]; for (_ji = 2; _ji <= _jn; _ji++) s = s "\\\\" _jp[_ji]; gsub(/"/, "\\\"", s); return s }
@@ -298,9 +337,10 @@ function sumh(b,   a, n, i, p, s, nowh) { nowh = int(now / 3600); s = 0
 '
 
 # -- everything together: jobs from the crontabs, copies running now, starts from the journal,
-# durations from the cache. Cache rows: C ts cursor | L key last per-hour | X per-hour (outputs
+# durations from the cache. Cache rows: C ts cursor | B read cap | L key last per-hour | X per-hour (outputs
 # thrown away) | D key seen durations | R key pid start age (copies seen running) --
-awk -F'\t' -v OFS='\t' -v now="$NOW" -v jran="$JRAN" -v maxrun="$MAX_RUN" -v nc="$TMPD/cache" -v jout="$TMPD/jobs" "$AWKFN"'
+awk -F'\t' -v OFS='\t' -v now="$NOW" -v jran="$JRAN" -v jreset="$JRESET" -v jcap="$JCAP" -v jfast="$JFAST" \
+    -v jmax="$JMAX" -v maxrun="$MAX_RUN" -v nc="$TMPD/cache" -v jout="$TMPD/jobs" "$AWKFN"'
   t == "cache" {
     if ($1 == "C") { cts = $2; ccur = $3 }
     else if ($1 == "L") { last[$2] = $3; bk[$2] = $4; lk[$2] = 1 }
@@ -343,8 +383,10 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v jran="$JRAN" -v maxrun="$MAX_RUN" -v nc=
     next }
   t == "j" {
     if (index($0, "-- cursor: ") == 1) { ncur = substr($0, 12); next }
-    if (!match($0, /^[0-9]+/)) next
-    ts = substr($0, 1, RLENGTH) + 0
+    if (!match($0, /^[0-9]+\.[0-9]+ /)) next
+    jread++
+    ts = int(substr($0, 1, RLENGTH))
+    if (ts > jlast) jlast = ts
     if (index($0, "No MTA installed, discarding output")) { hb["X" SUBSEP int(ts / 3600)]++; next }
     p = index($0, "]: ("); if (!p) next
     rest = substr($0, p + 4); q = index(rest, ") CMD ("); if (!q) next
@@ -354,7 +396,12 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v jran="$JRAN" -v maxrun="$MAX_RUN" -v nc=
     next }
   END {
     # the journal counts only once cron has written to it: a cursor appears with the first entry
-    jok = jran && (ncur != "" || ccur != "")
+    cursor = (ncur != "" || jreset) ? ncur : ccur
+    if (jran && jcap) {
+      if (jread < jcap) jcap = 0
+      else if (jfast) jcap = (2 * jcap < jmax) ? 2 * jcap : jmax
+    }
+    jok = jran && cursor != "" && !jcap
     # copies seen last time and gone now ended: how long they ran (at least what was seen)
     for (i = 1; i <= npr; i++) {
       ik = prk[i]; if (ik in cur) continue
@@ -363,7 +410,11 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v jran="$JRAN" -v maxrun="$MAX_RUN" -v nc=
       n = split(d, da, ","); d = ""; for (m = (n > 10 ? n - 9 : 1); m <= n; m++) d = d (d == "" ? "" : ",") da[m]
       dur[k] = d; dseen[k] = now
     }
-    printf "C\t%s\t%s\n", (jran ? now : cts + 0), (ncur != "" ? ncur : ccur) > nc
+    # If the cursor later becomes unusable during catch-up, keep the date fallback near the last entry read.
+    if (jran && !jcap) cts = now
+    if (jran && jcap && jlast > cts) cts = jlast
+    printf "C\t%s\t%s\n", cts + 0, cursor > nc
+    if (jcap) printf "B\t%d\n", jcap > nc
     for (k in lk) {
       if (k in obs && obs[k] > last[k]) last[k] = obs[k]
       b = addh(bk[k], k); bk[k] = b
@@ -400,7 +451,7 @@ awk -F'\t' -v OFS='\t' -v now="$NOW" -v jran="$JRAN" -v maxrun="$MAX_RUN" -v nc=
       ds = ds (ds == "" ? "" : ",") sprintf("{\"where\":\"%s\",\"kind\":\"%s\",\"mta\":%s,\"jobs\":%d}", e(mw[p]), mk[p], (mmta[p] ? "true" : "false"), mj[p] + 0) }
     printf "%s\t%s\t%d\n", (jok ? "true" : "false"), ds, sumh(xb)
   }' t=cache "$CACHE" t=rows "$TMPD/rows" t=tree "$TMPD/tree" t=j "$TMPD/j" > "$TMPD/head" || exit 0
-mv -f "$TMPD/cache" "$CACHE" 2>/dev/null || : > "$CACHE"
+mv -f "$TMPD/cache" "$CACHE" 2>/dev/null || exit 0
 
 IFS=$'\t' read -r JRN DS DISC < "$TMPD/head"
 JOBS=$( { [ -f "$TMPD/jobs" ] && sort -t "$(printf '\t')" -k1,1 -k2,2n -k3,3 -k4,4 "$TMPD/jobs"; } | head -$MAX_JOBS \

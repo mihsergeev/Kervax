@@ -104,6 +104,8 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
   }
   if (!v) return <div className="muted small">{t('Еще не разбирали: главную открываем раз в час, когда сайт отвечает.')}</div>
   const n = v.signs.length
+  const wpReview = v.wp_review ?? []
+  const wpLocal = v.wp_local
   // что видно снаружи; версия, по которой есть признак "с дырой", подсвечена как сам признак
   const engs = [v.engine.wp ? `WordPress ${v.engine.wp}` : v.engine.gen ?? '', v.engine.php ? `PHP ${v.engine.php}` : ''].filter(Boolean)
   const holes = new Set(v.signs.filter((s) => s.key === 'old').map((s) => s.what))
@@ -129,6 +131,21 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
           <span className="tamper-txt">
             <b>{t('Один признак')}</b>
             <span className="muted small">{t('Сам по себе не взлом, но надо глянуть.')}</span>
+          </span>
+        </div>
+      )}
+      {wpReview.length > 0 && (
+        <div className="tamper-banner tamper-banner-warn">
+          <span className="tamper-ico">🧩</span>
+          <span className="tamper-txt">
+            <b>{t('Нужна локальная перепроверка версии WordPress')}</b>
+            {wpReview.map(({ what, observed_at }) => (
+              <span key={what} className="muted small">
+                {t('Исторический сигнал о версии {what} по внешнему осмотру', { what })}
+                {observed_at && ` · ${fmtDateTime(observed_at)}`}
+              </span>
+            ))}
+            <span className="muted small">{t('Нужен свежий отчет файлов сайта от назначенного агента для точного домена.')}</span>
           </span>
         </div>
       )}
@@ -191,7 +208,7 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
           </span>
         </div>
       )}
-      {n === 0 && !v.wall && <div className="small">{t('Признаков нет.')}</div>}
+      {n === 0 && !v.wall && wpReview.length === 0 && <div className="small">{t('Признаков нет.')}</div>}
       <div className="tamper-facts">
         {(v.base.title || v.base.size != null) && (
           // эталон целиком из базы: title и размер одной страницы
@@ -212,9 +229,19 @@ export function TamperSigns({ check, canEdit, onChanged }: { check: Check; canEd
         </span>
         {engs.length > 0 && (
           <>
-            <span className="tamper-k">{t('Видно снаружи')}</span>
+            <span className="tamper-k">{t(check.probe_local ? 'Последний внешний осмотр' : 'Видно снаружи')}</span>
             <span className="tamper-v tamper-chips">
               {engs.map((e) => <span key={e} className={`type-chip${holes.has(e) ? ' tamper-chip-warn' : ''}`}>{e}</span>)}
+            </span>
+          </>
+        )}
+        {wpLocal && (
+          <>
+            <span className="tamper-k">{t('Версия ядра на сервере')}</span>
+            <span className="tamper-v muted small">
+              {wpLocal.vulnerable ? t('{what} с дырой', { what: `WordPress ${wpLocal.version}` }) : `WordPress ${wpLocal.version}`}
+              {` · ${fmtDateTime(wpLocal.at)}`}
+              {!wpLocal.fresh && ` · ${t('нужна повторная проверка')}`}
             </span>
           </>
         )}

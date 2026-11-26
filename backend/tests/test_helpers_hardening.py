@@ -13,7 +13,7 @@ def _src(name: str) -> str:
 
 def test_spool_answers_are_root_only():
     # каталог ответов root (агент только читает), ответ через mktemp, без chmod по имени после mv
-    for name, ver in (("timesync-setup.sh", "0.4"), ("diskusage-setup.sh", "0.7"), ("units-setup.sh", "0.6")):
+    for name, ver in (("timesync-setup.sh", "0.4"), ("diskusage-setup.sh", "0.7"), ("units-setup.sh", "0.7")):
         s = _src(name)
         assert f"KERVAX_SETUP_VERSION={ver}  # " in s
         assert '-m 0750 "$RES_DIR"' in s and '-m 0770 "$RES_DIR"' not in s

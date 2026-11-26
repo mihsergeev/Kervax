@@ -84,13 +84,14 @@ def _helper_json(journal: str, now: float, passwd: str = "web:x:1001:1001::/home
 
 
 def test_helper_version_and_wiring():
-    assert "KERVAX_SETUP_VERSION=0.6" in SRC and "\r" not in SRC
+    assert "KERVAX_SETUP_VERSION=0.7" in SRC and "\r" not in SRC
     helper = _body("HELPER_EOF")
     assert 'scan) scan; oom_scan ;;' in helper
     # журнал читается одним запросом: ядро, отметки systemd о юнитах и systemd-oomd
     assert "_TRANSPORT=kernel + MESSAGE_ID=$OOM_MSGID + UNIT_RESULT=oom-kill + SYSLOG_IDENTIFIER=systemd-oomd" in helper
     # у каждого чтения журнала таймаут: под systemd пайп не останавливает journalctl
-    assert helper.count("timeout 60 journalctl \"$@\"") == 2
+    assert 'timeout "$limit" journalctl "$@"' in helper
+    assert 'oom_journal 60 "$@" --after-cursor=' in helper and 'oom_journal 20 "$@"' in helper
 
 
 def test_helper_parses_real_kernel_log():

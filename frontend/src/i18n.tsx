@@ -4357,6 +4357,13 @@ const EN: Record<string, string> = {
   // --- признаки взлома сайта (TamperSigns.tsx) ---
   'Внешние домены': 'External domains',
   'Видно снаружи': 'Visible from outside',
+  'Последний внешний осмотр': 'Last external inspection',
+  'Версия ядра на сервере': 'Core version on the server',
+  'Нужна локальная перепроверка версии WordPress': 'Verify the WordPress version on the server',
+  'Для этого монитора нужна свежая проверка на назначенном сервере': 'This monitor needs a fresh check on its assigned server',
+  'Исторический сигнал о версии {what} по внешнему осмотру': 'Previous external alert for {what}',
+  'Нужен свежий отчет файлов сайта от назначенного агента для точного домена.': 'A fresh site-files report for the exact domain is required from the assigned agent.',
+  'нужна повторная проверка': 'needs rechecking',
   // --- признаки взлома сайта (TamperSigns.tsx) ---
   'Файлы кода изменились не через git/деплой': 'Code files changed outside git/deploy',
   'перезаписаны тем же содержимым, что в git: {f}': 'rewritten with the same content as in git: {f}',

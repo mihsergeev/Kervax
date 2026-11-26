@@ -79,27 +79,27 @@ from app.schemas import (
 router = APIRouter(prefix="/checks", tags=["checks"])
 
 
-def _hide_secrets(check: Check, user) -> Check:
+def _check_out(check: Check, user) -> CheckOut:
     """Прячет секреты монитора от учётки, которая его всё равно не правит.
 
     auth_pass — пароль от закрытого раздела сайта, http_headers часто содержит
     «Authorization: Bearer …». Роль «только просмотр» заводят как раз для тех,
     кому доступ к таким вещам не выдавали. push_token - сам адрес push-монитора: кто его
     знает, тот может стучаться за упавший крон и гасить алерт."""
-    if user.role in ("admin", "editor"):
-        return check
-    check.auth_pass = ""
-    check.http_headers = ""
-    check.push_token = ""
-    check.auth_user = ""
-    check.target = mask_target(check.target)
-    return check
+    out = CheckOut.model_validate(check)
+    if user.role not in ("admin", "editor"):
+        out.auth_pass = ""
+        out.http_headers = ""
+        out.push_token = ""
+        out.auth_user = ""
+        out.target = mask_target(out.target)
+    return out
 
 
 async def _get_or_404(
-    check_id: int, session: SessionDep, user: User | None = None
+    check_id: int, session: SessionDep, user: User | None = None, *, lock: bool = False
 ) -> Check:
-    check = await session.get(Check, check_id)
+    check = await session.get(Check, check_id, with_for_update=lock)
     if check is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Монитор не найден")
     # Монитор вне групп учётки — отвечаем «не найден», а не «запрещено»: иначе
@@ -140,18 +140,16 @@ def _run_out(check: Check, user, **extra) -> CheckRunOut:
 
 
 @router.get("", response_model=list[CheckOut])
-async def list_checks(user: CurrentUser, session: SessionDep) -> list[Check]:
+async def list_checks(user: CurrentUser, session: SessionDep) -> list[CheckOut]:
     # учётке с нарезанными группами показываем только её мониторы
     rows = list(
         await session.scalars(
             scope_query(user, select(Check), Check, "sites").order_by(Check.sort_order, Check.id)
         )
     )
-    # expunge_all: ниже правим поля объектов, а они привязаны к сессии — без отвязки
-    # SQLAlchemy запишет «очистку» секретов обратно в базу на ближайшем flush
     session.expunge_all()
     await _with_parents(session, user, rows)
-    return [_hide_secrets(c, user) for c in rows]
+    return [_check_out(c, user) for c in rows]
 
 
 async def _parents_index(session, checks) -> tuple[parents_mod.Index, dict[int, str], set[int]]:
@@ -356,18 +354,9 @@ async def overview(user: CurrentUser, session: SessionDep) -> ChecksOverviewOut:
         if pids else {}
     )
     outs = []
-    secrets_ok = user.role in ("admin", "editor")
     pidx, pgroups, psilent = await _parents_index(session, checks)
     for c in checks:
-        co = CheckOut.model_validate(c)
-        if not secrets_ok:
-            # секреты гасим на модели ответа, как в _run_out: роль "только просмотр" их не
-            # получает и отсюда (раньше обзор отдавал пароль сайта и заголовки всем)
-            co.auth_pass = ""
-            co.http_headers = ""
-            co.push_token = ""
-            co.auth_user = ""
-            co.target = mask_target(co.target)
+        co = _check_out(c, user)
         co.probe_server_name = pnames.get(c.probe_server_id or 0)
         co.last_inside = _inside_out(co.last_inside, pgroups, user)
         co.parents = _parents_out(c, pidx, pgroups, psilent, user)
@@ -1301,7 +1290,7 @@ def _push_defaults(check: Check) -> None:
 
 
 @router.put("/{check_id}/note", response_model=CheckOut)
-async def set_check_note(check_id: int, body: NoteIn, user: CurrentUser, session: SessionDep) -> Check:
+async def set_check_note(check_id: int, body: NoteIn, user: CurrentUser, session: SessionDep) -> CheckOut:
     """Заметка о мониторе: видна в карточке и едет строкой в его алертах."""
     check = await _get_or_404(check_id, session, user)
     text = body.text.strip()
@@ -1311,11 +1300,11 @@ async def set_check_note(check_id: int, body: NoteIn, user: CurrentUser, session
     await session.commit()
     await session.refresh(check)
     await audit.record(session, user.username, "check_note", check.name, text[:200])
-    return _hide_secrets(check, user)
+    return _check_out(check, user)
 
 
 @router.put("/{check_id}/known", response_model=CheckOut)
-async def set_check_known(check_id: int, body: KnownIn, user: CurrentUser, session: SessionDep) -> Check:
+async def set_check_known(check_id: int, body: KnownIn, user: CurrentUser, session: SessionDep) -> CheckOut:
     """Отметить, что монитор лежит известно почему: алерт молчит, отметка закроется, когда он
     поднимется, или по сроку (app/known.py)."""
     check = await _get_or_404(check_id, session, user)
@@ -1325,11 +1314,11 @@ async def set_check_known(check_id: int, body: KnownIn, user: CurrentUser, sessi
     await session.commit()
     await session.refresh(check)
     await audit.record(session, user.username, "known_set", check.name, body.text[:200])
-    return _hide_secrets(check, user)
+    return _check_out(check, user)
 
 
 @router.delete("/{check_id}/known", response_model=CheckOut)
-async def drop_check_known(check_id: int, user: CurrentUser, session: SessionDep) -> Check:
+async def drop_check_known(check_id: int, user: CurrentUser, session: SessionDep) -> CheckOut:
     """Снять отметку: если монитор все еще лежит, алерт уйдет на ближайшей проверке."""
     check = await _get_or_404(check_id, session, user)
     if check.known_issue is not None:
@@ -1337,7 +1326,7 @@ async def drop_check_known(check_id: int, user: CurrentUser, session: SessionDep
         await session.commit()
         await session.refresh(check)
         await audit.record(session, user.username, "known_drop", check.name)
-    return _hide_secrets(check, user)
+    return _check_out(check, user)
 
 
 @router.post("/{check_id}/push-token", response_model=CheckOut)
@@ -1410,13 +1399,17 @@ async def tamper_accept(check_id: int, body: dict, user: CurrentUser, session: S
     """Кнопки признаков взлома (app/tamper.py): "это наше" - домен в базу, "новая норма" -
     страница в базу, "отложить" - версия с дырой на 7 дней, all - Разобрались, все текущее
     как норма. Отбой придет следующим тиком, если признаков не осталось."""
-    check = await _get_or_404(check_id, session, user)
+    check = await _get_or_404(check_id, session, user, lock=True)
     key, arg = str(body.get("key") or ""), str(body.get("arg") or "")
     mode = str(body.get("mode") or "")
     if key not in _TAMPER_KEYS or not check.tamper_state or mode not in ("", "later") or (mode and key == "all"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Принимать нечего")
     from app import tamper as tamper_mod
     from app import webfiles as webfiles_mod
+    try:
+        accepted = tamper_mod.accept_check(check, key, arg, datetime.now(timezone.utc), mode)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     # новые php и правки - файлы на сервере: снимаем их там, иначе стадия "файлы сайтов" вернет
     # признак. Отложенные остаются на сервере, их прячет сама стадия
     signs = check.tamper_state.get("signs") or {}
@@ -1429,7 +1422,7 @@ async def tamper_accept(check_id: int, body: dict, user: CurrentUser, session: S
             # baseline файлов чужого сервера не трогаем: так можно было спрятать веб-шелл от его группы
             if srv is not None and group_allowed(user, srv.group_name):
                 srv.webfiles = webfiles_mod.accept(srv.webfiles, root, k, paths)
-    check.tamper_state = tamper_mod.accept(check.tamper_state, key, arg, datetime.now(timezone.utc), mode)
+    check.tamper_state = accepted
     await session.commit()
     await audit.record(session, user.username, "tamper_accept", check.name, " ".join(x for x in (key, arg, mode) if x)[:500])
     return {"tamper": check.tamper}
@@ -1593,11 +1586,11 @@ async def _close_if_disabled(session, checks: list[Check]) -> None:
 
 
 @router.get("/{check_id}", response_model=CheckOut)
-async def get_check(check_id: int, user: CurrentUser, session: SessionDep) -> Check:
+async def get_check(check_id: int, user: CurrentUser, session: SessionDep) -> CheckOut:
     check = await _get_or_404(check_id, session, user)
     session.expunge_all()
     await _with_parents(session, user, [check])
-    return _hide_secrets(check, user)
+    return _check_out(check, user)
 
 
 @router.patch("/{check_id}", response_model=CheckOut)

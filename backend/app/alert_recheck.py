@@ -144,6 +144,8 @@ def unavailable(obj, kind: str, spec: dict, now: datetime) -> str:
     if not obj.enabled:
         return "Не удалось проверить: мониторинг объекта выключен"
     if isinstance(obj, Check):
+        if kind == "tamper" and obj.probe_local:
+            return tamper.LOCAL_RECHECK
         if probe_scope.uses_agent(obj):
             return "" if kind == "status" else "Не удалось проверить: для этой проверки изнутри сервера пока нет свежего разбора"
         if obj.type == "push":
@@ -380,6 +382,10 @@ async def panel_work(factory, job_id: str) -> None:
             await session.commit()
             if pending:
                 await send_alerts_soon(factory, pending, now)
+            return
+        if obj.probe_local:
+            finish(job, "unavailable", tamper.LOCAL_RECHECK, now)
+            await session.commit()
             return
         try:
             result = await asyncio.wait_for(tamper.scan(obj), PANEL_TIMEOUT)

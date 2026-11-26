@@ -49,7 +49,7 @@ from urllib.parse import quote, urlparse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app import podnames, tg_fmt
+from app import podnames, probe_scope, tg_fmt
 
 log = logging.getLogger("kervax.webfiles")
 
@@ -181,7 +181,7 @@ def process(state: dict | None, b: dict, now: datetime) -> dict:
                    at=now.isoformat())
         for k, v in (("src", str(r.get("src") or "")), ("git", _events(r.get("git"))),
                      ("wp", str(r.get("wp") or "")), ("branch", str(r.get("branch") or "")),
-                     ("wploc", str(r.get("wploc") or ""))):
+                     ("wploc", str(r.get("wploc") or "")), ("wp_at_root", r.get("wp_at_root") is True)):
             if v:
                 cur[k] = v
             else:
@@ -897,6 +897,7 @@ def view(state: dict | None, rep: dict, now: datetime) -> dict | None:
             "edits": _shown(rs, now, "edits"),
             "cleared": _shown(rs, now, "cleared"),
             "wp": next((r["wp"] for r in rs if r.get("wp")), ""),
+            "wp_at_root": all(r.get("wp_at_root") is True for r in rs),
             "wp_events": _wp_shown(rs, now),
             "branch": next((r["branch"] for r in rs if r.get("branch")), ""),
             "same": _shown(rs, now, "same"),
@@ -941,6 +942,44 @@ def tg_short(items) -> tuple[str, list[str]] | None:
 
 # ---------- стадия планировщика ----------
 
+def _local_wp(check, server, b: dict | None, catalog: dict, now: datetime) -> dict | None:
+    from app import tamper
+    from app.collector import _aware, seen_online
+
+    if (server is None or not server.enabled or not b or not seen_online(server, now)
+            or not probe_scope.server_allowed(check, server)
+            or not probe_scope.site_group_allowed(server.token_site_groups, check)):
+        return None
+    binding = tamper.local_wp_binding(check)
+    if binding is None or server.id != binding["server_id"]:
+        return None
+    at = b.get("ts")
+    fresh_after = (now - tamper.LOCAL_WP_MAX_AGE).timestamp()
+    if type(at) not in (int, float) or not fresh_after <= at <= min(now, _aware(server.last_seen)).timestamp():
+        return None
+
+    # Нужны данные текущего отчета, а не накопленные корни из servers.webfiles.
+    # При лимитах helper'а могли пропасть корни того же сайта (MAXROOTS/MAXFULL).
+    roots = [r for r in b["roots"] if isinstance(r, dict)]
+    if len(roots) >= 80 or sum(r.get("layer") is False for r in roots) >= 20:
+        return None
+    host = binding["host"]
+    versions = set()
+    for root in roots:
+        domains = root.get("domains")
+        if not isinstance(domains, list) or not any(
+            isinstance(d, str) and d.lower().rstrip(".") == host for d in domains
+        ):
+            continue
+        version = root.get("wp")
+        if not root.get("key") or root.get("wp_at_root") is not True or not isinstance(version, str):
+            return None
+        versions.add(version)
+    if len(versions) != 1:
+        return None
+    return tamper.local_wp_observation(check, versions.pop(), datetime.fromtimestamp(at, timezone.utc), catalog, now)
+
+
 async def track(session_factory: async_sessionmaker[AsyncSession], now: datetime) -> None:
     """Свежие блоки helper'а -> servers.webfiles, сверка с wordpress.org; признаки привязанных
     корней -> мониторы."""
@@ -951,8 +990,11 @@ async def track(session_factory: async_sessionmaker[AsyncSession], now: datetime
         servers = list(await s.scalars(select(Server)))
         changed = False
         want: list[tuple[str, str, str]] = []
+        blocks = {}
         for srv in servers:
             b = block(srv.last_report or {}, now)
+            if b is not None:
+                blocks[srv.id] = b
             new = process(srv.webfiles, b, now) if b is not None else srv.webfiles
             if new and any(r.get("wpchk") for r in (new.get("roots") or {}).values()):
                 new = verify(new, now)
@@ -964,10 +1006,13 @@ async def track(session_factory: async_sessionmaker[AsyncSession], now: datetime
             await s.commit()
         _start_fetch(want)
         have = [(x.id, x.name, x.webfiles) for x in servers if x.webfiles]
-        checks = [c for c in await s.scalars(select(Check).where(Check.type == "http"))]
+        checks = list(await s.scalars(select(Check).where(Check.type == "http").order_by(Check.id)))
         pidx = parents_mod.Index(await parents_mod.load_servers(s))
         cl = [(c.id, _host(c.target), {pid for pid, _w in parents_mod.parents_of(c, pidx)}) for c in checks]
         by_check, loose = mirror(have, cl)
+        servers_by_id = {srv.id: srv for srv in servers}
+        local = {c.id for c in checks if c.enabled and tamper_mod.local_wp_history(c) and tamper_mod.local_wp_binding(c)}
+        catalog = await tamper_mod.versions(s, now, refresh=False) if local else {}
         dirty = False
         for srv in servers:
             lk = sorted(loose.get(srv.id, []))
@@ -976,7 +1021,8 @@ async def track(session_factory: async_sessionmaker[AsyncSession], now: datetime
                 dirty = True
         for c in checks:
             want_c = by_check.get(c.id) or {}
-            st = c.tamper_state or {}
+            stored = c.tamper_state
+            st = stored or {}
             signs = dict(st.get("signs") or {})
             before = {k: signs.get(k) for k in ("php", "edit")}
             # "edit" (правки) - признак до правил 4: снимается
@@ -988,8 +1034,26 @@ async def track(session_factory: async_sessionmaker[AsyncSession], now: datetime
                 signs["php"] = {"files": files, "since": min(f["since"] for f in files)}
             else:
                 signs.pop("php", None)
+            if c.id in local:
+                proof = _local_wp(c, servers_by_id.get(c.probe_server_id), blocks.get(c.probe_server_id), catalog, now)
+                stored_proof = st.get("wp_local")
+                if proof is None and stored_proof:
+                    proof = {**stored_proof, "valid": False}
+                if proof != stored_proof:
+                    st = {**st, "wp_local": proof}
             if before != {k: signs.get(k) for k in ("php", "edit")}:
-                c.tamper_state = {**st, "signs": signs}
+                st = {**st, "signs": signs}
+            if st != (stored or {}):
+                # Повторно читаем только изменяемую строку: внешний скан или правка монитора
+                # могли сохранить новые данные, пока сопоставляли корни.
+                before_update = (c.updated_at, c.target, tamper_mod.local_wp_binding(c), c.group_name, stored)
+                with s.no_autoflush:
+                    current = await s.get(Check, c.id, with_for_update=True, populate_existing=True)
+                if current is None or before_update != (current.updated_at, current.target,
+                                                        tamper_mod.local_wp_binding(current), current.group_name,
+                                                        current.tamper_state):
+                    continue
+                current.tamper_state = st
                 dirty = True
         if dirty:
             await s.commit()

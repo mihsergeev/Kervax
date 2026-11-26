@@ -507,8 +507,7 @@ export function CheckDetail({ check, groups, initialSec, onClose, onSaved, onRun
     // вечным "нет данных"
     paths: check.type === 'http' && ((check.extra_paths ?? []).length > 0 || check.check_all_ips),
     exp: check.type === 'http' && (check.check_ssl || check.check_domain),
-    // главную разбирает панель (app/tamper.py): сайту за белым списком ее не открыть
-    tamper: check.type === 'http' && !check.probe_local,
+    tamper: check.type === 'http' && (!check.probe_local || !!check.tamper),
     inc: true,
     log: true,
     deps: true,

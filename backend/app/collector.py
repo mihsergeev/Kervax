@@ -2067,23 +2067,24 @@ async def tamper_alerts(session_factory, settings: Settings, now: datetime) -> N
     pending: list[Pending] = []
     async with session_factory() as session:
         rows = (await session.execute(
-            select(Check.id, Check.name, Check.enabled, Check.tamper_state, Check.tamper_sent)
+            select(Check.id, Check.name, Check.enabled, Check.tamper_state, Check.tamper_sent,
+                   Check.probe_local, Check.probe_server_id, Check.probe_bound_at, Check.target,
+                   Check.parent_mode, Check.parent_server_id, Check.http_headers)
             .where(Check.type == "http"))).all()
         quiet = False
-        for cid, name, enabled, st, sent in rows:
-            got = tamper_mod.alert_due(st, sent) if enabled else None
+        for check in rows:
+            got = tamper_mod.check_alert(check, now) if check.enabled else None
             if got is None:
                 continue
-            kind, keep = got
+            kind, keep, msg = got
             if not kind:
                 # спустилось до одного слабого признака: молча забываем отправленное
-                row = await session.get(Check, cid)
+                row = await session.get(Check, check.id)
                 if row is not None:
                     row.tamper_sent = keep or None
                     quiet = True
                 continue
-            msg = tamper_mod.alert_text(st) if kind == "tamper" else ""
-            pending.append(Pending(kind, name, "down" if kind == "tamper" else "up", msg, None, cid,
+            pending.append(Pending(kind, check.name, "down" if kind == "tamper" else "up", msg, None, check.id,
                                    ("tamper_sent", keep or None)))
         if quiet:
             await session.commit()

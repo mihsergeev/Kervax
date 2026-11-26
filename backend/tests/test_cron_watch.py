@@ -161,7 +161,7 @@ def test_alert_condition():
 
 def test_helper_script():
     src = (Path(__file__).resolve().parents[2] / "agent" / "cron-setup.sh").read_text(encoding="utf-8")
-    assert "KERVAX_SETUP_VERSION=0.2" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
+    assert "KERVAX_SETUP_VERSION=0.3" in src and "KERVAX_SETUP_ALWAYS=1" in src and "\r" not in src
     # 0.2: etimes дольше аптайма (procps-ng 4.0.4) - копия только что началась; мусор из кэша выбрасывается
     assert 'UP=$(cut -d. -f1 /proc/uptime' in src and "$3 + 0 > up + 5) ? 0 : $3" in src and "34560000" in src
     # обратный слэш в команде удваивается так, что mawk его не теряет: иначе отчет не JSON

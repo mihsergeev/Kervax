@@ -509,6 +509,7 @@ const PHRASES: Rule[] = [
   [/контейнеры и поды больше не упираются в свой лимит памяти/g, 'containers and pods no longer hit their memory limit'],
   [/\(пользователь (\S+)\)/g, '(user $1)'],
   // файлы сайтов (app/webfiles.py problems, app/tamper.py summary); "новые php" - в старой истории
+  [/Нужна локальная перепроверка версии WordPress/g, 'Verify the WordPress version on the server'],
   [/похоже на взлом: новые php в /g, 'looks like a break-in: new php in '],
   [/php похож на веб-шелл/g, 'php looks like a web shell'],
   [/php в загрузках/g, 'php in uploads'],

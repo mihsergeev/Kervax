@@ -47,7 +47,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app import checks as checks_exec
-from app import net_guard
+from app import net_guard, probe_scope
 
 log = logging.getLogger("kervax.tamper")
 
@@ -56,6 +56,9 @@ RECHECK = timedelta(minutes=10)  # подозрение подтверждаем
 POSTPONE = timedelta(days=7)     # "отложить" группу признака
 OLD_GRACE = timedelta(days=2)    # свежее исправление: пару дней на автообновление
 VERSIONS_EVERY = timedelta(hours=24)
+LOCAL_WP_MAX_AGE = timedelta(minutes=30)
+WP_CATALOG_MAX_AGE = 2 * VERSIONS_EVERY
+LOCAL_RECHECK = "Для этого монитора нужна свежая проверка на назначенном сервере"
 _LOOK_EVERY = timedelta(minutes=1)
 _CONCURRENCY = 4
 _MAX_BODY = 2_000_000
@@ -105,6 +108,7 @@ _VENDOR = re.compile(
     re.I,
 )
 _WP_GEN = re.compile(r"WordPress\s+(\d+\.\d+(?:\.\d+)?)", re.I)
+_WP_VERSION = re.compile(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?")
 _PHP_VER = re.compile(r"PHP/(\d+)\.(\d+)\.(\d+)", re.I)
 _DIGITS = re.compile(r"\d+")
 _SPACES = re.compile(r"\s+")
@@ -397,6 +401,103 @@ def _items(key: str, s: dict) -> list[str]:
     return []
 
 
+def _is_wordpress(item: dict) -> bool:
+    return str(item.get("what", "")).startswith("WordPress ")
+
+
+def local_wp_history(check) -> list[dict]:
+    if not check.probe_local:
+        return []
+    old = ((check.tamper_state or {}).get("signs") or {}).get("old") or {}
+    return [it for it in old.get("items") or [] if _is_wordpress(it)]
+
+
+def local_wp_binding(check) -> dict | None:
+    """Домен и назначенный агент для доказательства с веб-корня."""
+    if not check.probe_local or not check.probe_server_id or not check.probe_bound_at:
+        return None
+    if probe_scope.trusted_server(check) != check.probe_server_id:
+        return None
+    host = probe_scope.target_host(check.target)
+    try:
+        raw = check.target.strip()
+        url = urlparse(raw if "://" in raw else "https://" + raw)
+        default_port = {"http": 80, "https": 443}.get(url.scheme)
+        if not default_port or url.port not in (None, default_port):
+            return None
+    except ValueError:
+        return None
+    if not host or url.path not in ("", "/") or url.query:
+        return None
+    headers = checks_exec._parse_headers(check.http_headers or "")
+    if any(key.lower() == "host" for key in headers):
+        return None
+    bound = check.probe_bound_at
+    bound = bound if bound.tzinfo else bound.replace(tzinfo=timezone.utc)
+    return {"host": host, "server_id": check.probe_server_id, "bound_at": _iso(bound)}
+
+
+def local_wp_observation(check, version: str, at: datetime, catalog: dict, now: datetime) -> dict | None:
+    """Применим только явный вердикт официального каталога по точной версии."""
+    history = local_wp_history(check)
+    if not history or not _WP_VERSION.fullmatch(version):
+        return None
+    st = check.tamper_state
+    old = st["signs"]["old"]
+    external_at = _dt((st.get("last") or {}).get("at") or old.get("since"))
+    binding = local_wp_binding(check)
+    if binding is None or external_at is None or at <= external_at or at < _dt(binding["bound_at"]):
+        return None
+    before = st.get("wp_local") or {}
+    same_binding = before.get("binding") == binding
+    previous_at = _dt(before.get("at")) if same_binding else None
+    same_version = same_binding and before.get("version") == version
+    if previous_at is not None and (at < previous_at or (at == previous_at and not same_version)):
+        return None
+    versions = catalog.get("wp") or {}
+    status = versions.get(version)
+    catalog_at = _dt(catalog.get("wp_at"))
+    if catalog_at is None or not now - WP_CATALOG_MAX_AGE <= catalog_at <= now:
+        return None
+    if status == "insecure":
+        verdict = wp_verdict(version, versions)
+    elif (status == "latest" and not (same_version and before.get("verdict"))
+          and all(it.get("what") != f"WordPress {version}" for it in history)):
+        verdict = None
+    else:
+        return None
+    return {"binding": binding, "at": _iso(at), "version": version, "verdict": verdict, "valid": True,
+            "since": before.get("since") if same_version and before.get("valid") else _iso(at),
+            "catalog_at": _iso(catalog_at)}
+
+
+def _local_state(check, now: datetime) -> tuple[dict | None, list[dict], dict | None]:
+    """Внешнее наблюдение сохраняется в БД. В текущих признаках ему нужна локальная проверка."""
+    state = check.tamper_state
+    history = local_wp_history(check)
+    if not history:
+        return state, [], None
+    signs = dict(state["signs"])
+    old = signs.pop("old")
+    items = [it for it in old["items"] if not _is_wordpress(it)]
+    proof = state.get("wp_local") or {}
+    at, catalog_at = _dt(proof.get("at")), _dt(proof.get("catalog_at"))
+    bound = proof.get("binding") and proof["binding"] == local_wp_binding(check)
+    fresh = bool(bound and proof.get("valid") and at and now - LOCAL_WP_MAX_AGE <= at <= now
+                 and catalog_at and now - WP_CATALOG_MAX_AGE <= catalog_at <= now)
+    if fresh and (verdict := proof.get("verdict")):
+        what = verdict["what"]
+        if what not in (state.get("ok_old") or []) and not hidden(state.get("post"), "old", what, now):
+            items.insert(0, {**verdict, "since": proof.get("since")})
+    if items:
+        signs["old"] = {**old, "items": items}
+    observed_at = (state.get("last") or {}).get("at") or old.get("since")
+    pending = [] if fresh else [{**it, "observed_at": observed_at} for it in history]
+    seen = {"version": proof["version"], "at": proof["at"], "vulnerable": bool(proof.get("verdict")),
+            "fresh": fresh} if bound and at else None
+    return {**state, "signs": signs}, pending, seen
+
+
 def _take_js(base: dict, obs: dict, signed: set[str]) -> dict:
     """Свои js, которые раньше не читались: файл был на странице с первого разбора, но тогда не
     открылся, или это вендорная сборка (новая версия библиотеки) - его домены ложатся в базу без
@@ -504,6 +605,7 @@ def observe(state: dict | None, obs: dict, now: datetime, fleet: set[str], versi
               next=_iso(now + (RECHECK if pend else SCAN_EVERY)))
     st.pop("err", None)
     st.pop("wall", None)
+    st.pop("wp_local", None)
     return st
 
 
@@ -724,6 +826,17 @@ def view(state: dict | None) -> dict | None:
     }
 
 
+def check_view(check, now: datetime | None = None) -> dict | None:
+    current, pending, seen = _local_state(check, now or datetime.now(timezone.utc))
+    result = view(current)
+    if result is not None and (pending or seen):
+        result.update(wp_review=pending, wp_local=seen)
+        if pending and result["level"] == "none":
+            result.update(level="review", summary="Нужна локальная перепроверка версии WordPress",
+                          since=pending[0]["observed_at"])
+    return result
+
+
 def accept(state: dict, key: str, arg: str, now: datetime, mode: str = "") -> dict:
     """Кнопки карточки. "Это ок" на группу признака (arg пусто) или одну строку (arg - домен,
     версия): домены в базу, страница в базу, разница для Googlebot - норма, версия с дырой
@@ -785,6 +898,21 @@ def accept(state: dict, key: str, arg: str, now: datetime, mode: str = "") -> di
     return st
 
 
+def accept_check(check, key: str, arg: str, now: datetime, mode: str = "") -> dict:
+    history = local_wp_history(check)
+    if not history:
+        return accept(check.tamper_state, key, arg, now, mode)
+    current, _, _ = _local_state(check, now)
+    old = (current["signs"].get("old") or {})
+    if key == "old" and (not old or (arg and arg not in _items("old", old))):
+        raise ValueError(LOCAL_RECHECK)
+    accepted = accept(current, key, arg, now, mode)
+    old = check.tamper_state["signs"]["old"]
+    left = (accepted["signs"].get("old") or {}).get("items") or []
+    accepted["signs"]["old"] = {**old, "items": history + [it for it in left if not _is_wordpress(it)]}
+    return accepted
+
+
 # ---------- сеть ----------
 
 async def _get(client: httpx.AsyncClient, url: str, ua: str, limit: int = _MAX_BODY):
@@ -805,6 +933,8 @@ _SCAN_TIMEOUT = "не открылась: истекло время ожидан
 async def scan(check) -> dict:
     """Разбор монитора: {"obs": ...} или {"err": ...}. Весь скан (страница, до _MAX_JS скриптов,
     бот) - в общий срок: не уложился - как сетевая ошибка скана, без признаков."""
+    if getattr(check, "probe_local", False):
+        return {"err": LOCAL_RECHECK}
     cm = asyncio.timeout(min(120.0, 3 * _TIMEOUT))
     try:
         async with cm:
@@ -885,7 +1015,9 @@ async def _fetch_versions() -> dict:
         try:
             r = await c.get("https://api.wordpress.org/core/stable-check/1.0/")
             if r.status_code == 200:
-                out["wp"] = {str(k): str(v) for k, v in r.json().items()}
+                data = r.json()
+                if isinstance(data, dict) and data:
+                    out["wp"] = {str(k): str(v) for k, v in data.items()}
         except (httpx.HTTPError, ValueError):
             log.warning("версии WordPress не загрузились", exc_info=True)
         try:
@@ -911,11 +1043,15 @@ async def versions(session: AsyncSession, now: datetime, refresh: bool = True) -
         have = json.loads(await settings_store.get_raw(session, _VKEY) or "{}")
     except ValueError:
         have = {}
+    if not isinstance(have, dict):
+        have = {}
     at = _dt(have.get("at"))
     if refresh and (at is None or now - at >= VERSIONS_EVERY):
         got = await _fetch_versions()
         # не загрузилось - оставляем старое, но повторим не раньше, чем через сутки
         have = {**have, **got, "at": _iso(now)}
+        if got.get("wp"):
+            have["wp_at"] = _iso(now)
         await settings_store.set_raw(session, _VKEY, json.dumps(have))
     return have
 
@@ -943,29 +1079,44 @@ def fleet_domains(rows, skip_id: int) -> set[str]:
     return out
 
 
+def _scan_source(check) -> tuple:
+    return (check.target, check.http_headers, check.auth_method, check.auth_user, check.auth_pass,
+            check.ignore_tls, checks_exec._allows_internal(check))
+
+
 async def _scan_due(session_factory: async_sessionmaker[AsyncSession], now: datetime) -> int:
     from app.models import Check
     async with session_factory() as s:
-        todo = [c for c in await s.scalars(select(Check).where(Check.type == "http")) if due(c, now)]
-        if not todo:
+        checks = list(await s.scalars(select(Check).where(Check.type == "http", Check.enabled).order_by(Check.id)))
+        todo = [c.id for c in checks if due(c, now)]
+        if not todo and not any(local_wp_history(c) and local_wp_binding(c) for c in checks):
             return 0
         vers = await versions(s, now)
+    if not todo:
+        return 0
     sem = asyncio.Semaphore(_CONCURRENCY)
 
-    async def one(c):
+    async def one(cid):
         async with sem:
+            async with session_factory() as s:
+                c = await s.get(Check, cid)
+                if c is None or not due(c, now):
+                    return cid, None, None
+                source = _scan_source(c)
             try:
-                return c.id, await scan(c)
+                return cid, source, await scan(c)
             except Exception as exc:  # noqa: BLE001 - один сайт не роняет прогон
                 log.warning("признаки взлома: %s не разобран", c.target, exc_info=True)
-                return c.id, {"err": f"ошибка разбора: {type(exc).__name__}"}
+                return cid, source, {"err": f"ошибка разбора: {type(exc).__name__}"}
 
-    got = await asyncio.gather(*(one(c) for c in todo))
+    got = await asyncio.gather(*(one(cid) for cid in todo))
     async with session_factory() as s:
         states = (await s.execute(select(Check.id, Check.tamper_state).where(Check.type == "http"))).all()
-        for cid, res in got:
-            row = await s.get(Check, cid)
-            if row is None:
+        for cid, source, res in got:
+            if res is None:
+                continue
+            row = await s.get(Check, cid, with_for_update=True)
+            if row is None or not due(row, now) or _scan_source(row) != source:
                 continue
             t = datetime.now(timezone.utc)
             if "obs" in res:
@@ -1018,3 +1169,18 @@ def alert_due(state: dict | None, sent: list | None) -> tuple[str, list] | None:
         # нечем, молча забываем
         return ("tamperrec", []) if lv == "none" and not (state or {}).get("wall") else ("", [])
     return None
+
+
+def check_alert(check, now: datetime) -> tuple[str, list, str] | None:
+    current, pending, _ = _local_state(check, now)
+    got = alert_due(current, check.tamper_sent)
+    if pending and check.tamper_sent:
+        kind, sent = got if got and got[0] == "tamper" else ("", check.tamper_sent)
+        # Recovery stays pending, but an independent strong sign must alert again if it reappears.
+        signs = (current or {}).get("signs") or {}
+        keep = [key for key in sent if key == "hack" or key in signs]
+        got = (kind, keep) if kind or keep != check.tamper_sent else None
+    if got is None:
+        return None
+    kind, keep = got
+    return kind, keep, alert_text(current) if kind == "tamper" else ""

@@ -1,6 +1,8 @@
 """Признаки взлома в файлах сайтов (app/webfiles.py, helper webfiles-setup): красное только по
 уликам (веб-шелл, php в загрузках, запуск php в .htaccess, файл WordPress не как в выпуске),
 остальное - серые строки; привязка корня к монитору, проблема и алерт сервера, кнопки."""
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -9,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from app import collector, setup_scripts, tamper, webfiles
+from app import collector, settings_store, setup_scripts, tamper, webfiles
 from app.models import Check, Server
 
 NOW = datetime(2026, 10, 21, 12, 0, tzinfo=timezone.utc)
@@ -135,7 +137,7 @@ def test_helper_needed_and_written_right():
     assert not setup_scripts.setup_needed("webfiles-setup", {"extras": {"fpm": {"v": 1, "pools": [], "skipped": []}}})
     assert not setup_scripts.setup_needed("webfiles-setup", {"web_services": [{"kind": "Traefik"}]})
     src = SRC_FILE.read_text(encoding="utf-8")
-    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.8 " in src and "report.d/webfiles.json" in src
+    assert "\r" not in src and "KERVAX_SETUP_VERSION=0.9 " in src and "report.d/webfiles.json" in src
     assert 'mv -f "$HELPER.new" "$HELPER"' in src and "versions/webfiles-setup.ver" in src
     # контейнер: только верхний слой overlay, ключ по контейнеру, старт - не правка, ассеты мимо
     assert "upperdir=" in src and 'key="c${cid:0:12}' in src and "START_WIN=600" in src
@@ -199,6 +201,180 @@ async def test_track_maps_root_to_site_and_accept(client, auth_headers, monkeypa
     async with f() as s:
         assert not (await s.get(Check, a)).tamper_state["signs"]  # принятый не вернулся
         assert "php" not in (await s.get(Server, sid)).webfiles["roots"]["2080-11"]
+
+
+async def test_track_local_wordpress_history_and_latest_evidence(client, auth_headers):
+    f = client._transport.app.state.session_factory
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    observed = now - timedelta(days=2)
+    wp = {"what": "WordPress 6.0.1", "fix": "6.0.4"}
+    php = {"what": "PHP 8.2.1", "fix": "8.2.7"}
+    old = {"since": observed.isoformat(), "items": [wp, php]}
+    title = {"since": observed.isoformat(), "title": "Other title"}
+    root = {**ROOT, "domains": ["EXAMPLE.TEST"], "wp": "6.0.4", "wp_at_root": True}
+
+    async def write_report(server_id, roots, at=None):
+        async with f() as s:
+            srv = await s.get(Server, server_id)
+            srv.last_report = {"extras": {"webfiles": blk(ts=int((at or now).timestamp()), roots=roots)}}
+            srv.last_seen = now
+            await s.commit()
+
+    async with f() as s:
+        srv = Server(name="local", token_hash="local", last_seen=now, external_ip="192.0.2.10")
+        other = Server(name="other", token_hash="other", last_seen=now, external_ip="192.0.2.11")
+        s.add_all([srv, other])
+        await s.flush()
+        check = Check(name="local site", type="http", target="https://example.test", probe_local=True,
+                      parent_mode="server", parent_server_id=srv.id, probe_server_id=srv.id,
+                      probe_bound_at=now - timedelta(minutes=15),
+                      tamper_state={"signs": {"old": old, "title": title}, "last": {"at": observed.isoformat()},
+                                    "engine": {"wp": "6.0.1", "php": "8.2.1"}})
+        s.add(check)
+        await s.commit()
+        cid, sid, other_id = check.id, srv.id, other.id
+        await settings_store.set_raw(s, tamper._VKEY, json.dumps({"wp_at": now.isoformat(), "wp": {
+            "6.0.1": "insecure", "6.0.3": "insecure", "6.0.4": "latest"}}))
+
+    await write_report(other_id, [root])
+    await write_report(sid, [{**root, "domains": ["www.example.test", "*.example.test"]}])
+    await webfiles.track(f, now)
+    async with f() as s:
+        check = await s.get(Check, cid)
+        v = tamper.check_view(check, now)
+        assert v["wp_review"] == [{**wp, "observed_at": observed.isoformat()}]
+        assert {row.get("what") for row in v["signs"]} == {None, "PHP 8.2.1"}
+        assert "WordPress" not in tamper.check_alert(check, now)[2]
+    r = await client.post(f"/api/checks/{cid}/tamper-accept", json={"key": "old", "arg": wp["what"]},
+                          headers=auth_headers)
+    assert r.status_code == 400
+
+    await write_report(sid, [root, {**root, "key": "replica"}])
+    await webfiles.track(f, now)
+    async with f() as s:
+        check = await s.get(Check, cid)
+        v = tamper.check_view(check, now)
+        assert not v["wp_review"] and v["wp_local"] == {
+            "version": "6.0.4", "vulnerable": False, "fresh": True, "at": now.isoformat()}
+        assert check.tamper_state["signs"] == {"old": old, "title": title}
+        assert check.tamper["engine"] == {"wp": "6.0.1", "php": "8.2.1"}
+        assert not tamper.check_view(check, now + timedelta(minutes=31))["wp_local"]["fresh"]
+
+    password = "fakepass-example"
+    response = await client.post("/api/users", headers=auth_headers, json={
+        "username": "wordpress-viewer", "password": password, "role": "viewer", "sections": ["sites"],
+    })
+    assert response.status_code == 201, response.text
+    response = await client.post("/api/auth/login", json={"username": "wordpress-viewer", "password": password})
+    assert response.status_code == 200, response.text
+    viewer = {"Authorization": f"Bearer {response.json()['access_token']}"}
+    custom_headers = '{"Host":"other.example.test","Authorization":"Bearer fake-token-example"}'
+    async with f() as s:
+        check = await s.get(Check, cid)
+        check.http_headers = custom_headers
+        check.auth_user = "fixture-user"
+        check.auth_pass = password
+        await s.commit()
+    for headers in (auth_headers, viewer):
+        detail = await client.get(f"/api/checks/{cid}", headers=headers)
+        assert detail.status_code == 200, detail.text
+        listing = await client.get("/api/checks", headers=headers)
+        assert listing.status_code == 200, listing.text
+        overview = await client.get("/api/checks/overview", headers=headers)
+        assert overview.status_code == 200, overview.text
+        for row in (detail.json(), next(c for c in listing.json() if c["id"] == cid),
+                    next(c for c in overview.json()["checks"] if c["id"] == cid)):
+            assert row["tamper"]["wp_local"] is None and row["tamper"]["wp_review"]
+            if headers is viewer:
+                assert row["http_headers"] == row["auth_user"] == row["auth_pass"] == ""
+            else:
+                assert row["http_headers"] == custom_headers and row["auth_pass"] == password
+    async with f() as s:
+        check = await s.get(Check, cid)
+        check.http_headers = ""
+        check.auth_user = check.auth_pass = ""
+        await s.commit()
+
+    now += timedelta(seconds=1)
+    await write_report(sid, [{**root, "wp": "6.0.3"}])
+    await webfiles.track(f, now)
+    async with f() as s:
+        check = await s.get(Check, cid)
+        v = tamper.check_view(check, now)
+        assert v["wp_local"]["vulnerable"] and not v["wp_review"]
+        assert [row.get("what") for row in v["signs"]] == [None, "WordPress 6.0.3", "PHP 8.2.1"]
+        assert "WordPress 6.0.3" in tamper.check_alert(check, now)[2]
+
+    await write_report(sid, [root], at=now - timedelta(seconds=1))
+    await webfiles.track(f, now)
+    async with f() as s:
+        check = await s.get(Check, cid)
+        v = tamper.check_view(check, now)
+        assert v["wp_review"] and not v["wp_local"]["fresh"] and v["wp_local"]["vulnerable"]
+        assert v["wp_local"]["version"] == "6.0.3"
+
+    await write_report(sid, [root, {**root, "key": "replica", "wp": "6.0.3"}])
+    await webfiles.track(f, now)
+    async with f() as s:
+        check = await s.get(Check, cid)
+        v = tamper.check_view(check, now)
+        assert v["wp_review"] and not v["wp_local"]["fresh"] and v["wp_local"]["vulnerable"]
+        assert check.tamper_state["signs"]["old"] == old
+
+
+@pytest.mark.parametrize("bad", ["expired", "future", "before_binding", "catalog_expired", "catalog_unknown",
+                                  "catalog_unverified", "catalog_outdated", "catalog_secure_unknown", "missing_version",
+                                  "legacy_helper", "nested_core", "non_boolean_evidence", "wrong_token_scope", "wrong_server",
+                                  "unassigned", "wrong_host_header", "different_path", "same_old_version"])
+def test_local_wordpress_rejects_incomplete_or_untrusted_evidence(bad):
+    root = {**ROOT, "domains": ["example.test"], "wp": "6.0.4", "wp_at_root": True}
+    b = blk(ts=T - 120, roots=[root])
+    check = Check(type="http", target="https://example.test/", group_name="local", probe_local=True,
+                  probe_server_id=1, parent_mode="server", parent_server_id=1,
+                  probe_bound_at=NOW - timedelta(minutes=10),
+                  tamper_state={"signs": {"old": {"since": (NOW - timedelta(days=1)).isoformat(),
+                                                 "items": [{"what": "WordPress 6.0.1"}]}}})
+    srv = Server(id=1, enabled=True, token_site_groups=["local"], last_seen=NOW, offline_after_seconds=120)
+    catalog = {"wp_at": NOW.isoformat(), "wp": {"6.0.1": "insecure", "6.0.4": "latest"}}
+    assert webfiles._local_wp(check, srv, b, catalog, NOW)["version"] == "6.0.4"
+    if bad == "expired":
+        b["ts"] = T - 3_601
+    elif bad == "future":
+        b["ts"] = T + 1
+    elif bad == "before_binding":
+        b["ts"] = T - 601
+    elif bad == "catalog_expired":
+        catalog["wp_at"] = (NOW - timedelta(days=3)).isoformat()
+    elif bad == "catalog_unknown":
+        catalog["wp"] = {}
+    elif bad == "catalog_unverified":
+        catalog["wp"]["6.0.4"] = "unknown"
+    elif bad == "catalog_outdated":
+        catalog["wp"]["6.0.4"] = "outdated"
+    elif bad == "catalog_secure_unknown":
+        catalog["wp"]["6.0.4"] = "secure"
+    elif bad == "missing_version":
+        b["roots"].append({**root, "key": "replica", "wp": None})
+    elif bad == "legacy_helper":
+        root.pop("wp_at_root")
+    elif bad == "nested_core":
+        root["wp_at_root"] = False
+    elif bad == "non_boolean_evidence":
+        root["wp_at_root"] = "true"
+    elif bad == "wrong_token_scope":
+        srv.token_site_groups = ["other"]
+    elif bad == "wrong_server":
+        srv.id = 2
+    elif bad == "unassigned":
+        check.parent_mode = "auto"
+    elif bad == "wrong_host_header":
+        check.http_headers = '{"Host": "other.example.test"}'
+    elif bad == "different_path":
+        check.target = "https://example.test/other/"
+    elif bad == "same_old_version":
+        root["wp"] = "6.0.1"
+        catalog["wp"] = {"6.0.1": "latest"}
+    assert webfiles._local_wp(check, srv, b, catalog, NOW) is None
 
 
 async def test_postponed_site_files_stay_on_server_and_new_ones_show(client, auth_headers, monkeypatch):
@@ -666,6 +842,48 @@ def test_helper_06_content_and_watch():
     # sha1 с ноды не уходят, только вердикты (md5 - лишь у файлов ядра и плагинов WordPress)
     assert '\\"h\\"' not in src
     assert "SEED_DAYS=14" in src and "c[$2] < 5" in src and 'head -n "$WATCH_MAX"' in src
+
+
+@pytest.mark.parametrize(("prefix", "declared", "domains", "direct"), [
+    ("", "", '"example.test"', True),
+    ("", "public", '"example.test"', False),
+    ("backup", "", '"example.test"', False),
+    ("web/wp", "", '"example.test"', False),
+    ("", "", "", False),
+])
+def test_helper_wordpress_version_path_provenance(tmp_path, prefix, declared, domains, direct):
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("нет bash")
+    src = SRC_FILE.read_text(encoding="utf-8")
+    fragments = [re.search(rf"^{name}\(\) \{{.*?^\}}", src, re.M | re.S).group()
+                 for name in ("wp_versions", "wp_at_root")]
+    root = tmp_path / "root"
+    version = root / prefix / "wp-includes" / "version.php"
+    version.parent.mkdir(parents=True)
+    version.write_text("<?php\n$wp_version = '6.0.4';\n", encoding="utf-8", newline="\n")
+    report = tmp_path / "wp.tsv"
+    script = tmp_path / "check-wp-root.sh"
+    script.write_text("\n".join(fragments) + '\nwp_versions "$TEST_WP_ROOT" > "$TEST_WP_REPORT"\n'
+                      'wp_at_root "$TEST_WP_ROOT" "$TEST_WP_DECLARED" "$TEST_WP_DOMAINS" "$TEST_WP_REPORT"\n',
+                      encoding="utf-8", newline="\n")
+    env = {**os.environ, "TEST_WP_ROOT": root.as_posix(), "TEST_WP_DECLARED": (root / declared).as_posix(),
+           "TEST_WP_DOMAINS": domains, "TEST_WP_REPORT": report.as_posix()}
+    res = subprocess.run([bash, script.as_posix()], env=env, capture_output=True, timeout=30, text=True)
+    assert res.returncode == (0 if direct else 1), res.stderr
+    assert report.read_text(encoding="utf-8").split("\t")[2] == "6.0.4"
+    assert r'\"wp_at_root\":$wpdirect' in src
+
+
+def test_webfiles_normalizes_direct_wordpress_version_evidence():
+    root = {**ROOT, "wp": "6.0.4", "wp_at_root": True}
+    report = blk(roots=[root])
+    state = webfiles.process(None, report, NOW)
+    assert webfiles.view(state, {"extras": {"webfiles": report}}, NOW)["roots"][0]["wp_at_root"] is True
+    root.pop("wp_at_root")
+    state = webfiles.process(state, report, NOW)
+    public_root = webfiles.view(state, {"extras": {"webfiles": report}}, NOW)["roots"][0]
+    assert public_root["wp"] == "6.0.4" and public_root["wp_at_root"] is False
 
 
 # ---------- awk helper'а: файлы плагина, запуск php, каталоги загрузок ----------

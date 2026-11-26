@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from app import collector, tamper
 from app.config import Settings
@@ -159,6 +160,104 @@ def test_alert_due_transitions():
     assert tamper.alert_due({"signs": {"dom": {}}}, ["hack"]) == ("", [])
     assert tamper.alert_due({"signs": {}}, ["empty", "hack"]) == ("tamperrec", [])
     assert tamper.alert_due({"signs": {"dom": {}}}, None) is None
+
+
+def test_local_external_wordpress_waits_without_false_recovery():
+    observed = NOW - timedelta(days=2)
+    st = run(None, obs(engine={"wp": "7.0"}), observed, versions={"wp": WP})
+    check = Check(probe_local=True, tamper_state=st, tamper_sent=["hack"])
+    v = tamper.check_view(check, NOW)
+    assert v["level"] == "review" and v["signs"] == []
+    assert v["wp_review"][0]["observed_at"] == observed.isoformat()
+    assert tamper.check_alert(check, NOW) is None
+    check.probe_local = False
+    assert tamper.check_view(check, NOW)["level"] == "one"
+
+
+def test_pending_local_wordpress_does_not_dedupe_returning_file_signal():
+    observed = NOW - timedelta(days=2)
+    st = run(None, obs(engine={"wp": "7.0"}), observed, versions={"wp": WP})
+    check = Check(probe_local=True, tamper_state=st, tamper_sent=["hack", "php"])
+    kind, check.tamper_sent, text = tamper.check_alert(check, NOW)
+    assert (kind, check.tamper_sent, text) == ("", ["hack"], "")
+    assert tamper.check_alert(check, NOW) is None
+    st["signs"]["php"] = {"files": [{"p": "wp-content/uploads/unexpected.php", "y": "upload"}],
+                          "since": NOW.isoformat()}
+    v = tamper.check_view(check, NOW)
+    assert v["level"] == "hack" and v["wp_review"] and [s["key"] for s in v["signs"]] == ["php"]
+    kind, check.tamper_sent, text = tamper.check_alert(check, NOW)
+    assert (kind, check.tamper_sent) == ("tamper", ["hack", "php"])
+    assert "unexpected.php" in text and "WordPress" not in text
+    assert tamper.check_alert(check, NOW) is None
+
+
+async def test_scan_never_opens_local_target(monkeypatch):
+    async def external(*args):
+        raise AssertionError("external scan of local target")
+
+    monkeypatch.setattr(tamper, "_scan", external)
+    check = Check(probe_local=True, target="https://example.test/", type="http", enabled=True, last_status="up")
+    assert not tamper.due(check, NOW)
+    assert await tamper.scan(check) == {"err": tamper.LOCAL_RECHECK}
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("probe_local", True), ("target", "https://other.example.test/"),
+    ("http_headers", '{"Host":"other.example.test"}'),
+])
+async def test_background_discards_external_result_after_source_change(client, monkeypatch, field, value):
+    factory = client._transport.app.state.session_factory
+    async with factory() as session:
+        check = Check(target="https://example.test/", name="site", type="http", enabled=True, last_status="up")
+        session.add(check)
+        await session.commit()
+        cid = check.id
+
+    async def versions(*args):
+        return {"wp": WP}
+
+    async def scan(check):
+        async with factory() as session:
+            row = await session.get(Check, check.id)
+            setattr(row, field, value)
+            await session.commit()
+        return {"obs": obs(engine={"wp": "7.0"})}
+
+    monkeypatch.setattr(tamper, "versions", versions)
+    monkeypatch.setattr(tamper, "scan", scan)
+    await tamper._scan_due(factory, NOW)
+    async with factory() as session:
+        check = await session.get(Check, cid)
+        assert getattr(check, field) == value and check.tamper_state is None
+
+
+async def test_only_local_sites_refresh_catalog_without_scanning_the_site(client, monkeypatch):
+    factory = client._transport.app.state.session_factory
+    st = run(None, obs(engine={"wp": "7.0"}), NOW - timedelta(days=1), versions={"wp": WP})
+    async with factory() as session:
+        session.add(Check(name="site", target="https://example.test/", type="http", enabled=True,
+                          last_status="up", probe_local=True, probe_server_id=1, probe_bound_at=NOW,
+                          parent_mode="server", parent_server_id=1, tamper_state=st))
+        await session.commit()
+
+    async def wp_table():
+        return {"wp": WP}
+
+    async def unavailable_wp_table():
+        return {"php": PHP}
+
+    async def external(*args):
+        raise AssertionError("external scan of local target")
+
+    monkeypatch.setattr(tamper, "scan", external)
+    monkeypatch.setattr(tamper, "_fetch_versions", wp_table)
+    assert await tamper._scan_due(factory, NOW) == 0
+    tomorrow = NOW + timedelta(days=1)
+    monkeypatch.setattr(tamper, "_fetch_versions", unavailable_wp_table)
+    assert await tamper._scan_due(factory, tomorrow) == 0
+    async with factory() as session:
+        catalog = await tamper.versions(session, tomorrow, refresh=False)
+        assert catalog["at"] == tomorrow.isoformat() and catalog["wp_at"] == NOW.isoformat() and catalog["wp"] == WP
 
 
 def test_texts_keyboard_only():

@@ -32,7 +32,7 @@
 # token=, Bearer and the like and passwords in URLs are hidden in every journal sent.
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.6  # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.7  # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_ALWAYS=1     # safe on any node: it only reads systemctl and the journal
 
 HELPER_DIR=/lib65/kervax
@@ -425,45 +425,130 @@ END {
 OOM_JSON_EOF
 )
 
-oom_scan() {
+oom_journal() {
+  local limit=$1 rc=0
+  shift
+  timeout "$limit" journalctl "$@" -o short-unix --no-pager \
+    > "$tmp/j" 2> "$tmp/j.err" || rc=$?
+  # Older systemd versions can exit 1 with only the journal header or an empty-selection marker.
+  if [ ! -s "$tmp/j.err" ]; then
+    [ "$rc" != 0 ] || return 0
+    if [ "$rc" = 1 ] && awk '
+      !/^-- Logs begin at .*, end at .*[.] --$/ && $0 != "-- No entries --" { bad = 1 }
+      END { exit (bad || NR == 0) }' "$tmp/j"; then return 0; fi
+  fi
+  return "$((rc == 0 ? 1 : rc))"
+}
+
+oom_checkpoint() {
+  printf '%s\n' "$2" > "$tmp/$1" && mv -f "$tmp/$1" "$OOM_DIR/$1"
+}
+
+oom_scan() (
   command -v journalctl >/dev/null 2>&1 || return 0
-  local now cur from raw rc pg
+  local now cur from cut tmp pg prev next_cursor
+  local watermark saved_span since until start rc span max_span=86400 min_span=60 date_args=()
   now=$(date +%s)
-  install -d -m 0700 "$OOM_DIR"
-  [ -f "$OOM_DIR/kills.tsv" ] || : > "$OOM_DIR/kills.tsv"
+  install -d -m 0700 "$OOM_DIR" || return 0
+  tmp=$(mktemp -d "$OOM_DIR/.scan.XXXXXX") || return 0
+  trap 'rm -rf -- "$tmp"' EXIT
   cur=$(cat "$OOM_DIR/cursor" 2>/dev/null || true)
   from=$(cat "$OOM_DIR/from" 2>/dev/null || true)
+  watermark=$(cat "$OOM_DIR/backfill_until" 2>/dev/null || true)
+  saved_span=$(cat "$OOM_DIR/backfill_span" 2>/dev/null || true)
+  case "$watermark" in *[!0-9]*) watermark= ;; esac
+  case "$saved_span" in *[!0-9]*) saved_span= ;; esac
+  cut=$((now - OOM_KEEP))
   pg=$(( $(getconf PAGESIZE 2>/dev/null || echo 4096) / 1024 ))
   [ "$pg" -ge 1 ] || pg=4
-  raw=$(mktemp)
   set -- _TRANSPORT=kernel + MESSAGE_ID=$OOM_MSGID + UNIT_RESULT=oom-kill + SYSLOG_IDENTIFIER=systemd-oomd
-  if [ -n "$cur" ]; then
-    timeout 60 journalctl "$@" --after-cursor="$cur" -o short-unix -q --no-pager --show-cursor > "$raw" 2>/dev/null; rc=$?
-  else
-    # the first read: a week back. A kernel log too big to read in a minute is skipped: from now on
-    timeout 60 journalctl "$@" --since "-7 days" -o short-unix -q --no-pager --show-cursor > "$raw" 2>/dev/null; rc=$?
-    from=$((now - OOM_KEEP))
-    if [ "$rc" -eq 124 ]; then
-      timeout 20 journalctl "$@" -n 1 -o short-unix -q --no-pager --show-cursor > "$raw" 2>/dev/null
-      rc=0; from=$now; : > "$OOM_DIR/kills.tsv"
+
+  until=
+  if [ -n "$cur" ] && [ -z "$watermark$saved_span" ]; then
+    rc=0
+    oom_journal 60 "$@" --after-cursor="$cur" --show-cursor || rc=$?
+    if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+      # A large unread tail can time out indefinitely. Replay retained history in overlapping
+      # date windows on the next run, keeping the old cursor and report until replay catches up.
+      oom_checkpoint backfill_span "$((max_span / 2))"
+      return 0
+    elif [ "$rc" != 0 ]; then
+      grep -q '^Failed to seek to cursor:' "$tmp/j.err" || return 0
+      cur=
     fi
-    echo "$from" > "$OOM_DIR/from"
   fi
-  if [ "$rc" -ne 124 ]; then
-    awk -v pg="$pg" "$OOM_AWK" "$raw" > "$raw.p" 2>/dev/null || : > "$raw.p"
-    grep -v '^C	' "$raw.p" >> "$OOM_DIR/kills.tsv"
-    cur=$(sed -n 's/^C	//p' "$raw.p" | tail -1)
-    [ -n "$cur" ] && printf '%s\n' "$cur" > "$OOM_DIR/cursor"
-    # a week, at most 400 lines
-    awk -F'\t' -v cut=$((now - OOM_KEEP - 86400)) '$2 + 0 >= cut' "$OOM_DIR/kills.tsv" | tail -400 > "$raw.k"
-    mv -f "$raw.k" "$OOM_DIR/kills.tsv"
+  if [ -z "$cur" ] || [ -n "$watermark$saved_span" ]; then
+    # Work through the retained week in time windows, even when a window has no entries.
+    # Reread 30 seconds at the boundary for OOM detail that precedes a kill line.
+    since=$cut
+    if [ "${watermark:-0}" -gt "$cut" ] && [ "$watermark" -le "$now" ]; then
+      since=$watermark
+    fi
+    start=$((since - 30)); [ "$start" -ge "$cut" ] || start=$cut
+    span=${saved_span:-$max_span}
+    until=$((since + span))
+    date_args=(--since "@$start")
+    if [ "$until" -lt "$now" ]; then
+      # Some versions show a cursor beyond --until. Only take one from an open-ended read.
+      date_args+=(--until "@$until")
+    else
+      until=$now
+      date_args+=(--show-cursor)
+    fi
+    local began=$SECONDS
+    rc=0
+    oom_journal 20 "$@" "${date_args[@]}" || rc=$?
+    if [ "$rc" != 0 ]; then
+      if [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
+        span=$(((until - since) / 2)); [ "$span" -ge "$min_span" ] || span=$min_span
+        oom_checkpoint backfill_span "$span"
+      fi
+      return 0
+    fi
   fi
-  rm -f "$raw" "$raw.p" "$raw.k"
-  awk -F'\t' -v now="$now" -v from="${from:-$now}" -v cut=$((now - OOM_KEEP)) -v max="$OOM_MAX" "$OOM_JSON" \
+
+  awk -v pg="$pg" "$OOM_AWK" "$tmp/j" > "$tmp/parsed" || return 0
+  next_cursor=$(awk -F'\t' '$1 == "C" { cursor = $2 } END { print cursor }' "$tmp/parsed") || return 0
+  prev=/dev/null
+  [ ! -f "$OOM_DIR/kills.tsv" ] || prev="$OOM_DIR/kills.tsv"
+  # A date-based replay can overlap stored kills and unit notes. Keep their original detail.
+  # Bound the retained history to eight days and 400 lines, including a day of slack.
+  (
+    set -o pipefail
+    awk -F'\t' -v cut=$((cut - 86400)) '
+      ($1 == "K" || $1 == "U") && $2 + 0 >= cut {
+        # Kernel records have a PID even when a window missed their cgroup detail.
+        detail = ($1 == "U") ? $4 : ($3 == "" ? $12 : "")
+        key = $1 SUBSEP $2 SUBSEP $3 SUBSEP detail
+        if (!seen[key]++) print
+      }' "$prev" "$tmp/parsed" | sort -s -t $'\t' -k2,2n | tail -400
+  ) > "$tmp/kills.tsv" || return 0
+  mv -f "$tmp/kills.tsv" "$OOM_DIR/kills.tsv" || return 0
+  if [ -z "$from" ]; then
+    from=$cut
+    oom_checkpoint from "$from" || return 0
+  fi
+  if [ -n "$until" ]; then
+    if [ "$until" = "$now" ] && [ -n "$next_cursor" ]; then
+      oom_checkpoint cursor "$next_cursor" || return 0
+      rm -f "$OOM_DIR/backfill_until" "$OOM_DIR/backfill_span" || return 0
+    else
+      oom_checkpoint backfill_until "$until" || return 0
+      if [ -n "$saved_span" ] && [ "$((SECONDS - began))" -lt 10 ]; then
+        span=$((span * 2)); [ "$span" -le "$max_span" ] || span=$max_span
+        oom_checkpoint backfill_span "$span" || return 0
+      fi
+    fi
+    [ "$until" = "$now" ] || return 0
+  elif [ -n "$next_cursor" ] && [ "$next_cursor" != "$cur" ]; then
+    oom_checkpoint cursor "$next_cursor" || return 0
+  fi
+
+  awk -F'\t' -v now="$now" -v from="$from" -v cut="$cut" -v max="$OOM_MAX" "$OOM_JSON" \
     /etc/passwd "$OOM_DIR/kills.tsv" > "$OOM_OUT.tmp.$$" 2>/dev/null && mv -f "$OOM_OUT.tmp.$$" "$OOM_OUT"
   rm -f "$OOM_OUT.tmp.$$"
   chmod 0644 "$OOM_OUT" 2>/dev/null || true
-}
+)
 
 case "${1:-scan}" in
   scan) scan; oom_scan ;;

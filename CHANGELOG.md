@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.179] - 2026-11-26
+
+- Local website monitors keep earlier external WordPress version findings visible as historical evidence. A fresh report from the assigned server can confirm the version for the exact site. Missing or ambiguous evidence requests a local recheck without announcing a recovery.
+- The cron and systemd helpers retain their last successful journal checkpoint after a failed read. Timed-out reads are retried in smaller batches so cron job counts and recent out-of-memory events can catch up.
+
 ## [1.8.178] - 2026-11-26
 
 - The home dashboard now puts critical issues first. Use the severity filters to focus the queue. Each row shows the issue, the affected resource and its age, with diagnostics and available actions in the details.

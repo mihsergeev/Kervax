@@ -752,7 +752,7 @@ class CheckOut(BaseModel):
     dns_server: str = ""
     dns_baseline: list[str] | None = None
     dns_last: list[str] | None = None
-    # признаки взлома (app/tamper.py, Check.tamper): level none|one|hack, signs, summary
+    # признаки взлома (app/tamper.py, Check.tamper): level none|one|hack|review, signs, summary
     tamper: dict | None = None
     parent_mode: str = "auto"
     parent_server_id: int | None = None

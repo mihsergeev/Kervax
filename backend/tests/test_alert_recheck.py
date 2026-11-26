@@ -243,8 +243,31 @@ async def test_cms_requires_a_fresh_observation(client, auth_headers, monkeypatc
         assert (obj.tamper or {}).get("level") == ("none" if mode == "fixed" else "one")
 
 
+async def test_local_cms_recheck_with_credentials_never_uses_the_panel(client, auth_headers, monkeypatch):
+    oid = await check(client)
+    async with factory(client)() as s:
+        obj = await s.get(Check, oid)
+        obj.target = "https://example.test/"
+        obj.probe_local = True
+        obj.http_headers = '{"X-Demo": "local"}'
+        await s.commit()
+
+    calls = []
+
+    async def scan(obj):
+        calls.append(obj.id)
+        return {"err": "unexpected external scan"}
+
+    monkeypatch.setattr(tamper, "scan", scan)
+    job = await start(client, auth_headers, oid, "tamper", "check")
+    assert job["status"] == "unavailable" and job["message"] == tamper.LOCAL_RECHECK
+    assert (await result(client, auth_headers, job["id"]))["status"] == "unavailable"
+    assert not calls
+
+
 @pytest.mark.parametrize("field,value", [("target", "https://changed.example"), ("enabled", False),
-                                        ("http_headers", "X-Demo: changed"), ("extra_paths", ["/new"]), ("degraded_ms", 1)])
+                                        ("http_headers", "X-Demo: changed"), ("extra_paths", ["/new"]),
+                                        ("degraded_ms", 1), ("probe_local", True)])
 async def test_cms_old_result_after_edit_does_not_overwrite(client, auth_headers, monkeypatch, field, value):
     oid = await check(client)
     async def scan(obj):
@@ -257,7 +280,8 @@ async def test_cms_old_result_after_edit_does_not_overwrite(client, auth_headers
     job = await start(client, auth_headers, oid, "tamper", "check")
     assert (await result(client, auth_headers, job["id"]))["status"] == "unavailable"
     async with factory(client)() as s:
-        assert (await s.get(Check, oid)).tamper["level"] == "one"
+        obj = await s.get(Check, oid)
+        assert obj.tamper["level"] == ("review" if field == "probe_local" else "one")
 
 
 @pytest.mark.parametrize("kind", ["tamper", "status", "ssl", "domain"])

@@ -87,7 +87,7 @@
 # (root only).
 set -euo pipefail
 
-KERVAX_SETUP_VERSION=0.8 # MAJOR.MINOR; compared component-wise
+KERVAX_SETUP_VERSION=0.9 # MAJOR.MINOR; compared component-wise
 KERVAX_SETUP_WHEN="pgrep -x nginx || pgrep -x apache2 || pgrep -x httpd || pgrep php-fpm || pgrep -x php || pgrep lsphp || pgrep frankenphp"
 
 HELPER_DIR=/lib65/kervax
@@ -771,6 +771,12 @@ wp_versions() {
     }' 2>/dev/null | sort -t "$TAB" -k1,2 | awk -F '\t' '!seen[$1 FS $2]++'
 }
 
+# The monitor needs version.php directly under the declared document root for a named site.
+wp_at_root() {
+  [ -n "$3" ] && [ "${1%/}" = "${2%/}" ] &&
+    awk -F '\t' '$1 == "core" && NF >= 5 && $3 != "" && $4 == "" { direct = 1 } END { exit !direct }' "$4"
+}
+
 now=$(date +%s)
 web_uids
 find "${OUT%/*}" -maxdepth 1 -name "${OUT##*/}.??????" -mmin +30 -delete 2>/dev/null || true
@@ -852,6 +858,8 @@ while IFS="$TAB" read -r pid dir names; do
   fi
   doms=$(printf '%s\n' "$names" | tr ' ' '\n' | grep -E '^[A-Za-z0-9*][A-Za-z0-9.*-]*\.[A-Za-z]{2,}$' | sort -u | head -20 \
     | awk '{ printf "%s\"%s\"", (NR > 1 ? "," : ""), $0 }')
+  wpdirect=false
+  if [ -n "$wpv" ] && wp_at_root "$inner" "$dir" "$doms" "$work/wp"; then wpdirect=true; fi
   snap="$SNAP/$key.lst" wf="$SNAP/$key.watch" lroot=$p
   [ -n "$upper" ] && lroot=$upper
   old=$snap
@@ -1002,7 +1010,7 @@ while IFS="$TAB" read -r pid dir names; do
     [ -n "$fsums" ] && finfo="$finfo,\"sums\":{$fsums}"
     deltas="$deltas${deltas:+,}{\"key\":\"$key\",\"n_new\":$nn,\"n_changed\":$nc,\"n_gone\":$ng,\"n_same\":$ns,\"new\":[$(jlist N "$work/diff")],\"changed\":[$(jlist C "$work/diff")],\"gone\":[$(jlist G "$work/diff")],\"same\":[$(jlist S "$work/diff")]${wpup:+,\"wp\":[$wpup]}$finfo}"
   fi
-  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}${branch:+,\"branch\":\"$branch\"}${wpv:+,\"wp\":\"$wpv\"}${wploc:+,\"wploc\":\"$wploc\"}${clean:+,\"clean\":[$clean]}}"
+  roots="$roots${roots:+,}{\"key\":\"$key\",\"where\":\"$(esc "$where")\",\"path\":\"$(esc "$inner")\",\"domains\":[$doms],\"files\":$files,\"big\":$big,\"layer\":$layer${src:+,\"src\":\"$src\"}${GEV:+,\"git\":[$GEV]}${branch:+,\"branch\":\"$branch\"}${wpv:+,\"wp\":\"$wpv\",\"wp_at_root\":$wpdirect}${wploc:+,\"wploc\":\"$wploc\"}${clean:+,\"clean\":[$clean]}}"
   cp -f "$work/cur" "$snap.tmp" && mv -f "$snap.tmp" "$snap"
   [ -e "$wf" ] || : > "$wf"
   cp -f "$work/wp" "$SNAP/$key.wp.tmp" && mv -f "$SNAP/$key.wp.tmp" "$SNAP/$key.wp"
