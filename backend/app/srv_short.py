@@ -19,7 +19,7 @@ from app import going_down, mem_starve, podnames, tg_fmt
 # Тема - второй эмодзи после уровня: по нему в ленте видно, про что алерт
 TOPIC = {
     "offline": "📡", "reboot": "🔄", "cpu": "⚡", "cpu_spin": "🌀", "mem": "🧠", "oom": "🧠",
-    "mem_leak": "📈", "mem_limit": "🧠", "pressure": "🫁", "temp": "🌡", "throttle": "🌡", "disktemp": "🌡",
+    "mem_leak": "📈", "mem_limit": "🧠", "pressure": "🫁", "temp": "🌡", "throttle": "🌡", "cpu_cap": "🔌", "disktemp": "🌡",
     "gpu_heat": "🌡", "clock": "🕐", "dns": "🌐", "disk": "💽", "inode": "💽", "disk_forecast": "💽",
     "disk_health": "💽", "disk_slow": "🐢", "backup_transfer": "💾", "net_health": "📶", "link": "🔗", "traffic": "📊",
     "conntrack": "🔗", "listen_gone": "🔌", "exposed": "🔓", "port_new": "🚪", "cf_realip": "🎭", "access_change": "🔑",
@@ -46,6 +46,8 @@ BASE = {
     "backup_dump": 2, "backup_dump_space": 2, "backup_cron": 2, "backup_custom": 2,
     "backup_restore": 2, "backup_check": 2, "port_new": 2, "cf_realip": 2, "ssh_risk": 2, "access_risk": 2, "autoban": 2,
     "listen_gone": 2, "link": 2, "unit_loop": 2, "db_conn": 2, "dns": 2,
+    # частота CPU урезана: сервер работает в разы медленнее - поломка, а не напоминание
+    "cpu_cap": 2,
     # смена доступа - событие безопасности; висячий лок, сломанная чистка и проблемные репозитории
     # бэкап-сервера - поломка, а не напоминание. Главная красит их так же (level ниже)
     "access_change": 2, "backup_lock": 2, "backup_prune": 2, "backup_repo": 2, "backup_mirror": 2,
@@ -74,6 +76,7 @@ RECOVERY = {
     "offline": "снова на связи", "cpu": "CPU снова в норме", "mem": "память снова в норме",
     "disk": "диск снова в норме", "inode": "inode снова в норме", "temp": "CPU остыл",
     "throttle": "троттлинга больше нет", "disktemp": "диск остыл", "conntrack": "conntrack снова в норме",
+    "cpu_cap": "частота CPU восстановилась",
     "clock": "часы снова точные", "dns": "DNS снова отвечает", "db_conn": "подключений к СУБД снова хватает",
     "web_5xx": "ошибок 5xx больше нет", "disk_health": "диски снова в порядке",
     "gpu": "GPU снова в порядке", "gpu_heat": "GPU остыли", "llm": "LLM снова отвечает", "qdrant": "Qdrant снова в порядке",
@@ -424,6 +427,12 @@ def _short(key: str, ctx: dict, s, level: int):
         return f"CPU греется до {v}°C{_avg_tail(ctx)}", []
     if key == "throttle":
         return "CPU сбрасывает частоту от перегрева", []
+    if key == "cpu_cap":
+        if v is None:
+            return "CPU ограничен по частоте", []
+        return f"CPU ограничен по частоте: {v} из {ctx.get('max')} МГц", [
+            f"Загрузка {ctx.get('cpu')}%, уже {ctx.get('minutes')} мин",
+            "Похоже на ограничение питания или BMC: проверьте блоки питания и журнал IPMI"]
     if key == "disktemp":
         return f"Диск греется до {v}°C{_avg_tail(ctx)}", []
     if key == "conntrack":

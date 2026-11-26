@@ -158,7 +158,7 @@ def test_problem_kinds_match_server_problems():
     src = (Path(__file__).resolve().parents[1] / "app" / "collector.py").read_text(encoding="utf-8")
     body = src[src.index("def _server_problems("):src.index("\ndef ", src.index("def _server_problems(") + 10)]
     kinds = set(re.findall(r'\badd\("([a-z_0-9]+)"', body))
-    kinds |= {"cpu", "mem", "temp", "conntrack", "disktemp", "throttle", "flux_down", "flux_stale"}  # add(kind, ...)
+    kinds |= {"cpu", "mem", "temp", "conntrack", "disktemp", "throttle", "cpu_cap", "flux_down", "flux_stale"}  # add(kind, ...)
     assert kinds == set(mw.PROBLEM_KINDS)
 
 

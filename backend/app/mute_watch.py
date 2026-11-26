@@ -48,7 +48,7 @@ DECISIONS = ("access:", "exposed:", "cfip:", "memlim:", "dockrisk:", "noboot:", 
 # Тест сверяет с исходником
 PROBLEM_KINDS = frozenset({
     "access_change", "access_risk", "autoban", "backup_check", "backup_cron", "backup_dump", "backup_dump_space",
-    "backup_mirror", "backup_restore", "cf_realip", "clock", "conntrack", "cpu", "cpu_spin", "cron_stuck", "db_conn", "db_health",
+    "backup_mirror", "backup_restore", "cf_realip", "clock", "conntrack", "cpu", "cpu_cap", "cpu_spin", "cron_stuck", "db_conn", "db_health",
     "backup_transfer", "disk", "disk_forecast", "disk_health", "disk_slow", "disktemp", "dns", "docker_restarts", "exposed",
     "flux_down", "flux_stale", "fpm", "gitlab", "gpu", "gpu_heat", "inode", "kube_cron", "kube_expiry",
     "windows_service", "gre_down", "kube_job", "kube_node", "kube_pod", "kube_restarts", "link", "listen_gone", "llm", "log_errors", "mem",

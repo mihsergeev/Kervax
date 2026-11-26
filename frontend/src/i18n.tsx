@@ -4115,6 +4115,7 @@ const EN: Record<string, string> = {
   'Частичная доступность (локации)': 'Partial availability (locations)',
   'Недоступен': 'Down',
   'Троттлинг CPU': 'CPU throttling',
+  'Частота CPU занижена': 'CPU frequency capped',
   'Температура диска': 'Disk temperature',
   'Температура CPU': 'CPU temperature',
   'Перезагрузка': 'Reboot',

@@ -86,7 +86,7 @@ function HomeDisclosure({ title, count, children }: { title: string; count: numb
 }
 // иконка проблемы по ее виду - чтобы список читался, не вчитываясь
 const ISSUE_ICON: Record<string, string> = {
-  offline: '🔥', cpu: '🧮', mem: '🧠', disk: '🗄', temp: '🌡', throttle: '🥵', conntrack: '🔗',
+  offline: '🔥', cpu: '🧮', mem: '🧠', disk: '🗄', temp: '🌡', throttle: '🥵', cpu_cap: '🔌', conntrack: '🔗',
   disktemp: '🌡', disk_health: '💽', disk_forecast: '📈', inode: '🗂', windows_service: '⚙️', units: '⚙️', oom: '🧠', cpu_spin: '🌀',
   docker: '🐳', kuber: '☸️', backups: '💾', backup_transfer: '💾', docker_sock: '🔓',
   clock: '🕐', dns: '🌐', db_conn: '🔌', web_5xx: '🌐', queue: '🐇', kube_expiry: '⏳', flux_down: '☸️',

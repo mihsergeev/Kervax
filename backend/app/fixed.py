@@ -34,7 +34,7 @@ WINDOW = frozenset({
     "kube_job", "disk_health",
 })
 STATE = frozenset({
-    "cpu", "mem", "temp", "throttle", "conntrack", "db_conn", "disktemp", "disk", "inode", "pressure",
+    "cpu", "mem", "temp", "throttle", "cpu_cap", "conntrack", "db_conn", "disktemp", "disk", "inode", "pressure",
     "net_health", "link", "disk_slow", "dns", "clock", "units", "kube_pod", "kube_node", "flux_down",
     "flux_stale", "kube_cron", "listen_gone", "cron_stuck", "queue_stuck", "queue_failed", "workers", "fpm",
     "mem_limit", "gpu", "gpu_heat", "llm", "qdrant", "windows_service", "cpu_spin", "db_health", "web_config", "gre_down", "autoban",

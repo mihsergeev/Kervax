@@ -40,6 +40,7 @@ export const SRV_ALERT_KINDS: { k: string; label: string }[] = [
   { k: 'disk', label: 'Диск' },
   { k: 'temp', label: 'Температура CPU' },
   { k: 'throttle', label: 'Троттлинг CPU' },
+  { k: 'cpu_cap', label: 'Частота CPU занижена' },
   { k: 'conntrack', label: 'Conntrack' },
   { k: 'disktemp', label: 'Температура диска' },
   { k: 'disk_health', label: 'Диск: поломка' },

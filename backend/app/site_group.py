@@ -55,7 +55,7 @@ LVL_BACK = {"flaky": "снова отвечают стабильно", "down": "
 
 # тревоги сервера, от которых сайты на нем и падают: строка "На сервере тоже: ..."
 SERVER_CAUSE = {
-    "cpu": "CPU", "cpu_spin": "CPU", "mem": "память", "oom": "OOM", "mem_limit": "лимит памяти",
+    "cpu": "CPU", "cpu_spin": "CPU", "cpu_cap": "частота CPU", "mem": "память", "oom": "OOM", "mem_limit": "лимит памяти",
     "pressure": "давление", "disk": "диск", "inode": "inode", "disk_health": "диски",
     "disk_slow": "медленный диск", "net_health": "сеть", "link": "связь", "conntrack": "conntrack",
     "web_5xx": "5xx", "fpm": "php-fpm", "db_conn": "база", "docker_down": "контейнер",

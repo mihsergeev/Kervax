@@ -53,6 +53,11 @@ SERVER_ALERT_KINDS: dict[str, tuple[str, str]] = {
     "disk": ("Диск", "диск {value}% ≥ {threshold}%{cause}"),
     "temp": ("Температура CPU", "CPU {value}°C ≥ {threshold}°C"),
     "throttle": ("Троттлинг CPU", "устойчивый тепловой троттлинг CPU ({streak} интервала подряд)"),
+    # CPU занят, а частота держится на половине пика ноды и ниже: питание или BMC урезали процессор,
+    # а тепловой троттлинг молчит. {max} - пик частоты ноды, {cpu} - загрузка, {minutes} - сколько держится
+    "cpu_cap": ("Частота CPU занижена",
+                "CPU ограничен по частоте: {value} из {max} МГц при загрузке {cpu}% уже {minutes} мин. "
+                "Похоже на ограничение питания или BMC: проверьте блоки питания и журнал IPMI"),
     "conntrack": ("Conntrack", "таблица conntrack заполнена на {value}% ≥ {threshold}%"),
     "db_conn": ("Коннекты СУБД", "{engine}: занято {used} из {limit} подключений ({value}% ≥ {threshold}%)"),
     "disktemp": ("Температура диска", "диск {value}°C ≥ {threshold}°C"),

@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.177] - 2026-11-26
+
+- New alert "CPU frequency capped": the CPU is busy (30% or more, iowait excluded) while its frequency stays at half of the node's own peak or lower for 20 minutes. It catches a power or BMC cap, for example a server that lost one of its two power feeds and runs at 800 MHz instead of 3.9 GHz, when the thermal throttling counter stays at zero and the CPU is cold. The peak is learned per node from its reports; VMs with a constant frequency and idle hardware at the minimum frequency stay quiet. The alert clears once the frequency comes back up, not when the load drops while the frequency is still capped.
+
 ## [1.8.176] - 2026-11-25
 
 - No more "sudo rights changed" alerts when a sudo package update rewrites the comments of /etc/sudoers.d/README: changes-setup 0.8 hashes sudoers files by the lines that act (comments and blank lines left out, include directives kept). The first snapshot after the helper update does not report the files as changed; new and removed sudoers files are reported as before. The helper is updated with the playbook.

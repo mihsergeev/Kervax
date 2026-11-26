@@ -42,7 +42,7 @@ APP = frozenset({
 INFRA = frozenset({
     "offline", "reboot", "clock", "dns", "pressure",
     # ресурсы ноды
-    "cpu", "mem", "oom", "temp", "throttle", "conntrack",
+    "cpu", "mem", "oom", "temp", "throttle", "cpu_cap", "conntrack",
     # диски
     "disk", "inode", "disk_forecast", "disk_health", "disk_slow", "disktemp",
     # сеть

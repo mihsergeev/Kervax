@@ -46,7 +46,7 @@ export const RELAY_DEFAULT_PORT = 8790
 // попадает в "Сервер" - новый вид не пропадет из окна, даже если его забыли разложить
 const AREAS: { id: string; label: string; kinds: string[] }[] = [
   { id: 'srv', label: 'Сервер', kinds: ['offline', 'reboot', 'listen_gone'] },
-  { id: 'load', label: 'Нагрузка и память', kinds: ['cpu', 'mem', 'temp', 'throttle', 'pressure', 'cpu_spin', 'oom', 'mem_leak', 'mem_limit'] },
+  { id: 'load', label: 'Нагрузка и память', kinds: ['cpu', 'mem', 'temp', 'throttle', 'cpu_cap', 'pressure', 'cpu_spin', 'oom', 'mem_leak', 'mem_limit'] },
   { id: 'disk', label: 'Диск', kinds: ['disk', 'disk_forecast', 'inode', 'disk_health', 'disk_slow', 'disktemp', 'backup_transfer'] },
   { id: 'net', label: 'Сеть', kinds: ['conntrack', 'net_health', 'link', 'traffic', 'vpn_torrent', 'vpn_heavy', 'gre_down', 'port_new', 'exposed', 'cf_realip'] },
   { id: 'svc', label: 'Службы и очереди', kinds: ['windows_service', 'units', 'unit_loop', 'workers', 'cron_stuck', 'queue_stuck', 'queue_failed', 'log_errors', 'fpm'] },
@@ -83,7 +83,7 @@ const SECS: SecDef[] = [
 const WINDOWS_EDIT_SECTIONS = new Set(['srv', 'load', 'disk', 'svc', 'del'])
 
 // температуры на ВМ не видны: датчиков нет, алертов по ним не будет
-const HW_ONLY = ['temp', 'disktemp']
+const HW_ONLY = ['temp', 'disktemp', 'cpu_cap']
 
 // Как дела у ретранслятора: что сказал helper relay-setup и когда
 function RelayStatus({ relay, host }: { relay: RelayView; host: string }) {

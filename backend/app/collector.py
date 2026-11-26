@@ -364,7 +364,7 @@ def _expiry_icon(kind: str, days: int) -> str:
 # графики ввода-вывода, тогда как заполнение лежит в самом низу.
 # offline/reboot — без цели (верх страницы): там смотреть нечего.
 _SRV_SECTION = {
-    "cpu": "cpu", "throttle": "throttle", "temp": "temp",
+    "cpu": "cpu", "throttle": "throttle", "cpu_cap": "freq", "temp": "temp",
     "mem": "mem", "oom": "oom",
     "conntrack": "conntrack", "disk": "diskfill", "disktemp": "disktemp",
     "kube_expiry": "kube", "flux_down": "kube", "flux_stale": "kube", "kube_pod": "kube", "web_5xx": "web",
@@ -2475,7 +2475,7 @@ async def _proxy_alerts(
 
 _SRV_LABEL = {
     "offline": "на связи", "cpu": "CPU", "mem": "RAM", "disk": "диск",
-    "temp": "температура", "throttle": "троттлинг",
+    "temp": "температура", "throttle": "троттлинг", "cpu_cap": "частота CPU",
     "conntrack": "conntrack", "disktemp": "температура диска",
     "db_conn": "коннекты СУБД",
     "backup_missing": "бэкап", "backup_failed": "бэкап", "backup_stale": "свежесть бэкапа",
@@ -2516,7 +2516,7 @@ _SRV_LABEL = {
 # Единицы пороговых метрик. Нужны отбою: голое «снова в норме» не отвечает на
 # первый вопрос инженера — сколько освободилось. Показываем «диск снова в норме:
 # 82% (было 90%)», где «было» — значение на момент срабатывания.
-_SRV_UNIT = {"cpu": "%", "mem": "%", "disk": "%", "inode": "%", "conntrack": "%", "db_conn": "%",
+_SRV_UNIT = {"cpu_cap": " МГц", "cpu": "%", "mem": "%", "disk": "%", "inode": "%", "conntrack": "%", "db_conn": "%",
              "temp": "°C", "disktemp": "°C"}
 
 
@@ -2713,6 +2713,35 @@ _THROTTLE_MIN_STREAK = 3  # интервалов подряд с реальны�
 # счетчик ядра растет рывками: интервал с нулем посреди перегрева давал "снова в норме", а
 # следующие три горячих - новый алерт. Заход внутри выдержки - та же история, без сообщения.
 _THROTTLE_CALM_S = 900
+# Частота CPU занижена (cpu_cap): питание или BMC урезали процессор (сервер потерял второй ввод
+# питания - минимальная частота вместо пиковой часами), а тепловой троттлинг молчит: счетчик 0,
+# CPU холодный. Беда - процессор занят, а частота сидит на половине пика ноды и ниже. Пик учим по
+# отчетам (alert_state "cpu_cap_peak"). На недельной истории парка такое без беды держалось не
+# дольше 10 минут: простаивающее железо сидит на минимальной частоте при CPU ~1% (отсекает
+# порог загрузки), у VM частота постоянная
+_CPU_CAP_LOAD = 30  # % CPU: ниже - простой, низкая частота там штатная
+_CPU_CAP_RATIO = 0.5  # частота не выше этой доли пика
+_CPU_CAP_HOLD_S = 20 * 60  # столько подряд до алерта
+_CPU_CAP_NEAR = 0.9  # частота у пика: пик еще достижим
+_CPU_CAP_RELEARN_S = 30 * 86400  # у пика не была столько - учим пик заново (заменили железо)
+_CPU_CAP_TOUCH_S = 3600  # отметку "была у пика" обновляем не чаще, чтобы не писать состояние каждый тик
+
+
+def _cpu_cap_peak(prev, freq: float, now: datetime, hold: bool = False) -> dict:
+    """Пик частоты ноды для cpu_cap: {"mhz": пик, "at": когда частота последний раз была у пика}.
+    Растет с каждым отчетом выше. Не была у пика _CPU_CAP_RELEARN_S - учим заново с текущей, но не
+    пока висит алерт (hold): месяц урезания, которое ждет блок питания, не делает 800 МГц нормой."""
+    mhz = prev.get("mhz") if isinstance(prev, dict) else None
+    at = _parse_iso(str(prev.get("at") or "")) if isinstance(prev, dict) else None
+    cur = round(freq)
+    if (not isinstance(mhz, (int, float)) or mhz <= 0 or at is None or cur > mhz
+            or (not hold and (now - at).total_seconds() > _CPU_CAP_RELEARN_S)):
+        return {"mhz": cur, "at": now.isoformat()}
+    if freq >= _CPU_CAP_NEAR * mhz and (now - at).total_seconds() >= _CPU_CAP_TOUCH_S:
+        return {"mhz": mhz, "at": now.isoformat()}
+    return prev
+
+
 # Дебаунс «мгновенных» метрик (CPU/RAM/темп/conntrack/темп диска): алертим, только
 # если превышение ДЕРЖИТСЯ дольше alert_sustain_seconds (по умолч. 15 мин). Считаем
 # ПО ВРЕМЕНИ (а не по тикам) — устойчиво к частоте отчётов/тиков: запоминаем момент
@@ -4869,7 +4898,7 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
     # CPU, RAM, температуры, conntrack и троттлинг - по уровню алерта (его выдержка, гистерезис и
     # отбой после затишья), а не по последнему отчету: минутный всплеск, о котором алерта не будет,
     # зажигал строку на главной, и через минуту она пропадала. В тексте - что держит алерт (_metric_row).
-    alerted = {k for k in ("cpu", "mem", "temp", "conntrack", "disktemp", "throttle")
+    alerted = {k for k in ("cpu", "mem", "temp", "conntrack", "disktemp", "throttle", "cpu_cap")
                if int(state.get(k, 0) or 0) >= 1}
     early = alert_since(s) if alerted else {}
 
@@ -4895,6 +4924,16 @@ def _server_problems(s: Server, now: datetime, pod_names: dict[str, str] | None 
         metric("disktemp", 2, _metric_row(s, state, now, "disktemp", max(dtemps)))
     if rep.get("cpu_throttle") is not None:
         metric("throttle", 1, "троттлинг CPU от перегрева")
+    # частота CPU занижена: сейчас и пик ноды, которым мерили
+    cap_f, cap_peak = rep.get("cpu_freq"), state.get("cpu_cap_peak")
+    if isinstance(cap_f, (int, float)) and cap_f > 0:
+        cap_max = cap_peak.get("mhz") if isinstance(cap_peak, dict) else None
+        if "cpu_cap" in alerted:
+            # раздел - карточка частоты, как у ссылки из алерта (_SRV_SECTION); частота уже поднялась
+            # и ждет отбоя - так и сказать, а не выдавать исправную частоту за беду
+            text = (f"частота CPU снова {round(cap_f)} МГц, отбой после выдержки" if state.get("cpu_cap_cool")
+                    else f"частота CPU {round(cap_f)}" + (f" из {cap_max} МГц" if cap_max else " МГц"))
+            add("cpu_cap", int(state.get("cpu_cap", 0) or 0) or 2, text, "freq", "cpu_cap", early.get("cpu_cap"))
     # Часы: пороги алерта (5 с, 30 с, 5 минут) без его выдержки. Сдвиг уже очищен от дороги
     # отчета (clock_skew_window), а сами часы за минуту не уходят и не возвращаются.
     skew = rep.get("clock_skew_sec")
@@ -5927,7 +5966,7 @@ def groups_text(groups: list[dict], pod_names: dict[str, str] | None = None) -> 
 
 # Что из alert_state отдать как "с какого момента проблема": "<вид>_from" ставит цикл алертов
 # для любого вида, а у пороговых метрик точнее "<вид>_since" - начало превышения, а не алерта.
-_SINCE_KEYS = ("cpu", "mem", "temp", "conntrack", "disktemp", "db_conn", "web_5xx", "clock",
+_SINCE_KEYS = ("cpu", "mem", "temp", "conntrack", "disktemp", "db_conn", "cpu_cap", "web_5xx", "clock",
                "backup_missing", "dns", "pressure", "net_health", "kube_node", "link", "traffic",
                "disk", "inode")
 
@@ -7119,6 +7158,37 @@ def _server_conditions(s: Server, now: datetime,
         else:
             lvl = 0
         out["throttle"] = (lvl, {"value": round(thr), "streak": streak, "cool": cool})
+    # Частота CPU занижена (см. _CPU_CAP_LOAD): не зависит ни от счетчика троттлинга, ни от
+    # температуры - при урезанном питании оба молчат. Пик ноды - в ctx["peak"], его пишет цикл
+    # алертов. Только что выученный пик и есть текущая частота: алерта до пика не бывает.
+    # Загрузка - без iowait: ждущие диска ядра простаивают на минимальной частоте законно
+    cap_f, cap_load = rep.get("cpu_freq"), rep.get("cpu_percent")
+    if isinstance(cap_f, (int, float)) and cap_f > 0 and isinstance(cap_load, (int, float)):
+        cap_on = int(state.get("cpu_cap", 0) or 0) >= 1
+        cap_peak = _cpu_cap_peak(state.get("cpu_cap_peak"), float(cap_f), now, hold=cap_on)
+        cap_busy = cap_load - (rep.get("cpu_iowait") or 0)
+        cap_low = cap_f <= _CPU_CAP_RATIO * cap_peak["mhz"]
+        # "_cool" - с какого момента после алерта частота уже поднималась. Отбой ведет общая выдержка
+        # (_SETTLE_S): урезали снова внутри нее - уровень в состоянии еще 1, алерт не снимается
+        cap_since, cap_cool, cap_lvl = None, None, 0
+        if online and cap_busy >= _CPU_CAP_LOAD and cap_low:
+            cap_since = state.get("cpu_cap_since") or now.isoformat()
+            held = (now - (_parse_iso(cap_since) or now)).total_seconds()
+            # алерт уже есть - та же история, без новой выдержки
+            cap_lvl = 1 if cap_on or held >= _CPU_CAP_HOLD_S else 0
+        elif online and cap_on and not cap_low:
+            cap_cool = state.get("cpu_cap_cool") or now.isoformat()
+        elif online and cap_on and not state.get("cpu_cap_cool"):
+            # Простой при урезанной частоте от простоя на исправном железе не отличить: держим, пока
+            # частота хоть раз не поднимется. "Частота восстановилась" без этого было бы неправдой
+            cap_since, cap_lvl = state.get("cpu_cap_since"), 1
+        elif online and cap_on:
+            cap_cool = state.get("cpu_cap_cool")  # частота уже поднималась: простой после - не беда
+        cap_from = _parse_iso(str(cap_since or ""))
+        out["cpu_cap"] = (cap_lvl, {
+            "value": round(cap_f), "max": round(cap_peak["mhz"]), "cpu": round(cap_busy), "since": cap_since,
+            "cool": cap_cool, "minutes": int((now - cap_from).total_seconds() // 60) if cap_from else 0,
+            "peak": cap_peak})
     ctmax = rep.get("conntrack_max") or 0
     if s.conntrack_alert_percent and ctmax > 0:  # только если conntrack есть
         fill = (rep.get("conntrack_count") or 0) / ctmax * 100
@@ -8352,6 +8422,9 @@ async def _evaluate_servers_serial(
                 apply(s.id, f"{k}_since", cx["since"])
             if "streak" in cx and int(st.get(f"{k}_streak", 0)) != cx["streak"]:
                 apply(s.id, f"{k}_streak", cx["streak"])
+            # пик частоты CPU ноды (cpu_cap): {"mhz", "at"}
+            if "peak" in cx and st.get(f"{k}_peak") != cx["peak"]:
+                apply(s.id, f"{k}_peak", cx["peak"])
             # с какого момента подряд тормозит каждый резолвер DNS (для "Что сломано")
             if "res" in cx and (st.get(f"{k}_res") or {}) != cx["res"]:
                 apply(s.id, f"{k}_res", cx["res"] or None)
