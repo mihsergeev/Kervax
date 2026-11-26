@@ -1,5 +1,6 @@
 .app {
-  max-width: max(1240px, 94%);
+  /* Halfway between the original 1240px shell and a 94% wide-screen layout. */
+  max-width: max(1240px, calc(620px + 47%));
   margin: 0 auto;
   padding: 1.5rem 1.5rem 3rem;
 }

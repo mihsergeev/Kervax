@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.183] - 2026-11-27
+
+- Panel pages and their shared header now grow more slowly on wide screens, keeping lists and issue details centered with more space on either side.
+
 ## [1.8.182] - 2026-11-27
 
 - Panel pages and their shared header now use a fluid width on wide screens, leaving more room for lists and details. The home summary column stays compact as the window grows.

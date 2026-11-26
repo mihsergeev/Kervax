@@ -294,7 +294,7 @@ async function fluidPanelLayout() {
     assert.equal(await rows(queue).count(), 3)
     assert.equal(await warningDetails(queue).evaluate(element => element.open), false)
     assert.match(await warningDetails(queue).locator('summary').innerText(), /12$/)
-    for (const [width, height] of [[2150, 800], [1440, 900], [320, 800]]) {
+    for (const [width, height] of [[2150, 800], [3440, 1440], [1440, 900], [320, 800]]) {
       await page.setViewportSize({ width, height })
       if (width === 320) await target.press('Enter')
       const heading = card.getByRole('heading', { name: /^оффлайн/i })
@@ -311,7 +311,7 @@ async function fluidPanelLayout() {
           scrollTop: element.scrollTop, pageScrollTop: scrollY, actions }
       })
       metrics.push({ section: 'home', ...await alignment(page.locator('.home-triage')), inspector: inspectorMetrics })
-      if (out && width !== 1440) {
+      if (out && (width === 2150 || width === 320)) {
         await page.screenshot({ path: path.join(out, `fluid-home-${width}.png`), fullPage: width === 320, animations: 'disabled' })
       }
     }
@@ -327,7 +327,10 @@ async function fluidPanelLayout() {
       const label = `${measured.section} at ${width}px`
       assert(measured.documentWidth <= width + 1, `${label}: no horizontal page overflow`)
       assert(Math.abs(measured.leftDifference) <= 2 && Math.abs(measured.rightDifference) <= 2, `${label}: header and content align`)
-      if (width === 2150) assert(measured.widthFraction > .85, `${label}: content should use over 85% of the viewport`)
+      const expectedWidth = { 1440: 1249, 2150: 1583, 3440: 2189 }[width]
+      if (expectedWidth) {
+        assert(Math.abs(measured.width - expectedWidth) < 24, `${label}: content width should be close to ${expectedWidth}px`)
+      }
       if (!measured.inspector || width === 320) continue
       const { clientHeight, scrollHeight, scrollTop, pageScrollTop, actions } = measured.inspector
       assert(actions.length >= 2 && actions.every(action => action.belowFold <= 1), `${label}: all standard actions fit in the inspector`)
