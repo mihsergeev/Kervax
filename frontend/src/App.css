@@ -5,6 +5,9 @@
   padding: 1.5rem 1.5rem 3rem;
 }
 
+.app[data-panel-width='narrow'] { max-width: 1240px; }
+.app[data-panel-width='wide'] { max-width: max(1240px, 94%); }
+
 .header {
   display: flex;
   align-items: center;
@@ -444,6 +447,16 @@ input.field-bad {
 
 .menu-pop-right {
   right: 0;
+}
+
+.menu-width {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.85rem;
 }
 
 .menu-gear {

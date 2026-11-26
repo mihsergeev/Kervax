@@ -34,6 +34,19 @@ import { PanelErrorsModal } from './PanelErrorsModal'
 import { clearClientLog, setUiSection } from './errorLog'
 import { Toasts } from './toast'
 
+type PanelWidth = 'narrow' | 'medium' | 'wide'
+const widthKey = (owner: string) => `kervax_panel_width:${owner}`
+const parseWidth = (value: string | null): PanelWidth =>
+  value === 'narrow' || value === 'wide' ? value : 'medium'
+
+function readPanelWidth(owner: string): PanelWidth {
+  try {
+    return parseWidth(localStorage.getItem(widthKey(owner)))
+  } catch {
+    return 'medium'
+  }
+}
+
 type Modal =
   | 'account'
   | 'about'
@@ -270,6 +283,8 @@ export default function App() {
     const id = window.setInterval(load, 30_000)
     return () => { active = false; window.clearInterval(id) }
   }, [authed, role, userId, modal])
+  const [panelWidth, setPanelWidth] = useState<PanelWidth>('medium')
+  const widthOwner = imp?.by ?? username
   const [theme, setThemeState] = useState<'dark' | 'light'>(
     () => (localStorage.getItem('kervax_theme') as 'dark' | 'light') || 'dark',
   )
@@ -300,6 +315,7 @@ export default function App() {
         setReadOnly(u.role === 'viewer', !!u.can_read_logs, u.impersonator ? u.username : '')
         setLogsOpen(!!u.can_read_logs)
         setSections(u.sections ?? [])
+        setPanelWidth(readPanelWidth(u.impersonator || u.username))
         setUsername(u.username)
         setUserId(u.id)
         setImp(
@@ -388,6 +404,28 @@ export default function App() {
     if (isCurrentSession(token)) logout()
   }, [logout, returnToSelf])
 
+  useEffect(() => {
+    if (!authed || !widthOwner) return
+    const key = widthKey(widthOwner)
+    const syncWidth = (event: StorageEvent) => {
+      if (event.storageArea === localStorage && (event.key === key || event.key === null)) {
+        setPanelWidth(readPanelWidth(widthOwner))
+      }
+    }
+    window.addEventListener('storage', syncWidth)
+    return () => window.removeEventListener('storage', syncWidth)
+  }, [authed, widthOwner])
+
+  const changeWidth = (value: string) => {
+    const next = parseWidth(value)
+    setPanelWidth(next)
+    try {
+      localStorage.setItem(widthKey(widthOwner), next)
+    } catch {
+      // Keep the selection for this tab if the browser cannot persist it.
+    }
+  }
+
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark'
     setThemeState(next)
@@ -409,7 +447,7 @@ export default function App() {
         username,
       }}
     >
-    <div className="app">
+    <div className="app" data-panel-width={authed ? panelWidth : undefined}>
       {authed && imp && (
         <ImpersonationBar
           username={username}
@@ -540,6 +578,15 @@ export default function App() {
                   onClick={() => setMenuOpen(false)}
                 />
                 <div className="menu-pop menu-pop-right">
+                  <label className="menu-width">
+                    {t('Ширина панели')}
+                    <select value={panelWidth} onChange={(event) => changeWidth(event.target.value)}>
+                      <option value="narrow">{t('Узкая')}</option>
+                      <option value="medium">{t('Средняя')}</option>
+                      <option value="wide">{t('Широкая')}</option>
+                    </select>
+                  </label>
+                  <div className="menu-divider" />
                   {role === 'viewer' && (
                     <>
                       <div className="menu-role-badge">

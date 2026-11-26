@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.8.184] - 2026-11-27
+
+- Each user can choose Narrow, Medium, or Wide in the settings menu. Medium remains the default. The choice applies across panel pages and is remembered for that account in the current browser.
+
 ## [1.8.183] - 2026-11-27
 
 - Panel pages and their shared header now grow more slowly on wide screens, keeping lists and issue details centered with more space on either side.

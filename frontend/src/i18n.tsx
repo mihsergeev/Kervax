@@ -11,6 +11,10 @@ export type Lang = 'ru' | 'en'
 // Ключ = русская строка (дефолт). Значение = английский перевод.
 // Отсутствующий ключ → возвращается русский (мягкий фолбэк).
 const EN: Record<string, string> = {
+  'Ширина панели': 'Panel width',
+  'Узкая': 'Narrow',
+  'Средняя': 'Medium',
+  'Широкая': 'Wide',
   'Контроль свежести возобновится после запуска базы.': 'Freshness checks will resume when the database starts.',
   'Сохранено файлов: {n}': 'Saved files: {n}',
   'Контейнер остановлен': 'Container stopped',

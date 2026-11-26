@@ -54,7 +54,8 @@ async function fixture(verify, {
 } = {}) {
   const errors = [], calls = [], jobs = [], writes = []
   const fixtureServers = activeServers.map(s => ({ ...s }))
-  const page = await browser.newPage({ viewport, colorScheme: 'dark' })
+  const context = await browser.newContext({ viewport, colorScheme: 'dark' })
+  const page = await context.newPage()
   page.setDefaultTimeout(6000)
   page.on('pageerror', error => errors.push(error.message))
   try {
@@ -63,7 +64,7 @@ async function fixture(verify, {
       localStorage.setItem('kervax_lang', 'ru')
       localStorage.setItem('kervax_theme', 'dark')
     })
-    await page.route('**/*', async route => {
+    await context.route('**/*', async route => {
       const request = route.request()
       const { origin, pathname } = new URL(request.url())
       if (origin !== base) return route.abort()
@@ -114,7 +115,7 @@ async function fixture(verify, {
     await verify(page, page.locator('#home-issue-queue'), { calls, jobs, writes })
     assert.deepEqual(errors, [], 'Browser runtime errors')
   } finally {
-    await page.close()
+    await context.close()
   }
 }
 
@@ -338,6 +339,66 @@ async function fluidPanelLayout() {
     }
   }, { activeChecks, activeServers: [offline], viewport: { width: 2150, height: 800 } })
   console.log('PASS fluid panel widths, navigation alignment and unclipped offline actions')
+}
+
+async function personalPanelWidth() {
+  await fixture(async (page) => {
+    const app = page.locator('.app')
+    const gear = page.getByRole('button', { name: 'Меню', exact: true })
+    const width = page.getByRole('combobox', { name: 'Ширина панели', exact: true })
+    const content = () => page.locator('.app > .header').evaluate(el => el.getBoundingClientRect().width)
+    const assertWidth = async (target) => assert(Math.abs(await content() - target) < 2)
+    const open = async () => {
+      await gear.click()
+      await width.waitFor()
+    }
+    await open()
+    assert.equal(await width.inputValue(), 'medium')
+    assert.deepEqual(await width.locator('option').allTextContents(), ['Узкая', 'Средняя', 'Широкая'])
+    await assertWidth(1583)
+    await width.selectOption('narrow')
+    await assertWidth(1192)
+    await page.locator('.menu-catcher').click({ position: { x: 1, y: 1 } })
+    await page.getByRole('button', { name: 'Сайты', exact: true }).click()
+    await page.getByRole('heading', { name: 'Мониторы', exact: true }).waitFor()
+    await assertWidth(1192)
+    await page.reload()
+    await open()
+    assert.equal(await width.inputValue(), 'narrow')
+
+    const secondTab = await page.context().newPage()
+    try {
+      await secondTab.goto(base)
+      await secondTab.locator('.app[data-panel-width="narrow"]').waitFor()
+      await width.selectOption('wide')
+      await assertWidth(1973)
+      await secondTab.locator('.app[data-panel-width="wide"]').waitFor()
+    } finally {
+      await secondTab.close()
+    }
+
+    // A second account on this browser starts with its own default.
+    const mePath = '**/api/auth/me'
+    await page.route(mePath, route => route.fulfill({ json: { id: 2, username: 'reader-two', role: 'viewer' } }))
+    await page.reload()
+    await open()
+    assert.equal(await width.inputValue(), 'medium')
+    await width.selectOption('narrow')
+    await page.unroute(mePath)
+    await page.reload()
+    await open()
+    assert.equal(await width.inputValue(), 'wide')
+    await width.selectOption('medium')
+    await assertWidth(1583)
+    await page.setViewportSize({ width: 320, height: 800 })
+    for (const mode of ['wide', 'narrow', 'medium']) {
+      await width.selectOption(mode)
+      const bounds = await width.boundingBox()
+      assert(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 321, 'Width selector fits on mobile')
+      assert(await app.evaluate(el => document.documentElement.scrollWidth <= innerWidth + 1 && el.clientWidth <= innerWidth))
+    }
+  }, { role: 'viewer', viewport: { width: 2150, height: 800 } })
+  console.log('PASS personal panel width, reload, account isolation, tab sync and mobile settings')
 }
 
 async function mobileLayout() {
@@ -722,7 +783,7 @@ async function markKnown() {
 
 try {
   const results = await Promise.allSettled([
-    queueFilters(), desktopLayout(), fluidPanelLayout(), mobileLayout(), scopedViewer(), loadingAndEmpty(),
+    queueFilters(), desktopLayout(), fluidPanelLayout(), personalPanelWidth(), mobileLayout(), scopedViewer(), loadingAndEmpty(),
     criticalPagination(), groupedActions(), denseWarningGroups(), mobileGroupActions(), groupMemberThemes(), markKnown(),
   ])
   const failures = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
