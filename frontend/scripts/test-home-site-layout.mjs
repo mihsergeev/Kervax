@@ -93,20 +93,25 @@ try {
 
   await page.goto(base)
   const card = page.locator('#home-issue-queue')
-  const row = (name) => card.locator('.home-attention-row').filter({ has: page.locator('b', { hasText: name }) })
+  const row = (name) => card.locator('.home-attention-row').filter({ has: page.getByText(name, { exact: true }) })
   const grouped = row(domain)
   const status = row(statusName)
   const ssl = row(sslName)
   const snapshot = async (name) => { if (out) await card.screenshot({ path: path.join(out, `${name}.png`) }) }
   const recheck = (item) => item.getByRole('button', { name: 'Исправил: перепроверить', exact: true })
 
+  await card.locator('details.home-queue-warnings > summary').click()
   await grouped.getByText('доступно 1 из 9').waitFor()
   await ssl.waitFor()
   assert.equal(await recheck(ssl).count(), 0, 'Unavailable recheck button must be absent')
   for (const width of [850, 1440, 390, 320]) {
     await page.setViewportSize({ width, height: 900 })
     await snapshot(`sites-${width}`)
-    const name = await grouped.locator('b').evaluate((element) => element.getClientRects().length)
+    const name = await grouped.getByText(domain, { exact: true }).evaluate((element) => {
+      const range = document.createRange()
+      range.selectNodeContents(element)
+      return range.getClientRects().length
+    })
     assert(name <= (width === 320 ? 2 : 1), `Domain name breaks into ${name} lines at ${width}px`)
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `Page overflow at ${width}px`)
     assert(await card.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), `Site card overflow at ${width}px`)
@@ -125,7 +130,7 @@ try {
   await status.getByText('Проблема осталась').waitFor()
   assert.deepEqual(posts[1], { pathname: '/api/alert-rechecks', body: { object_type: 'check', object_id: 10, kind: 'status' } })
 
-  await ssl.locator('.quick-mute').click()
+  await ssl.getByRole('button', { name: 'Напомнить позже или не следить за сертификатом', exact: true }).press('Enter')
   await snapshot('sites-320-snooze')
   assert(await ssl.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), 'Open snooze options overflow')
   await ssl.getByRole('button', { name: 'за 7 дн.', exact: true }).click()

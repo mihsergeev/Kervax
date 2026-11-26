@@ -22,6 +22,9 @@ const defaults = {
   '/api/alerts/coverage': { items: [] },
 }
 
+const selectWarnings = (page) => page.getByRole('group', { name: 'Фильтр по важности' })
+  .getByRole('button', { name: /^Предупреждения/ }).click()
+
 async function fixture(handler, verify) {
   const page = await browser.newPage({ viewport: { width: 1400, height: 950 } })
   const errors = []
@@ -134,6 +137,12 @@ async function overviewErrors() {
     await siteError.waitFor()
     await sites.waitFor()
     assert.equal(await queue.getByText('Нет активных проблем').count(), 0)
+    const serverFilter = page.getByRole('group', { name: 'Фильтр по разделам' }).getByRole('button', { name: /^Серверы/ })
+    await serverFilter.click()
+    await siteError.waitFor({ state: 'detached' })
+    await queue.getByText('Нет активных проблем').waitFor()
+    await serverFilter.click()
+    await siteError.waitFor()
     failing = ''
     await queue.getByRole('button', { name: 'Повторить запрос' }).click()
     await queue.getByText(check.name, { exact: true }).waitFor()
@@ -189,6 +198,7 @@ async function retireRace() {
     }
     return route.fulfill({ json: [old] })
   }, async (page, queue) => {
+    await selectWarnings(page)
     const button = queue.getByRole('button', { name: 'Порт больше не нужен', exact: true })
     await button.first().waitFor()
     phase = 'stale'
@@ -236,6 +246,7 @@ async function parallelMutes() {
     mutes = body.alert_mutes ?? [...mutes.filter((key) => !body.remove.includes(key)), ...body.add]
     return route.fulfill({ json: { ...host, alert_mutes: mutes } })
   }, async (page, queue) => {
+    await selectWarnings(page)
     const problem = (i) => queue.locator('.home-attention-row').filter({ hasText: problems[i].text })
     const mute = (i) => problem(i).getByTitle('Не алертить', { exact: true })
     await mute(0).click()
